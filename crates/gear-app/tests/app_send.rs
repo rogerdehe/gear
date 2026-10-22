@@ -137,24 +137,46 @@ fn reply_to_inherits_thread() {
 }
 
 #[test]
+fn to_requires_instruction() {
+    let mut s = world();
+    // `--to` is captain to lane and always an instruction (design/07:21).
+    let mut a = args(MsgKind::Question);
+    a.to = Some("heat".into());
+    let err = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &a, NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+
+    let mut progress = args(MsgKind::Progress);
+    progress.to = Some("heat".into());
+    let err = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &progress, NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+
+    // With an instruction it is stored for that lane.
+    let mut instruction = args(MsgKind::Instruction);
+    instruction.to = Some("heat".into());
+    instruction.request_id = "r2".into();
+    let sent = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &instruction, NOW + 1).unwrap();
+    assert_eq!(sent.recipient, "p:heat");
+    let m = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    assert_eq!(m.kind, MsgKind::Instruction);
+    assert_eq!(m.state, MsgState::Open);
+}
+
+#[test]
 fn new_thread_starts_with_the_task_or_the_seat() {
     let mut s = world();
     let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap();
-    assert!(
-        sent.thread.starts_with("heat:"),
-        "a thread without a task is named after the seat: {}",
-        sent.thread
-    );
+    assert_eq!(sent.thread, "heat:1", "a thread without a task is named after the seat");
 
     let mut a = args(MsgKind::Question);
-    a.task = Some("T-1".into());
     a.request_id = "r2".into();
     let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
-    assert!(
-        sent.thread.starts_with("T-1:"),
-        "a thread with a task is named after the task: {}",
-        sent.thread
-    );
+    assert_eq!(sent.thread, "heat:2", "the next question gets the next number");
+
+    let mut with_task = args(MsgKind::Question);
+    with_task.task = Some("T-1".into());
+    with_task.request_id = "r3".into();
+    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &with_task, NOW + 2).unwrap();
+    assert_eq!(sent.thread, "T-1:1", "a thread with a task is named after the task");
 }
 
 #[test]
@@ -165,6 +187,7 @@ fn same_request_is_replayed() {
     let second = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
 
     assert_eq!(first.msg_id, second.msg_id);
+    assert_eq!(first.thread, second.thread);
     assert!(!first.replayed);
     assert!(second.replayed);
 
@@ -172,6 +195,12 @@ fn same_request_is_replayed() {
     assert_eq!(inbox.len(), 1, "the replay stored no second message");
     let m2 = s.read(|tx| tx.get_message("p", "M-2")).unwrap();
     assert!(m2.is_none());
+
+    // The replay numbered no thread: the next question is the second one.
+    let mut next = args(MsgKind::Question);
+    next.request_id = "r2".into();
+    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &next, NOW + 3).unwrap();
+    assert_eq!(sent.thread, "heat:2");
 }
 
 #[test]

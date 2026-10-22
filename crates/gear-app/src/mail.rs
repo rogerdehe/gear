@@ -40,7 +40,8 @@ pub struct SendResult {
 ///
 /// Slice 1 scope:
 /// - sender must be an Active/Standby/Retiring lane/temp, or the captain;
-/// - default recipient = project captain; `--to` only for the captain;
+/// - default recipient = project captain; `--to` only for the captain and
+///   only with kind `instruction` (design/07:21);
 ///   `--reply-to M-x` → the sender of M-x;
 /// - Progress → Info; Question/Blocked/Result/Instruction → Open;
 ///   Reply-kind is produced by `reply()`, not by `send`;
@@ -87,17 +88,26 @@ pub fn send(
                 "`--to` and `--reply-to` cannot be combined",
             ));
         }
+        if args.to.is_some() && args.kind != MsgKind::Instruction {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--to` addresses a seat with an instruction, not with {}",
+                    args.kind.as_str()
+                ),
+            ));
+        }
 
         // Recipient: the sender of the answered message, a seat the captain
         // addresses, or the project captain.
-        let (recipient, thread) = if let Some(reply_to) = &args.reply_to {
+        let (recipient, inherited_thread) = if let Some(reply_to) = &args.reply_to {
             let original = tx.get_message(&ctx.project, reply_to)?.ok_or_else(|| {
                 GearError::new(
                     ErrorCode::NoTarget,
                     format!("no message {reply_to} in project {}", ctx.project),
                 )
             })?;
-            (original.sender, original.thread)
+            (original.sender, Some(original.thread))
         } else if let Some(to) = &args.to {
             if seat.role != SeatRole::Captain {
                 return Err(GearError::new(
@@ -109,7 +119,7 @@ pub fn send(
             tx.get_seat(&seat_id)?.ok_or_else(|| {
                 GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id} in this project"))
             })?;
-            (seat_id, String::new())
+            (seat_id, None)
         } else {
             let captain = tx.captain_of(&ctx.project)?.ok_or_else(|| {
                 GearError::new(
@@ -117,15 +127,7 @@ pub fn send(
                     format!("project {} has no captain", ctx.project),
                 )
             })?;
-            (captain.id, String::new())
-        };
-
-        // A new thread is named after the task, or after the sender's seat.
-        let thread = if thread.is_empty() {
-            let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
-            format!("{prefix}:{}", next_thread_seq(tx, &ctx.project, &prefix)?)
-        } else {
-            thread
+            (captain.id, None)
         };
 
         let state = match args.kind {
@@ -150,6 +152,16 @@ pub fn send(
         );
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            // The thread of a new message is numbered here, after the replay
+            // check: a replay returns the stored result and numbers nothing.
+            let thread = match &inherited_thread {
+                Some(thread) => thread.clone(),
+                None => {
+                    let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
+                    let seq = next_thread_seq(tx, &ctx.project, &recipient, now, &prefix)?;
+                    format!("{prefix}:{seq}")
+                }
+            };
             let message = NewMessage {
                 project: ctx.project.clone(),
                 thread: thread.clone(),
@@ -185,21 +197,42 @@ pub fn send(
     })
 }
 
-/// The next free sequence number of a thread with this prefix.
+/// The next unused sequence number of a thread with this prefix.
 ///
-/// The message id is allocated inside the store, so a thread cannot carry the
-/// id of the message that opens it; the thread is numbered instead
-/// (design/07: `<task>:<seq>`).
-fn next_thread_seq(tx: &Tx<'_>, project: &str, prefix: &str) -> GearResult<u32> {
-    for seq in 1..=MAX_THREAD_SEQ {
+/// The threads that are still unhandled are read in one query and give the
+/// highest number in use; the numbers a resolved thread already took are then
+/// skipped one by one, so a number is never reused and two questions never
+/// end up in the same thread.
+fn next_thread_seq(
+    tx: &Tx<'_>,
+    project: &str,
+    recipient: &str,
+    now: Ts,
+    prefix: &str,
+) -> GearResult<u32> {
+    let unhandled = tx.actionable_for(project, recipient, now)?;
+    let mut seq = unhandled
+        .iter()
+        .filter_map(|message| thread_seq(&message.thread, prefix))
+        .max()
+        .unwrap_or(0);
+    loop {
+        seq += 1;
+        if seq > MAX_THREAD_SEQ {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!("too many threads named {prefix}:* in project {project}"),
+            ));
+        }
         if tx.thread_messages(project, &format!("{prefix}:{seq}"))?.is_empty() {
             return Ok(seq);
         }
     }
-    Err(GearError::new(
-        ErrorCode::BadFormat,
-        format!("too many threads named {prefix}:* in project {project}"),
-    ))
+}
+
+/// The sequence number of `thread`, when the thread belongs to `prefix`.
+fn thread_seq(thread: &str, prefix: &str) -> Option<u32> {
+    thread.strip_prefix(prefix)?.strip_prefix(':')?.parse().ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
