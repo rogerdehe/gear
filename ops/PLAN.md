@@ -87,6 +87,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | ready | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
+| T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -279,3 +280,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice 3 starts: admin init contract (`admin_init_contract.rs`, 2 ignored); T-57 ready. gear-data switched back to MiniMax-M3.1-Flash.
 - 2026-10-22 R-52 pass; T-56 merged (`gear run` now has the opencode profile).
 - 2026-10-22 R-53 pass; T-55 merged (Staff park/hold/retire); its two P3s fixed by the captain at merge.
+- 2026-10-22 gear-runtime sat idle with T-54 ready: OpenCode auto-compacted its session and ended the turn, and the captain's watcher was off (not re-armed after the T-55 merge) → L-39; re-armed, lane woken. T-58 (onboarding plan) ready.
