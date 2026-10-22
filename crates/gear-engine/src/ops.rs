@@ -181,9 +181,13 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
 }
 
 /// Settle Submitted/Unknown doorbell ops using ViewRecords: an op is Confirmed
-/// only when a view of the same seat+generation, at or after the op time,
-/// lists every message id in the op's `covers`. Otherwise bump its check
-/// budget; when the budget is exhausted, flag the seat (no resend).
+/// only when a view of the same seat+generation, at or after the op's
+/// `created` (intent) time, lists every message id in the op's `covers`.
+/// Evidence counts from intent, not from the moment the text reached the pane:
+/// a view recorded after intent means the seat looked at its home page, which
+/// is what the doorbell is for. The view's time is stored on the op (`result`)
+/// as the evidence that settled it. Without evidence the op's check budget is
+/// bumped; when it is exhausted the seat is flagged (no resend).
 /// Returns (confirmed op ids, flagged seat ids).
 pub fn confirm_pending(
     store: &mut Store,
@@ -201,14 +205,16 @@ pub fn confirm_pending(
                     // own evidence rules.
                     continue;
                 }
-                if shown_in_a_view(tx, &op)? {
+                if let Some(view_ts) = shown_in_a_view(tx, &op)? {
                     require_transition(
                         state.can_transition(OpState::Confirmed),
                         "operation",
                         state.as_str(),
                         "confirmed",
                     )?;
-                    tx.set_op_state(project, &op.id, OpState::Confirmed, None, now)?;
+                    // design/08: confirm(op, evidence) — keep the pointer.
+                    let evidence = format!("view {}/{} @ {view_ts}", op.seat, op.generation);
+                    tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
                     confirmed.push(op.id.clone());
                     continue;
                 }
@@ -225,10 +231,10 @@ pub fn confirm_pending(
     })
 }
 
-/// Whether a view of the seat's current generation shows every message id the
-/// op covers. The view must be at or after the op's time: a view from before
-/// the doorbell went out proves nothing.
-fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<bool> {
+/// The time of the view that shows every message id the op covers, if any.
+/// Only a view of the seat's current generation, at or after the op's `created`
+/// time, counts: a view from before the doorbell was intended proves nothing.
+fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     let covers: Vec<&str> = op
         .payload
         .get("covers")
@@ -237,14 +243,17 @@ fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<bool> {
         .unwrap_or_default();
     if covers.is_empty() {
         // Nothing to show: no view can be linked to this op.
-        return Ok(false);
+        return Ok(None);
     }
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    Ok(views.iter().any(|view| {
-        covers
-            .iter()
-            .all(|id| view.shown_msgs.iter().any(|shown| shown == id))
-    }))
+    Ok(views
+        .iter()
+        .find(|view| {
+            covers
+                .iter()
+                .all(|id| view.shown_msgs.iter().any(|shown| shown == id))
+        })
+        .map(|view| view.ts))
 }
 
 /// On engine start: every Executing op becomes Unknown (the previous process
