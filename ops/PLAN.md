@@ -80,6 +80,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | done | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | verifying | — |
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | ready | — |
+| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-45, T-48, T-50, T-51 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -240,3 +241,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-47 → R-43, T-46 → R-44.
 - 2026-10-22 Delivery confirmation designed: a Deliver op is confirmed by a view whose shown_task/attempt match (ViewRecord fields already exist); home records them. Contracts on dev; T-48 (runtime), T-51 (data) ready.
 - 2026-10-22 R-42, R-44 pass (no findings). Merged T-43 (settle), T-46 (plan/intend dispatch); T-50 ready. T-45 → R-45.
+- 2026-10-22 Slice-2 acceptance written: `slice2_dispatch.rs::full_work_loop` (plan → assign → no resend → view → confirm → result → captain rung → verdict pass → quiet), ignored for T-49.
