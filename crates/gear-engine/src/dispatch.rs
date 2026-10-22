@@ -4,7 +4,7 @@
 
 use crate::observe::SeatObs;
 use gear_herdr::ScreenFlag;
-use gear_model::{AttemptState, SeatRole, SeatState, Ts};
+use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
 use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
 
@@ -191,8 +191,66 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 /// - `nudges_since_progress` 0 and `safe_for_next` false (sampling and the
 ///   design/06 safe conditions come later).
 pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
-    let _ = (tx, seat, obs, now);
-    todo!("T-41")
+    let _ = now; // the design/09 cooldown uses last_deliver_at, not this tick's time
+
+    // The open attempt, but only while its task may still be worked on: a
+    // Waiting task (or one that is not Running/Verifying) blocks both the
+    // continue and any assign (design/09, R-31).
+    let open = tx.open_attempts_of_seat(&seat.id)?;
+    let attempt = match open.into_iter().next() {
+        Some(attempt) => {
+            let task = tx.get_task(&seat.project, &attempt.task)?;
+            let continues = task
+                .map(|task| matches!(task.state, TaskState::Running | TaskState::Verifying))
+                .unwrap_or(false);
+            if !continues {
+                return Ok(empty_view(obs));
+            }
+            Some(attempt)
+        }
+        None => None,
+    };
+
+    Ok(LaneView {
+        obs,
+        attempt,
+        pending_op: tx.slot_ops(&seat.id)?.into_iter().next(),
+        last_deliver_at: tx.last_op(&seat.id, OpKind::Deliver)?.map(|op| op.created),
+        nudges_since_progress: 0,
+        ready_tasks: ready_tasks_of(tx, seat)?,
+        safe_for_next: false,
+    })
+}
+
+/// A view with nothing to do: no attempt, no pending delivery, no ready task.
+fn empty_view(obs: Option<SeatObs>) -> LaneView {
+    LaneView {
+        obs,
+        attempt: None,
+        pending_op: None,
+        last_deliver_at: None,
+        nudges_since_progress: 0,
+        ready_tasks: Vec::new(),
+        safe_for_next: false,
+    }
+}
+
+/// This lane's Ready tasks in rank order: not `wont`, every dependency Done.
+fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
+    use std::collections::BTreeSet;
+    let tasks = tx.tasks_of_project(&seat.project)?;
+    let done: BTreeSet<String> = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Done)
+        .map(|task| task.id.clone())
+        .collect();
+    Ok(tasks
+        .into_iter()
+        .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
+        .filter(|task| task.state == TaskState::Ready)
+        .filter(|task| task.priority != "wont")
+        .filter(|task| task.deps.iter().all(|dep| done.contains(dep)))
+        .collect())
 }
 
 /// Where a lane reads a task packet: the CLI shows the rendered packet.

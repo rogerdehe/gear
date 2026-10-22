@@ -31,7 +31,6 @@ fn world(tasks: &[TaskRow], attempts: &[AttemptRow]) -> (Store, SeatRow) {
 }
 
 #[test]
-#[ignore = "T-41: un-ignored by the captain when T-41 merges"]
 fn ready_tasks_are_this_lanes_ready_with_done_deps_in_rank_order() {
     let (mut s, seat) = world(&[
         task("T-1", 1, "heat", TaskState::Done, "must", &[]),
@@ -48,7 +47,6 @@ fn ready_tasks_are_this_lanes_ready_with_done_deps_in_rank_order() {
 }
 
 #[test]
-#[ignore = "T-41: un-ignored by the captain when T-41 merges"]
 fn open_attempt_pending_op_and_last_delivery() {
     let (mut s, seat) = world(&[task("T-1", 1, "heat", TaskState::Running, "must", &[])], &[attempt("T-1", AttemptState::Started)]);
     s.write(|tx| {
@@ -65,7 +63,6 @@ fn open_attempt_pending_op_and_last_delivery() {
 }
 
 #[test]
-#[ignore = "T-41: un-ignored by the captain when T-41 merges"]
 fn waiting_task_blocks_continue_and_assign() {
     let (mut s, seat) = world(&[
         task("T-1", 1, "heat", TaskState::Waiting, "must", &[]),
