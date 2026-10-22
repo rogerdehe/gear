@@ -35,11 +35,13 @@ pub struct EngineCfg {
     /// Observation profiles by name (seat.profile). Unknown profile name ⇒ the
     /// seat is not observed as idle (fail closed) and is flagged.
     pub profiles: std::collections::BTreeMap<String, gear_herdr::Profile>,
+    /// The store path agents get as `GEAR_DB` when onboarded (slice 3).
+    pub db_path: String,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new() }
     }
 }
 

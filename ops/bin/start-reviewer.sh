@@ -95,7 +95,7 @@ if [ -n "${recovered:-}" ]; then
 elif [ -n "$resume" ]; then
   herdr agent prompt "$agent" "Re-review T-$n (branch $branch) per ops/REVIEW.md requirement 4: check each of your previous findings is resolved, review the delta, report anything new. Work on branch review/t$n, then end your turn." >/dev/null
 else
-  herdr agent prompt "$agent" "You are a temp reviewer ($agent). Review T-$n on branch $branch per ops/REVIEW.md. You review exactly this one task, on branch review/t$n, then end your turn." >/dev/null
+  herdr agent prompt "$agent" "You are a temp reviewer ($agent). Review T-$n on branch $branch per ops/REVIEW.md. MVP walking-skeleton phase: report only P0–P2 that would stop the loop from working; list P3s briefly, they never block. You review exactly this one task, on branch review/t$n, then end your turn." >/dev/null
 fi
 # delivered only when seen working (lesson L-30)
 for _ in $(seq 1 20); do herdr agent get "$agent" | grep -q '"agent_status":"working"' && break; sleep 0.5; done

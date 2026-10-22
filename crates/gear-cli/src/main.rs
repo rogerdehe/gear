@@ -263,17 +263,27 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
 }
 
 fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult<()> {
-    reject_slice2(show, diff, all)?;
+    // `--diff`/`--all` are views that are not implemented yet: reject them by
+    // name instead of printing a page that silently ignores them.
+    reject_slice2(diff, all)?;
+    if let Some(target) = show {
+        let env = env_from_process()?;
+        let mut store = open_store()?;
+        let mut herdr = open_herdr()?;
+        let out = run_show(&mut store, &env, &mut herdr, target, json)?;
+        println!("{out}");
+        return Ok(());
+    }
     let env = env_from_process()?;
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     run_home(&mut store, &env, &mut herdr, now_ts(), json, &mut std::io::stdout())
 }
 
-/// The `--show`/`--diff`/`--all` views are slice 2: reject them by name
-/// instead of printing a page that silently ignores them.
-fn reject_slice2(show: Option<&str>, diff: bool, all: bool) -> GearResult<()> {
-    for (flag, given) in [("--show", show.is_some()), ("--diff", diff), ("--all", all)] {
+/// The `--diff`/`--all` views are slice 2: reject them by name instead of
+/// printing a page that silently ignores them.
+fn reject_slice2(diff: bool, all: bool) -> GearResult<()> {
+    for (flag, given) in [("--diff", diff), ("--all", all)] {
         if given {
             return Err(GearError::new(
                 gear_model::ErrorCode::BadFormat,
@@ -282,6 +292,41 @@ fn reject_slice2(show: Option<&str>, diff: bool, all: bool) -> GearResult<()> {
         }
     }
     Ok(())
+}
+
+/// `gear --show <target>` over injected state: the task packet of a task id.
+/// Every other target (`queue`, `draft`, a message id) is rejected by name.
+fn run_show(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    target: &str,
+    json: bool,
+) -> GearResult<String> {
+    if !is_task_id(target) {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("--show {target} is not supported: only a task id (T-n) can be shown"),
+        ));
+    }
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let text = store.read(|tx| {
+        // The identity of the home page: a registered seat of the project.
+        let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
+        gear_app::plan::render_task_packet(tx, &ctx.project, target)
+    })?;
+    if json {
+        return serde_json::to_string(&text).map_err(json_error);
+    }
+    Ok(text)
+}
+
+/// A task id is `T-<n>`; every other `--show` target is rejected by name.
+fn is_task_id(target: &str) -> bool {
+    match target.strip_prefix("T-") {
+        Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
 }
 
 /// The `gear` home page over injected state: build it, print it, and only
@@ -838,7 +883,7 @@ mod tests {
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
     use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
-    use gear_store::{testing, Store, TaskRow};
+    use gear_store::{testing, ContractRow, Store, TaskRow};
     use std::collections::BTreeMap;
 
 
@@ -1445,18 +1490,98 @@ mod tests {
         assert!(views.is_empty(), "a page that was not printed is not a view");
     }
 
+    /// A task with contract v1 in project `p`.
+    fn seed_task(store: &mut Store, id: &str, lane: Option<&str>) {
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: id.into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: lane.map(str::to_string),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: id.into(),
+                    version: 1,
+                    goal: "Ship the thing".into(),
+                    accept: "The thing is shipped".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn show_prints_the_packet() {
+        let (mut store, mut herdr) = world();
+        seed_task(&mut store, "T-1", Some("heat"));
+
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", false).unwrap();
+
+        assert!(out.contains("# T-1 — Ship the thing"), "{out}");
+        assert!(out.contains("Lane: heat · Contract: v1 · State: ready"), "{out}");
+        assert!(out.contains("## Goal"), "{out}");
+        assert!(out.contains("## Acceptance"), "{out}");
+        assert!(out.contains("gear send --kind result --task T-1"), "{out}");
+    }
+
+    #[test]
+    fn show_json_is_the_text_as_a_json_string() {
+        let (mut store, mut herdr) = world();
+        seed_task(&mut store, "T-1", Some("heat"));
+
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", true).unwrap();
+
+        let text: String = serde_json::from_str(&out).unwrap();
+        assert!(text.contains("# T-1 — Ship the thing"), "{text}");
+    }
+
+    #[test]
+    fn show_unknown_task_is_no_target() {
+        let (mut store, mut herdr) = world();
+        let err = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-9", false).unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
+        assert!(err.detail.contains("T-9"), "{}", err.detail);
+    }
+
+    #[test]
+    fn show_other_target_is_bad_format() {
+        let (mut store, mut herdr) = world();
+        for target in ["queue", "draft", "M-1"] {
+            let err =
+                run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, target, false).unwrap_err();
+            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{target}");
+            assert!(err.detail.contains(target), "{target}: {}", err.detail);
+        }
+    }
+
     #[test]
     fn slice2_flags_are_bad_format() {
         for (flag, rejected) in [
-            ("--show", reject_slice2(Some("M-1"), false, false)),
-            ("--diff", reject_slice2(None, true, false)),
-            ("--all", reject_slice2(None, false, true)),
+            ("--diff", reject_slice2(true, false)),
+            ("--all", reject_slice2(false, true)),
         ] {
             let err = rejected.unwrap_err();
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
             assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
         }
-        assert!(reject_slice2(None, false, false).is_ok());
+        assert!(reject_slice2(false, false).is_ok());
     }
 
     #[test]
