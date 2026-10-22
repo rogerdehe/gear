@@ -30,6 +30,14 @@ seats=$(seq 1 "$max")
 if [ -n "$resume" ]; then
   sdir=$(opencode session export "$resume" 2>/dev/null | grep -m1 -oE '"directory": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
   case "$sdir" in "$wtroot"/home-review-*) seats=${sdir##*-} ;; *) echo "session $resume has no seat directory ($sdir)" >&2; exit 1 ;; esac
+  # its seat busy: do not wait — new-session recovery on any free seat (design/00 §1),
+  # the new reviewer reads its predecessor's review file instead of remembering it
+  p=$(herdr worktree list --cwd "$main" | tr '{' '\n' | grep -F "\"path\":\"$sdir\"" | sed -n 's/.*"open_workspace_id":"\([^"]*\)".*/\1/p')
+  p=${p:+$(herdr pane list --workspace "$p" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)}
+  if [ -n "$p" ] && herdr agent get "$p" >/dev/null 2>&1; then
+    echo "seat $seats (session $resume) is busy: new-session recovery" >&2
+    recovered=$resume; resume=""; seats=$(seq 1 "$max")
+  fi
 fi
 seat=""; pane=""
 for k in $seats; do
@@ -76,7 +84,9 @@ if ! bar | grep -qF "$model"; then
 fi
 bar | grep -qF "$model" || { echo "model check failed: $(bar)" >&2; exit 1; }
 
-if [ -n "$resume" ]; then
+if [ -n "${recovered:-}" ]; then
+  herdr agent prompt "$agent" "You are a temp reviewer ($agent), new session recovering a re-review (the previous reviewer session $recovered is busy elsewhere). Re-review T-$n (branch $branch) per ops/REVIEW.md requirement 4: read the previous round in origin/review/t$n:ops/reviews/T-$n.md, check each of its findings is resolved, review the delta, report anything new; say 'new-session recovery' in the Reviewed line. Work on branch review/t$n, then end your turn." >/dev/null
+elif [ -n "$resume" ]; then
   herdr agent prompt "$agent" "Re-review T-$n (branch $branch) per ops/REVIEW.md requirement 4: check each of your previous findings is resolved, review the delta, report anything new. Work on branch review/t$n, then end your turn." >/dev/null
 else
   herdr agent prompt "$agent" "You are a temp reviewer ($agent). Review T-$n on branch $branch per ops/REVIEW.md. You review exactly this one task, on branch review/t$n, then end your turn." >/dev/null
