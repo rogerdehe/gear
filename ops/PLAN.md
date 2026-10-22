@@ -56,6 +56,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | verifying | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | ready | — |
 | T-27 | data | `data/t27-config-models` | config: `[models]` chains + validation (01, 17 §0) | draft | — |
+| T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -130,3 +131,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-16 fail (P1 same-second message lost; P2 instruction shown twice). T-17 → rework (data M-2); line cap out of T-17.
 - 2026-10-22 User: GEAR is also for one requirement iterated inside an existing repo, and every project starts with a kickoff aligned with the user — installed agents/models inventory, lanes, per-role model chains with fallbacks. Written into 17 §0, 01 `[models]`, 00 §0; T-27 (config `[models]`) drafted.
 - 2026-10-22 Handed in: T-26 → R-17, T-21 → R-18, T-17 rework → R-16 round 2, T-23 → R-19 (queued: 3 seats busy).
+- 2026-10-22 runtime lowready → T-28 (CLI plumbing, independent). Next for runtime after T-17 lands: T-4 packet; CLI send/reply wiring needs a captain decision on how CLI tests get a Herdr fingerprint (T-22 rejects an agent-less caller).
