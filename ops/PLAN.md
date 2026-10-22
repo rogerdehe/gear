@@ -50,7 +50,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | done | — |
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | done | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
-| T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | ready | — |
+| T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | verifying | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -134,6 +134,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat (session ses_e9c2d132fffeCvFXhxwoQcT0qp) | done | — |
 | R-48 | r51 | `review/t51` | review T-51 (branch `data/t51-home-task`) — temp reviewer gear-r51 on seat (session ses_e9c27071fffeuSvSJr474MQ22u) | done | — |
 | R-49 | r52 | `review/t52` | review T-52 (branch `runtime/t52-cli-plan-result`) — temp reviewer gear-r52 on seat (session ses_e9c2579abffexrPYbsZYHQ00xt) | done | — |
+| R-50 | r53 | `review/t53` | review T-53 (branch `data/t53-task-packet`) — temp reviewer gear-r53 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -260,3 +261,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-52 → R-49.
 - 2026-10-22 R-47 pass (stale doc P3s fixed at merge), R-46 round 2 pass. Merged T-50 (verdicts), T-48 (delivery confirmation). T-49 waits only on T-51.
 - 2026-10-22 R-48, R-49 pass. Merged T-51 (home shows current task), T-52 (cli plan apply, --candidate). T-49 ready — the last piece of the slice-2 acceptance.
+- 2026-10-22 T-53 → R-50. merge-task.sh now also parks the reviewer seat.
