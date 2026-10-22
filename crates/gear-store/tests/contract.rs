@@ -254,7 +254,6 @@ fn concurrent_writers_do_not_duplicate_ids() {
 /// T-10: a raw state write whose target row does not exist is `NoTarget`,
 /// never a silent success, and writes nothing.
 #[test]
-#[ignore = "T-10: un-ignored by the captain when T-10 merges"]
 fn raw_writes_on_a_missing_target_are_no_target() {
     let mut s = store();
     s.write(|tx| {
