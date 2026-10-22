@@ -26,7 +26,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | captain | plan-format | errors.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | agent:opencode.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -694,8 +694,10 @@ fn write_error(e: std::io::Error) -> GearError {
 
 /// Skill topics and their embedded text. The skill is compiled into the
 /// binary, so the printed rules always match this binary's version.
+/// The `--skill` help text must list exactly these names (test `help_lists_every_skill_topic`).
 const SKILL_TOPICS: &[(&str, &str)] = &[
     ("main", include_str!("../../../skills/gear/SKILL.md")),
+    ("conventions", include_str!("../../../docs/design/17-conventions.md")),
     ("decompose", include_str!("../../../skills/gear/references/decompose.md")),
     ("agent:opencode", include_str!("../../../skills/gear/references/agents/opencode.md")),
 ];
@@ -718,6 +720,16 @@ fn print_skill(topic: &str) -> GearResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_lists_every_skill_topic() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        for (name, _) in SKILL_TOPICS {
+            let shown = if *name == "main" { "(none)=SKILL.md" } else { name };
+            assert!(help.contains(shown), "--skill help misses topic {name}");
+        }
+    }
+
     use super::*;
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
