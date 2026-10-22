@@ -48,6 +48,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | done | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | verifying | — |
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | ready | — |
+| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | draft | T-43 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -230,3 +231,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-41 pass; T-44 merged. Question → T-47 (missing attempt voided; captain adjusted deliver_contract to record the attempt).
 - 2026-10-22 R-40 pass (P3: a blocked view also clears pending_op — harmless, decide returns None without attempt or ready tasks). T-41 merged; T-46 ready.
 - 2026-10-22 T-43 → R-42.
+- 2026-10-22 Captain: `ApplyResult.settled` + verdicts contract (`plan_verdicts_contract.rs`, 2 ignored); T-50 drafted (after T-43).
