@@ -42,7 +42,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | done | — |
 | T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | done | — |
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | done | — |
-| T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | verifying | — |
+| T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | done | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | done | — |
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | verifying | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | ready | — |
@@ -107,7 +107,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-30 | r32 | `review/t32` | review T-32 (branch `runtime/t32-gear-run`) — temp reviewer gear-r32 on seat (session ses_e9c7f3958ffeScASFffzXSnlxp) | done | — |
 | R-31 | r35 | `review/t35` | review T-35 (branch `runtime/t35-dispatch`) — temp reviewer gear-r35 on seat (session ses_e9c7e586cffeX07HoHKoX2EVLQ) | done | — |
 | R-32 | r34 | `review/t34` | review T-34 (branch `data/t34-store-attempts`) — temp reviewer gear-r34 on seat (session ses_e9c7a020dffe41ZXCI10PJb0Oe) | done | — |
-| R-33 | r36 | `review/t36` | review T-36 (branch `data/t36-plan-apply-queue`) — temp reviewer gear-r36 on seat (session ses_e9c71de3cffeXE6Bju5tFuahIF) | running | — |
+| R-33 | r36 | `review/t36` | review T-36 (branch `data/t36-plan-apply-queue`) — temp reviewer gear-r36 on seat (session ses_e9c71de3cffeXE6Bju5tFuahIF), round 2 new-session recovery ses_e9c5fd1a3ffetvlHvhqagW5tNe | done | — |
 | R-34 | r38 | `review/t38` | review T-38 (branch `runtime/t38-dispatch-delivered`) — temp reviewer gear-r38 on seat (session ses_e9c71adadffeNqEPO3RJKDwFHB) | done | — |
 | R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat (session ses_e9c6ebc9effef9Fb7NcakyILcA) | done | — |
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
@@ -211,3 +211,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-37 fail (2 P2 in SKILL.md: lane write rule vs 17; `blocked` arguments). Captain reworked T-6 → round 2.
 - 2026-10-22 T-40 → R-38 (critical path: unblocks runtime T-41, T-44).
 - 2026-10-22 R-37 round 2 pass; T-6 merged (SKILL.md v1, `--skill conventions`).
+- 2026-10-22 R-33 round 2 pass; T-36 merged (`plan apply` queue part; its contract un-ignored).
