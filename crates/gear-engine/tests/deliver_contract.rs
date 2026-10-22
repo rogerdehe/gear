@@ -23,7 +23,6 @@ fn world() -> Store {
 }
 
 #[test]
-#[ignore = "T-39: un-ignored by the captain when T-39 merges"]
 fn texts_match_design_09() {
     assert_eq!(continue_text("T-17", 4, "ops/tasks/T-17.md"),
         "Continue T-17 (contract v4). Task packet: ops/tasks/T-17.md. Report progress/blocked/done with gear send.");
@@ -32,7 +31,6 @@ fn texts_match_design_09() {
 }
 
 #[test]
-#[ignore = "T-39: un-ignored by the captain when T-39 merges"]
 fn texts_carry_no_screen_marker() {
     let p = Profile {
         kind: "opencode".into(),
@@ -53,7 +51,6 @@ fn texts_carry_no_screen_marker() {
 }
 
 #[test]
-#[ignore = "T-39: un-ignored by the captain when T-39 merges"]
 fn delivery_is_intended_then_executed() {
     let mut s = world();
     let text = continue_text("T-1", 1, "ops/tasks/T-1.md");
