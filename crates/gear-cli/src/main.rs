@@ -301,6 +301,7 @@ fn run_send(
     json: bool,
 ) -> GearResult<String> {
     reject_unsupported(&[
+        ("--need", c.need.is_some()),
         ("--candidate", c.candidate.is_some()),
         ("--preempted", c.preempted.is_some()),
         ("--saved", c.saved.is_some()),
@@ -635,13 +636,24 @@ mod tests {
 
     #[test]
     fn unsupported_flag_is_bad_format() {
-        let (mut store, mut herdr) = world();
-        let mut c = send_cmd("question");
-        c.candidate = Some("T-2".into());
-        let err = run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), T0 + 1, false)
-            .unwrap_err();
-        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
-        assert!(err.detail.contains("--candidate"), "{}", err.detail);
+        // Every flag whose behaviour is slice 2+ is rejected by name, never
+        // silently dropped.
+        let flags: [(&str, fn(&mut SendCmd)); 4] = [
+            ("--need", |c| c.need = Some("a decision".into())),
+            ("--candidate", |c| c.candidate = Some("T-2".into())),
+            ("--preempted", |c| c.preempted = Some("T-3".into())),
+            ("--saved", |c| c.saved = Some("branch".into())),
+        ];
+        for (flag, set) in flags {
+            let (mut store, mut herdr) = world();
+            let mut c = send_cmd("question");
+            set(&mut c);
+            let err =
+                run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), T0 + 1, false)
+                    .unwrap_err();
+            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
+            assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
+        }
     }
 
     #[test]
