@@ -8,7 +8,7 @@
 #   2. messages — open captain messages for you
 #   3. next     — first ready task not yet started, if below the in-flight cap
 set -u
-lane=${1:?usage: inbox.sh <lane>   (data | runtime | review)}
+lane=${1:?usage: inbox.sh <lane>   (data | runtime)}
 
 main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
 board="$main/ops/PLAN.md"

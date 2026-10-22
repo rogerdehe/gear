@@ -17,7 +17,6 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 | Lane | Herdr workspace / pane | Worktree | Anchor branch |
 |---|---|---|---|
 | gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
-| gear-review | `gear-review` / (set at onboarding) | `/Volumes/Data/.herdr-worktrees/gear/home-review` | `home/review` |
 | gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
 
 ## Board
@@ -38,7 +37,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | ready | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
-| T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
+| T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | verifying | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | ready | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
@@ -50,6 +49,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | done | — |
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | done | — |
+| R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
 
 ## Done
@@ -76,3 +76,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-3 pass (2× P3, 3 questions) and R-4 pass (no findings). Merged T-2, T-8 + reviews; acceptance re-run on dev. Decisions on R-3 questions → T-12 (runtime): busy/unavailable/name-taken are refusals; generic not_found is an observation failure; pin the worktree reply mapper. `pane.send_input` key semantics left to the captain's live probe.
 - 2026-10-22 T-3 split into T-13 identity, T-16 select_batch (both ready, independent), T-14 send, T-15 reply (after T-13), T-17 home (after T-13, T-16). Lane writes the named tests first (intra-lane behaviour; public signatures already fixed).
 - 2026-10-22 T-4 split: T-18..T-21 (independent, store + herdr already merged) and a thin T-4 for the tick + slice-1 acceptance. Captain fixed `observe::reconcile` to take `profiles` (screen flags need them).
+- 2026-10-22 practice finding: a long-lived review lane must be cleared before every review, which an async lane cannot do → retired gear-review (exited, worktree removed via Herdr); reviews are temp workers from now on (17 §8, §8a; ops/REVIEW.md requirements-only). T-9 handed in → R-5 by temp reviewer gear-r9.

@@ -10,7 +10,6 @@ This repo follows GEAR's own default working conventions: `docs/design/17-conven
 | Lane | Agent name | Duty | Owns | Worktree |
 |---|---|---|---|---|
 | data | `gear-data` | storage and business rules | `crates/gear-store`, `crates/gear-app` | `/Volumes/Data/.herdr-worktrees/gear/home-data` |
-| review | `gear-review` | acceptance + code review of others' tasks (rules: `ops/REVIEW.md`) | `ops/reviews/` | `/Volumes/Data/.herdr-worktrees/gear/home-review` |
 | runtime | `gear-runtime` | Herdr adapter, engine, CLI | `crates/gear-herdr`, `crates/gear-engine`, `crates/gear-cli` | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` |
 
 ## Your loop — never wait for review
