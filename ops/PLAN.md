@@ -58,7 +58,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | done | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | verifying | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | done | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | ready | — |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | verifying | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | verifying | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | ready | — |
@@ -88,6 +88,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat (session ses_e9c9ccc9dffeZjGrdNQ5Br72Qz) | done | — |
 | R-24 | r27 | `review/t27` | review T-27 (branch `data/t27-config-models`) — temp reviewer gear-r27 on seat | running | — |
 | R-25 | r29 | `review/t29` | review T-29 (branch `runtime/t29-cli-send-reply`) — temp reviewer gear-r29 on seat | running | — |
+| R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -158,3 +159,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice 1 data work done → slice 2 starts: captain added `gear_app::draft` types + contract `draft_contract.rs` (5, ignored); T-31 ready. Next slice-2 contracts (store task/attempt accessors, plan apply, settle) follow.
 - 2026-10-22 T-27 → R-24, T-29 → R-25.
 - 2026-10-22 runtime lowready → T-32 (`gear run`); T-5 is now only the slice-1 end-to-end CLI acceptance after T-4/T-29/T-30/T-32.
+- 2026-10-22 T-4 → R-26.
