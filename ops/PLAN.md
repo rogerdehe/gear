@@ -58,6 +58,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | ready | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | ready | — |
+| T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -144,3 +145,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-10 → R-20, T-22 → R-21, T-25 → R-22.
 - 2026-10-22 runtime lowready → T-29 (CLI send/reply). Decision: CLI logic in private run_* helpers with injected store/env/herdr, tested with FakeHerdr; cmd_* is glue only.
 - 2026-10-22 T-21 rework handed in → R-18 round 2; its session's seat is busy → new-session recovery on a free seat (no waiting on the critical path to T-4).
+- 2026-10-22 runtime lowready → T-30 (CLI home).
