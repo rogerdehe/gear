@@ -3,7 +3,6 @@
 use gear_herdr::{builtin, classify_screen, ScreenFlag};
 
 #[test]
-#[ignore = "T-56: un-ignored by the captain when T-56 merges"]
 fn opencode_is_built_in_and_verified() {
     let p = builtin("opencode").expect("opencode is built in");
     assert_eq!(p.kind, "opencode");
@@ -18,7 +17,6 @@ fn opencode_is_built_in_and_verified() {
 }
 
 #[test]
-#[ignore = "T-56: un-ignored by the captain when T-56 merges"]
 fn unverified_kinds_are_not_built_in() {
     for kind in ["claude", "codex", "pi", "nope"] {
         assert!(builtin(kind).is_none(), "{kind}");
