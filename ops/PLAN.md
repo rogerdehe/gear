@@ -52,7 +52,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | done | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
-| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | verifying | — |
+| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | rework | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | ready | — |
 | T-27 | data | `data/t27-config-models` | config: `[models]` chains + validation (01, 17 §0) | draft | — |
@@ -76,7 +76,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
 | R-16 | r17 | `review/t17` | review T-17 (branch `data/t17-home`) — temp reviewer gear-r17 on seat (session ses_e9cb776fdffe7xhq2Jh4IWaxRZ), 2 rounds | done | — |
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat (session ses_e9cad4a35ffec27oj5H7Z4AMDZ) | done | — |
-| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat | running | — |
+| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | done | — |
 | R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat (session ses_e9ca9da55ffetpXMr32sRFk5gM) | done | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
@@ -135,3 +135,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Both lanes capped (2 in review each) while 3 seats were busy → 4th seat; review throughput is the bottleneck now. start-reviewer waits for the UI before the model check and confirms the prompt was picked up.
 - 2026-10-22 R-17 pass (two P3 doc lines, fixed by the captain at merge). Merged T-26 + review; workspace green.
 - 2026-10-22 R-16 round 2 pass, R-19 pass. Merged T-17, T-23 + reviews; workspace green. slice1_messaging now fails only at `engine::tick` (T-4), which waits on T-21 alone.
+- 2026-10-22 R-18 fail (P1: private expects_agent with the wrong state set). T-21 → rework (runtime M-3). Re-reviews resume on the session's own seat (L-31).
