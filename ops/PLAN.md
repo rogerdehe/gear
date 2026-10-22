@@ -48,7 +48,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | done | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | done | — |
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | done | — |
-| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | ready | — |
+| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | verifying | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | ready | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -130,6 +130,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-44 | r46 | `review/t46` | review T-46 (branch `runtime/t46-dispatch-tick`) — temp reviewer gear-r46 on seat (session ses_e9c3e8e6affe2zdySh07ehBlAW) | done | — |
 | R-45 | r45 | `review/t45` | review T-45 (branch `data/t45-send-result`) — temp reviewer gear-r45 on seat (session ses_e9c37bdc7ffeT9sHr3t67ud0bt) | done | — |
 | R-46 | r48 | `review/t48` | review T-48 (branch `runtime/t48-confirm-delivery`) — temp reviewer gear-r48 on seat | running | — |
+| R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -249,3 +250,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-48 → R-46.
 - 2026-10-22 Deliveries point at `gear --show T-n` → packet rendering contract (`packet_contract.rs`, 2 ignored); T-53 ready (data); CLI `--show` follows.
 - 2026-10-22 R-45 pass; T-45 merged (result submits the attempt); T-52 ready.
+- 2026-10-22 T-50 → R-47.
