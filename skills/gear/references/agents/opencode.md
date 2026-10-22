@@ -13,7 +13,7 @@ Verified on: OpenCode v2.1.2, Herdr 0.9.1 (protocol 22), macOS, 2026-10-22.
 | Resume flag | `-s <session-id>` |
 | Herdr reports `agent_session` | no — find the id yourself (below) |
 | Exit | one `ctrl+c` |
-| Model / effort | switched inside the agent: `/model`, `/effort`; not a start flag |
+| Model / effort / context | switched inside the agent: `/model`, `/effort`, `/clear`; never start flags |
 | Status bar (bottom, above the input) | `Build auto · <model> <provider> · <effort>` — `auto` confirms the unattended flag |
 | Busy sign | `esc interrupt` at the bottom-left while a turn runs |
 
@@ -82,9 +82,34 @@ herdr pane read <pane> --source visible          # status bar: Build auto · <mo
 - The same model may exist under several providers (own account vs. `… Free  OpenCode`). Filter until only the intended provider's row remains before pressing enter.
 - Use `pane send-text` / `pane send-keys`, not `agent prompt`: this is UI input, not a task.
 
-## Switch effort
+## Switch effort (model variant)
 
-Unverified. `/effort` exists; after switching to MiniMax-M3.1-Flash the status bar no longer shows an effort level, so the model may have none. Verify before relying on it.
+Agent must be `idle`. Only models with variants have it; the status bar shows the current one at the end (`… DeepSeek · high`). No variant shown (e.g. MiniMax-M3.1-Flash) → the model has none and `/effort` opens nothing.
+
+```bash
+herdr pane send-text <pane> "/effort" && herdr pane send-keys <pane> enter
+herdr pane read <pane> --source visible          # a "Select variant" dialog in the MIDDLE of the screen:
+                                                 # Search / Default / none / low / high / max (● = current)
+herdr pane send-text <pane> "<variant>"          # filter, e.g. low
+herdr pane send-keys <pane> enter
+herdr pane read <pane> --source visible          # status bar ends with · <variant>
+```
+
+- Read the whole visible screen, not just the last lines: dialogs are drawn mid-screen.
+- Anything typed while a dialog is open goes into the dialog's search box (typing `/effort` again shows "No results found"). Clear it with `backspace`, or close the dialog with `esc`.
+- Verified on DeepSeek V4.1 Flash: high → low → high.
+
+## Clear context
+
+Agent must be `idle`.
+
+```bash
+herdr pane send-text <pane> "/clear" && herdr pane send-keys <pane> enter
+herdr pane read <pane> --source visible          # OpenCode start screen, "Ask anything…"
+```
+
+- Keeps the model, variant and `auto`; the old session stays in `opencode session list`.
+- No new session id exists until the first message is sent — look the id up again after the next prompt before relying on it for resume.
 
 ## Pitfalls
 
