@@ -8,7 +8,7 @@ use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, ReplyArgs, ReplyMode, SendArgs};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole};
-use gear_store::{testing, Store};
+use gear_store::{testing, NewMessage, Store};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -94,6 +94,37 @@ fn state_of(s: &mut Store, id: &str) -> MsgState {
     s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().state
 }
 
+/// A question written straight into a given thread.
+fn insert_question(
+    s: &mut Store,
+    thread: &str,
+    sender: &str,
+    recipient: &str,
+    body: &str,
+    created: i64,
+) -> String {
+    s.write(|tx| {
+        let row = NewMessage {
+            project: "p".into(),
+            thread: thread.into(),
+            task: None,
+            attempt: None,
+            sender: sender.into(),
+            sender_gen: 1,
+            recipient: recipient.into(),
+            kind: MsgKind::Question,
+            urgent: false,
+            body: body.into(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created,
+        };
+        Ok(tx.insert_message(&row)?.id)
+    })
+    .unwrap()
+}
+
 #[test]
 fn resolve_closes_and_replies() {
     let mut s = world();
@@ -160,7 +191,7 @@ fn note_keeps_state() {
 }
 
 #[test]
-fn one_reply_per_sender() {
+fn one_reply_per_sender_and_thread() {
     let mut s = world();
     let a = ask(&mut s, "heat", LANE_PANE, "q1", "s1", NOW);
     let b = ask(&mut s, "heat", LANE_PANE, "q2", "s2", NOW + 1);
@@ -176,14 +207,88 @@ fn one_reply_per_sender() {
     .unwrap();
 
     assert_eq!(r.handled.len(), 3, "every listed id is handled");
-    assert_eq!(r.replies.len(), 2, "one reply per sender");
+    assert_eq!(r.replies.len(), 3, "one answer per thread of a sender");
 
-    let recipients: Vec<String> = r
+    let threads: Vec<String> = r
         .replies
         .iter()
-        .map(|id| s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().recipient)
+        .map(|id| s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().thread)
         .collect();
-    assert_eq!(recipients, vec!["p:heat".to_string(), "p:pricing".to_string()]);
+    assert_eq!(threads, vec!["heat:1".to_string(), "heat:2".to_string(), "pricing:1".to_string()]);
+}
+
+#[test]
+fn answer_reaches_every_thread_of_a_sender() {
+    let mut s = world();
+    let a = ask(&mut s, "heat", LANE_PANE, "q1", "s1", NOW);
+    let b = ask(&mut s, "heat", LANE_PANE, "q2", "s2", NOW + 1);
+    // A second question of the same lane in the same thread.
+    let c = insert_question(&mut s, "heat:1", "p:heat", "p:captain", "q3", NOW + 2);
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&a, &b, &c], ReplyMode::Resolve, "r1"),
+        NOW + 3,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled.len(), 3, "every listed id is handled");
+    // heat:1 (twice) and heat:2 — the thread of the lane appears twice, so
+    // two answers, and the second id of heat:1 does not add a third.
+    assert_eq!(r.replies.len(), 2, "one answer per thread of a sender");
+
+    let threads: Vec<String> = r
+        .replies
+        .iter()
+        .map(|id| s.read(|tx| tx.get_message("p", id)).unwrap().unwrap().thread)
+        .collect();
+    assert_eq!(threads, vec!["heat:1".to_string(), "heat:2".to_string()]);
+}
+
+#[test]
+fn repeated_ids_are_handled_once() {
+    let mut s = world();
+    let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id, &id], ReplyMode::Resolve, "r1"),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())], "the id is listed once");
+    assert_eq!(r.replies.len(), 1, "one answer");
+    assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
+}
+
+#[test]
+fn wait_without_time_is_bad_format() {
+    let mut s = world();
+    let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+
+    // A wait without a recheck time would never become due again.
+    let err = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Wait, "r1"),
+        NOW + 1,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert_eq!(state_of(&mut s, &id), MsgState::Open, "nothing was written");
+
+    // A label without a time is not enough either.
+    let mut args = reply_args(&[&id], ReplyMode::Wait, "r2");
+    args.wait_on = Some("user".into());
+    let err = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 2).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert_eq!(state_of(&mut s, &id), MsgState::Open, "nothing was written");
 }
 
 #[test]
