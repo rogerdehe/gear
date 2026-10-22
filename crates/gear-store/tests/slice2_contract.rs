@@ -100,7 +100,6 @@ fn verdicts_append_and_order() {
 }
 
 #[test]
-#[ignore = "T-40: un-ignored by the captain when T-40 merges"]
 fn open_attempts_include_submitted() {
     let mut s = store();
     s.write(|tx| {
