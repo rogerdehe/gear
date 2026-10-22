@@ -667,9 +667,22 @@ fn cmd_run() -> GearResult<()> {
     let _lock = take_engine_lock(&dir)?; // held for the life of the loop
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
-    let cfg = gear_engine::EngineCfg::default();
+    let cfg = engine_cfg();
     let mut clock = now_ts;
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut std::io::stdout())
+}
+
+/// The engine's configuration: the defaults plus every built-in agent profile.
+/// A kind without a built-in profile is not added, so its seats stay observed
+/// fail-closed (design/04).
+fn engine_cfg() -> gear_engine::EngineCfg {
+    let mut cfg = gear_engine::EngineCfg::default();
+    for kind in ["opencode"] {
+        if let Some(profile) = gear_herdr::builtin(kind) {
+            cfg.profiles.insert(kind.to_string(), profile);
+        }
+    }
+    cfg
 }
 
 /// Take the engine's single-instance lock in `dir`; the caller keeps the file
@@ -1213,6 +1226,18 @@ mod tests {
                 Ok(id)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn engine_cfg_carries_the_builtin_profiles() {
+        let cfg = engine_cfg();
+        let opencode = cfg.profiles.get("opencode").expect("opencode is built in");
+        assert_eq!(opencode.kind, "opencode");
+        assert!(opencode.verified);
+        assert_eq!(opencode.unattended_args, vec!["--auto".to_string()]);
+        // A kind without a verified SOP stays out, so its seats fail closed.
+        assert!(!cfg.profiles.contains_key("claude"));
+        assert!(!cfg.profiles.contains_key("codex"));
     }
 
     #[test]
