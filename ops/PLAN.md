@@ -40,7 +40,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
-| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
+| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | rework | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
@@ -85,3 +85,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-13 handed in → R-6 by temp reviewer gear-r13 (started with ops/bin/start-reviewer.sh).
 - 2026-10-22 R-5 pass (no findings; first temp reviewer). Merged T-9 + review; reviewer exited, worktree removed, session recorded. Help-text question → T-6.
 - 2026-10-22 R-7 pass (T-11), R-8 pass (T-12), R-6 fail overridden → pass: its only failed fact was T-11's contract test, red on the branch base before dev-green (L-19), not T-13's work. Merged T-11, T-12, T-13 + reviews; T-11 ignore removed; slice-1 acceptance tests ignored until T-4 (L-23). T-14, T-15 → ready. Follow-ups: T-22 (R-6 question + P3: agent-less pane rejected), T-23 (R-8 question: two refusal codes). Reviews sat undecided because the watcher was off after a compaction; data lane idle at the cap → L-22 (heartbeat, `capped` event).
+- 2026-10-22 T-18 handed in with a captain question (engine cannot enumerate projects). Decision (b): captain added `Tx::project_ids()` + contract test on dev; T-18 → rework (M-1) to use it and drop its private meta-table registry. No review started on the first hand-in (it would review code about to change).
