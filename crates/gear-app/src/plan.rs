@@ -20,6 +20,9 @@ pub struct ApplyResult {
     pub contract_changed: Vec<(String, i64)>,
     /// Non-terminal tasks the draft did not mention (kept, ranked after the listed ones).
     pub not_mentioned: Vec<String>,
+    /// Verdicts settled by this apply, `<task> attempt <n> pass|fail`, in draft order (T-50).
+    #[serde(default)]
+    pub settled: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -27,7 +30,10 @@ pub struct ApplyResult {
 /// 1. identity: captain seat (`require_seat` with role Captain, states Active);
 /// 2. `draft.project` = the caller's project, else `BadFormat`;
 /// 3. `draft.base` ≠ current `plan_version` → `StaleVersion`;
-/// 4. non-empty Staff/Verdicts/Review → `BadFormat` (not in this cut);
+/// 4. non-empty Staff/Review → `BadFormat` (not in this cut); `# Verdicts` (T-50):
+///    after the queue writes, each line → `tasks::settle` (by_seat = the caller's
+///    seat) in draft order, in the same transaction — any error aborts the whole
+///    apply; settled lines are listed in `settled`;
 /// 5. validation, nothing written on failure (`BadFormat`, detail names the task/line):
 ///    - an existing id must exist; a `NEW` block needs `lane`, `goal` and `accept`;
 ///    - every dep names an existing task or a task of this draft; no cycle;
@@ -353,7 +359,7 @@ fn apply_queue(
         by_gen: Some(by_gen),
     })?;
 
-    Ok(ApplyResult { version, created, contract_changed, not_mentioned })
+    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled: Vec::new() })
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
