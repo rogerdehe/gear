@@ -92,7 +92,7 @@ fn invalid_drafts_write_nothing() {
         assert_eq!(run(&mut s, &draft(1, q), rid).unwrap_err().code, ErrorCode::BadFormat, "{rid}");
     }
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
-    let staff = "<!-- gear-plan project=p base=1 -->\n# Staff\n- retire heat\n";
+    let staff = "<!-- gear-plan project=p base=1 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n"; // temp workers are not in slice 2 (T-55)
     let (env, fp) = cap();
     assert_eq!(apply(&mut s, &env, Some(&fp), &parse(staff).unwrap(), staff, "f", NOW).unwrap_err().code, ErrorCode::BadFormat);
 }
