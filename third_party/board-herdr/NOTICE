@@ -1,6 +1,0 @@
-This directory is vendored from https://github.com/nelsonPires5/herdr-board
-commit 7a215a179acb4e098dd1c2971332497806309360, path crates/board-herdr.
-The upstream workspace declares license = "MIT" (Cargo.toml [workspace.package]).
-Local modifications, if any, are listed below.
-
-- Cargo.toml rewritten to use the GEAR workspace dependencies.
