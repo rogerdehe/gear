@@ -10,7 +10,7 @@ Read `origin/review/t16:ops/reviews/T-16.md`. Fix the P2 (`max_threads = 0` must
 
 Read `origin/review/t17:ops/reviews/T-17.md`. Fix the P1 (a message created in the same second as the last view is lost: decide "unshown" by the ids earlier views listed, not by time alone) and the P2 (an Instruction to the captain printed and recorded twice: skip ids already printed in the batch), each with the test the review names; tighten the generation assertion (P3). Merge `origin/dev` first (T-15, T-24 landed). Captain answer: the ~120-line cap / overflow marker is out of T-17 (later task; nothing is truncated for now).
 
-### M-3 [open] T-36: rework — every contract field opens a new version (R-33)
+### M-3 [closed] T-36: rework — every contract field opens a new version (R-33)
 
 Read `origin/review/t36:ops/reviews/T-36.md`. Captain answer: yes — a change to `goal`, `accept`, `evidence-files` (including clearing it) or `evidence-due` opens a new contract version; fix the P2 with a test in `plan.rs`'s private tests (the contract test does not cover it). Also the P3: base check (StaleVersion) before the section gate (BadFormat), per the doc comment order. Merge `origin/dev` and build before hand-in.
 
