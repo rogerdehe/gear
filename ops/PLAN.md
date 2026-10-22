@@ -33,7 +33,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-15 | data | `data/t15-reply` | app: gear reply | ready | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
-| T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | ready | — |
+| T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | verifying | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
 | T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
@@ -61,6 +61,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
 | R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | done | — |
 | R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat | running | — |
+| R-14 | r24 | `review/t24` | review T-24 (branch `data/t24-send-followups`) — temp reviewer gear-r24 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -101,3 +102,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-12 fail: T-19 conflicts with dev in ops.rs imports (T-18 merged after the cut). T-19 → rework (runtime M-2): merge origin/dev, resolve; doc comment says doorbell ops only (decision: other kinds later). New lane rule: check `merge-tree` before every hand-in (L-27). T-16 rework handed in → R-9 round 2 (resume gear-r16's session).
 - 2026-10-22 R-9 round 2 pass. Merged T-16 + review; workspace green. T-17 → ready (T-13, T-16 merged). The round-2 `done` did not ring (event keyed without the round) → watcher keys review events on the round.
 - 2026-10-22 T-20 handed in → R-13. start-reviewer.sh now refuses a branch that does not merge into dev (L-27).
+- 2026-10-22 T-24 handed in → R-14.
