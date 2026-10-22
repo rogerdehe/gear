@@ -51,6 +51,27 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
         }
 
         let mut shown_msgs: Vec<String> = Vec::new();
+        let mut shown_task: Option<String> = None;
+        let mut shown_attempt: Option<i64> = None;
+        let mut shown_contract: Option<i64> = None;
+
+        // A lane or temp sees the task of its open attempt (design/13: the
+        // current task comes right after the identity line).
+        if seat.role != SeatRole::Captain {
+            if let Some(attempt) = tx.open_attempts_of_seat(&seat_id)?.first() {
+                let goal = tx
+                    .get_contract(&ctx.project, &attempt.task, attempt.adopted_version)?
+                    .map(|contract| contract.goal)
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "task {} attempt {} contract v{} — {}",
+                    attempt.task, attempt.n, attempt.adopted_version, goal
+                ));
+                shown_task = Some(attempt.task.clone());
+                shown_attempt = Some(attempt.n);
+                shown_contract = Some(attempt.adopted_version);
+            }
+        }
 
         if seat.role == SeatRole::Captain {
             // The inbox batch: thread, message ids, the original bodies.
@@ -108,9 +129,9 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
             ts: now,
             shown_msgs,
             shown_ops: Vec::new(),
-            shown_task: None,
-            shown_attempt: None,
-            shown_contract: None,
+            shown_task,
+            shown_attempt,
+            shown_contract,
         };
         Ok((lines.join("\n"), view))
     })?;
