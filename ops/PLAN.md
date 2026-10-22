@@ -55,7 +55,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | rework | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | ready | — |
-| T-27 | data | `data/t27-config-models` | config: `[models]` chains + validation (01, 17 §0) | draft | — |
+| T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
@@ -136,3 +136,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-17 pass (two P3 doc lines, fixed by the captain at merge). Merged T-26 + review; workspace green.
 - 2026-10-22 R-16 round 2 pass, R-19 pass. Merged T-17, T-23 + reviews; workspace green. slice1_messaging now fails only at `engine::tick` (T-4), which waits on T-21 alone.
 - 2026-10-22 R-18 fail (P1: private expects_agent with the wrong state set). T-21 → rework (runtime M-3). Re-reviews resume on the session's own seat (L-31).
+- 2026-10-22 data lowready → captain added `[models]` types (parse) + contract test `models_rules` (ignored for T-27); T-27 ready.
