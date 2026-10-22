@@ -4,10 +4,14 @@ use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
+use std::collections::BTreeMap;
 
 /// Upper bound for the thread sequence search, so a broken database cannot
 /// spin forever.
 const MAX_THREAD_SEQ: u32 = 10_000;
+
+/// Unhandled messages of one thread that are shown in the batch.
+const SHOWN_PER_THREAD: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
@@ -232,6 +236,9 @@ impl Default for BatchLimits {
 /// 3. fill the rest: urgent threads first, then oldest first; at most
 ///    `per_sender` threads per sender (the reserved one counts);
 /// Returns threads in display order. Reading never changes state.
+///
+/// A thread counts once for the sender of its oldest unhandled message, and
+/// `max_threads = 0` returns no thread at all.
 pub fn select_batch(
     tx: &Tx<'_>,
     project: &str,
@@ -239,7 +246,74 @@ pub fn select_batch(
     now: Ts,
     limits: BatchLimits,
 ) -> GearResult<Vec<ThreadView>> {
-    todo!("slice1")
+    // 1. candidates: open messages and waiting messages that are due.
+    let candidates = tx.actionable_for(project, recipient, now)?;
+
+    // Group them by thread, keeping the order of the oldest message.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<MessageRow>> = BTreeMap::new();
+    for message in candidates {
+        if !groups.contains_key(&message.thread) {
+            order.push(message.thread.clone());
+        }
+        groups.entry(message.thread.clone()).or_default().push(message);
+    }
+
+    // One view per thread.
+    let mut views: Vec<ThreadView> = Vec::new();
+    let mut oldest: Vec<Ts> = Vec::new();
+    let mut senders: Vec<String> = Vec::new();
+    for thread in &order {
+        let messages = groups.get(thread).cloned().unwrap_or_default();
+        let shown: Vec<MessageRow> = messages.iter().take(SHOWN_PER_THREAD).cloned().collect();
+        let more = messages.len() - shown.len();
+        let urgent = messages.iter().any(|m| m.urgent);
+        // The latest reply in the thread is context, not an unhandled item.
+        let last_reply = tx
+            .thread_messages(project, thread)?
+            .into_iter()
+            .filter(|m| m.kind == MsgKind::Reply)
+            .max_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+        views.push(ThreadView {
+            thread: thread.clone(),
+            urgent,
+            open: shown,
+            more,
+            last_reply,
+        });
+        oldest.push(messages.first().map(|m| m.created).unwrap_or_default());
+        senders.push(messages.first().map(|m| m.sender.clone()).unwrap_or_default());
+    }
+
+    // 2. one slot is reserved for the oldest normal thread.
+    let mut selected: Vec<usize> = Vec::new();
+    let mut per_sender: BTreeMap<String, usize> = BTreeMap::new();
+    if limits.max_threads > 0 && limits.per_sender > 0 {
+        if let Some(index) = views.iter().position(|view| !view.urgent) {
+            selected.push(index);
+            *per_sender.entry(senders[index].clone()).or_insert(0) += 1;
+        }
+    }
+
+    // 3. the rest: urgent threads first, then oldest first, per sender capped.
+    let mut rest: Vec<usize> = (0..views.len()).filter(|i| !selected.contains(i)).collect();
+    rest.sort_by_key(|index| (if views[*index].urgent { 0 } else { 1 }, oldest[*index]));
+    for index in rest {
+        if selected.len() >= limits.max_threads {
+            break;
+        }
+        let sender = senders[index].clone();
+        let taken = per_sender.get(&sender).copied().unwrap_or(0);
+        if taken >= limits.per_sender {
+            continue;
+        }
+        selected.push(index);
+        *per_sender.entry(sender).or_insert(0) += 1;
+    }
+
+    // Display order: urgent threads first, then oldest first.
+    selected.sort_by_key(|index| (if views[*index].urgent { 0 } else { 1 }, oldest[*index]));
+    Ok(selected.into_iter().map(|index| views[index].clone()).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
