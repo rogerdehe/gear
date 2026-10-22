@@ -37,7 +37,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | ready | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
-| T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | verifying | — |
+| T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | ready | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
@@ -49,9 +49,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | done | — |
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | done | — |
-| R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 | running | — |
+| R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 (session ses_e9cf4091fffejJRMFPr6pkDgum) | done | — |
 | R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 | running | — |
-| T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
+| T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
 
@@ -79,3 +79,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-4 split: T-18..T-21 (independent, store + herdr already merged) and a thin T-4 for the tick + slice-1 acceptance. Captain fixed `observe::reconcile` to take `profiles` (screen flags need them).
 - 2026-10-22 practice finding: a long-lived review lane must be cleared before every review, which an async lane cannot do → retired gear-review (exited, worktree removed via Herdr); reviews are temp workers from now on (17 §8, §8a; ops/REVIEW.md requirements-only). T-9 handed in → R-5 by temp reviewer gear-r9.
 - 2026-10-22 T-13 handed in → R-6 by temp reviewer gear-r13 (started with ops/bin/start-reviewer.sh).
+- 2026-10-22 R-5 pass (no findings; first temp reviewer). Merged T-9 + review; reviewer exited, worktree removed, session recorded. Help-text question → T-6.
