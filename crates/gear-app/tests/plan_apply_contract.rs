@@ -43,7 +43,6 @@ fn run(s: &mut Store, d: &(Draft, String), rid: &str) -> gear_model::GearResult<
 const TWO_NEW: &str = "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\ndeps: T-1\n";
 
 #[test]
-#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
 fn new_tasks_get_ids_rank_and_contract_v1() {
     let mut s = world();
     let r = run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
@@ -57,7 +56,6 @@ fn new_tasks_get_ids_rank_and_contract_v1() {
 }
 
 #[test]
-#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
 fn stale_base_and_replay() {
     let mut s = world();
     let d = draft(0, TWO_NEW);
@@ -67,7 +65,6 @@ fn stale_base_and_replay() {
 }
 
 #[test]
-#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
 fn reorder_change_contract_and_unmentioned_keep_order() {
     let mut s = world();
     run(&mut s, &draft(0, &format!("{TWO_NEW}\n## NEW [could] lane=heat\ngoal: C\naccept: c\ndeps: -\n")), "r1").unwrap();
@@ -82,7 +79,6 @@ fn reorder_change_contract_and_unmentioned_keep_order() {
 }
 
 #[test]
-#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
 fn invalid_drafts_write_nothing() {
     let mut s = world();
     run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
@@ -102,7 +98,6 @@ fn invalid_drafts_write_nothing() {
 }
 
 #[test]
-#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
 fn cancel_and_lane_cannot_apply() {
     let mut s = world();
     run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
