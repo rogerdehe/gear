@@ -34,11 +34,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-17 | data | `data/t17-home` | app: home page + view record | draft | T-13, T-16 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
-| T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | ready | — |
+| T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | verifying | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
-| T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | ready | — |
+| T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | verifying | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
@@ -51,6 +51,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | done | — |
 | R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 (session ses_e9cf4091fffejJRMFPr6pkDgum) | done | — |
 | R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 | running | — |
+| R-7 | r11 | `review/t11` | review T-11 (branch `data/t11-config-trim`) — temp reviewer gear-r11 | running | — |
+| R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
