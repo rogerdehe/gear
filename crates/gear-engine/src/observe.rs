@@ -37,12 +37,15 @@ pub fn snapshot(herdr: &mut dyn HerdrRead) -> Result<Vec<AgentInfo>, gear_herdr:
 /// Compare seats with the snapshot (reads bindings inside `tx`; reads screen
 /// tails via `herdr` only for idle/done agents — callers must not hold a write
 /// transaction while doing so, so this takes a read `Tx`).
+/// Screen flags use `profiles[seat.profile]`; a seat whose profile is missing
+/// is never `idle` (fail closed).
 /// Slice 1 does not change seat states; slice 2+ acts on Missing/Changed.
 pub fn reconcile(
     tx: &Tx<'_>,
     herdr: &mut dyn HerdrRead,
     project: &str,
     agents: &[AgentInfo],
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
 ) -> GearResult<Vec<SeatObs>> {
     todo!("slice1")
 }
