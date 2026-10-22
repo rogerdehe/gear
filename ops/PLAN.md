@@ -273,3 +273,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-50 pass; T-53 merged (task packet rendering); T-54 ready. T-55 question (stale T-36 contract) answered M-5.
 - 2026-10-22 **Milestone: slice-2 work-loop acceptance passes on dev** (`slice2_dispatch::full_work_loop` un-ignored; slice-1 still 7/7). R-51 pass; T-49 merged. T-56 → R-52.
 - 2026-10-22 T-55 → R-53.
+- 2026-10-22 Live probe (captain, seat 5): GEAR_CTX exported in the pane before `agent start` reaches OpenCode's tool commands — onboarding mechanism of design/03 confirmed. Also: first prompt right after start can stall (SOP). Probe shell cleaned (unset).

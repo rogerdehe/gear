@@ -20,7 +20,7 @@ agent start <name> --kind <kind> --pane <pane> -- <args or resume args>
 
 The Agent process and all its children (including every `gear` it invokes) inherit `GEAR_CTX`. The Agent does not need to remember any arguments.
 
-The onboarding target must be a checked, usable shell pane: if an existing Agent has not exited or its state is unknown, do not type the export/start commands; first finish stopping the old session and checking resources. Environment setup and start are confirmed as separate steps; `pane run` returning does not mean the shell has finished the export; environment inheritance is enabled only after passing the probe in 15.
+The onboarding target must be a checked, usable shell pane: if an existing Agent has not exited or its state is unknown, do not type the export/start commands; first finish stopping the old session and checking resources. Environment setup and start are confirmed as separate steps; `pane run` returning does not mean the shell has finished the export; environment inheritance is enabled only after passing the probe in 15 — **verified 2026-10-22 for OpenCode on Herdr 0.9.1**: a variable exported in the pane shell before `agent start` is visible to the agent's tool commands. The shell keeps it after the agent exits, so releasing a seat unsets it before the pane is reused.
 
 - On a write request, `gear` reads `GEAR_CTX` and checks inside the transaction: the seat exists, this generation = the seat's current generation, the binding is not voided, and the seat state allows the operation. Generation mismatch → `STALE_GENERATION`.
 - Late commands spawned by an old session carry the old generation and are always rejected after rebinding; `gear` **never** reads and adopts the latest generation by pane.
