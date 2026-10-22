@@ -113,5 +113,7 @@ herdr pane read <pane> --source visible          # OpenCode start screen, "Ask a
 
 ## Pitfalls
 
+- **Provider quota / plan limit looks like a finished turn.** Herdr reports `done`, not `blocked`. The screen shows a "Session failed" toast and an `Error:` line from the provider, e.g. MiniMax: `Error: <message in Chinese saying the Token Plan usage limit is reached> (2056)` (seen 2026-10-22). Always read the screen when an agent stops; treat this as quota (wait for the reset or `/model` to another provider), never as completion. Profile quota markers: `Session failed`, `Token Plan`, `(2056)`.
+
 - Typing a shell command into a pane that hosts OpenCode submits it as a prompt and the agent starts working on it. Check the occupant first; if it happened, `herdr agent send-keys <name> esc` stops the turn.
 - `herdr agent prompt … --wait` returns when the agent settles; a settled agent is not necessarily finished with the task — read its task packet / screen.
