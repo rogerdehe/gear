@@ -47,7 +47,6 @@ fn verdict(pass: bool) -> Verdict {
 }
 
 #[test]
-#[ignore = "T-42: un-ignored by the captain when T-42 merges"]
 fn attempt_lifecycle_to_verifying() {
     let mut s = submitted();
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying);
@@ -56,7 +55,6 @@ fn attempt_lifecycle_to_verifying() {
 }
 
 #[test]
-#[ignore = "T-42: un-ignored by the captain when T-42 merges"]
 fn start_preconditions() {
     let mut s = world(&[task("T-1", TaskState::Ready, &["T-2"]), task("T-2", TaskState::Ready, &[]), task("T-3", TaskState::Draft, &[]), task("T-4", TaskState::Ready, &[])]);
     let code = |s: &mut Store, t: &str, gen: i64| s.write(|tx| start_attempt(tx, "p", t, "p:heat", gen, T0).map(|_| ())).unwrap_err().code;
@@ -69,7 +67,6 @@ fn start_preconditions() {
 }
 
 #[test]
-#[ignore = "T-42: un-ignored by the captain when T-42 merges"]
 fn submit_must_name_the_adopted_contract() {
     let mut s = world(&[task("T-1", TaskState::Ready, &[])]);
     s.write(|tx| { start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?; on_delivery_confirmed(tx, "p", "T-1", 1, T0) }).unwrap();
