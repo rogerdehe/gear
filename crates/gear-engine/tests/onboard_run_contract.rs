@@ -40,7 +40,6 @@ fn cfg() -> EngineCfg {
 }
 
 #[test]
-#[ignore = "T-62: un-ignored by the captain when T-62 merges"]
 fn queued_lane_gets_worktree_env_and_agent() {
     let mut s = Store::open_in_memory().unwrap();
     admin::init(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG, T0).unwrap();
@@ -63,7 +62,6 @@ fn queued_lane_gets_worktree_env_and_agent() {
 }
 
 #[test]
-#[ignore = "T-62: un-ignored by the captain when T-62 merges"]
 fn a_failed_step_parks_the_seat_in_needs_check() {
     let mut s = Store::open_in_memory().unwrap();
     admin::init(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG, T0).unwrap();
