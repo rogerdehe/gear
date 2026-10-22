@@ -89,7 +89,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | done | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
 | T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | done | — |
-| T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | ready | — (start now against the T-58/T-59 signatures on dev; hand in after they merge) |
+| T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | verifying | — (start now against the T-58/T-59 signatures on dev; hand in after they merge) |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -154,6 +154,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-57 | r63 | `review/t63` | review T-63 (branch `captain/t63-bind-captain`) — temp reviewer gear-r63 on seat | done | — |
 | R-58 | r59 | `review/t59` | review T-59 (branch `data/t59-seat-onboard`) — temp reviewer gear-r59 on seat | done | — |
 | R-59 | r64 | `review/t64` | review T-64 (branch `captain/t64-cli-admin-init`) — temp reviewer gear-r64 on seat | running | — |
+| R-60 | r62 | `review/t62` | review T-62 (branch `runtime/t62-onboard-run`) — temp reviewer gear-r62 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
