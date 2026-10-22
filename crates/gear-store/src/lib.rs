@@ -9,7 +9,7 @@
 //! Herdr or git while holding a [`Tx`].
 
 use gear_model::{
-    ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, Ts,
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::path::Path;
@@ -156,6 +156,90 @@ pub struct OpRow {
     pub check_budget: i64,
     pub created: Ts,
     pub updated: Ts,
+}
+
+/// One task (design/06). `deps` is stored as a JSON array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskRow {
+    pub project: String,
+    /// `T-<n>`
+    pub id: String,
+    /// queue position, ascending
+    pub rank: i64,
+    pub state: TaskState,
+    /// `now|must|should|could|wont`
+    pub priority: String,
+    pub lane: Option<String>,
+    pub milestone: Option<String>,
+    pub required: bool,
+    /// current contract version
+    pub contract_version: i64,
+    pub deps: Vec<String>,
+    pub followup_of: Option<String>,
+    pub wait_on: Option<String>,
+    pub wait_cond: Option<String>,
+    pub rework_note: Option<String>,
+    pub updated: Ts,
+}
+
+/// One contract version of a task. `evidence_files` is stored as a JSON array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractRow {
+    pub project: String,
+    pub task: String,
+    pub version: i64,
+    pub goal: String,
+    pub accept: String,
+    pub evidence_files: Vec<String>,
+    pub evidence_due_min: Option<i64>,
+    pub body: String,
+    pub created: Ts,
+}
+
+/// One attempt of a task (design/06).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptRow {
+    pub project: String,
+    pub task: String,
+    pub n: i64,
+    pub seat: String,
+    pub generation: i64,
+    /// contract version current when the attempt started
+    pub contract_version: i64,
+    /// contract version the attempt works to (only rises)
+    pub adopted_version: i64,
+    pub pending_update: Option<i64>,
+    pub state: AttemptState,
+    pub candidate: Option<String>,
+    pub report: Option<String>,
+    pub safe_point: Option<String>,
+    pub started: Ts,
+    pub updated: Ts,
+}
+
+/// One acceptance verdict (append-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictRow {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    pub contract_version: i64,
+    pub candidate: String,
+    pub passed: bool,
+    pub evidence: Option<String>,
+    pub by_seat: String,
+    pub created: Ts,
+}
+
+/// One applied plan version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRow {
+    pub project: String,
+    pub version: i64,
+    pub draft: String,
+    pub applied: Ts,
+    pub by_seat: Option<String>,
+    pub by_gen: Option<i64>,
 }
 
 /// What one `gear` call actually displayed (design/13).
@@ -992,6 +1076,92 @@ impl<'s> Tx<'s> {
             .optional()
             .map_err(map_sqlite)?;
         Ok(row)
+    }
+}
+
+// Slice-2 skeleton: bodies are T-33/T-34; the allow goes when they land.
+#[allow(unused_variables)]
+impl<'s> Tx<'s> {
+    // ---- plans, tasks, contracts (slice 2; T-33)
+
+    /// Insert a plan version. Duplicate (project, version) → BadFormat (constraint violation, as every insert).
+    pub fn insert_plan(&self, row: &PlanRow) -> GearResult<()> {
+        todo!("T-33")
+    }
+
+    /// Highest applied plan version of the project; 0 when none.
+    pub fn plan_version(&self, project: &str) -> GearResult<i64> {
+        todo!("T-33")
+    }
+
+    pub fn get_plan(&self, project: &str, version: i64) -> GearResult<Option<PlanRow>> {
+        todo!("T-33")
+    }
+
+    /// Insert a task. Duplicate (project, id) → BadFormat (constraint violation, as every insert).
+    pub fn insert_task(&self, row: &TaskRow) -> GearResult<()> {
+        todo!("T-33")
+    }
+
+    pub fn get_task(&self, project: &str, id: &str) -> GearResult<Option<TaskRow>> {
+        todo!("T-33")
+    }
+
+    /// All tasks of the project ordered by rank, then id.
+    pub fn tasks_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
+        todo!("T-33")
+    }
+
+    /// Replace every column of an existing task (raw write, no transition
+    /// check — callers use `require_transition`). Missing → NoTarget.
+    pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {
+        todo!("T-33")
+    }
+
+    /// Insert a contract version. Duplicate (project, task, version) → BadFormat (constraint violation, as every insert).
+    pub fn insert_contract(&self, row: &ContractRow) -> GearResult<()> {
+        todo!("T-33")
+    }
+
+    pub fn get_contract(&self, project: &str, task: &str, version: i64) -> GearResult<Option<ContractRow>> {
+        todo!("T-33")
+    }
+
+    // ---- attempts, verdicts (slice 2; T-34)
+
+    /// Insert an attempt. Duplicate (project, task, n) → BadFormat (constraint violation, as every insert).
+    pub fn insert_attempt(&self, row: &AttemptRow) -> GearResult<()> {
+        todo!("T-34")
+    }
+
+    pub fn get_attempt(&self, project: &str, task: &str, n: i64) -> GearResult<Option<AttemptRow>> {
+        todo!("T-34")
+    }
+
+    /// All attempts of a task ordered by n.
+    pub fn attempts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<AttemptRow>> {
+        todo!("T-34")
+    }
+
+    /// The seat's attempts in Delivered/Started/Stopped/Unknown (design/06 "in progress"),
+    /// ordered by (task, n).
+    pub fn in_progress_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
+        todo!("T-34")
+    }
+
+    /// Replace every column of an existing attempt (raw write). Missing → NoTarget.
+    pub fn update_attempt(&self, row: &AttemptRow) -> GearResult<()> {
+        todo!("T-34")
+    }
+
+    /// Append a verdict (no uniqueness: history is kept).
+    pub fn insert_verdict(&self, row: &VerdictRow) -> GearResult<()> {
+        todo!("T-34")
+    }
+
+    /// Verdicts of a task ordered by (created, attempt).
+    pub fn verdicts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<VerdictRow>> {
+        todo!("T-34")
     }
 }
 

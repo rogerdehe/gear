@@ -182,7 +182,6 @@ fn models_parse_with_defaults() {
 }
 
 #[test]
-#[ignore = "T-27: un-ignored by the captain when T-27 merges"]
 fn models_rules() {
     // valid as given
     assert!(validate(&parse(&format!("{MINIMAL}{MODELS}")).unwrap()).is_empty());
