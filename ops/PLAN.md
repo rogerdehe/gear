@@ -145,6 +145,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat (session ses_e9c0a4336ffeivxaX6BlsMPzfj) | done | — |
 | R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | running | — |
 | R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | running | — |
+| T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
@@ -288,3 +289,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-54 → R-54 (first reviewer on MiniMax-M3).
 - 2026-10-22 T-57 → R-55.
 - 2026-10-22 User: temporary workarounds must not become permanent. `ops/STOPGAPS.md` lists each with its removal trigger; T-60 removes them when GEAR runs this project. New stopgaps get a row in the same commit.
+- 2026-10-22 User: stop adding to SOP/skill/conventions after each incident; prefer subtraction. Lessons stay in the log; a pruning pass (T-61) is planned, aligned with the user.
