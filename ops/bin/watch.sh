@@ -32,8 +32,10 @@ while :; do
     esac
     st=$(git -C "$main" show "origin/$branch:$file" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
     sha=$(git -C "$main" rev-parse --short "origin/$branch" 2>/dev/null)
-    case "$st" in review|question|blocked|done)
-      report "packet $task $st $sha" "packet $task ($lane) Status: $st @ $sha" && touch "$main/.git/gear-watch.hit" ;;
+    case "$st" in
+      review|question|blocked|done)
+        report "packet $task $st" "packet $task ($lane) Status: $st @ $sha" && touch "$main/.git/gear-watch.hit" ;;
+      running) sed -i "" "/^packet $task /d" "$seen" ;;   # re-arms after rework / answer
     esac
   done
   for agent in gear-data gear-runtime gear-review; do
