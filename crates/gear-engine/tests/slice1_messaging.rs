@@ -53,6 +53,7 @@ fn test_profile(kind: &str) -> gear_herdr::Profile {
         auth_markers: vec![],
         tail_lines: 16,
         confirm_rounds: 2,
+        unattended_args: vec!["--auto".into()],
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],

@@ -11,6 +11,7 @@ fn opencode() -> Profile {
         auth_markers: vec!["Unauthorized".into()],
         tail_lines: 3,
         confirm_rounds: 2,
+        unattended_args: vec!["--auto".into()],
         session_ref: false,
         resume_args: None,
         exit_keys: vec!["ctrl+c".into()],

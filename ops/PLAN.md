@@ -40,3 +40,5 @@ Single writer: the captain (see `ops/CAPTAIN.md`). States follow GEAR `TaskState
 ## Log
 
 - 2026-10-22 manual scaffold set up: board (this file), packets with checklists + lane record, `ops/CAPTAIN.md`, `ops/bin/board.sh`.
+- 2026-10-22 lanes gear-data (w7:p1) and gear-runtime (w8:p1) running OpenCode, DeepSeek V4.1 Flash / high. Incident: captain typed `export …` into panes that already hosted agents (submitted as a prompt); interrupted, no changes. Restarted both with `--auto -s <session>`; context kept.
+- 2026-10-22 rule: every agent GEAR starts carries the profile's unattended flags (opencode `--auto`); model/effort switched in-agent via `/model` `/effort`.
