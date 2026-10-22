@@ -111,9 +111,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-34 | r38 | `review/t38` | review T-38 (branch `runtime/t38-dispatch-delivered`) — temp reviewer gear-r38 on seat (session ses_e9c71adadffeNqEPO3RJKDwFHB) | done | — |
 | R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat (session ses_e9c6ebc9effef9Fb7NcakyILcA) | done | — |
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
-| R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX) | running | — |
+| R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX), 2 rounds | done | — |
 | R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat | running | — |
-| T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | verifying | — |
+| T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
 
@@ -210,3 +210,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-36 rework → R-33 round 2 (data did the rework before reading M-4; T-40 next).
 - 2026-10-22 R-37 fail (2 P2 in SKILL.md: lane write rule vs 17; `blocked` arguments). Captain reworked T-6 → round 2.
 - 2026-10-22 T-40 → R-38 (critical path: unblocks runtime T-41, T-44).
+- 2026-10-22 R-37 round 2 pass; T-6 merged (SKILL.md v1, `--skill conventions`).
