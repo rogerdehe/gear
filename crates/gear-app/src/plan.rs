@@ -350,6 +350,30 @@ fn apply_queue(
     }
 
     let version = current + 1;
+    // Settle the verdicts, after the queue writes and before the plan row:
+    // an error aborts the whole apply, so nothing of it is kept.
+    let mut settled: Vec<String> = Vec::new();
+    for line in &draft.verdicts {
+        let verdict = crate::tasks::Verdict {
+            project: project.to_string(),
+            task: line.task.clone(),
+            attempt: line.attempt,
+            contract_version: line.contract,
+            candidate: line.candidate.clone(),
+            pass: line.pass,
+            evidence: line.evidence.clone(),
+            rework: line.rework.clone(),
+            by_seat: by_seat.to_string(),
+        };
+        crate::tasks::settle(tx, &verdict, now)?;
+        settled.push(format!(
+            "{} attempt {} {}",
+            line.task,
+            line.attempt,
+            if line.pass { "pass" } else { "fail" }
+        ));
+    }
+
     tx.insert_plan(&PlanRow {
         project: project.to_string(),
         version,
@@ -359,7 +383,7 @@ fn apply_queue(
         by_gen: Some(by_gen),
     })?;
 
-    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled: Vec::new() })
+    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled })
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
@@ -377,10 +401,6 @@ fn reject_sections(draft: &Draft) -> GearResult<()> {
             | StaffItem::Retire { line, .. } => *line,
         };
         return Err(bad(line, "the `# Staff` section is not supported in this cut"));
-    }
-    if let Some(item) = draft.verdicts.first() {
-        let line = item.line;
-        return Err(bad(line, "the `# Verdicts` section is not supported in this cut"));
     }
     if let Some(item) = draft.reviews.first() {
         let line = item.line;
