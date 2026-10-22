@@ -380,6 +380,7 @@ fn run_send(
         task: c.task.clone(),
         attempt: c.attempt,
         contract: c.contract,
+        candidate: None,
         about: c.about.clone(),
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
