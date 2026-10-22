@@ -115,3 +115,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-12 round 2 pass (P3s). Merged T-19 + review; workspace green.
 - 2026-10-22 User: when MiniMax quota runs out, switch the long-lived lanes temporarily to DeepSeek V4.1 Flash. Mechanism: watcher `quota` event (screen markers), ops/bin/switch-model.sh, start-reviewer picks an alternate reviewer model when the writer runs the default reviewer model (independence).
 - 2026-10-22 MiniMax quota hit on both lanes → switched gear-data and gear-runtime to DeepSeek V4.1 Flash (switch-model.sh); switch back after the reset.
+- 2026-10-22 Correction: the first switch picked the free OpenCode tier (prefix match), which hit its limit; lanes now on DeepSeek V4.1 Flash 1017 (L-29).
