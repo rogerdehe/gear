@@ -51,11 +51,13 @@ fn init_registers_project_and_queued_seats() {
     assert_eq!((p.herdr_session.as_str(), p.config_toml.as_str(), p.quota_lanes, p.plan_version), ("selyra", CONFIG, 2, 0));
     let seats = s.read(|tx| tx.seats_of_project("oxford")).unwrap();
     assert_eq!(seats.len(), 3);
-    for seat in &seats {
+    for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
         assert_eq!((seat.state, seat.generation), (SeatState::Queued, 0), "{}", seat.id);
     }
     let cap = s.read(|tx| tx.get_seat("oxford:captain")).unwrap().unwrap();
-    assert_eq!((cap.role, cap.profile.as_str()), (SeatRole::Captain, "codex"));
+    assert_eq!((cap.role, cap.profile.as_str(), cap.state, cap.generation), (SeatRole::Captain, "codex", SeatState::Active, 1));
+    let b = s.read(|tx| tx.get_binding("oxford:captain", 1)).unwrap().unwrap();
+    assert_eq!((b.pane_id.as_str(), b.kind.as_str(), b.status), ("w2:p1", "codex", gear_store::BindingStatus::Active));
 }
 
 #[test]
