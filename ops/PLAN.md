@@ -52,7 +52,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
 | T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | done | — |
-| T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | verifying | — |
+| T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | done | — |
 | T-59 | data | `data/t59-seat-onboard` | slice 3: seat onboarding transitions (stub + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
@@ -89,7 +89,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | done | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
 | T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | ready | — |
-| T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | draft | T-57, T-58, T-59 |
+| T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | ready | — (start now against the T-58/T-59 signatures on dev; hand in after they merge) |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -145,7 +145,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat (session ses_e9c0b056bffeN388Em2XWRzNEh) | done | — |
 | R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat (session ses_e9c0a4336ffeivxaX6BlsMPzfj) | done | — |
 | R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | done | — |
-| R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | running | — |
+| R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | done | — |
 | T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
@@ -293,3 +293,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 User: stop adding to SOP/skill/conventions after each incident; prefer subtraction. Lessons stay in the log; a pruning pass (T-61) is planned, aligned with the user.
 - 2026-10-22 User: run the skeleton end to end before polishing modules; MVP had grown ~2.5x (≈7,800 product lines vs 3,000). New direction: only walking-skeleton work (T-57, T-58, T-59, T-62) then a real run on Herdr; everything else frozen until that run.
 - 2026-10-22 R-54 found a P2 (unsupported --show target reports a missing-env error instead of BadFormat) — does not stop the loop; merged T-54 under the skeleton rule, finding logged only.
+- 2026-10-22 T-57 merged (admin init). T-62 released early to runtime (codes against the stub signatures) to shorten the path to the first real run.
