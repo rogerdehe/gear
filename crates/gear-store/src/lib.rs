@@ -1267,37 +1267,165 @@ impl<'s> Tx<'s> {
 
     /// Insert an attempt. Duplicate (project, task, n) → BadFormat (constraint violation, as every insert).
     pub fn insert_attempt(&self, row: &AttemptRow) -> GearResult<()> {
-        todo!("T-34")
+        self.tx
+            .execute(
+                "INSERT INTO attempts
+                   (project, task, n, seat, generation, contract_version, adopted_version,
+                    pending_update, state, candidate, report, safe_point, started, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    row.project,
+                    row.task,
+                    row.n,
+                    row.seat,
+                    row.generation,
+                    row.contract_version,
+                    row.adopted_version,
+                    row.pending_update,
+                    row.state.as_str(),
+                    row.candidate,
+                    row.report,
+                    row.safe_point,
+                    row.started,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
     }
 
     pub fn get_attempt(&self, project: &str, task: &str, n: i64) -> GearResult<Option<AttemptRow>> {
-        todo!("T-34")
+        let row: Option<AttemptRow> = self
+            .tx
+            .query_row(
+                &attempt_select(" WHERE project=?1 AND task=?2 AND n=?3"),
+                params![project, task, n],
+                attempt_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
     }
 
     /// All attempts of a task ordered by n.
     pub fn attempts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<AttemptRow>> {
-        todo!("T-34")
+        let mut stmt = self
+            .tx
+            .prepare(&attempt_select(" WHERE project=?1 AND task=?2 ORDER BY n"))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task], attempt_from_row)
+            .map_err(map_sqlite)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(attempts)
     }
 
     /// The seat's attempts in Delivered/Started/Stopped/Unknown (design/06 "in progress"),
     /// ordered by (task, n).
     pub fn in_progress_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
-        todo!("T-34")
+        let mut stmt = self
+            .tx
+            .prepare(&attempt_select(
+                " WHERE seat=?1 AND state IN ('delivered', 'started', 'stopped', 'unknown')
+                 ORDER BY task, n",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![seat], attempt_from_row)
+            .map_err(map_sqlite)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(attempts)
+    }
+
+    /// The seat's non-terminal attempts — in progress plus Submitted
+    /// (Delivered/Started/Stopped/Unknown/Submitted) — ordered by (task, n).
+    /// The engine's lane view (design/09) reads the current attempt from here.
+    pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
+        todo!("T-40")
     }
 
     /// Replace every column of an existing attempt (raw write). Missing → NoTarget.
     pub fn update_attempt(&self, row: &AttemptRow) -> GearResult<()> {
-        todo!("T-34")
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE attempts
+                 SET seat=?4, generation=?5, contract_version=?6, adopted_version=?7,
+                     pending_update=?8, state=?9, candidate=?10, report=?11, safe_point=?12,
+                     started=?13, updated=?14
+                 WHERE project=?1 AND task=?2 AND n=?3",
+                params![
+                    row.project,
+                    row.task,
+                    row.n,
+                    row.seat,
+                    row.generation,
+                    row.contract_version,
+                    row.adopted_version,
+                    row.pending_update,
+                    row.state.as_str(),
+                    row.candidate,
+                    row.report,
+                    row.safe_point,
+                    row.started,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "attempt",
+            &format!("{} {} in project {}", row.task, row.n, row.project),
+        )
     }
 
     /// Append a verdict (no uniqueness: history is kept).
     pub fn insert_verdict(&self, row: &VerdictRow) -> GearResult<()> {
-        todo!("T-34")
+        self.tx
+            .execute(
+                "INSERT INTO verdicts
+                   (project, task, attempt, contract_version, candidate, passed, evidence, by_seat, created)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    row.project,
+                    row.task,
+                    row.attempt,
+                    row.contract_version,
+                    row.candidate,
+                    row.passed as i64,
+                    row.evidence,
+                    row.by_seat,
+                    row.created,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
     }
 
     /// Verdicts of a task ordered by (created, attempt).
     pub fn verdicts_of_task(&self, project: &str, task: &str) -> GearResult<Vec<VerdictRow>> {
-        todo!("T-34")
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, task, attempt, contract_version, candidate, passed, evidence,
+                        by_seat, created
+                 FROM verdicts WHERE project=?1 AND task=?2 ORDER BY created, attempt",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task], verdict_from_row)
+            .map_err(map_sqlite)?;
+        let mut verdicts = Vec::new();
+        for row in rows {
+            verdicts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(verdicts)
     }
 }
 
@@ -1498,6 +1626,14 @@ fn task_select(tail: &str) -> String {
     )
 }
 
+fn attempt_select(tail: &str) -> String {
+    format!(
+        "SELECT project, task, n, seat, generation, contract_version, adopted_version,
+                pending_update, state, candidate, report, safe_point, started, updated
+         FROM attempts{tail}"
+    )
+}
+
 fn plan_from_row(row: &rusqlite::Row) -> rusqlite::Result<PlanRow> {
     Ok(PlanRow {
         project: row.get(0)?,
@@ -1542,6 +1678,40 @@ fn contract_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContractRow> {
         evidence_files: json_strings_from_text(&evidence_files)?,
         evidence_due_min: row.get(6)?,
         body: row.get(7)?,
+        created: row.get(8)?,
+    })
+}
+
+fn attempt_from_row(row: &rusqlite::Row) -> rusqlite::Result<AttemptRow> {
+    let state: String = row.get(8)?;
+    Ok(AttemptRow {
+        project: row.get(0)?,
+        task: row.get(1)?,
+        n: row.get(2)?,
+        seat: row.get(3)?,
+        generation: row.get(4)?,
+        contract_version: row.get(5)?,
+        adopted_version: row.get(6)?,
+        pending_update: row.get(7)?,
+        state: state.parse::<AttemptState>().map_err(as_sqlite_error)?,
+        candidate: row.get(9)?,
+        report: row.get(10)?,
+        safe_point: row.get(11)?,
+        started: row.get(12)?,
+        updated: row.get(13)?,
+    })
+}
+
+fn verdict_from_row(row: &rusqlite::Row) -> rusqlite::Result<VerdictRow> {
+    Ok(VerdictRow {
+        project: row.get(0)?,
+        task: row.get(1)?,
+        attempt: row.get(2)?,
+        contract_version: row.get(3)?,
+        candidate: row.get(4)?,
+        passed: row.get::<_, i64>(5)? != 0,
+        evidence: row.get(6)?,
+        by_seat: row.get(7)?,
         created: row.get(8)?,
     })
 }

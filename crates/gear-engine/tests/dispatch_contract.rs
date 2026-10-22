@@ -50,7 +50,6 @@ fn is_none(a: &Action) -> bool {
 }
 
 #[test]
-#[ignore = "T-35: un-ignored by the captain when T-35 merges"]
 fn idle_lane_without_attempt_gets_first_ready_task() {
     assert_eq!(decide(&view(), &DispatchCfg::default(), NOW), Action::Assign { task: "T-2".into() });
     let mut v = view();
@@ -59,7 +58,6 @@ fn idle_lane_without_attempt_gets_first_ready_task() {
 }
 
 #[test]
-#[ignore = "T-35: un-ignored by the captain when T-35 merges"]
 fn gates_before_any_action() {
     let cfg = DispatchCfg::default();
     for st in [SeatState::Parked, SeatState::Held, SeatState::Missing, SeatState::NeedsCheck, SeatState::Handover] {
@@ -84,7 +82,6 @@ fn gates_before_any_action() {
 }
 
 #[test]
-#[ignore = "T-35: un-ignored by the captain when T-35 merges"]
 fn started_attempt_is_continued_then_escalated() {
     let cfg = DispatchCfg::default();
     for st in [AttemptState::Started, AttemptState::Stopped] {
@@ -96,7 +93,6 @@ fn started_attempt_is_continued_then_escalated() {
 }
 
 #[test]
-#[ignore = "T-35: un-ignored by the captain when T-35 merges"]
 fn submitted_attempt_assigns_only_when_safe() {
     let cfg = DispatchCfg::default();
     let mut v = view(); v.attempt = Some(attempt("T-1", AttemptState::Submitted));
@@ -106,7 +102,6 @@ fn submitted_attempt_assigns_only_when_safe() {
 }
 
 #[test]
-#[ignore = "T-35: un-ignored by the captain when T-35 merges"]
 fn retiring_and_temp_seats_never_assign() {
     let cfg = DispatchCfg::default();
     let mut v = view(); v.obs = Some(obs(SeatState::Retiring, true, &[]));
