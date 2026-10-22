@@ -47,9 +47,10 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | done | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | done | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | done | — |
-| T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | verifying | — |
-| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | ready | — |
+| T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | done | — |
+| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | verifying | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | ready | — |
+| T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -78,9 +79,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | done | — |
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | done | — |
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | done | — |
-| T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | verifying | — |
-| T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | ready | — |
-| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-45, T-48, T-50, T-51 |
+| T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
+| T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | rework | — |
+| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-48, T-50, T-51 |
+| T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | ready | — |
+| T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | draft | T-53 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -124,9 +127,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-40 | r41 | `review/t41` | review T-41 (branch `runtime/t41-lane-view`) — temp reviewer gear-r41 on seat (session ses_e9c4db501ffel4I1Yxj7jRdydK) | done | — |
 | R-41 | r44 | `review/t44` | review T-44 (branch `runtime/t44-stale-delivery`) — temp reviewer gear-r44 on seat (session ses_e9c4d4795ffelOAIJwNJzCrEMX) | done | — |
 | R-42 | r43 | `review/t43` | review T-43 (branch `data/t43-settle`) — temp reviewer gear-r43 on seat (session ses_e9c42c05dffee9BSIW8chVNNlY) | done | — |
-| R-43 | r47 | `review/t47` | review T-47 (branch `runtime/t47-missing-attempt`) — temp reviewer gear-r47 on seat | running | — |
+| R-43 | r47 | `review/t47` | review T-47 (branch `runtime/t47-missing-attempt`) — temp reviewer gear-r47 on seat (session ses_e9c3ec62bffe7DLXPgCT5qkfRW) | done | — |
 | R-44 | r46 | `review/t46` | review T-46 (branch `runtime/t46-dispatch-tick`) — temp reviewer gear-r46 on seat (session ses_e9c3e8e6affe2zdySh07ehBlAW) | done | — |
-| R-45 | r45 | `review/t45` | review T-45 (branch `data/t45-send-result`) — temp reviewer gear-r45 on seat | running | — |
+| R-45 | r45 | `review/t45` | review T-45 (branch `data/t45-send-result`) — temp reviewer gear-r45 on seat (session ses_e9c37bdc7ffeT9sHr3t67ud0bt) | done | — |
+| R-46 | r48 | `review/t48` | review T-48 (branch `runtime/t48-confirm-delivery`) — temp reviewer gear-r48 on seat (session ses_e9c32a21dffe4jKmnxeVGcynpz) | done | — |
+| R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -242,3 +247,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Delivery confirmation designed: a Deliver op is confirmed by a view whose shown_task/attempt match (ViewRecord fields already exist); home records them. Contracts on dev; T-48 (runtime), T-51 (data) ready.
 - 2026-10-22 R-42, R-44 pass (no findings). Merged T-43 (settle), T-46 (plan/intend dispatch); T-50 ready. T-45 → R-45.
 - 2026-10-22 Slice-2 acceptance written: `slice2_dispatch.rs::full_work_loop` (plan → assign → no resend → view → confirm → result → captain rung → verdict pass → quiet), ignored for T-49.
+- 2026-10-22 R-43 pass; T-47 merged.
+- 2026-10-22 T-48 → R-46.
+- 2026-10-22 Deliveries point at `gear --show T-n` → packet rendering contract (`packet_contract.rs`, 2 ignored); T-53 ready (data); CLI `--show` follows.
+- 2026-10-22 R-45 pass; T-45 merged (result submits the attempt); T-52 ready.
+- 2026-10-22 T-50 → R-47.
+- 2026-10-22 R-46 fail (P2: other op kinds would be budget-bumped and flag seats). T-48 → rework (runtime M-6).
