@@ -1,6 +1,6 @@
 # Lane conventions (every lane reads this first)
 
-This repo follows GEAR's own default working conventions: `docs/design/17-conventions.md`. Read it once. This file adds what applies while GEAR is not yet running itself (reports go to files instead of `gear send`).
+This repo follows GEAR's own default working conventions: `docs/design/17-conventions.md`. Read it once. This file adds what applies while GEAR is not yet running itself (you report by editing your task packet instead of `gear send`).
 
 ## Who you are
 
@@ -32,12 +32,23 @@ cargo test -p <crate>
 
 Zero warnings, zero errors, every listed test passes.
 
+## Working a task
+
+- Your task list is the rows for your lane in `ops/PLAN.md` (in order); you only ever work the one the captain sent you.
+- Your dev list is the `## Tasks` checklist in the packet. Work it top to bottom; if `## Review follow-ups` has open items, do those first.
+- Tick a box only when its tests pass and the build is warning-free. After each box: add one line under "Progress notes", update "Files", commit.
+- When you start, set `Status: running` and commit.
+
 ## Reporting
 
-When done or stuck, write `ops/reports/T-<n>.md`, commit it, and end your turn. Do **not** message the captain. Format (exact headings; see 17 §6):
+You never message the captain. You report by editing your packet and ending your turn — the captain is woken when you stop.
+
+- **Done:** every box ticked, acceptance passes → fill "Result" (format below), set `Status: review`, commit, end your turn.
+- **Stuck / need a decision:** write the question under "Progress notes" in the 17 §7 shape (Question / Options / Context / Default), set `Status: blocked` or `Status: question`, commit, end your turn.
+
+Result format (exact headings; see 17 §6):
 
 ```
-Status: done | blocked | question
 Scope: T-<n> — <what shipped, one line>
 Branch: <branch> @ <short sha>
 Files: <path> — <what/why>, one line each
@@ -46,5 +57,3 @@ Open questions: <each> | none
 Out of scope: <noticed, not touched> | none
 Diff: <+/- lines across N files>
 ```
-
-For `blocked` / `question`, use the 17 §7 shape: Question / Options / Context / Default.
