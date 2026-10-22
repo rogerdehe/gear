@@ -18,7 +18,10 @@ Lineage: §5–§9 absorb the collaboration rules of the user's BMAD-Team skills
 3. **Lanes:** duties and `owns` (§1), how many, and which agent kind each runs.
 4. **Model plan** — per role an ordered chain, primary first, then fallbacks (`[models]`, design/01):
    - e.g. lanes `MiniMax M3.1 Flash → DeepSeek V4.1 Flash`, reviewers `DeepSeek V4.1 Flash → MiniMax M3.1 Flash → DeepSeek V4 Pro`.
-   - **Fallback:** when an agent stops on a provider limit (quota markers, SOP), switch it to the next model in its chain and continue; switch back when the provider resets. Every switch is logged.
+   - **On a provider limit, one of two policies, chosen per role at kickoff** (`on_quota`):
+     - `fallback` — switch the agent to the next model in its chain and continue; switch back when the provider resets.
+     - `wait` — park the agent until the provider's reset (`quota_reset_h`, e.g. 5 h for a 5-hour plan window, or the reset time the error message states), then wake it on the same model to continue its inbox. Cheaper or more consistent output, slower calendar time.
+     Either way the stop is detected from the screen (quota markers, SOP), never mistaken for a finished turn, and every switch/park is logged.
    - **Reviewer independence wins over order:** a reviewer takes the first model in its chain that differs from the writer's *current* model; if none differs, the review waits and the captain tells the user.
    - Models are named by their full provider/model id (or full picker label), never a display prefix (lesson L-29).
 5. **First milestone** and how the user wants to be involved (release gate, questions).
