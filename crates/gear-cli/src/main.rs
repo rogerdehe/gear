@@ -497,7 +497,131 @@ fn now_ts() -> i64 {
 }
 
 fn cmd_run() -> GearResult<()> {
-    todo!("slice1: single-instance lock, ops::recover_on_start, loop tick every cfg.tick_s")
+    // The single-instance lock lives next to the database (design/08 startup).
+    let db = std::env::var_os("GEAR_DB").ok_or_else(|| {
+        GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set")
+    })?;
+    let dir = std::path::Path::new(&db)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let _lock = take_engine_lock(&dir)?; // held for the life of the loop
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let cfg = gear_engine::EngineCfg::default();
+    let mut clock = now_ts;
+    run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut std::io::stdout())
+}
+
+/// Take the engine's single-instance lock in `dir`; the caller keeps the file
+/// handle alive, dropping it releases the lock.
+fn take_engine_lock(dir: &std::path::Path) -> GearResult<std::fs::File> {
+    std::fs::create_dir_all(dir).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot create {}: {e}", dir.display()),
+        )
+    })?;
+    let path = dir.join("engine.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot open {}: {e}", path.display()),
+            )
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            format!("engine already running (another process holds {})", path.display()),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot lock {}: {e}", path.display()),
+        )),
+    }
+}
+
+/// The engine loop over an injected clock and a bounded number of ticks: the
+/// startup recovery, then `tick` every `cfg.tick_s` seconds (design/08).
+fn run_engine(
+    store: &mut gear_store::Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &gear_engine::EngineCfg,
+    clock: &mut dyn FnMut() -> i64,
+    ticks: Option<u64>,
+    out: &mut dyn std::io::Write,
+) -> GearResult<()> {
+    run_engine_with(store, herdr, cfg, clock, ticks, out, &mut gear_engine::tick)
+}
+
+/// [`run_engine`] with the tick call injectable, so a test can drive the
+/// "a failing tick does not stop the loop" path.
+fn run_engine_with(
+    store: &mut gear_store::Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &gear_engine::EngineCfg,
+    clock: &mut dyn FnMut() -> i64,
+    ticks: Option<u64>,
+    out: &mut dyn std::io::Write,
+    tick: &mut dyn FnMut(
+        &mut gear_store::Store,
+        &mut dyn gear_herdr::HerdrAct,
+        &gear_engine::EngineCfg,
+        i64,
+    ) -> GearResult<gear_engine::TickReport>,
+) -> GearResult<()> {
+    // Startup step 3: an op the previous process left Executing becomes
+    // Unknown — nothing is re-sent.
+    for (project, id) in gear_engine::ops::recover_on_start(store, clock())? {
+        writeln!(out, "recovered {project} {id}: unknown").map_err(write_error)?;
+    }
+    let mut done: u64 = 0;
+    loop {
+        if ticks.is_some_and(|limit| done >= limit) {
+            break;
+        }
+        match tick(store, herdr, cfg, clock()) {
+            Ok(report) if report != gear_engine::TickReport::default() => {
+                writeln!(
+                    out,
+                    "tick: observe_failed={:?} intended={} executed={} confirmed={} flagged={}",
+                    report.observe_failed,
+                    report.intended.len(),
+                    report.executed.len(),
+                    report.confirmed.len(),
+                    report.flagged.len()
+                )
+                .map_err(write_error)?;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // A failing tick is reported; the loop keeps going.
+                writeln!(out, "tick failed: {}: {}", e.code, e.detail).map_err(write_error)?;
+            }
+        }
+        out.flush().map_err(write_error)?;
+        done += 1;
+        if ticks.is_none() {
+            let seconds = u64::try_from(cfg.tick_s).unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+        }
+    }
+    Ok(())
+}
+
+/// An engine output line that could not be written is reported.
+fn write_error(e: std::io::Error) -> GearError {
+    GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!("cannot write the engine output: {e}"),
+    )
 }
 
 /// Skill topics and their embedded text. The skill is compiled into the
@@ -529,7 +653,7 @@ mod tests {
     use super::*;
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
-    use gear_model::{GearCtx, MsgKind, MsgState, SeatRole};
+    use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
     use gear_store::{testing, Store};
     use std::collections::BTreeMap;
 
@@ -732,6 +856,127 @@ mod tests {
         let map: BTreeMap<String, String> =
             pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |name: &str| map.get(name).cloned()
+    }
+
+    // --- T-32: `gear run` ---
+
+    /// A unique directory for a lock file.
+    fn lock_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("gear-lock-{}-{tag}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn second_lock_is_refused() {
+        let dir = lock_dir("second");
+        let first = take_engine_lock(&dir).unwrap();
+        let err = take_engine_lock(&dir).unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+        assert!(err.detail.contains("engine already running"), "{}", err.detail);
+        drop(first);
+    }
+
+    #[test]
+    fn lock_released_on_drop() {
+        let dir = lock_dir("drop");
+        {
+            let lock = take_engine_lock(&dir).unwrap();
+            assert!(take_engine_lock(&dir).is_err(), "held while the first handle lives");
+            drop(lock);
+        }
+        // The lock went away with the handle.
+        drop(take_engine_lock(&dir).unwrap());
+    }
+
+    /// A doorbell op the previous process left Executing.
+    fn executing_op(store: &mut Store) -> String {
+        store
+            .write(|tx| {
+                let id = tx
+                    .insert_op(&gear_store::NewOp {
+                        project: "p".into(),
+                        seat: "p:captain".into(),
+                        generation: 1,
+                        kind: OpKind::Doorbell,
+                        task: None,
+                        attempt: None,
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "t", "covers": ["M-1"] }),
+                        created: T0,
+                    })?
+                    .id;
+                tx.set_op_state("p", &id, OpState::Executing, None, T0)?;
+                Ok(id)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn recovers_then_ticks_n_times() {
+        let (mut store, mut herdr) = world();
+        let id = executing_op(&mut store);
+
+        let clock_calls = std::cell::Cell::new(0);
+        let mut clock = || {
+            clock_calls.set(clock_calls.get() + 1);
+            T0 + clock_calls.get()
+        };
+        let mut out: Vec<u8> = Vec::new();
+        run_engine(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            Some(2),
+            &mut out,
+        )
+        .unwrap();
+
+        // One clock call for the recovery, then one per tick.
+        assert_eq!(clock_calls.get(), 3, "recovery once, then exactly two ticks");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&id), "{text}");
+        let op = store.read(|tx| tx.get_op("p", &id)).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Unknown, "recovered before the first tick");
+    }
+
+    #[test]
+    fn tick_error_does_not_stop_the_loop() {
+        let (mut store, mut herdr) = world();
+        let clock_calls = std::cell::Cell::new(0);
+        let mut clock = || {
+            clock_calls.set(clock_calls.get() + 1);
+            T0 + clock_calls.get()
+        };
+        let tick_calls = std::cell::Cell::new(0);
+        let mut failing = |_: &mut Store,
+                           _: &mut dyn gear_herdr::HerdrAct,
+                           _: &gear_engine::EngineCfg,
+                           _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Err::<gear_engine::TickReport, _>(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                "boom",
+            ))
+        };
+        let mut out: Vec<u8> = Vec::new();
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            Some(3),
+            &mut out,
+            &mut failing,
+        )
+        .unwrap();
+
+        assert_eq!(tick_calls.get(), 3, "a failing tick does not stop the loop");
+        assert!(String::from_utf8(out).unwrap().contains("boom"));
     }
 
     #[test]
