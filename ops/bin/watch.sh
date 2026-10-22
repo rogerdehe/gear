@@ -50,7 +50,16 @@ while :; do
   while read -r task lane branch state; do
     case "$state" in ready|running|rework|waiting|verifying) ;; *) continue ;; esac
     # captain sent it back: the next hand-in must ring even if the lane never pushed `running`
-    [ "$state" = rework ] && { sed -i "" "/^packet $task /d" "$seen"; continue; }
+    # a rework hand-in = packet says review on a branch newer than the review record
+    if [ "$state" = rework ]; then
+      st=$(git -C "$main" show "origin/$branch:ops/tasks/$task.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
+      tb=$(git -C "$main" log -1 --format=%ct "origin/$branch" 2>/dev/null || echo 0)
+      rb=$(git -C "$main" log -1 --format=%ct "origin/review/t${task#T-}" 2>/dev/null || echo 0)
+      if [ "$st" = review ] && [ "$tb" -gt "$rb" ]; then
+        report "rework $task $tb" "packet $task ($lane) rework handed in @ $(git -C "$main" rev-parse --short "origin/$branch")" && touch "$main/.git/gear-watch.hit"
+      fi
+      continue
+    fi
     case "$task" in
       T-*) file="ops/tasks/T-${task#T-}.md" ;;
       R-*) file="ops/reviews/T-$(sed -n 's#^review/t\([0-9]*\)$#\1#p' <<<"$branch").md" ;;
