@@ -59,7 +59,7 @@ fn unknown_topic_is_bad_format_and_lists_topics() {
 
 #[test]
 fn not_yet_commands_fail_cleanly() {
-    let o = gear(&["admin", "init", "x"]); // slice 3; `plan apply` is implemented since T-52
+    let o = gear(&["admin", "seat", "confirm", "x"]); // after the walking skeleton
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).starts_with("ERROR FORBIDDEN: "), "{}", stderr(&o));
 }

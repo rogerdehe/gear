@@ -148,12 +148,12 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | done | — |
 | T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
 | T-63 | captain | `captain/t63-bind-captain` | skeleton: init binds the existing captain pane | done | — |
-| T-64 | captain | `captain/t64-cli-admin-init` | skeleton: `gear admin init` in the CLI | verifying | — |
+| T-64 | captain | `captain/t64-cli-admin-init` | skeleton: `gear admin init` in the CLI | done | — |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
 | R-56 | r58 | `review/t58` | review T-58 (branch `runtime/t58-onboard-plan`) — temp reviewer gear-r58 on seat | done | — |
 | R-57 | r63 | `review/t63` | review T-63 (branch `captain/t63-bind-captain`) — temp reviewer gear-r63 on seat | done | — |
 | R-58 | r59 | `review/t59` | review T-59 (branch `data/t59-seat-onboard`) — temp reviewer gear-r59 on seat | done | — |
-| R-59 | r64 | `review/t64` | review T-64 (branch `captain/t64-cli-admin-init`) — temp reviewer gear-r64 on seat | running | — |
+| R-59 | r64 | `review/t64` | review T-64 (branch `captain/t64-cli-admin-init`) — temp reviewer gear-r64 on seat | done | — |
 | R-60 | r62 | `review/t62` | review T-62 (branch `runtime/t62-onboard-run`) — temp reviewer gear-r62 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
@@ -308,3 +308,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Captain wrote T-63 (skeleton: bind the existing captain pane at init) → R-57.
 - 2026-10-22 T-59 → R-58.
 - 2026-10-22 R-58: T-59 needed one store write (`set_binding_session_ref`) outside its allowed files — captain decision (a): merge as is. T-59, T-63 merged. board-herdr is now a pinned git dependency (user). Skeleton code left: T-62 (runtime) + T-64 (cli admin init, captain).
+- 2026-10-22 R-59 on T-64: P1 = admin init needs GEAR_DB (design's targets.toml not built) — for the skeleton the user's shell sets GEAR_DB explicitly, logged; P2 = not-yet test now uses `admin seat confirm`. Merged T-64.
