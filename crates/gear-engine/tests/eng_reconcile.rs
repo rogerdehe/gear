@@ -128,6 +128,31 @@ fn not_expected() {
 }
 
 #[test]
+fn retired_seat_is_not_expected() {
+    let mut store = store_with_seat();
+    store
+        .write(|tx| {
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            // A lane retires: Active -> Retiring -> Retired (the model's transitions).
+            tx.set_seat_state("p:heat", SeatState::Retiring, Some("retiring"), T0 + 1)?;
+            tx.set_seat_state("p:heat", SeatState::Retired, Some("retired"), T0 + 2)?;
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    // The retired seat's pane still hosts its agent: it must not be judged Present.
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle);
+
+    let observed = observe(&mut store, &mut herdr, &profiles());
+
+    let heat = observed.iter().find(|o| o.seat.id == "p:heat").unwrap();
+    assert_eq!(heat.presence, Presence::NotExpected, "a retired seat expects no agent");
+    assert!(!heat.idle);
+    assert_eq!(observed[0].presence, Presence::Present, "the active seat is unaffected");
+}
+
+#[test]
 fn idle_when_quiet() {
     let mut store = store_with_seat();
     let mut herdr = FakeHerdr::new();
