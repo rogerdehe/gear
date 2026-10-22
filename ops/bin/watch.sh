@@ -50,7 +50,17 @@ while :; do
   while read -r task lane branch state; do
     case "$state" in ready|running|rework|waiting|verifying) ;; *) continue ;; esac
     # captain sent it back: the next hand-in must ring even if the lane never pushed `running`
-    [ "$state" = rework ] && { sed -i "" "/^packet $task /d" "$seen"; continue; }
+    # a rework hand-in = packet says review on a branch newer than the review record
+    if [ "$state" = rework ]; then
+      st=$(git -C "$main" show "origin/$branch:ops/tasks/$task.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
+      tb=$(git -C "$main" log -1 --format=%ct "origin/$branch" 2>/dev/null || echo 0)
+      rb=$(git -C "$main" log -1 --format=%ct "origin/review/t${task#T-}" 2>/dev/null || echo 0)
+      rerev=$(grep -E "^\| *R-[0-9]+ .*\`review/t${task#T-}\`.*\| *running *\|" "$board" | wc -l)
+      if [ "$st" = review ] && [ "$tb" -gt "$rb" ] && [ "$rerev" -eq 0 ]; then
+        report "rework $task $tb" "packet $task ($lane) rework handed in @ $(git -C "$main" rev-parse --short "origin/$branch")" && touch "$main/.git/gear-watch.hit"
+      fi
+      continue
+    fi
     case "$task" in
       T-*) file="ops/tasks/T-${task#T-}.md" ;;
       R-*) file="ops/reviews/T-$(sed -n 's#^review/t\([0-9]*\)$#\1#p' <<<"$branch").md" ;;
@@ -73,7 +83,7 @@ while :; do
       [ "$(echo $l)" = "$lane" ] || continue
       b=$(echo $branch | tr -d '`')
       t=$(echo $task)
-      case "$t" in T-*) [ "$(git -C "$main" show "origin/$b:ops/tasks/$t.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)" = review ] && inrev=$((inrev+1)) ;; esac
+      case "$t" in T-*) [ "$(echo $state)" != rework ] && [ "$(git -C "$main" show "origin/$b:ops/tasks/$t.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)" = review ] && inrev=$((inrev+1)) ;; esac
       case "$(echo $state)" in
         rework|running) case "$lane" in r[0-9]*) work=$((work+1)) ;; *) [ "$(echo $state)" = rework ] && work=$((work+1)) ;; esac ;;
         ready) git -C "$main" rev-parse -q --verify "origin/$b" >/dev/null || { ready=$((ready+1)); [ "$inrev" -lt 2 ] && work=$((work+1)); } ;;
