@@ -33,3 +33,7 @@ Read `origin/review/t48:ops/reviews/T-48.md`. In `confirm_pending`, ops of kinds
 ### M-8 [closed] T-58: merge origin/dev (conflict with the captain's onboard_queued stub)
 
 `runtime/t58-onboard-plan` conflicts with dev in `crates/gear-engine/src/onboard.rs` because I added the `onboard_queued` stub there afterwards. Merge `origin/dev` into the T-58 branch (keep your `plan_onboard` body and the new stub), re-run acceptance, hand it in again — before continuing T-62.
+
+### M-9 [open] gear-model now allows Queued → Starting/NeedsCheck for lanes (and Queued → Starting/Active for the captain)
+
+Pushed to dev (found by gear-runtime). Merge `origin/dev` into your branch and use `SeatState::can_transition` for those steps — no raw state write needed.

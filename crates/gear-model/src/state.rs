@@ -132,7 +132,8 @@ impl SeatState {
         match role {
             SeatRole::Captain => matches!(
                 (from, to),
-                (Starting, Active | Unknown)
+                (Queued, Starting | Active) // Active: the skeleton binds the user's existing captain pane at init
+                    | (Starting, Active | Unknown)
                     | (Unknown, Active | Unavailable | Handover)
                     | (Active, Unavailable | Handover)
                     | (Unavailable, Handover)
@@ -140,7 +141,8 @@ impl SeatState {
             ),
             SeatRole::Lane => matches!(
                 (from, to),
-                (Starting, Active | NeedsCheck | Unknown)
+                (Queued, Starting | NeedsCheck)
+                    | (Starting, Active | NeedsCheck | Unknown)
                     | (Unknown, Active | NeedsCheck)
                     | (Active, Standby | Parked | Held | Retiring | Missing | NeedsCheck)
                     | (Standby, Active | Parked | Held | Retiring | Missing | NeedsCheck)

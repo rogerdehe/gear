@@ -3,9 +3,9 @@
 //! (pure); executing them through Herdr is a later task.
 
 use gear_herdr::{HerdrAct, Outcome, Profile};
-use gear_model::{GearResult, SeatRole, SeatState, Ts};
-use gear_store::Store;
-use gear_store::SeatRow;
+use gear_model::state::require_transition;
+use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
+use gear_store::{SeatRow, Store};
 
 /// Where a lane's long-lived worktree comes from (17 §3–§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +51,49 @@ pub fn plan_onboard(
     db_path: &str,
     resume: Option<&str>,
 ) -> Result<OnboardPlan, String> {
-    let _ = (seat, kind, profile, generation, repo, integration, db_path, resume);
-    todo!("T-58")
+    // An unverified profile may not take over a real project (design/04).
+    if !profile.verified {
+        return Err(format!(
+            "profile {kind} is not verified, so it may not onboard a seat"
+        ));
+    }
+    // The agent name and the workspace label are one name (17 §3).
+    let agent_name = format!("{}-{}", seat.project, seat.name);
+    if agent_name.chars().count() > 32 {
+        return Err(format!(
+            "agent name {agent_name} is longer than 32 chars"
+        ));
+    }
+    // The agent is started unattended; a resume adds the profile's resume args
+    // with the session reference in place of `{session}`.
+    let mut args = profile.unattended_args.clone();
+    if let Some(session) = resume {
+        let resume_args = profile.resume_args.as_ref().ok_or_else(|| {
+            format!("profile {kind} cannot resume a session")
+        })?;
+        args.extend(resume_args.iter().map(|arg| arg.replace("{session}", session)));
+    }
+    // Only a lane holds a long-lived worktree; the captain and the temps get
+    // their pane elsewhere (17 §3-§4).
+    let worktree = match seat.role {
+        SeatRole::Lane => Some(WorktreeStep {
+            repo: repo.to_string(),
+            branch: format!("home/{}", seat.name),
+            base: integration.to_string(),
+            label: agent_name.clone(),
+        }),
+        _ => None,
+    };
+    Ok(OnboardPlan {
+        worktree,
+        env_command: format!(
+            "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
+            seat.project, seat.name, generation, db_path
+        ),
+        agent_name,
+        kind: kind.to_string(),
+        args,
+    })
 }
 
 /// Onboard every **Lane** seat in state Queued, in every project (slice-3
@@ -189,9 +230,21 @@ fn onboard_seat(
 }
 
 /// Park a seat in NeedsCheck with the reason. It is never retried
-/// automatically (design/10): a human decides what happens next.
+/// automatically (design/10): a human decides what happens next. The
+/// transition is checked like every other seat transition.
 fn park(store: &mut Store, seat_id: &str, reason: &str, now: Ts) -> GearResult<()> {
-    store.write(|tx| tx.set_seat_state(seat_id, SeatState::NeedsCheck, Some(reason), now))
+    store.write(|tx| {
+        let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
+        })?;
+        require_transition(
+            SeatState::can_transition(seat.role, seat.state, SeatState::NeedsCheck),
+            "seat",
+            seat.state.as_str(),
+            SeatState::NeedsCheck.as_str(),
+        )?;
+        tx.set_seat_state(seat_id, SeatState::NeedsCheck, Some(reason), now)
+    })
 }
 
 /// Park every queued lane of a project that cannot be onboarded.
