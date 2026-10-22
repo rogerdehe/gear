@@ -28,15 +28,20 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 |---|---|---|---|---|---|
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
-| T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home — to be split into small tasks, packets pending | draft | T-1 |
+| T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | ready | — |
+| T-16 | data | `data/t16-select-batch` | app: inbox batch selection | ready | — |
+| T-14 | data | `data/t14-send` | app: gear send | draft | T-13 |
+| T-15 | data | `data/t15-reply` | app: gear reply | draft | T-13 |
+| T-17 | data | `data/t17-home` | app: home page + view record | draft | T-13, T-16 |
+| T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | ready | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | ready | — |
-| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3, T-8 |
-| T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-3, T-4 |
+| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass (to be split) | draft | T-14, T-15, T-17 |
+| T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | done | — |
@@ -65,3 +70,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 restocked gear-data: T-10, T-11 (small, contract tests written and validated against a throwaway fix).
 - 2026-10-22 caught: T-3 was marked ready without a packet and is too big for the size rule → back to draft; captain splits it next.
 - 2026-10-22 R-3 pass (2× P3, 3 questions) and R-4 pass (no findings). Merged T-2, T-8 + reviews; acceptance re-run on dev. Decisions on R-3 questions → T-12 (runtime): busy/unavailable/name-taken are refusals; generic not_found is an observation failure; pin the worktree reply mapper. `pane.send_input` key semantics left to the captain's live probe.
+- 2026-10-22 T-3 split into T-13 identity, T-16 select_batch (both ready, independent), T-14 send, T-15 reply (after T-13), T-17 home (after T-13, T-16). Lane writes the named tests first (intra-lane behaviour; public signatures already fixed).
