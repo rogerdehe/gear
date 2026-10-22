@@ -7,13 +7,14 @@
 
 - 2026-10-22 语言 Rust；由外向内切片；舰长搭骨架（model 全实现；store/herdr/app/engine/cli 签名 + 合同测试）；两条线实现。
 - 2026-10-22 Herdr 适配直接走 socket，vendored herdr-board 的 board-herdr（MIT）。
+- 2026-10-22 分支用 GitHub Flow：`main` + 每任务短命分支 `t<n>-<主题>`；每条线一个 worktree（`../gear-lane-a`、`../gear-lane-b`）；远端 `rogerdehe/gear`（私有）。
 
 ## 在途
 
-| 任务 | 线 | 内容 | 状态 |
-|---|---|---|---|
-| T-1 | A | gear-store 实现 | 待派 |
-| T-2 | B | gear-herdr：profile、outcome、SocketHerdr | 待派 |
+| 任务 | 线 | 分支 | 内容 | 状态 |
+|---|---|---|---|---|
+| T-1 | A | t1-store | gear-store 实现 | 待派 |
+| T-2 | B | t2-herdr | gear-herdr：profile、outcome、SocketHerdr | 待派 |
 
 ## 就绪（下一批）
 
