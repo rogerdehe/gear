@@ -147,8 +147,10 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | done | — |
 | R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | done | — |
 | T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
+| T-63 | captain | `captain/t63-bind-captain` | skeleton: init binds the existing captain pane | verifying | — |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
 | R-56 | r58 | `review/t58` | review T-58 (branch `runtime/t58-onboard-plan`) — temp reviewer gear-r58 on seat | done | — |
+| R-57 | r63 | `review/t63` | review T-63 (branch `captain/t63-bind-captain`) — temp reviewer gear-r63 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -299,3 +301,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-58 conflicts with dev (captain's stub in the same file) → rework M-8 before review.
 - 2026-10-22 T-58 re-handed in after the dev merge → R-56. gear-data kept stopping after a thought at 68% context → captain ran /compact, lane continues T-59.
 - 2026-10-22 R-56 pass; T-58 merged (onboarding plan).
+- 2026-10-22 Captain wrote T-63 (skeleton: bind the existing captain pane at init) → R-57.
