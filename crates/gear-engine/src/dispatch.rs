@@ -56,10 +56,14 @@ pub enum Action {
 /// 4. agent not idle (`obs.idle` false) → None;
 /// 5. screen flag RateLimit/Quota/Auth → None;
 /// 6. `now - last_deliver_at < cooldown_s` → None;
-/// 7. attempt Started/Stopped → Continue, or Escalate when
-///    `nudges_since_progress >= nudge_budget`;
+/// 7. attempt Started/Stopped/Delivered → Continue, or Escalate when
+///    `nudges_since_progress >= nudge_budget` (a Delivered attempt was
+///    confirmed but the agent never started, so it is nudged like a stopped
+///    one);
 ///    attempt Submitted → Assign the first ready task if `safe_for_next`, else None;
-///    no attempt → Assign the first ready task, else None;
+///    attempt Unknown → None (an unknown outcome is never retried);
+///    no attempt (or a terminal one, which the view contract excludes) →
+///    Assign the first ready task, else None;
 ///    seat Retiring never Assigns (Continue allowed);
 ///    temp seats (role Temp) never Assign.
 /// `reason` texts are free-form but non-empty.
@@ -97,12 +101,15 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     let may_assign = seat.state != SeatState::Retiring && seat.role != SeatRole::Temp;
     match &v.attempt {
         Some(attempt) => match attempt.state {
-            AttemptState::Started | AttemptState::Stopped => {
+            // Started/Stopped: the agent worked and stopped. Delivered: the
+            // delivery was confirmed but the agent never started (R-31) — it
+            // is nudged the same way instead of waiting forever.
+            AttemptState::Started | AttemptState::Stopped | AttemptState::Delivered => {
                 if v.nudges_since_progress >= cfg.nudge_budget {
                     Action::Escalate {
                         task: attempt.task.clone(),
                         reason: format!(
-                            "{} continues without verifiable progress",
+                            "no verifiable progress after {} continues",
                             v.nudges_since_progress
                         ),
                     }
@@ -118,11 +125,9 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                 }
                 assign_first(&v.ready_tasks, may_assign)
             }
-            // Still live (delivered but not started, or an unknown outcome):
-            // never put a second task on the seat.
-            AttemptState::Delivered | AttemptState::Unknown => {
-                none("the current attempt is still in flight")
-            }
+            // An unknown outcome is never retried, and a second task would
+            // break "one task per seat" (design/08).
+            AttemptState::Unknown => none("the current attempt's outcome is unknown"),
             // A terminal attempt belongs to a finished task; the seat is free.
             AttemptState::Accepted | AttemptState::Rejected | AttemptState::Abandoned => {
                 assign_first(&v.ready_tasks, may_assign)
@@ -173,6 +178,7 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
     todo!("T-39")
 }
 
+<<<<<<< HEAD
 /// Build the [`LaneView`] of one lane seat from the store (read-only `tx`):
 /// - `attempt`: the seat's open attempt (`open_attempts_of_seat`, first); if its
 ///   task is not Running/Verifying (e.g. Waiting) the view has **no attempt and
@@ -186,4 +192,112 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
     let _ = (tx, seat, obs, now);
     todo!("T-41")
+=======
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observe::Presence;
+    use gear_herdr::AgentStatus;
+    use gear_model::{SeatRole as Role, SeatState as State};
+    use gear_store::{SeatRow, TaskRow};
+    use std::collections::BTreeSet;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn obs(idle: bool) -> SeatObs {
+        SeatObs {
+            seat: SeatRow {
+                id: "p:heat".into(),
+                project: "p".into(),
+                role: Role::Lane,
+                name: "heat".into(),
+                profile: "opencode".into(),
+                generation: 1,
+                state: State::Active,
+                state_since: NOW - 1000,
+                state_reason: None,
+            },
+            presence: Presence::Present,
+            status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
+            flags: BTreeSet::new(),
+            idle,
+        }
+    }
+
+    fn attempt(state: AttemptState) -> AttemptRow {
+        AttemptRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 1,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: NOW - 500,
+            updated: NOW - 500,
+        }
+    }
+
+    fn view(attempt: Option<AttemptRow>) -> LaneView {
+        LaneView {
+            obs: Some(obs(true)),
+            attempt,
+            pending_op: None,
+            last_deliver_at: Some(NOW - 1000),
+            nudges_since_progress: 0,
+            ready_tasks: vec![TaskRow {
+                project: "p".into(),
+                id: "T-2".into(),
+                rank: 1,
+                state: gear_model::TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                updated: NOW,
+            }],
+            safe_for_next: false,
+        }
+    }
+
+    #[test]
+    fn delivered_attempt_is_continued() {
+        // Delivery confirmed but the agent never started (design/09 gap, R-31):
+        // nudge it like a started attempt instead of leaving it silent.
+        let cfg = DispatchCfg::default();
+        let action = decide(&view(Some(attempt(AttemptState::Delivered))), &cfg, NOW);
+        assert_eq!(action, Action::Continue { task: "T-1".into() });
+
+        let mut v = view(Some(attempt(AttemptState::Delivered)));
+        v.nudges_since_progress = cfg.nudge_budget;
+        match decide(&v, &cfg, NOW) {
+            Action::Escalate { task, reason } => {
+                assert_eq!(task, "T-1");
+                assert_eq!(
+                    reason,
+                    format!("no verifiable progress after {} continues", cfg.nudge_budget)
+                );
+            }
+            other => panic!("expected an escalation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_attempt_is_not_nudged() {
+        // An unknown outcome is never retried (design/08).
+        let action = decide(&view(Some(attempt(AttemptState::Unknown))), &DispatchCfg::default(), NOW);
+        assert!(matches!(action, Action::None { .. }));
+    }
+>>>>>>> origin/runtime/t38-dispatch-delivered
 }
