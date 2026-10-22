@@ -52,7 +52,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | done | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
-| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | rework | — |
+| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | verifying | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | verifying | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
@@ -77,7 +77,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
 | R-16 | r17 | `review/t17` | review T-17 (branch `data/t17-home`) — temp reviewer gear-r17 on seat (session ses_e9cb776fdffe7xhq2Jh4IWaxRZ), 2 rounds | done | — |
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat (session ses_e9cad4a35ffec27oj5H7Z4AMDZ) | done | — |
-| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | done | — |
+| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | running | — |
 | R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat (session ses_e9ca9da55ffetpXMr32sRFk5gM) | done | — |
 | R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat | running | — |
 | R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat | running | — |
@@ -143,3 +143,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 data lowready → captain added `[models]` types (parse) + contract test `models_rules` (ignored for T-27); T-27 ready.
 - 2026-10-22 T-10 → R-20, T-22 → R-21, T-25 → R-22.
 - 2026-10-22 runtime lowready → T-29 (CLI send/reply). Decision: CLI logic in private run_* helpers with injected store/env/herdr, tested with FakeHerdr; cmd_* is glue only.
+- 2026-10-22 T-21 rework handed in → R-18 round 2; its session's seat is busy → new-session recovery on a free seat (no waiting on the critical path to T-4).

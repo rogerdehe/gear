@@ -10,6 +10,6 @@ Your question (projects cannot be enumerated): option (b). `Tx::project_ids()` i
 
 Read `origin/review/t19:ops/reviews/T-19.md`. P1: the branch conflicts with dev in `crates/gear-engine/src/ops.rs` imports (T-18 landed after your cut). `git merge origin/dev` into `runtime/t19-execute` (no rebase), keep dev's imports plus yours, re-run acceptance, correct the progress note. Captain decision on the drain question: `execute_intended` handles doorbell ops only for now — make its doc comment say so (other kinds come with their own packets). The P3s are optional; the void-reason test is welcome if it fits in a few minutes. New rule for every hand-in: `ops/CONVENTIONS.md` → Acceptance (merge-tree check).
 
-### M-3 [open] T-21: rework — use `SeatState::expects_agent()` (R-18 P1)
+### M-3 [closed] T-21: rework — use `SeatState::expects_agent()` (R-18 P1)
 
 Read `origin/review/t21:ops/reviews/T-21.md`. Delete the private `observe::expects_agent` and call `state.expects_agent()` from gear-model (Retired/Missing/NeedsCheck/Unknown seats must be `NotExpected`); add a test with a Retired seat whose pane hosts an agent → `NotExpected`. Merge `origin/dev` first, then hand in.
