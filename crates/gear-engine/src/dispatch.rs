@@ -178,7 +178,6 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
     todo!("T-39")
 }
 
-<<<<<<< HEAD
 /// Build the [`LaneView`] of one lane seat from the store (read-only `tx`):
 /// - `attempt`: the seat's open attempt (`open_attempts_of_seat`, first); if its
 ///   task is not Running/Verifying (e.g. Waiting) the view has **no attempt and
@@ -192,7 +191,8 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
     let _ = (tx, seat, obs, now);
     todo!("T-41")
-=======
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +299,4 @@ mod tests {
         let action = decide(&view(Some(attempt(AttemptState::Unknown))), &DispatchCfg::default(), NOW);
         assert!(matches!(action, Action::None { .. }));
     }
->>>>>>> origin/runtime/t38-dispatch-delivered
 }
