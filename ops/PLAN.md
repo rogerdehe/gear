@@ -29,7 +29,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
 | T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | done | — |
 | T-16 | data | `data/t16-select-batch` | app: inbox batch selection | rework | — |
-| T-14 | data | `data/t14-send` | app: gear send | ready | — |
+| T-14 | data | `data/t14-send` | app: gear send | verifying | — |
 | T-15 | data | `data/t15-reply` | app: gear reply | ready | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | draft | T-13, T-16 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -57,6 +57,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 (session ses_e9cef8ed2ffe4Rh4t71sju79cH) | done | — |
 | R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4) | done | — |
 | R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat | running | — |
+| R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -90,3 +91,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-18 handed in with a captain question (engine cannot enumerate projects). Decision (b): captain added `Tx::project_ids()` + contract test on dev; T-18 → rework (M-1) to use it and drop its private meta-table registry. No review started on the first hand-in (it would review code about to change).
 - 2026-10-22 T-16 handed in → R-9 by gear-r16, first job on a warm reviewer seat (ops/bin/start-reviewer.sh).
 - 2026-10-22 R-9 fail (P2 `max_threads = 0` returns a thread; test P3). T-16 → rework (data M-1); per_sender rule and T-17 limits decided there. T-18 re-handed in after M-1 → R-10 on the warm seat.
+- 2026-10-22 T-14 handed in → R-11.
