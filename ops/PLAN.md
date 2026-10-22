@@ -39,6 +39,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-14 | data | `data/t14-send` | app: gear send | done | — |
 | T-15 | data | `data/t15-reply` | app: gear reply | done | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | done | — |
+| T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -151,3 +152,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-20 pass (P3 wording). T-10 ignore removed; merged T-10 + review; workspace green.
 - 2026-10-22 R-18 round 2 (new-session recovery), R-21, R-22 pass. Merged T-21, T-22, T-25 + reviews; T-21 doc P3 fixed at merge; workspace green. T-4 → ready (all deps merged). Recurring stale-Result P3 removed at the source (L-32).
 - 2026-10-22 R-23 pass (P3). Merged T-28 + review; workspace green.
+- 2026-10-22 Slice 1 data work done → slice 2 starts: captain added `gear_app::draft` types + contract `draft_contract.rs` (5, ignored); T-31 ready. Next slice-2 contracts (store task/attempt accessors, plan apply, settle) follow.
