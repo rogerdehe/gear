@@ -3,8 +3,8 @@
 use gear_engine::ops::execute_intended;
 use gear_herdr::fake::{FakeHerdr, Inject};
 use gear_herdr::AgentStatus;
-use gear_model::{OpKind, OpState, SeatRole, SeatState};
-use gear_store::{testing, NewOp, Store, Tx};
+use gear_model::{AttemptState, OpKind, OpState, SeatRole, SeatState, TaskState};
+use gear_store::{testing, AttemptRow, NewOp, Store, TaskRow, Tx};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -107,6 +107,80 @@ fn uncertain_is_unknown() {
 
     assert_eq!(done, vec![("O-1".to_string(), "unknown".to_string())]);
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Unknown);
+}
+
+/// An Intended Deliver op for `task`/`attempt`.
+fn insert_delivery(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64, now: i64) -> String {
+    tx.insert_op(&NewOp {
+        project: "p".into(),
+        seat: seat.into(),
+        generation: 1,
+        kind: OpKind::Deliver,
+        task: Some(task.into()),
+        attempt: Some(attempt),
+        ref_msg: None,
+        plan_version: None,
+        payload: serde_json::json!({ "text": "Continue T-1 (contract v1). Task packet: x.md." }),
+        created: now,
+    })
+    .unwrap()
+    .id
+}
+
+#[test]
+fn stale_delivery_is_voided() {
+    let mut store = store_with_projects();
+    store
+        .write(|tx| {
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Running,
+                priority: "must".into(),
+                lane: Some("captain".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                updated: T0,
+            })?;
+            // The seat's open attempt is attempt 2 ...
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 2,
+                seat: "p:captain".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            // ... while the delivery was written for attempt 1.
+            insert_delivery(tx, "p:captain", "T-1", 1, T0 + 1);
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = herdr_with_agent(CAP_PANE);
+
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+    assert_eq!(done, vec![("O-1".to_string(), "void".to_string())]);
+    assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Void);
+    assert!(herdr.calls.is_empty(), "a stale delivery is never sent");
+    let stored = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+    let reason = stored.result.expect("a voided op says why");
+    assert!(reason.contains("attempt 1"), "{reason}");
 }
 
 #[test]

@@ -54,7 +54,8 @@ pub fn intend_deliveries(tx: &Tx<'_>, actions: &[crate::dispatch::DeliverAction]
 
 /// Execute every Intended **doorbell or deliver** op of `project`:
 /// - in a tx: re-check the seat's current generation/state still match the
-///   op (else → Void) and move it to Executing;
+///   op (else → Void) and move it to Executing; a delivery is also voided
+///   when its task/attempt is no longer the seat's open attempt;
 /// - outside any tx: call Herdr;
 /// - in a tx: Ok → Submitted, Refused → Failed, Uncertain → Unknown.
 /// Returns (op id, final state) pairs.
@@ -172,6 +173,8 @@ impl Prepared {
 /// Re-check an op against the seat's current state: the generation fixed at
 /// intent time must still be the seat's, the seat must be reachable, and it
 /// must still have an active binding (that is the pane the text goes to).
+/// A delivery must additionally still belong to the seat's open attempt: an
+/// attempt that was settled, abandoned or replaced must not be nudged (R-35).
 fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let void = |reason: String| Ok(Prepared::Void { id: op.id.clone(), reason });
 
@@ -192,6 +195,29 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     };
     if binding.status != BindingStatus::Active {
         return void("the seat's binding is not active".to_string());
+    }
+    if op.kind == OpKind::Deliver {
+        // The attempt this delivery was written for must still be the seat's
+        // open attempt. Stale: a newer/other attempt of the same task is open,
+        // or this attempt already settled (accepted/rejected/abandoned).
+        let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+            return void("the deliver op names no task or attempt".to_string());
+        };
+        let open = tx.open_attempts_of_seat(&op.seat)?;
+        if !open.iter().any(|a| a.task == task && a.n == attempt) {
+            let superseded = open.iter().any(|a| a.task == task && a.n != attempt);
+            let settled = tx
+                .get_attempt(&op.project, task, attempt)?
+                .map(|a| a.state.is_terminal())
+                .unwrap_or(false);
+            if superseded || settled {
+                return void(format!(
+                    "task {task} attempt {attempt} is no longer the seat's open attempt"
+                ));
+            }
+            // No attempt row at all: the op was intended before the attempt
+            // was recorded, so there is nothing to compare it with.
+        }
     }
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
