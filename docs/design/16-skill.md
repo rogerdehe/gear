@@ -27,7 +27,10 @@ skills/gear/
     captain.md                # captain: inbox, reply, plan draft, Verdicts, Staff, review, handover
     plan-format.md            # strict plan draft format (same source as 05, generated rather than hand-written)
     errors.md                 # meaning of error codes and what to do (same source as 02)
+    agents/<kind>.md          # per-CLI SOP for whoever drives that agent (captain / user / engine author)
 ```
+
+**Per-agent SOPs** (`gear --skill agent:<kind>`): one file per Herdr agent kind, same headings in every file — Start, Find the session, Resume, Exit, Switch model, Switch effort, Screen signs, Pitfalls. Each step is written as exact Herdr commands plus what the screen must show before going on, so a weaker captain model can follow it without exploring. Only steps verified on a real Herdr go in; unverified ones are marked "unverified". The engine's built-in profile (04) for that kind is derived from the same facts.
 
 SKILL.md key points:
 
