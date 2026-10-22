@@ -9,6 +9,10 @@
 #            (default 600) until the lane works again
 #   lowready a writing lane has fewer than 2 ready tasks it has not started —
 #            re-rings every REPEAT seconds until restocked
+#   capped   a writing lane stopped at the review cap while it still has ready
+#            tasks: only the captain's review decisions free it (lesson L-22)
+# Heartbeat: touches .git/gear-watch.alive every loop; board.sh shows
+# "WATCHER OFF" when it is stale, so a captain without a doorbell sees it.
 # Silent on purpose: a lane with nothing to do, and any lane the board marks
 # `standby` in its Lanes row (design: no doorbell when there is truly no work).
 # Packet events ring once per status change; remembered in .git/gear-watch.
@@ -39,6 +43,7 @@ report() { # key line
 }
 
 while :; do
+  touch "$main/.git/gear-watch.alive"
   git -C "$main" fetch -q --prune origin 2>/dev/null
   # Board rows: | T-n | lane | `branch` | content | state | depends |
   awk -F'|' 'NF>=7 && $2 ~ /[TR]-[0-9]/ { for (i=2;i<=6;i++) gsub(/^ +| +$|`/, "", $i); print $2, $3, $4, $6 }' "$board" |
@@ -82,6 +87,11 @@ while :; do
       working) sed -i "" "/^stopped $agent [0-9]*$/d" "$seen" ;;
     esac
     case "$lane" in r[0-9]*) continue ;; esac   # temp reviewers have no queue
+    case "$s" in idle|done)
+      if [ "$inrev" -ge 2 ] && [ "$ready" -gt 0 ]; then
+        nag "capped $lane" "capped $agent: stopped at the review cap with $ready ready task(s) — decide its reviews" && touch "$main/.git/gear-watch.hit"
+      fi ;;
+    esac
     if [ "$standby" -eq 0 ] && [ "$ready" -lt 2 ]; then
       nag "lowready $lane" "lowready $lane ($ready ready task(s) not started)" && touch "$main/.git/gear-watch.hit"
     else
