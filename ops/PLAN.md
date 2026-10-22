@@ -68,6 +68,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | done | — |
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | done | — |
 | T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | ready | — |
+| T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -186,3 +187,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-30 rework → R-29 round 2.
 - 2026-10-22 R-30 pass (P3s). Merged T-32 + review; MSRV bumped to 1.89 (File::try_lock; R-30 question). T-34 → R-32.
 - 2026-10-22 R-29 r2 pass, R-31 pass. Merged T-30, T-35 + reviews; T-35 ignores removed; workspace green. **Slice-1 CLI complete** (send, reply, home, run). R-31 decisions: continue-preconditions (task Waiting/held/verifying) are enforced when building the LaneView (attempt = None then); a Delivered attempt on an idle seat past cooldown gets Continue like Started — both in the next runtime task.
+- 2026-10-22 runtime lowready → slice-2 delivery contract on dev (`deliver_contract.rs`, 3 ignored); T-39 ready.
