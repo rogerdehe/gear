@@ -45,7 +45,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | done | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | done | — |
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | done | — |
-| T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | ready | — |
+| T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | verifying | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | draft | T-42 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
@@ -113,6 +113,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
 | R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX), 2 rounds | done | — |
 | R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat (session ses_e9c5c5744ffeS3on5K6XAPD49g) | done | — |
+| R-39 | r42 | `review/t42` | review T-42 (branch `data/t42-attempt-lifecycle`) — temp reviewer gear-r42 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -214,3 +215,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-33 round 2 pass; T-36 merged (`plan apply` queue part; its contract un-ignored).
 - 2026-10-22 R-38 pass; T-40 merged; T-41, T-44 ready (runtime unblocked).
 - 2026-10-22 R-33 r2 questions: evidence fields absent = none, goal/accept absent = keep (documented in plan.rs); packet acceptance narrowed to own ignored tests (L-36, T-41/42/43 packets fixed). Store skeleton allow removed.
+- 2026-10-22 T-42 → R-39 (data's next tasks all depend on it).
