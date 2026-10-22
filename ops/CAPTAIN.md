@@ -40,6 +40,8 @@ Lanes never wait for review (17 §5): they take their next ready task themselves
 
 ## Rules the captain holds itself to
 
+- Every workaround that exists only because GEAR cannot run itself yet gets a row in `ops/STOPGAPS.md` (why, removal trigger, removing task) in the same commit; the list is reviewed at every milestone.
+
 - Never type into a pane before checking its occupant; never prompt a working agent.
 - Never resend a prompt whose delivery is uncertain; read the screen first.
 - Writer ≠ reviewer: lanes run DeepSeek/MiniMax; the captain (Claude) reviews.
