@@ -22,7 +22,7 @@ Read `origin/review/t29:ops/reviews/T-29.md`. Captain answer: yes, `--need` is a
 
 Read `origin/review/t30:ops/reviews/T-30.md`. `git merge origin/dev` into `runtime/t30-cli-home`: the merged `mod tests` defines `T0`/`CAP_PANE`/`LANE_PANE` twice (yours and T-29's) — keep one set; use T-29's `open_herdr()` / `now_ts()` in `cmd_home` (P3). Run acceptance on the merged result. Hand-in rule changed: always merge dev and build before `Status: review` (ops/CONVENTIONS.md, L-33).
 
-### M-6 [open] T-48: rework — skip kinds without an evidence rule (R-46 P2)
+### M-6 [closed] T-48: rework — skip kinds without an evidence rule (R-46 P2)
 
 Read `origin/review/t48:ops/reviews/T-48.md`. In `confirm_pending`, ops of kinds other than Doorbell/Deliver must be skipped entirely (no budget bump, no flag) as before; add a test that an Onboard op in Submitted is left untouched. Merge `origin/dev` and build before hand-in.
 
