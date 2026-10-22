@@ -237,6 +237,11 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
 /// is what the doorbell is for. The view's time is stored on the op (`result`)
 /// as the evidence that settled it. Without evidence the op's check budget is
 /// bumped; when it is exhausted the seat is flagged (no resend).
+/// Deliver ops (T-48): Confirmed when a view of the same seat+generation at or
+/// after `created` shows `shown_task == op.task` and `shown_attempt ==
+/// op.attempt`; on confirmation an attempt still in Delivered goes through
+/// `gear_app::tasks::on_delivery_confirmed` in the same transaction. Budget and
+/// flagging as for doorbells.
 /// Returns (confirmed op ids, flagged seat ids).
 pub fn confirm_pending(
     store: &mut Store,
