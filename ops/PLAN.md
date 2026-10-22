@@ -44,7 +44,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | done | — |
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | done | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | done | — |
-| T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | verifying | — |
+| T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | done | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | ready | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | draft | T-42 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -72,8 +72,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | done | — |
 | T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | done | — |
 | T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | done | — |
-| T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | draft | T-40 |
-| T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | draft | T-40 |
+| T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | ready | — |
+| T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -112,7 +112,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat (session ses_e9c6ebc9effef9Fb7NcakyILcA) | done | — |
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
 | R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX), 2 rounds | done | — |
-| R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat | running | — |
+| R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat (session ses_e9c5c5744ffeS3on5K6XAPD49g) | done | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -212,3 +212,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-40 → R-38 (critical path: unblocks runtime T-41, T-44).
 - 2026-10-22 R-37 round 2 pass; T-6 merged (SKILL.md v1, `--skill conventions`).
 - 2026-10-22 R-33 round 2 pass; T-36 merged (`plan apply` queue part; its contract un-ignored).
+- 2026-10-22 R-38 pass; T-40 merged; T-41, T-44 ready (runtime unblocked).
