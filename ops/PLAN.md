@@ -64,6 +64,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | done | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | verifying | — |
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | ready | — |
+| T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -171,3 +172,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-31 → R-27; T-29 rework → R-25 round 2.
 - 2026-10-22 **Milestone: slice-1 messaging acceptance passes on dev** (slice1_messaging 7/7, no ignores). R-26 pass; merged T-4 + review; slice-1 ignores removed; engine crate's skeleton allow removed (no warnings). TickReport.intended bare ids: noted, qualify when a multi-project consumer needs it.
 - 2026-10-22 R-25 round 2 pass; merged T-29 + review. T-33 → R-28, T-30 → R-29.
+- 2026-10-22 Slice-2 dispatch contract on dev (`dispatch.rs` types + `decide` stub, `dispatch_contract.rs` 5 ignored). T-35 ready.

@@ -13,6 +13,7 @@
 //! directly with an injected `now` and a `FakeHerdr`.
 
 
+pub mod dispatch;
 pub mod doorbell;
 pub mod observe;
 pub mod ops;
