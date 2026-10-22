@@ -55,7 +55,8 @@ while :; do
       st=$(git -C "$main" show "origin/$branch:ops/tasks/$task.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
       tb=$(git -C "$main" log -1 --format=%ct "origin/$branch" 2>/dev/null || echo 0)
       rb=$(git -C "$main" log -1 --format=%ct "origin/review/t${task#T-}" 2>/dev/null || echo 0)
-      if [ "$st" = review ] && [ "$tb" -gt "$rb" ]; then
+      rerev=$(grep -E "^\| *R-[0-9]+ .*\`review/t${task#T-}\`.*\| *running *\|" "$board" | wc -l)
+      if [ "$st" = review ] && [ "$tb" -gt "$rb" ] && [ "$rerev" -eq 0 ]; then
         report "rework $task $tb" "packet $task ($lane) rework handed in @ $(git -C "$main" rev-parse --short "origin/$branch")" && touch "$main/.git/gear-watch.hit"
       fi
       continue
