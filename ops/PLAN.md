@@ -89,6 +89,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | verifying | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
 | T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | ready | — |
+| T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | draft | T-57, T-58, T-59 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -290,3 +291,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-57 → R-55.
 - 2026-10-22 User: temporary workarounds must not become permanent. `ops/STOPGAPS.md` lists each with its removal trigger; T-60 removes them when GEAR runs this project. New stopgaps get a row in the same commit.
 - 2026-10-22 User: stop adding to SOP/skill/conventions after each incident; prefer subtraction. Lessons stay in the log; a pruning pass (T-61) is planned, aligned with the user.
+- 2026-10-22 User: run the skeleton end to end before polishing modules; MVP had grown ~2.5x (≈7,800 product lines vs 3,000). New direction: only walking-skeleton work (T-57, T-58, T-59, T-62) then a real run on Herdr; everything else frozen until that run.
