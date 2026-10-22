@@ -250,3 +250,34 @@ fn concurrent_writers_do_not_duplicate_ids() {
     all.dedup();
     assert_eq!(all.len(), 100);
 }
+
+/// T-10: a raw state write whose target row does not exist is `NoTarget`,
+/// never a silent success, and writes nothing.
+#[test]
+fn raw_writes_on_a_missing_target_are_no_target() {
+    let mut s = store();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    let code = |r: gear_model::GearResult<()>| r.unwrap_err().code;
+    s.write(|tx| {
+        assert_eq!(code(tx.set_seat_state("p:ghost", SeatState::Standby, None, NOW)), ErrorCode::NoTarget);
+        assert_eq!(code(tx.set_seat_generation("p:ghost", 2)), ErrorCode::NoTarget);
+        assert_eq!(code(tx.set_binding_status("p:heat", 9, BindingStatus::Void)), ErrorCode::NoTarget);
+        assert_eq!(
+            code(tx.update_message_state("p", "M-404", MsgState::Resolved, None, None, None, NOW)),
+            ErrorCode::NoTarget
+        );
+        assert_eq!(code(tx.set_op_state("p", "O-404", OpState::Void, None, NOW)), ErrorCode::NoTarget);
+        // the existing rows still update fine
+        tx.set_seat_state("p:heat", SeatState::Standby, Some("idle"), NOW)?;
+        tx.set_binding_status("p:heat", 1, BindingStatus::Void)?;
+        Ok(())
+    })
+    .unwrap();
+    let seat = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Standby);
+}

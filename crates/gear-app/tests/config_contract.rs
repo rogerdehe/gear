@@ -134,3 +134,25 @@ fn quota_conventions_and_timing() {
     cfg.conventions.staging = "main".into();
     assert_eq!(fields(&validate(&cfg)), vec!["conventions.staging"]);
 }
+
+/// T-11: values are compared after trimming; an entry that is empty after
+/// trimming is reported where it is (owns entry or branch name).
+#[test]
+fn whitespace_does_not_hide_overlaps_or_empty_values() {
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.lanes[1].owns = vec![" src/heat/ ".into()];
+    assert_eq!(fields(&validate(&cfg)), vec!["lanes[1].owns"], "trimmed owns overlap");
+
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.lanes[0].owns = vec!["src/heat/".into(), "   ".into()];
+    assert_eq!(fields(&validate(&cfg)), vec!["lanes[0].owns"], "blank owns entry");
+
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.conventions.integration = "dev ".into();
+    cfg.conventions.release = "dev".into();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.release"], "trimmed branch names compared");
+
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.conventions.staging = "  ".into();
+    assert_eq!(validate(&cfg), vec![], "blank staging means no staging");
+}

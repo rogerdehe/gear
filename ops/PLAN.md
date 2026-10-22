@@ -29,6 +29,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
 | T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home | ready | T-1 |
+| T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
+| T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | ready | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | verifying | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | verifying | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
@@ -59,3 +61,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 practice finding: gear-data sat idle ~15 min — the watcher rang once and the captain's attention went elsewhere. Fix: idle lanes re-ring until handled (watch.sh).
 - 2026-10-22 T-8 handed in → R-4 queued.
 - 2026-10-22 R-2 pass (P3: owns/branch names compared without trimming). Merged T-7 + review into dev; acceptance re-run on dev. P3 → follow-up T-11 (data).
+- 2026-10-22 restocked gear-data: T-10, T-11 (small, contract tests written and validated against a throwaway fix).
