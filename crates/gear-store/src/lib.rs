@@ -1285,6 +1285,13 @@ impl<'s> Tx<'s> {
         todo!("T-34")
     }
 
+    /// The seat's non-terminal attempts — in progress plus Submitted
+    /// (Delivered/Started/Stopped/Unknown/Submitted) — ordered by (task, n).
+    /// The engine's lane view (design/09) reads the current attempt from here.
+    pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
+        todo!("T-40")
+    }
+
     /// Replace every column of an existing attempt (raw write). Missing → NoTarget.
     pub fn update_attempt(&self, row: &AttemptRow) -> GearResult<()> {
         todo!("T-34")
