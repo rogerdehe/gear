@@ -76,8 +76,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | done | — |
 | T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | done | — |
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | done | — |
-| T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | ready | — |
-| T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | ready | — |
+| T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | verifying | — |
+| T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | verifying | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -121,6 +121,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-40 | r41 | `review/t41` | review T-41 (branch `runtime/t41-lane-view`) — temp reviewer gear-r41 on seat (session ses_e9c4db501ffel4I1Yxj7jRdydK) | done | — |
 | R-41 | r44 | `review/t44` | review T-44 (branch `runtime/t44-stale-delivery`) — temp reviewer gear-r44 on seat (session ses_e9c4d4795ffelOAIJwNJzCrEMX) | done | — |
 | R-42 | r43 | `review/t43` | review T-43 (branch `data/t43-settle`) — temp reviewer gear-r43 on seat | running | — |
+| R-43 | r47 | `review/t47` | review T-47 (branch `runtime/t47-missing-attempt`) — temp reviewer gear-r47 on seat | running | — |
+| R-44 | r46 | `review/t46` | review T-46 (branch `runtime/t46-dispatch-tick`) — temp reviewer gear-r46 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -232,3 +234,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-40 pass (P3: a blocked view also clears pending_op — harmless, decide returns None without attempt or ready tasks). T-41 merged; T-46 ready.
 - 2026-10-22 T-43 → R-42.
 - 2026-10-22 Captain: `ApplyResult.settled` + verdicts contract (`plan_verdicts_contract.rs`, 2 ignored); T-50 drafted (after T-43).
+- 2026-10-22 T-47 → R-43, T-46 → R-44.
