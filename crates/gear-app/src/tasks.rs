@@ -6,7 +6,7 @@
 
 use gear_model::state::require_transition;
 use gear_model::{AttemptState, ErrorCode, GearError, GearResult, SeatState, TaskState, Ts};
-use gear_store::{AttemptRow, Tx};
+use gear_store::{AttemptRow, Tx, VerdictRow};
 
 /// Create attempt `n = last + 1` for `task` on `seat_id` (state Delivered,
 /// `contract_version = adopted_version =` the task's current contract version).
@@ -205,6 +205,131 @@ pub struct Verdict {
 /// task/attempt/outcome/candidate) after it settled → Ok, nothing written;
 /// a conflicting one → `BadTransition`.
 pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
-    let _ = (tx, v, now);
-    todo!("T-43")
+    let mut attempt = tx.get_attempt(&v.project, &v.task, v.attempt)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!(
+                "no attempt {} of task {} in project {}",
+                v.attempt, v.task, v.project
+            ),
+        )
+    })?;
+
+    // The same verdict again settles nothing; a conflicting one is a move the
+    // attempt cannot make any more.
+    for settled in tx.verdicts_of_task(&v.project, &v.task)? {
+        if settled.attempt != v.attempt {
+            continue;
+        }
+        if settled.passed == v.pass && settled.candidate == v.candidate {
+            return Ok(());
+        }
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "attempt {} of task {} was already settled with a different verdict",
+                v.attempt, v.task
+            ),
+        ));
+    }
+
+    // A pass carries evidence, a fail carries the rework reason; never both.
+    let fields_ok = match (v.pass, v.evidence.is_some(), v.rework.is_some()) {
+        (true, true, false) | (false, false, true) => true,
+        _ => false,
+    };
+    if !fields_ok {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            if v.pass {
+                "a pass verdict needs `evidence` and no `rework`".to_string()
+            } else {
+                "a fail verdict needs `rework` and no `evidence`".to_string()
+            },
+        ));
+    }
+
+    if attempt.candidate.as_deref() != Some(v.candidate.as_str()) {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "attempt {} of task {} submitted candidate {:?}, not {:?}",
+                v.attempt, v.task, attempt.candidate, v.candidate
+            ),
+        ));
+    }
+    if v.contract_version != attempt.adopted_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "attempt {} of task {} works to contract {}, not {}",
+                v.attempt, v.task, attempt.adopted_version, v.contract_version
+            ),
+        ));
+    }
+
+    let mut task_row = tx.get_task(&v.project, &v.task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {} in project {}", v.task, v.project),
+        )
+    })?;
+    // A pass must be against the contract the task carries now; a fail may
+    // settle an older one.
+    if v.pass && v.contract_version != task_row.contract_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "a pass needs the task's current contract {}, not {}",
+                task_row.contract_version, v.contract_version
+            ),
+        ));
+    }
+
+    let (attempt_state, attempt_name) = if v.pass {
+        (AttemptState::Accepted, "accepted")
+    } else {
+        (AttemptState::Rejected, "rejected")
+    };
+    require_transition(
+        AttemptState::can_transition(attempt.state, attempt_state),
+        "attempt",
+        attempt.state.as_str(),
+        attempt_name,
+    )?;
+    let (task_state, task_name) = if v.pass {
+        (TaskState::Done, "done")
+    } else {
+        (TaskState::Ready, "ready")
+    };
+    require_transition(
+        TaskState::can_transition(task_row.state, task_state),
+        "task",
+        task_row.state.as_str(),
+        task_name,
+    )?;
+
+    tx.insert_verdict(&VerdictRow {
+        project: v.project.clone(),
+        task: v.task.clone(),
+        attempt: v.attempt,
+        contract_version: v.contract_version,
+        candidate: v.candidate.clone(),
+        passed: v.pass,
+        evidence: v.evidence.clone(),
+        by_seat: v.by_seat.clone(),
+        created: now,
+    })?;
+
+    attempt.state = attempt_state;
+    attempt.updated = now;
+    tx.update_attempt(&attempt)?;
+
+    task_row.state = task_state;
+    if !v.pass {
+        task_row.rework_note = v.rework.clone();
+    }
+    task_row.updated = now;
+    tx.update_task(&task_row)?;
+    Ok(())
 }
