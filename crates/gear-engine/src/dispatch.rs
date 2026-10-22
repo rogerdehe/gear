@@ -267,8 +267,19 @@ pub fn task_branch(lane: &str, task: &str) -> String {
 /// seat-id order: `lane_view(tx, seat, obs, now)` with that seat's entry from
 /// `observed` (None when absent) → `decide`.
 pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &DispatchCfg, now: Ts) -> GearResult<Vec<(SeatRow, Action)>> {
-    let _ = (tx, project, observed, cfg, now);
-    todo!("T-46")
+    let mut decisions = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            // The captain has no task queue (design/09).
+            continue;
+        }
+        // The seat's entry from this tick's observation, if it was observed.
+        let obs = observed.iter().find(|o| o.seat.id == seat.id).cloned();
+        let view = lane_view(tx, &seat, obs, now)?;
+        let action = decide(&view, cfg, now);
+        decisions.push((seat, action));
+    }
+    Ok(decisions)
 }
 
 /// Turn decisions into Deliver ops in the caller's transaction:
@@ -278,8 +289,50 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
 pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)], now: Ts) -> GearResult<Vec<OpRow>> {
-    let _ = (tx, project, actions, now);
-    todo!("T-46")
+    let mut deliveries: Vec<DeliverAction> = Vec::new();
+    for (seat, action) in actions {
+        match action {
+            Action::Assign { task } => {
+                // The attempt exists before the delivery that announces it.
+                let attempt =
+                    gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?;
+                deliveries.push(DeliverAction {
+                    project: project.to_string(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    task: task.clone(),
+                    attempt: attempt.n,
+                    text: assign_text(
+                        task,
+                        attempt.contract_version,
+                        &task_branch(&seat.name, task),
+                        &packet_ref(task),
+                    ),
+                });
+            }
+            Action::Continue { task } => {
+                // Continue the attempt that is actually open, never a guess.
+                let Some(attempt) = tx
+                    .open_attempts_of_seat(&seat.id)?
+                    .into_iter()
+                    .find(|attempt| attempt.task == *task)
+                else {
+                    continue;
+                };
+                deliveries.push(DeliverAction {
+                    project: project.to_string(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    task: task.clone(),
+                    attempt: attempt.n,
+                    text: continue_text(task, attempt.adopted_version, &packet_ref(task)),
+                });
+            }
+            // A seat that must wait, or one handed to the captain: no delivery.
+            Action::None { .. } | Action::Escalate { .. } => {}
+        }
+    }
+    crate::ops::intend_deliveries(tx, &deliveries, now)
 }
 
 #[cfg(test)]
