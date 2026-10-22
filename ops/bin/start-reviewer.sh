@@ -8,7 +8,7 @@
 set -eu
 n=${1:?task number}; branch=${2:?branch under review}; shift 2
 resume=""; model="DeepSeek V4.1 Flash 1017"; filter=""   # must differ from the writer's model
-alt_model=${REVIEW_ALT_MODEL:-"DeepSeek V4 Pro"}; alt_filter=${REVIEW_ALT_FILTER:-"deepseek-v4-pro"}
+alt_model=${REVIEW_ALT_MODEL:-"DeepSeek V4 Pro"}; alt_filter=${REVIEW_ALT_FILTER:-"DeepSeek V4 Pro"}
 while [ $# -gt 0 ]; do case "$1" in --resume) resume=$2; shift 2 ;; --model) model=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;; esac; done
 main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
 wtroot=$(dirname "$(git -C "$main" worktree list --porcelain | sed -n 's/^worktree \(.*\/home-data\)$/\1/p')")
@@ -60,6 +60,11 @@ if ! bar | grep -qF "$model"; then
   herdr pane send-text "$pane" "/model" >/dev/null; herdr pane send-keys "$pane" enter >/dev/null; sleep 1
   herdr pane send-text "$pane" "$filter" >/dev/null; sleep 1
   herdr pane send-keys "$pane" enter >/dev/null; sleep 1
+  # models with variants (e.g. DeepSeek V4 Pro) open a "Select variant" dialog next (lesson L-30)
+  if herdr pane read "$pane" --source visible | grep -q 'Select variant'; then
+    herdr pane send-text "$pane" "${REVIEW_VARIANT:-high}" >/dev/null; sleep 0.5
+    herdr pane send-keys "$pane" enter >/dev/null; sleep 1
+  fi
 fi
 bar | grep -qF "$model" || { echo "model check failed: $(bar)" >&2; exit 1; }
 

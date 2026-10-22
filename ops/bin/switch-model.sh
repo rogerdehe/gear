@@ -14,5 +14,10 @@ herdr pane send-text "$(herdr agent get "$agent" | sed -n 's/.*"pane_id":"\([^"]
 herdr agent send-keys "$agent" enter >/dev/null; sleep 1
 herdr pane send-text "$(herdr agent get "$agent" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')" "$filter" >/dev/null; sleep 1
 herdr agent send-keys "$agent" enter >/dev/null; sleep 1
+# models with variants open a "Select variant" dialog next (lesson L-30)
+if herdr agent read "$agent" --source visible | grep -q 'Select variant'; then
+  herdr pane send-text "$(herdr agent get "$agent" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p')" "${VARIANT:-high}" >/dev/null; sleep 0.5
+  herdr agent send-keys "$agent" enter >/dev/null; sleep 1
+fi
 bar | grep -qF "$expect" || { echo "model check failed: $(bar)" >&2; exit 1; }
 echo "$agent now on $expect"
