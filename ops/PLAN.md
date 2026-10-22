@@ -47,6 +47,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | done | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | verifying | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | draft | T-42 |
+| T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | draft | T-42 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -216,3 +217,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-38 pass; T-40 merged; T-41, T-44 ready (runtime unblocked).
 - 2026-10-22 R-33 r2 questions: evidence fields absent = none, goal/accept absent = keep (documented in plan.rs); packet acceptance narrowed to own ignored tests (L-36, T-41/42/43 packets fixed). Store skeleton allow removed.
 - 2026-10-22 T-42 → R-39 (data's next tasks all depend on it).
+- 2026-10-22 Captain: `SendArgs.candidate` added (all constructors updated); result-send contract `result_contract.rs` (2 ignored); T-45 drafted (after T-42). CLI `--candidate` mapping is a runtime follow-up once T-45 lands.

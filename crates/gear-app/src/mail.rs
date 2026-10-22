@@ -21,6 +21,8 @@ pub struct SendArgs {
     pub task: Option<String>,
     pub attempt: Option<i64>,
     pub contract: Option<i64>,
+    /// Result only: the commit (or other checkable ref) handed in.
+    pub candidate: Option<String>,
     /// Upstream task to ask (must be a registered dependency) — slice 2.
     pub about: Option<String>,
     /// Captain only: seat name to instruct.
@@ -50,7 +52,10 @@ pub struct SendResult {
 /// - Progress → Info; Question/Blocked/Result/Instruction → Open;
 ///   Reply-kind is produced by `reply()`, not by `send`;
 /// - thread: reply_to inherits; otherwise new thread `<task or seat>:<seq>` (seq = next unused number for that prefix, design/07);
-/// - Ack/Result/Blocked side effects (tasks, handover) arrive in slice 2 and
+/// - Result (T-45): `task`, `attempt`, `contract` and `candidate` required (else
+///   BadFormat); in the same transaction `tasks::submit_result(…, body as report)`
+///   — its errors abort the send; the message goes to the captain as usual.
+/// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
 pub fn send(
     store: &mut Store,
