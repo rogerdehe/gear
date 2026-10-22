@@ -121,7 +121,7 @@ The captain replies by picking an option (`gear reply <id> --resolve -m "<option
 
 Review is asynchronous: the lane has already moved on. The captain fetches the pushed branch and reviews it; a pass merges it, a fail writes follow-ups into the packet (committed and pushed on that task branch) and marks it for rework.
 
-**Writer ≠ reviewer, and the captain does not review.** Acceptance and code review are done by a review seat (a long-lived review lane or a temp worker) running a different model from the writer; it writes `ops/reviews/T-<n>.md` (mechanical acceptance, findings P0–P3, verdict, questions). The captain only decides — pass/merge or fail/rework — from that file, looking at code only where the review raises a question. Reviewing 10+ minutes per task would otherwise block the captain all day.
+**Writer ≠ reviewer, and the captain does not review.** Each review is done by a **temp reviewer**: a fresh agent session started for that one review, on a different model from the writer, given only the packet, its contracts and the diff. It writes `ops/reviews/T-<n>.md` (verified acceptance facts, spec compliance, findings P0–P3, set-aside items, questions, verdict) and ends. The captain only decides — pass/merge or fail/rework — from that file, looking at code only where the review raises a question; a 10+ minute review per task would otherwise block the captain all day. A re-review of the same task after rework resumes the same reviewer session (it knows its own findings) and checks the delta. GEAR prescribes these requirements, not the method: a reviewer may follow BMAD `code-review`, superpowers `requesting-code-review` or its own approach.
 
 **Review loop discipline:**
 - Read the findings first, count them, then decide. Never announce "clean" before the review output has been read; output present ≠ review finished — confirm the reviewer actually completed.
@@ -143,6 +143,12 @@ Review is asynchronous: the lane has already moved on. The captain fetches the p
 **Conflicts:** the captain never rebases or resolves someone else's branch; the owning lane merges `dev` into its branch and resolves in its own worktree.
 
 **Shared append-only files** (registries, route tables, migration lists, the errors table): lanes only append their own line; never reorder. Conflicts there resolve mechanically by keeping both sides.
+
+## 8a. Long-lived lane or temp worker
+
+- A **long-lived lane** is for work where accumulated context is an asset: a duty and owned paths it gets better at over time. It pulls its own queue asynchronously.
+- A **temp worker** is for work that must start clean every time and ends with one deliverable — reviews, one-off investigations, isolated fixes. The captain/engine pushes the job to a fresh session; nobody has to remember to clear anything. Same job coming back (rework, follow-up) resumes the same session.
+- There is no such thing as "a long-lived lane that must be cleared before each task": an agent cannot clear its own context, and an asynchronous lane is never cleared by anyone. If a role needs a clean context per task, it is temp work.
 
 ## 9. Status comes from facts
 

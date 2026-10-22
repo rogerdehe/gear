@@ -56,7 +56,9 @@ while :; do
       running) sed -i "" "/^packet $task /d" "$seen" ;;   # re-arms after rework / answer
     esac
   done
-  for lane in data runtime review; do
+  # writing lanes + temp reviewers currently on the board (lane r<m>, state running)
+  temps=$(grep -E '^\| *R-[0-9]' "$board" | awk -F'|' '{gsub(/ /,"",$3); gsub(/ /,"",$6); if ($6=="running") print $3}')
+  for lane in data runtime $temps; do
     agent="gear-$lane"
     standby=$(grep -E "^\| *$agent *\|" "$board" | grep -c standby)
     work=0; ready=0
@@ -64,7 +66,7 @@ while :; do
       [ "$(echo $l)" = "$lane" ] || continue
       b=$(echo $branch | tr -d '`')
       case "$(echo $state)" in
-        rework) work=$((work+1)) ;;
+        rework|running) case "$lane" in r[0-9]*) work=$((work+1)) ;; *) [ "$(echo $state)" = rework ] && work=$((work+1)) ;; esac ;;
         ready) git -C "$main" rev-parse -q --verify "origin/$b" >/dev/null || { work=$((work+1)); ready=$((ready+1)); } ;;
       esac
     done < <(grep -E '^\| *[TR]-[0-9]' "$board")
@@ -77,7 +79,8 @@ while :; do
         fi ;;
       working) sed -i "" "/^stopped $agent [0-9]*$/d" "$seen" ;;
     esac
-    if [ "$lane" != review ] && [ "$standby" -eq 0 ] && [ "$ready" -lt 2 ]; then
+    case "$lane" in r[0-9]*) continue ;; esac   # temp reviewers have no queue
+    if [ "$standby" -eq 0 ] && [ "$ready" -lt 2 ]; then
       nag "lowready $lane" "lowready $lane ($ready ready task(s) not started)" && touch "$main/.git/gear-watch.hit"
     else
       sed -i "" "/^lowready $lane [0-9]*$/d" "$seen"
