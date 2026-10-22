@@ -97,8 +97,7 @@ fn captain_sees_batch_with_ids_and_bodies() {
     .unwrap();
 
     assert!(home.text.contains("p:captain"), "identity line: {}", home.text);
-    assert!(home.text.contains("captain"), "identity line: {}", home.text);
-    assert!(home.text.contains("1"), "generation in the identity line");
+    assert!(home.text.contains("generation 1"), "identity line: {}", home.text);
     assert!(home.text.contains("M-1"), "the message id: {}", home.text);
     assert!(home.text.contains("Schema v1 or v2?"), "the body: {}", home.text);
     assert!(home.text.contains("heat:1"), "the thread id: {}", home.text);
@@ -167,6 +166,64 @@ fn recorded_view_hides_it_next_time() {
     )
     .unwrap();
     assert!(!second.text.contains("Use v2"), "the answer was shown already: {}", second.text);
+}
+
+#[test]
+fn message_in_the_same_second_as_the_view_is_not_lost() {
+    let mut s = world();
+    // A view of the empty page, recorded at NOW.
+    let empty = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW,
+    )
+    .unwrap();
+    home::record_view(&mut s, &empty.view).unwrap();
+
+    // The answer arrives in the same second as that view.
+    answer(&mut s, "Use v2", NOW);
+
+    let home = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 1,
+    )
+    .unwrap();
+    assert!(home.text.contains("Use v2"), "the answer must not be lost: {}", home.text);
+    assert_eq!(home.view.shown_msgs, vec!["M-1".to_string()]);
+}
+
+#[test]
+fn instruction_to_the_captain_is_printed_once() {
+    let mut s = world();
+    insert(
+        &mut s,
+        "T-1:1",
+        "p:heat",
+        "p:captain",
+        MsgKind::Instruction,
+        MsgState::Open,
+        "do the thing",
+        NOW,
+    );
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert_eq!(
+        home.text.matches("do the thing").count(),
+        1,
+        "printed once: {}",
+        home.text
+    );
+    assert_eq!(home.view.shown_msgs, vec!["M-1".to_string()], "the id is listed once");
 }
 
 #[test]
