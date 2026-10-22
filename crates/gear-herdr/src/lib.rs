@@ -91,19 +91,47 @@ impl SocketHerdr {
     /// Connect to `socket_path` (from the project binding / HERDR_SOCKET_PATH) and
     /// require the supported protocol (22). Failure is an ObserveError.
     pub fn connect(socket_path: &std::path::Path) -> Result<SocketHerdr, ObserveError> {
-        todo!("T-herdr")
+        let mut client = board_herdr::HerdrClient::connect(socket_path)
+            .map_err(|e| ObserveError(format!("herdr connect failed: {e}")))?;
+        client
+            .require_supported_protocol()
+            .map_err(|e| ObserveError(format!("herdr protocol check failed: {e}")))?;
+        Ok(SocketHerdr { client })
     }
 }
 
 impl HerdrRead for SocketHerdr {
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
-        todo!("T-herdr")
+        let snapshot = self
+            .client
+            .session_snapshot()
+            .map_err(|e| ObserveError(format!("session.snapshot failed: {e}")))?;
+        Ok(snapshot.agents)
     }
+
     fn agent_get(&mut self, pane_id: &str) -> Result<Option<AgentInfo>, ObserveError> {
-        todo!("T-herdr")
+        match self.client.agent_get(pane_id) {
+            Ok(info) => {
+                // A pane that hosts no agent is a negative answer, not a failure.
+                if info.agent.is_none() {
+                    Ok(None)
+                } else {
+                    Ok(Some(info))
+                }
+            }
+            Err(board_herdr::HerdrError::Protocol { code, .. }) if MISSING_CODES.contains(&code.as_str()) => {
+                Ok(None)
+            }
+            Err(e) => Err(ObserveError(format!("agent.get failed: {e}"))),
+        }
     }
+
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError> {
-        todo!("T-herdr")
+        let read = self
+            .client
+            .pane_read(pane_id, board_herdr::ReadSource::RecentUnwrapped, Some(lines))
+            .map_err(|e| ObserveError(format!("pane.read failed: {e}")))?;
+        Ok(read.text)
     }
 }
 
