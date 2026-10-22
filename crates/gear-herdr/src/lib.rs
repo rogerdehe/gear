@@ -17,7 +17,7 @@
 pub mod fake;
 pub mod profile;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
 pub use profile::{classify_screen, validate_template, Profile, ScreenFlag};
@@ -137,26 +137,92 @@ impl HerdrRead for SocketHerdr {
 
 impl HerdrAct for SocketHerdr {
     fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        let params = board_herdr::AgentPromptParams {
+            target: pane_id.to_string(),
+            text: text.to_string(),
+            wait: None, // no --wait: "submitted" is confirmed by the next observation round
+        };
+        match self.client.agent_prompt(&params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        // `pane.send_input` is the atomic "text + Enter" submission Herdr's
+        // own `pane run` uses (the socket protocol has no other one): the
+        // command is queued and submitted as one unit, so a rejected line
+        // never leaves a half-typed command in the pane.
+        let params = json!({
+            "pane_id": pane_id,
+            "text": command,
+            "keys": [ENTER_KEY],
+        });
+        match self.client.call("pane.send_input", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo> {
-        todo!("T-herdr")
+        let params = board_herdr::AgentStartParams {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            pane_id: pane_id.to_string(),
+            args: args.to_vec(),
+            timeout_ms: Some(AGENT_START_TIMEOUT_MS),
+        };
+        match self.client.agent_start(&params) {
+            Ok(started) => {
+                let mut info = started.agent;
+                if info.agent.is_none() {
+                    // Herdr started the agent but did not name its kind: refresh
+                    // the pane's own info instead of guessing.
+                    if let Ok(fresh) = self.client.agent_get(pane_id) {
+                        info = fresh;
+                    }
+                }
+                Outcome::Ok(info)
+            }
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()> {
-        todo!("T-herdr")
+        match self.client.pane_send_keys(pane_id, keys) {
+            Ok(()) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        match self.client.pane_close(pane_id) {
+            Ok(()) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        // Herdr has no "pane.title" call: the pane title is metadata reported
+        // by the pane's owner. GEAR reports it under the source "gear".
+        let params = json!({
+            "pane_id": pane_id,
+            "source": METADATA_SOURCE,
+            "title": title,
+        });
+        match self.client.call("pane.report_metadata", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        match self.client.notification_show(title, Some(body), board_herdr::NotificationSound::None) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
         todo!("T-herdr")
     }
