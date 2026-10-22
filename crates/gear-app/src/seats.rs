@@ -18,17 +18,14 @@ pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now:
     })?;
 
     // A seat starts onboarding from Queued (freshly registered) or from
-    // Missing/NeedsCheck (a restart). The model's lane table has no
-    // Queued -> Starting (a registered seat is Queued, design/03), so Queued
-    // is allowed here and every other source state goes through the table.
-    if seat.state != SeatState::Queued {
-        require_transition(
-            SeatState::can_transition(seat.role, seat.state, SeatState::Starting),
-            &format!("seat {seat_id}"),
-            seat.state.as_str(),
-            SeatState::Starting.as_str(),
-        )?;
-    }
+    // Missing/NeedsCheck (a restart); the model says which is legal for the
+    // seat's role.
+    require_transition(
+        SeatState::can_transition(seat.role, seat.state, SeatState::Starting),
+        &format!("seat {seat_id}"),
+        seat.state.as_str(),
+        SeatState::Starting.as_str(),
+    )?;
 
     // The binding records the session the seat lives in: the project's Herdr
     // session (design/03).
