@@ -27,7 +27,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 |---|---|---|---|---|---|
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
-| T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | ready | — |
+| T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | verifying | — |
 | T-16 | data | `data/t16-select-batch` | app: inbox batch selection | ready | — |
 | T-14 | data | `data/t14-send` | app: gear send | draft | T-13 |
 | T-15 | data | `data/t15-reply` | app: gear reply | draft | T-13 |
@@ -50,6 +50,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | done | — |
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | done | — |
 | R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 | running | — |
+| R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
 
 ## Done
@@ -77,3 +78,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-3 split into T-13 identity, T-16 select_batch (both ready, independent), T-14 send, T-15 reply (after T-13), T-17 home (after T-13, T-16). Lane writes the named tests first (intra-lane behaviour; public signatures already fixed).
 - 2026-10-22 T-4 split: T-18..T-21 (independent, store + herdr already merged) and a thin T-4 for the tick + slice-1 acceptance. Captain fixed `observe::reconcile` to take `profiles` (screen flags need them).
 - 2026-10-22 practice finding: a long-lived review lane must be cleared before every review, which an async lane cannot do → retired gear-review (exited, worktree removed via Herdr); reviews are temp workers from now on (17 §8, §8a; ops/REVIEW.md requirements-only). T-9 handed in → R-5 by temp reviewer gear-r9.
+- 2026-10-22 T-13 handed in → R-6 by temp reviewer gear-r13 (started with ops/bin/start-reviewer.sh).
