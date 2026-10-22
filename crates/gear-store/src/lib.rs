@@ -557,23 +557,25 @@ impl<'s> Tx<'s> {
         reason: Option<&str>,
         now: Ts,
     ) -> GearResult<()> {
-        self.tx
+        let changed = self
+            .tx
             .execute(
                 "UPDATE seats SET state=?2, state_since=?3, state_reason=?4 WHERE id=?1",
                 params![seat_id, state.as_str(), now, reason],
             )
             .map_err(map_sqlite)?;
-        Ok(())
+        require_written(changed, "seat", seat_id)
     }
 
     pub fn set_seat_generation(&self, seat_id: &str, generation: i64) -> GearResult<()> {
-        self.tx
+        let changed = self
+            .tx
             .execute(
                 "UPDATE seats SET generation=?2 WHERE id=?1",
                 params![seat_id, generation],
             )
             .map_err(map_sqlite)?;
-        Ok(())
+        require_written(changed, "seat", seat_id)
     }
 
     pub fn insert_binding(&self, row: &BindingRow) -> GearResult<()> {
@@ -618,13 +620,14 @@ impl<'s> Tx<'s> {
         generation: i64,
         status: BindingStatus,
     ) -> GearResult<()> {
-        self.tx
+        let changed = self
+            .tx
             .execute(
                 "UPDATE bindings SET status=?3 WHERE seat=?1 AND generation=?2",
                 params![seat_id, generation, binding_status_str(status)],
             )
             .map_err(map_sqlite)?;
-        Ok(())
+        require_written(changed, "binding", &format!("{seat_id} generation {generation}"))
     }
 
     // ---- messages
@@ -704,7 +707,8 @@ impl<'s> Tx<'s> {
         wait_until: Option<Ts>,
         now: Ts,
     ) -> GearResult<()> {
-        self.tx
+        let changed = self
+            .tx
             .execute(
                 "UPDATE messages
                  SET state=?3, result=?4, wait_on=?5, wait_until=?6,
@@ -713,7 +717,7 @@ impl<'s> Tx<'s> {
                 params![project, id, state.as_str(), result, wait_on, wait_until, now],
             )
             .map_err(map_sqlite)?;
-        Ok(())
+        require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
     /// Messages to `recipient` in state Open, or Waiting with `wait_until <= now`.
@@ -742,7 +746,7 @@ impl<'s> Tx<'s> {
         Ok(messages)
     }
 
-    /// Info/Reply/Instruction messages to `recipient` created after `since` (for "unshown" checks).
+    /// Reply/Instruction messages to `recipient` created after `since` (for "unshown" checks).
     ///
     /// "Info" messages are the answers the captain sent (kind `reply`, stored in
     /// state `info`); progress is also stored in state `info` but must not ring
@@ -901,13 +905,14 @@ impl<'s> Tx<'s> {
         result: Option<&str>,
         now: Ts,
     ) -> GearResult<()> {
-        self.tx
+        let changed = self
+            .tx
             .execute(
                 "UPDATE operations SET state=?3, result=?4, updated=?5 WHERE project=?1 AND id=?2",
                 params![project, id, state.as_str(), result, now],
             )
             .map_err(map_sqlite)?;
-        Ok(())
+        require_written(changed, "operation", &format!("{id} in project {project}"))
     }
 
     pub fn bump_op_check_budget(&self, project: &str, id: &str, now: Ts) -> GearResult<i64> {
@@ -1064,6 +1069,18 @@ pub mod testing {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/// A raw state write must have moved the row it names: `Ok` means the row
+/// exists and was written, `NoTarget` names the missing target.
+fn require_written(changed: usize, what: &str, target: &str) -> GearResult<()> {
+    if changed == 0 {
+        return Err(GearError::new(
+            ErrorCode::NoTarget,
+            format!("no {what} {target}"),
+        ));
+    }
+    Ok(())
+}
 
 /// One conversion for every rusqlite error. Lock contention is `Locked`
 /// (safe to retry, nothing written); everything else is a data problem.
