@@ -5,7 +5,8 @@
 use crate::observe::SeatObs;
 use gear_herdr::ScreenFlag;
 use gear_model::{AttemptState, SeatRole, SeatState, Ts};
-use gear_store::{AttemptRow, OpRow, TaskRow};
+use gear_model::GearResult;
+use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneView {
@@ -170,4 +171,19 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
     let _ = (task, version, branch, packet);
     todo!("T-39")
+}
+
+/// Build the [`LaneView`] of one lane seat from the store (read-only `tx`):
+/// - `attempt`: the seat's open attempt (`open_attempts_of_seat`, first); if its
+///   task is not Running/Verifying (e.g. Waiting) the view has **no attempt and
+///   no ready tasks** — the continue preconditions of design/09 live here;
+/// - `pending_op`: first of `slot_ops(seat)`;
+/// - `last_deliver_at`: `created` of `last_op(seat, Deliver)`;
+/// - `ready_tasks`: tasks of the project with `lane == seat.name`, state Ready,
+///   priority ≠ `wont`, every dep Done — in rank order;
+/// - `nudges_since_progress` 0 and `safe_for_next` false (sampling and the
+///   design/06 safe conditions come later).
+pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
+    let _ = (tx, seat, obs, now);
+    todo!("T-41")
 }
