@@ -24,8 +24,15 @@ git -C "$main" merge-tree --write-tree origin/dev "origin/$branch" >/dev/null ||
   { echo "origin/$branch conflicts with origin/dev: send it back as rework (merge dev in), no review" >&2; exit 3; }
 
 # 1. a free seat = seat worktree whose pane hosts no agent; else create one.
+# A resumed session is bound to the directory it was created in (OpenCode keeps
+# working there), so a re-review must run on that same seat (lesson L-31).
+seats=$(seq 1 "$max")
+if [ -n "$resume" ]; then
+  sdir=$(opencode session export "$resume" 2>/dev/null | grep -m1 -oE '"directory": *"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+  case "$sdir" in "$wtroot"/home-review-*) seats=${sdir##*-} ;; *) echo "session $resume has no seat directory ($sdir)" >&2; exit 1 ;; esac
+fi
 seat=""; pane=""
-for k in $(seq 1 "$max"); do
+for k in $seats; do
   dir="$wtroot/home-review-$k"
   if [ -d "$dir" ]; then
     ws=$(herdr worktree list --cwd "$main" | tr '{' '\n' | grep -F "\"path\":\"$dir\"" | sed -n 's/.*"open_workspace_id":"\([^"]*\)".*/\1/p')
@@ -38,7 +45,7 @@ for k in $(seq 1 "$max"); do
     seat=$k; break
   fi
 done
-[ -n "$seat" ] && [ -n "$pane" ] || { echo "no free reviewer seat (max $max)" >&2; exit 1; }
+[ -n "$seat" ] && [ -n "$pane" ] || { echo "no free reviewer seat (${resume:+the seat of that session, $seats is busy; }max $max) — retry when one frees" >&2; exit 4; }
 dir="$wtroot/home-review-$seat"
 
 # 2. the seat's shell must be idle at a prompt before anything is typed (lesson L-1).
