@@ -63,9 +63,9 @@ fn observe_seat(
     agents: &[AgentInfo],
     profiles: &BTreeMap<String, Profile>,
 ) -> GearResult<SeatObs> {
-    if !expects_agent(seat.state) {
-        // The seat expects no agent (queued/released, or mid onboard/release):
-        // nothing is judged about it.
+    if !seat.state.expects_agent() {
+        // The seat expects no agent (queued/released, mid onboard/release, or
+        // already missing/retired/needs-check): nothing is judged about it.
         return Ok(SeatObs {
             seat,
             presence: Presence::NotExpected,
@@ -114,13 +114,6 @@ fn observe_seat(
 
     let (flags, idle) = screen_flags(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
     Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle })
-}
-
-/// Whether the seat expects an agent to be in its pane. Queued and Released
-/// seats have none, and a seat that is being onboarded or released is in a
-/// change that must not count as "missing" (design/08).
-fn expects_agent(state: SeatState) -> bool {
-    !matches!(state, SeatState::Queued | SeatState::Released | SeatState::Starting | SeatState::Releasing)
 }
 
 /// The screen flags of the seat's agent and whether it is idle.
