@@ -216,6 +216,26 @@ fn cmd_run() -> GearResult<()> {
     todo!("slice1: single-instance lock, ops::recover_on_start, loop tick every cfg.tick_s")
 }
 
+/// Skill topics and their embedded text. The skill is compiled into the
+/// binary, so the printed rules always match this binary's version.
+const SKILL_TOPICS: &[(&str, &str)] = &[
+    ("main", include_str!("../../../skills/gear/SKILL.md")),
+    ("decompose", include_str!("../../../skills/gear/references/decompose.md")),
+    ("agent:opencode", include_str!("../../../skills/gear/references/agents/opencode.md")),
+];
+
 fn print_skill(topic: &str) -> GearResult<()> {
-    todo!("slice1: include_str! skills/gear/SKILL.md (+ references) and print")
+    let Some((_, text)) = SKILL_TOPICS.iter().find(|(name, _)| *name == topic) else {
+        let available = SKILL_TOPICS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("unknown skill topic {topic}; available: {available}"),
+        ));
+    };
+    // The text is printed unchanged: no added newline, nothing trimmed.
+    print!("{text}");
+    // `std::process::exit` skips stdout's buffer: flush it ourselves so the
+    // last line is never lost.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    Ok(())
 }
