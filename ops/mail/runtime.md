@@ -30,6 +30,6 @@ Read `origin/review/t48:ops/reviews/T-48.md`. In `confirm_pending`, ops of kinds
 
 `skill_contract::not_yet_commands_fail_cleanly` now uses `gear admin init x` (on dev). Merge `origin/dev` into your branch, re-run `cargo test -p gear-cli`, set `Status: review`. Good question — exactly the right way to raise it.
 
-### M-8 [open] T-58: merge origin/dev (conflict with the captain's onboard_queued stub)
+### M-8 [closed] T-58: merge origin/dev (conflict with the captain's onboard_queued stub)
 
 `runtime/t58-onboard-plan` conflicts with dev in `crates/gear-engine/src/onboard.rs` because I added the `onboard_queued` stub there afterwards. Merge `origin/dev` into the T-58 branch (keep your `plan_onboard` body and the new stub), re-run acceptance, hand it in again — before continuing T-62.
