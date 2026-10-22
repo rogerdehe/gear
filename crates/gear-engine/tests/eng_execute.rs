@@ -128,6 +128,28 @@ fn insert_delivery(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64, now: i64) 
 }
 
 #[test]
+fn delivery_for_missing_attempt_is_voided() {
+    let mut store = store_with_projects();
+    store
+        .write(|tx| {
+            // The delivery names an attempt the store does not know at all.
+            insert_delivery(tx, "p:captain", "T-1", 1, T0 + 1);
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = herdr_with_agent(CAP_PANE);
+
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+    assert_eq!(done, vec![("O-1".to_string(), "void".to_string())]);
+    assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Void);
+    assert!(herdr.calls.is_empty(), "a delivery without an attempt is never sent");
+    let stored = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+    let reason = stored.result.expect("a voided op says why");
+    assert!(reason.contains("attempt 1"), "{reason}");
+}
+
+#[test]
 fn stale_delivery_is_voided() {
     let mut store = store_with_projects();
     store
