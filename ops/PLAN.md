@@ -40,6 +40,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-15 | data | `data/t15-reply` | app: gear reply | done | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | done | — |
 | T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | ready | — |
+| T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | ready | — |
+| T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -160,3 +162,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-27 → R-24, T-29 → R-25.
 - 2026-10-22 runtime lowready → T-32 (`gear run`); T-5 is now only the slice-1 end-to-end CLI acceptance after T-4/T-29/T-30/T-32.
 - 2026-10-22 T-4 → R-26.
+- 2026-10-22 Slice-2 store contract on dev: row types, method signatures (todo!), `slice2_contract.rs` (5 ignored). T-33, T-34 ready (independent bodies).
