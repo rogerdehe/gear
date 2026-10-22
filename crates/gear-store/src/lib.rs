@@ -461,6 +461,19 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Ids of every project in the store, ascending. The engine iterates these
+    /// for recovery on start and for each tick.
+    pub fn project_ids(&self) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare("SELECT id FROM projects ORDER BY id")
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    }
+
     pub fn get_project(&self, id: &str) -> GearResult<Option<ProjectRow>> {
         let row: Option<ProjectRow> = self
             .tx

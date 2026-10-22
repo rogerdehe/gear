@@ -282,3 +282,16 @@ fn raw_writes_on_a_missing_target_are_no_target() {
     let seat = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::Standby);
 }
+
+#[test]
+fn project_ids_lists_every_project_in_order() {
+    let mut s = store();
+    assert!(s.read(|tx| tx.project_ids()).unwrap().is_empty());
+    s.write(|tx| {
+        testing::seed_project(tx, "zeta", "default", NOW)?;
+        testing::seed_project(tx, "alpha", "default", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(s.read(|tx| tx.project_ids()).unwrap(), vec!["alpha".to_string(), "zeta".to_string()]);
+}
