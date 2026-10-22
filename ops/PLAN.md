@@ -53,7 +53,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
 | T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | done | — |
 | T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | done | — |
-| T-59 | data | `data/t59-seat-onboard` | slice 3: seat onboarding transitions (stub + contract by captain) | ready | — |
+| T-59 | data | `data/t59-seat-onboard` | slice 3: seat onboarding transitions (stub + contract by captain) | verifying | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -151,6 +151,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
 | R-56 | r58 | `review/t58` | review T-58 (branch `runtime/t58-onboard-plan`) — temp reviewer gear-r58 on seat | done | — |
 | R-57 | r63 | `review/t63` | review T-63 (branch `captain/t63-bind-captain`) — temp reviewer gear-r63 on seat | running | — |
+| R-58 | r59 | `review/t59` | review T-59 (branch `data/t59-seat-onboard`) — temp reviewer gear-r59 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -302,3 +303,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-58 re-handed in after the dev merge → R-56. gear-data kept stopping after a thought at 68% context → captain ran /compact, lane continues T-59.
 - 2026-10-22 R-56 pass; T-58 merged (onboarding plan).
 - 2026-10-22 Captain wrote T-63 (skeleton: bind the existing captain pane at init) → R-57.
+- 2026-10-22 T-59 → R-58.
