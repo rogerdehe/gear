@@ -4,10 +4,13 @@
 # background; when it exits the captain is woken, handles it, and runs it again.
 # Events:
 #   packet  a pushed task branch's packet Status changed to review/question/blocked
-#   stopped a lane agent is idle/done/blocked (it ended its turn) — re-rings
-#           every REPEAT seconds (default 600) for as long as it stays stopped
-#   lowready a lane has fewer than 2 ready tasks it has not started — re-rings
-#           every REPEAT seconds until the captain restocks its queue
+#   stopped  a lane agent stopped while it still has work (rework, a ready task
+#            it has not started, an open mail) — re-rings every REPEAT seconds
+#            (default 600) until the lane works again
+#   lowready a writing lane has fewer than 2 ready tasks it has not started —
+#            re-rings every REPEAT seconds until restocked
+# Silent on purpose: a lane with nothing to do, and any lane the board marks
+# `standby` in its Lanes row (design: no doorbell when there is truly no work).
 # Packet events ring once per status change; remembered in .git/gear-watch.
 set -u
 main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
@@ -53,20 +56,28 @@ while :; do
       running) sed -i "" "/^packet $task /d" "$seen" ;;   # re-arms after rework / answer
     esac
   done
-  for agent in gear-data gear-runtime gear-review; do
+  for lane in data runtime review; do
+    agent="gear-$lane"
+    standby=$(grep -E "^\| *$agent *\|" "$board" | grep -c standby)
+    work=0; ready=0
+    while IFS='|' read -r _ task l branch _ state _; do
+      [ "$(echo $l)" = "$lane" ] || continue
+      b=$(echo $branch | tr -d '`')
+      case "$(echo $state)" in
+        rework) work=$((work+1)) ;;
+        ready) git -C "$main" rev-parse -q --verify "origin/$b" >/dev/null || { work=$((work+1)); ready=$((ready+1)); } ;;
+      esac
+    done < <(grep -E '^\| *[TR]-[0-9]' "$board")
+    [ -f "$main/ops/mail/$lane.md" ] && work=$((work + $(grep -c '^### .*\[open\]' "$main/ops/mail/$lane.md")))
     s=$(herdr agent get "$agent" 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p')
     case "$s" in
-      idle|done|blocked) nag "stopped $agent" "stopped $agent ($s)" && touch "$main/.git/gear-watch.hit" ;;
+      idle|done|blocked)
+        if [ "$work" -gt 0 ]; then
+          nag "stopped $agent" "stopped $agent ($s) with $work item(s) of work waiting" && touch "$main/.git/gear-watch.hit"
+        fi ;;
       working) sed -i "" "/^stopped $agent [0-9]*$/d" "$seen" ;;
     esac
-  done
-  for lane in data runtime review; do
-    ready=0
-    while IFS='|' read -r _ task l branch _ state _; do
-      [ "$(echo $l)" = "$lane" ] && [ "$(echo $state)" = ready ] || continue
-      git -C "$main" rev-parse -q --verify "origin/$(echo $branch | tr -d '\`')" >/dev/null || ready=$((ready+1))
-    done < <(grep -E '^\| *[TR]-[0-9]' "$board")
-    if [ "$ready" -lt 2 ]; then
+    if [ "$lane" != review ] && [ "$standby" -eq 0 ] && [ "$ready" -lt 2 ]; then
       nag "lowready $lane" "lowready $lane ($ready ready task(s) not started)" && touch "$main/.git/gear-watch.hit"
     else
       sed -i "" "/^lowready $lane [0-9]*$/d" "$seen"
