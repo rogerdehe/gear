@@ -102,6 +102,27 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified. Any other kind → None.
 pub fn builtin(kind: &str) -> Option<Profile> {
-    let _ = kind;
-    todo!("T-56")
+    match kind {
+        "opencode" => Some(Profile {
+            kind: "opencode".into(),
+            busy_markers: vec!["esc interrupt".into()],
+            ratelimit_markers: vec![],
+            quota_markers: vec![
+                "Session failed".into(),
+                "Token Plan".into(),
+                "(2056)".into(),
+                "Free usage limit reached".into(),
+            ],
+            auth_markers: vec![],
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--auto".into()],
+            session_ref: false,
+            resume_args: Some(vec!["-s".into(), "{session}".into()]),
+            exit_keys: vec!["ctrl+c".into()],
+            verified: true,
+        }),
+        // Only kinds with a verified SOP are built in (design/04).
+        _ => None,
+    }
 }
