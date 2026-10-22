@@ -1,13 +1,33 @@
 //! Side-effect operations: intend → execute → confirm (design/08).
 
 use gear_herdr::HerdrAct;
-use gear_model::{GearResult, Ts};
-use gear_store::{OpRow, Store, Tx};
+use gear_model::state::require_transition;
+use gear_model::{GearResult, OpKind, OpState, Ts};
+use gear_store::{NewOp, OpRow, Store, Tx};
+
+/// Reason stored with an op that the engine found Executing after a restart.
+const RECOVERED_REASON: &str = "engine restarted before the call finished";
 
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
-    todo!("slice1")
+    let mut ops = Vec::with_capacity(actions.len());
+    for action in actions {
+        let payload = serde_json::json!({ "text": action.text, "covers": action.covers });
+        ops.push(tx.insert_op(&NewOp {
+            project: action.project.clone(),
+            seat: action.seat.clone(),
+            generation: action.generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload,
+            created: now,
+        })?);
+    }
+    Ok(ops)
 }
 
 /// Execute every Intended op of `project`:
@@ -32,5 +52,20 @@ pub fn confirm_pending(store: &mut Store, project: &str, budget: i64, now: Ts) -
 /// On engine start: every Executing op becomes Unknown (the previous process
 /// died mid-call). Nothing is re-sent.
 pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
-    todo!("slice1")
+    store.write(|tx| {
+        let mut recovered = Vec::new();
+        for project in tx.project_ids()? {
+            for op in tx.ops_in_state(&project, OpState::Executing)? {
+                require_transition(
+                    OpState::Executing.can_transition(OpState::Unknown),
+                    "operation",
+                    "executing",
+                    "unknown",
+                )?;
+                tx.set_op_state(&op.project, &op.id, OpState::Unknown, Some(RECOVERED_REASON), now)?;
+                recovered.push(op.id);
+            }
+        }
+        Ok(recovered)
+    })
 }
