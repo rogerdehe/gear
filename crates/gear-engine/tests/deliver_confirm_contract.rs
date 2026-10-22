@@ -34,7 +34,6 @@ fn view(s: &mut Store, ts: i64, task: Option<&str>, attempt: Option<i64>) {
 }
 
 #[test]
-#[ignore = "T-48: un-ignored by the captain when T-48 merges"]
 fn a_view_of_the_task_confirms_the_delivery_and_starts_the_attempt() {
     let (mut s, op) = world();
     view(&mut s, T0 + 20, Some("T-7"), Some(1));
@@ -46,7 +45,6 @@ fn a_view_of_the_task_confirms_the_delivery_and_starts_the_attempt() {
 }
 
 #[test]
-#[ignore = "T-48: un-ignored by the captain when T-48 merges"]
 fn views_without_the_task_or_too_early_do_not_confirm() {
     let (mut s, op) = world();
     view(&mut s, T0 + 5, Some("T-7"), Some(1));   // before the op
