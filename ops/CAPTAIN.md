@@ -2,7 +2,7 @@
 
 While GEAR cannot run itself, the captain performs by hand what the engine will do. Every step names the GEAR piece that replaces it, so this file is the automation spec.
 
-Borrowed from BMAD: one status board with a single writer (sprint-status.yaml → `ops/PLAN.md`); a task file that carries its own checklist and the agent's record (story file → task packet); "tick only when tests pass"; review findings go back into the task file as follow-up items; one story per agent at a time. Borrowed from bmad-loop: the agent never writes the board — it writes its own file, the orchestrator verifies and then advances the board; completion is detected by the agent stopping, then the result is read from disk and re-verified.
+Borrowed from BMAD: one status board with a single writer (sprint-status.yaml → `ops/PLAN.md`); a task file that carries its own checklist and the agent's record (story file → task packet); "tick only when tests pass"; review findings go back into the task file as follow-up items. Borrowed from bmad-loop: the agent never writes the board — it writes its own file, the orchestrator verifies and then advances the board; completion is detected by the agent stopping, then the result is read from disk and re-verified.
 
 ## State
 
@@ -10,33 +10,33 @@ Borrowed from BMAD: one status board with a single writer (sprint-status.yaml �
 |---|---|---|---|
 | Task board (state, lane, order) | `ops/PLAN.md` | captain only | `tasks` table + `gear plan apply` |
 | Task contract | `ops/tasks/T-<n>.md` top part | captain | task packet (06) |
-| Lane progress | packet `Status:`, checkboxes, Lane record — in the lane's worktree | lane only | `gear send --kind progress/result` + work sampling (12) |
+| Lane progress | packet `Status:`, checkboxes, Lane record — on the lane's pushed task branch | lane only | `gear send --kind progress/result` + work sampling (12) |
 | Lane's task list | its rows in `ops/PLAN.md` | captain | home view "your tasks" |
 | Lane's dev list | packet `## Tasks` checklist | captain writes, lane ticks | same (packet) |
+| Captain → lane messages | `ops/mail/<lane>.md` (`### M-<n> [open] …`; captain closes with `[closed]`) | captain | inbox + `gear reply` (07) |
+| Lane inbox view | `ops/bin/inbox.sh <lane>` | — | `gear` home (13) |
+| Captain doorbell | `ops/bin/watch.sh` in the background | — | engine observe + doorbell (08) |
 | Event log | `ops/PLAN.md` → Log | captain | `audit` table |
 
-Board states use GEAR's `TaskState`: `ready → running → verifying → done`, plus `waiting` (question/blocked), `failed`, `cancelled`. Packet `Status:` is the lane's claim; the board changes only after the captain checks it.
+Board states (GEAR `TaskState`, plus `rework` = ready-with-follow-ups shown separately): `draft → ready → running → verifying → done`; `verifying → rework → running`; `waiting` (question/blocked); `failed`, `cancelled`. Packet `Status:` is the lane's claim; the board changes only after the captain checks it.
 
 ## Loop
 
-1. **Dispatch** (GEAR: assign + deliver op, 09)
-   - board: task `ready → running`, log it;
-   - make sure the lane's worktree is on the task branch cut from current `dev` (`git -C <worktree> switch -c <lane>/t<n>-<slug> dev`);
-   - deliver a one-line pointer and arm the doorbell in one background command:
-     `herdr agent prompt <agent> "Task T-<n>: read ops/tasks/T-<n>.md and ops/CONVENTIONS.md, then work it." --wait`
-     run with `run_in_background`; it returns when the lane settles (idle/done/blocked) after starting work.
-2. **Doorbell** (GEAR: engine observe + doorbell, 08) — the background command finishing re-invokes the captain. Fallback: on any wake, run `ops/bin/board.sh` and treat every lane whose agent is idle/done as rung (idempotent: a lane already handled has no new packet status).
-3. **Read** (GEAR: `gear` home) — `ops/bin/board.sh`, then the packet in the lane's worktree. If the agent is `blocked` (approval dialog) or the packet status is still `running`, read the screen: `herdr agent read <agent> --source recent-unwrapped --lines 80` (rate limit, quota, crash, or a turn that ended early).
-4. **Answer** (GEAR: `gear reply` → deliver) — for `question`/`blocked`: board `running → waiting`, log; reply with `herdr agent prompt <agent> "<answer>" --wait` in the background (same doorbell); board back to `running`.
-5. **Nudge** (GEAR: continue, 09) — lane stopped with unticked boxes and no question: one prompt "Continue T-<n> from the first unticked box." Same failure twice → read the screen and decide; never loop blindly.
-6. **Review** (GEAR: verdict, 11/17 §8) — packet `review`: board `running → verifying`; run the merge checklist (17 §8): brief complete, diff only in allowed files, acceptance re-run by the captain in the lane's worktree, zero warnings, branch current with `dev`.
-   - fail: add `- [ ] [Review][P<n>] …` items under the packet's "Review follow-ups" (committed on the task branch), board `verifying → running`, prompt "Rework T-<n>: see Review follow-ups." in the background.
-   - pass: merge into `dev` (`git merge --no-ff <branch>` from the main checkout on `dev`), verify, push `dev`, delete the task branch, switch the lane worktree back to `home/<lane>` or straight to its next task branch; board `verifying → done`, log.
-7. **Next** — pick the lane's next `ready` row in board order and go to 1. No ready row → the lane is on standby; say so in the log, send nothing.
+Lanes never wait for review (17 §5): they take their next ready task themselves. The captain keeps queues stocked, reviews asynchronously, and answers.
+
+1. **Stock the queues** (GEAR: plan apply, 05) — every lane has ready tasks that start from current `dev` without each other (`gear --skill decompose`). Board rows in queue order; branch names fixed in the packets.
+2. **Kick off** a lane once (GEAR: first deliver, 09): `herdr agent prompt <agent> "Read ops/CONVENTIONS.md, then run ops/bin/inbox.sh <lane> and work your queue."`. After that lanes pull work via the inbox; no per-task prompts.
+3. **Arm the doorbell** (GEAR: engine observe/doorbell, 08) — run `ops/bin/watch.sh` with `run_in_background`. It exits on: a pushed packet turning `review`/`question`/`blocked`, or a lane agent stopping. Re-arm it after handling every event.
+4. **Handle a `packet … review` event** (GEAR: verdict, 11) — board `running → verifying`, then review per 17 §8 from the pushed branch: `git fetch`; read the packet's Result; `git diff origin/dev...origin/<branch>`; check only allowed files changed; run acceptance in a scratch worktree or the main checkout on a detached `origin/<branch>`.
+   - pass: on `dev`: `git merge --no-ff origin/<branch> -m "merge(T-n): …"`, run acceptance on `dev`, `git push origin dev`, `git push origin --delete <branch>`; board `verifying → done`; tasks whose dependencies are now merged go `draft → ready`; log.
+   - fail: commit follow-ups `- [ ] [Review][P<n>] …` into the packet **on that branch** (in a scratch worktree of `origin/<branch>`, push); board `verifying → rework`; if urgent leave it, else add `after-current` in a mail message; log. The lane picks it up from its inbox.
+5. **Handle `packet … question/blocked`** (GEAR: inbox + reply, 07) — board `→ waiting`; answer as `### M-<n> [open] T-<n>: <answer>` in `ops/mail/<lane>.md` on `dev` (commit, push); board `waiting → running`. If the lane has stopped, wake it with `herdr agent prompt <agent> "Run ops/bin/inbox.sh <lane>."`.
+6. **Handle `stopped <agent>`** — read the screen (`herdr agent read <agent> --source recent-unwrapped --lines 80`) and `ops/bin/board.sh`: queue empty / at cap (normal — refill or review), rate limit / quota / crash (switch model per `gear --skill agent:<kind>`), permission dialog (should not happen with `--auto`), or an early turn end (prompt it to run its inbox). Never prompt an agent that is working.
+7. **Re-plan** whenever a lane's queue has no startable task (17 §6a.6).
 
 ## Rules the captain holds itself to
 
-- One open task per lane. Never prompt a lane that is working.
-- Never resend a pointer whose delivery is uncertain; read the screen first.
-- Writer ≠ reviewer: lanes run DeepSeek; the captain (Claude) reviews.
-- Every board change gets a log line with the time.
+- Never type into a pane before checking its occupant; never prompt a working agent.
+- Never resend a prompt whose delivery is uncertain; read the screen first.
+- Writer ≠ reviewer: lanes run DeepSeek/MiniMax; the captain (Claude) reviews.
+- The board is written only by the captain, on `dev`; every change gets a log line.
