@@ -1,6 +1,8 @@
 //! GEAR engine (design/08). The only code that performs Herdr side effects.
 //!
 //! One [`tick`]:
+//! 0. onboard: every queued lane gets its worktree, pane and agent
+//!    ([`onboard::onboard_queued`]);
 //! 1. observe: one `agents()` call → per-seat [`observe::SeatObs`]
 //!    (observation failure ⇒ no decisions for that project this tick);
 //! 2. confirm: settle Submitted/Unknown ops using ViewRecords as evidence;
@@ -62,6 +64,11 @@ pub struct TickReport {
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
     let mut report = TickReport::default();
+
+    // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
+    //    that fails a step is parked in NeedsCheck, never retried blindly.
+    onboard::onboard_queued(store, herdr, cfg, now)?;
+
     let projects = store.read(|tx| tx.project_ids())?;
 
     // 1. observe: one agents() call for the whole session. If it fails, every
