@@ -68,7 +68,6 @@ fn contracts_roundtrip() {
 }
 
 #[test]
-#[ignore = "T-34: un-ignored by the captain when T-34 merges"]
 fn attempts_roundtrip_order_and_in_progress() {
     let mut s = store();
     s.write(|tx| {
@@ -91,7 +90,6 @@ fn attempts_roundtrip_order_and_in_progress() {
 }
 
 #[test]
-#[ignore = "T-34: un-ignored by the captain when T-34 merges"]
 fn verdicts_append_and_order() {
     let mut s = store();
     let v = |attempt: i64, passed: bool, created: i64| VerdictRow { project: "p".into(), task: "T-1".into(), attempt,

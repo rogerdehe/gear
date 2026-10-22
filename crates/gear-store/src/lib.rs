@@ -1634,7 +1634,8 @@ fn attempt_select(tail: &str) -> String {
     )
 }
 
-fn plan_from_row(row: &rusqlite::Row) -> rusqlite::Result<PlanRow> {    Ok(PlanRow {
+fn plan_from_row(row: &rusqlite::Row) -> rusqlite::Result<PlanRow> {
+    Ok(PlanRow {
         project: row.get(0)?,
         version: row.get(1)?,
         draft: row.get(2)?,
