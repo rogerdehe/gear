@@ -69,14 +69,13 @@ pub fn apply(
             ));
         }
 
-        // 4. sections that belong to later cuts.
-        reject_sections(draft)?;
-
         let args_key = format!(
             "{}|{}:{}|plan-apply|base={}|text={:?}",
             ctx.project, ctx.seat, ctx.generation, draft.base, text
         );
         let outcome = tx.run_request(request_id, &args_key, now, |tx| {
+            // Steps 3 to 6 run inside the closure, so a replay returns the
+            // stored result instead of meeting a moved plan version.
             let result = apply_queue(tx, &ctx.project, &seat.id, ctx.generation, draft, text, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
@@ -120,6 +119,10 @@ fn apply_queue(
             ),
         ));
     }
+
+    // 4. sections that belong to later cuts (after the base check, as the doc
+    // comment orders the steps).
+    reject_sections(draft)?;
 
     let existing: BTreeMap<String, TaskRow> = tx
         .tasks_of_project(project)?
@@ -279,7 +282,9 @@ fn apply_queue(
                 }
                 task.updated = now;
 
-                // A contract change (goal, accept or evidence) opens a version.
+                // A change to any contract field (goal, accept, evidence-files
+                // or evidence-due) opens a new version — including clearing a
+                // value: the queue item is the contract as the captain wants it.
                 let current_contract = tx.get_contract(project, id, task.contract_version)?;
                 if let Some(contract) = current_contract {
                     let goal_changed = item
@@ -292,9 +297,9 @@ fn apply_queue(
                         .as_ref()
                         .map(|accept| *accept != contract.accept)
                         .unwrap_or(false);
-                    let evidence_changed = !item.evidence_files.is_empty()
-                        && item.evidence_files != contract.evidence_files;
-                    if goal_changed || accept_changed || evidence_changed {
+                    let files_changed = item.evidence_files != contract.evidence_files;
+                    let due_changed = item.evidence_due.map(i64::from) != contract.evidence_due_min;
+                    if goal_changed || accept_changed || files_changed || due_changed {
                         let version = task.contract_version + 1;
                         let next = ContractRow {
                             project: project.to_string(),
@@ -302,15 +307,8 @@ fn apply_queue(
                             version,
                             goal: item.goal.clone().unwrap_or(contract.goal),
                             accept: item.accept.clone().unwrap_or(contract.accept),
-                            evidence_files: if item.evidence_files.is_empty() {
-                                contract.evidence_files
-                            } else {
-                                item.evidence_files.clone()
-                            },
-                            evidence_due_min: item
-                                .evidence_due
-                                .map(i64::from)
-                                .or(contract.evidence_due_min),
+                            evidence_files: item.evidence_files.clone(),
+                            evidence_due_min: item.evidence_due.map(i64::from),
                             body: contract_body(item),
                             created: now,
                         };
@@ -444,4 +442,104 @@ fn walk(
     }
     colour.insert(node.to_string(), 2);
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draft::parse;
+    use gear_model::GearCtx;
+    use gear_store::testing;
+
+    const NOW: i64 = 1_800_000_000;
+    const CAP_PANE: &str = "w1:p1";
+
+    fn world() -> Store {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+            Ok(())
+        })
+        .unwrap();
+        s
+    }
+
+    fn cap() -> (Env, Fingerprint) {
+        (
+            Env {
+                ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+                pane_id: Some(CAP_PANE.into()),
+                admin: false,
+            },
+            Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        )
+    }
+
+    fn draft_text(base: i64, queue: &str) -> String {
+        format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}")
+    }
+
+    fn run(s: &mut Store, text: &str, rid: &str) -> GearResult<ApplyResult> {
+        let draft = parse(text).unwrap();
+        let (env, fp) = cap();
+        apply(s, &env, Some(&fp), &draft, text, rid, NOW)
+    }
+
+    #[test]
+    fn an_evidence_due_change_opens_a_contract_version() {
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nevidence-due: 60\ndeps: -\n"),
+            "r1",
+        )
+        .unwrap();
+
+        let r = run(
+            &mut s,
+            &draft_text(1, "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-due: 90\ndeps: -\n"),
+            "r2",
+        )
+        .unwrap();
+
+        assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
+        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        assert_eq!(contract.evidence_due_min, Some(90));
+        assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version, 2);
+    }
+
+    #[test]
+    fn clearing_the_evidence_files_opens_a_contract_version() {
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nevidence-files: notes/x.md\ndeps: -\n"),
+            "r1",
+        )
+        .unwrap();
+
+        let r = run(
+            &mut s,
+            &draft_text(1, "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-files:\ndeps: -\n"),
+            "r2",
+        )
+        .unwrap();
+
+        assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
+        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        assert!(contract.evidence_files.is_empty(), "the files were cleared");
+    }
+
+    #[test]
+    fn a_stale_base_is_reported_before_an_unsupported_section() {
+        let mut s = world();
+        run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"), "r1").unwrap();
+
+        let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- retire heat\n";
+        let draft = parse(text).unwrap();
+        let (env, fp) = cap();
+        let err = apply(&mut s, &env, Some(&fp), &draft, text, "r2", NOW).unwrap_err();
+        assert_eq!(err.code, ErrorCode::StaleVersion, "step 3 is checked before step 4");
+    }
 }
