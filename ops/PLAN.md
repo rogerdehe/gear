@@ -17,6 +17,7 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 | Lane | Herdr workspace / pane | Worktree | Anchor branch |
 |---|---|---|---|
 | gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
+| gear-review | `gear-review` / (set at onboarding) | `/Volumes/Data/.herdr-worktrees/gear/home-review` | `home/review` |
 | gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
 
 ## Board
@@ -25,14 +26,17 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 
 | Task | Lane | Branch | Content | State | Depends on |
 |---|---|---|---|---|---|
-| T-1 | data | `data/t1-store` | gear-store implementation | ready | — |
-| T-7 | data | `data/t7-config` | project config: parse + validate (pure) | ready | — |
+| T-1 | data | `data/t1-store` | gear-store implementation | verifying | — |
+| T-7 | data | `data/t7-config` | project config: parse + validate (pure) | verifying | — |
 | T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home | draft | T-1 |
-| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready | — |
+| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | verifying | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | ready | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
 | T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3, T-8 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-3, T-4 |
+| R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | ready | — |
+| R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | ready | — |
+| R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | ready | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
 
 ## Done
@@ -48,3 +52,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 both lanes switched to MiniMax-M3.1-Flash (minimax.cn) via /model; /effort verified on DeepSeek (MiniMax has no variants); both /clear-ed (stale context from the export incident removed).
 - 2026-10-22 practice findings: (1) lanes must not idle waiting for review → non-blocking loop (17 §5–§6), rework at the next checklist boundary; (2) task branches are pushed for review and deleted after merge; (3) the M1 queues forced waiting (T-1→T-3, T-2→T-4→T-5) → added contract-first independent tasks T-7 (config), T-8 (doorbell), T-9 (`--skill`), each with captain-written contract tests validated against a throwaway implementation; (4) decomposition rules in 17 §6a + `gear --skill decompose` (method-neutral; BMAD and superpowers mapped).
 - 2026-10-22 kickoff: both lanes hit the MiniMax Token Plan limit (error 2056) within ~90 s, before starting any task; Herdr reported `done`. Waiting for the reset; quota signs added to the opencode SOP.
+- 2026-10-22 practice finding: the captain doing acceptance + code review itself (~10+ min per task) would block it all day. Added a review lane `gear-review` (OpenCode + DeepSeek, different model from the MiniMax writers): mechanical acceptance + code review into `ops/reviews/T-<n>.md` on `review/t<n>`; the captain only decides. T-1 and T-7 handed in → R-1, R-2 queued.
+- 2026-10-22 T-2 handed in → R-3 queued. gear-data stopped: T-1/T-7 in review, T-3 waits for T-1 (planning gap: data lane had only two independent tasks).
