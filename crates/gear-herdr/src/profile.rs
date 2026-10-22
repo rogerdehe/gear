@@ -23,6 +23,11 @@ pub struct Profile {
     pub tail_lines: u32,
     /// A flag counts only after this many consecutive observations.
     pub confirm_rounds: u32,
+    /// CLI flags that turn off interactive permission prompts (opencode:
+    /// `--auto`). Passed on every start and resume. Required: an agent that
+    /// stops on a permission dialog cannot be driven unattended, so a profile
+    /// with this empty is never `verified`.
+    pub unattended_args: Vec<String>,
     /// Herdr reports `agent_session` for this kind.
     pub session_ref: bool,
     /// Args to resume a session; `{session}` is replaced. None = unsupported.

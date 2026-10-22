@@ -69,11 +69,14 @@ class Profile:
     tail_lines: int = 16
     confirm_rounds: int = 2            # only counts after N consecutive rounds match
     session_ref: bool = False          # whether Herdr reports agent_session
+    unattended_args: list[str]         # REQUIRED, e.g. opencode: ["--auto"]; passed on every start/resume
     resume_args: list[str] | None = None   # e.g. claude: ["--resume", "{session}"]; None = not supported
     exit_keys: list[str] = ["ctrl+c"]  # key sequence to make the Agent exit (used before closing the session)
     verified: bool = False             # profiles not verified by probes may not take over real projects
 ```
 
+- **Unattended start is mandatory.** Every agent GEAR starts (captain, lane, temp; fresh or resumed) gets the profile's `unattended_args`. Without them the CLI stops on permission dialogs (Herdr `blocked`) and nothing can run unattended; a profile with empty `unattended_args` can never be `verified`. Model and reasoning effort are not start arguments: they are switched inside the running agent (opencode: `/model`, `/effort`), because a lane may need to change model mid-way (e.g. quota exhausted).
+- Session refs: when Herdr does not report `agent_session` for a kind (opencode as of Herdr 0.9.1), the profile names how to find it (opencode: `opencode session list` / `session export <id>` → `info.location.directory` matches the seat's worktree). Verified 2026-10-22: opencode exits on one `ctrl+c` and prints `opencode -s <id>`; `--auto -s <id>` resumes with context intact.
 - Built-in profiles are provided only for **probe-verified** CLIs; others must be supplied explicitly in project config and are refused when marked `verified=false`.
 - Screen-reading signatures only match within the tail window; nudge templates are validated at load time to contain no marker (prevents "the nudge text triggering its own detection").
 - Matching logic (pure function, easy to test):
