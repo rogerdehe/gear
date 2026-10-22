@@ -40,7 +40,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | ready | — |
-| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass (to be split) | draft | T-14, T-15, T-17 |
+| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
+| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
+| T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
+| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -71,3 +75,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 caught: T-3 was marked ready without a packet and is too big for the size rule → back to draft; captain splits it next.
 - 2026-10-22 R-3 pass (2× P3, 3 questions) and R-4 pass (no findings). Merged T-2, T-8 + reviews; acceptance re-run on dev. Decisions on R-3 questions → T-12 (runtime): busy/unavailable/name-taken are refusals; generic not_found is an observation failure; pin the worktree reply mapper. `pane.send_input` key semantics left to the captain's live probe.
 - 2026-10-22 T-3 split into T-13 identity, T-16 select_batch (both ready, independent), T-14 send, T-15 reply (after T-13), T-17 home (after T-13, T-16). Lane writes the named tests first (intra-lane behaviour; public signatures already fixed).
+- 2026-10-22 T-4 split: T-18..T-21 (independent, store + herdr already merged) and a thin T-4 for the tick + slice-1 acceptance. Captain fixed `observe::reconcile` to take `profiles` (screen flags need them).
