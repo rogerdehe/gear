@@ -1,9 +1,13 @@
 //! Messages: send, reply, inbox batch selection (design/07).
 
-use crate::identity::Fingerprint;
+use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{GearResult, MsgKind, Ts};
-use gear_store::{MessageRow, Store, Tx};
+use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
+use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
+
+/// Upper bound for the thread sequence search, so a broken database cannot
+/// spin forever.
+const MAX_THREAD_SEQ: u32 = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
@@ -50,7 +54,152 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
-    todo!("slice1")
+    store.write(|tx| {
+        // The caller must be a seat that may write (design/03).
+        let (ctx, seat) = require_seat(
+            tx,
+            env,
+            fp,
+            Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
+            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+        )?;
+
+        // Slice 1 kinds only: the side effects of ack/result/blocked belong to
+        // slice 2, and a reply is written by `gear reply`.
+        match args.kind {
+            MsgKind::Progress | MsgKind::Question | MsgKind::Instruction => {}
+            other => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("kind {} is not available in slice 1", other.as_str()),
+                ))
+            }
+        }
+        if args.about.is_some() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "`--about` needs registered task dependencies (slice 2)",
+            ));
+        }
+        if args.to.is_some() && args.reply_to.is_some() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "`--to` and `--reply-to` cannot be combined",
+            ));
+        }
+
+        // Recipient: the sender of the answered message, a seat the captain
+        // addresses, or the project captain.
+        let (recipient, thread) = if let Some(reply_to) = &args.reply_to {
+            let original = tx.get_message(&ctx.project, reply_to)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("no message {reply_to} in project {}", ctx.project),
+                )
+            })?;
+            (original.sender, original.thread)
+        } else if let Some(to) = &args.to {
+            if seat.role != SeatRole::Captain {
+                return Err(GearError::new(
+                    ErrorCode::Forbidden,
+                    "only the captain may address a seat directly",
+                ));
+            }
+            let seat_id = format!("{}:{}", ctx.project, to);
+            tx.get_seat(&seat_id)?.ok_or_else(|| {
+                GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id} in this project"))
+            })?;
+            (seat_id, String::new())
+        } else {
+            let captain = tx.captain_of(&ctx.project)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("project {} has no captain", ctx.project),
+                )
+            })?;
+            (captain.id, String::new())
+        };
+
+        // A new thread is named after the task, or after the sender's seat.
+        let thread = if thread.is_empty() {
+            let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
+            format!("{prefix}:{}", next_thread_seq(tx, &ctx.project, &prefix)?)
+        } else {
+            thread
+        };
+
+        let state = match args.kind {
+            MsgKind::Progress => MsgState::Info,
+            _ => MsgState::Open,
+        };
+
+        let args_key = format!(
+            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+            ctx.project,
+            ctx.seat,
+            ctx.generation,
+            args.kind.as_str(),
+            args.body,
+            args.task,
+            args.attempt,
+            args.contract,
+            args.about,
+            args.to,
+            args.reply_to,
+            args.urgent
+        );
+
+        let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            let message = NewMessage {
+                project: ctx.project.clone(),
+                thread: thread.clone(),
+                task: args.task.clone(),
+                attempt: args.attempt,
+                sender: seat.id.clone(),
+                sender_gen: ctx.generation,
+                recipient: recipient.clone(),
+                kind: args.kind,
+                urgent: args.urgent,
+                body: args.body.clone(),
+                reply_to: args.reply_to.clone(),
+                needs_ack: false,
+                state,
+                created: now,
+            };
+            let stored = tx.insert_message(&message)?;
+            Ok(serde_json::json!({
+                "msg_id": stored.id,
+                "thread": stored.thread,
+                "recipient": stored.recipient,
+            }))
+        })?;
+
+        let (value, replayed) = match outcome {
+            RequestOutcome::Executed(value) => (value, false),
+            RequestOutcome::Replayed(value) => (value, true),
+        };
+        let msg_id = value["msg_id"].as_str().unwrap_or_default().to_string();
+        let thread = value["thread"].as_str().unwrap_or_default().to_string();
+        let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
+        Ok(SendResult { msg_id, thread, recipient, replayed })
+    })
+}
+
+/// The next free sequence number of a thread with this prefix.
+///
+/// The message id is allocated inside the store, so a thread cannot carry the
+/// id of the message that opens it; the thread is numbered instead
+/// (design/07: `<task>:<seq>`).
+fn next_thread_seq(tx: &Tx<'_>, project: &str, prefix: &str) -> GearResult<u32> {
+    for seq in 1..=MAX_THREAD_SEQ {
+        if tx.thread_messages(project, &format!("{prefix}:{seq}"))?.is_empty() {
+            return Ok(seq);
+        }
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!("too many threads named {prefix}:* in project {project}"),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
