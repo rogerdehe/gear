@@ -40,12 +40,12 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
-| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | verifying | — |
+| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -56,7 +56,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-7 | r11 | `review/t11` | review T-11 (branch `data/t11-config-trim`) — temp reviewer gear-r11 (session ses_e9cefccd8ffezPlP9TL2p98Ctf) | done | — |
 | R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 (session ses_e9cef8ed2ffe4Rh4t71sju79cH) | done | — |
 | R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4) | done | — |
-| R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat | running | — |
+| R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
@@ -92,3 +92,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-16 handed in → R-9 by gear-r16, first job on a warm reviewer seat (ops/bin/start-reviewer.sh).
 - 2026-10-22 R-9 fail (P2 `max_threads = 0` returns a thread; test P3). T-16 → rework (data M-1); per_sender rule and T-17 limits decided there. T-18 re-handed in after M-1 → R-10 on the warm seat.
 - 2026-10-22 T-14 handed in → R-11.
+- 2026-10-22 R-10 pass (P3 stale diff count only). Merged T-18 + review; workspace green. R-10 question (bare op ids are ambiguous across projects): T-4 changes `recover_on_start` to return (project, id) pairs — noted on the T-4 row for its packet.
