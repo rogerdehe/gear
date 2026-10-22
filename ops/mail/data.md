@@ -14,6 +14,6 @@ Read `origin/review/t17:ops/reviews/T-17.md`. Fix the P1 (a message created in t
 
 Read `origin/review/t36:ops/reviews/T-36.md`. Captain answer: yes — a change to `goal`, `accept`, `evidence-files` (including clearing it) or `evidence-due` opens a new contract version; fix the P2 with a test in `plan.rs`'s private tests (the contract test does not cover it). Also the P3: base check (StaleVersion) before the section gate (BadFormat), per the doc comment order. Merge `origin/dev` and build before hand-in.
 
-### M-4 [open] T-40 before the T-36 rework
+### M-4 [closed] T-40 before the T-36 rework
 
 Captain re-plan: the runtime lane has nothing startable until `open_attempts_of_seat` (T-40, ~15 min) is on dev. Do T-40 first and hand it in, then the T-36 rework (M-3), then T-42. If you are mid-way through the rework, finish the checklist item you are on, commit and push it, then switch.

@@ -44,7 +44,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | done | — |
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | verifying | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | done | — |
-| T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | ready | — |
+| T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | verifying | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | ready | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | draft | T-42 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -112,6 +112,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat (session ses_e9c6ebc9effef9Fb7NcakyILcA) | done | — |
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
 | R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX) | running | — |
+| R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | verifying | — |
 
 ## Done
@@ -208,3 +209,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-6 (captain's own task) handed in → R-37: the captain's work is reviewed like any lane's.
 - 2026-10-22 T-36 rework → R-33 round 2 (data did the rework before reading M-4; T-40 next).
 - 2026-10-22 R-37 fail (2 P2 in SKILL.md: lane write rule vs 17; `blocked` arguments). Captain reworked T-6 → round 2.
+- 2026-10-22 T-40 → R-38 (critical path: unblocks runtime T-41, T-44).
