@@ -29,4 +29,9 @@ cargo test --workspace >/tmp/gear-merge-test.$$ 2>&1 || { grep -E 'FAILED|panick
 git push -q origin dev
 git push -q origin --delete "$branch" "review/t$n" || true
 git branch -D "$branch" >/dev/null 2>&1 || true
+# park the reviewer seat that holds review/t<n> and drop the local branch
+git worktree list --porcelain | awk '/^worktree /{w=$2} /^branch refs\/heads\/review\/t'"$n"'$/{print w}' | while read -r seat; do
+  k=${seat##*-}; git -C "$seat" switch -q "home/review-$k" && git -C "$seat" branch -D "review/t$n" >/dev/null || true
+done
+git branch -D "review/t$n" >/dev/null 2>&1 || true
 echo "merged T-$n ($branch) into dev and pushed"
