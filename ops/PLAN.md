@@ -56,7 +56,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | done | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
-| T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | verifying | — |
+| T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | done | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | ready | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | ready | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
@@ -83,7 +83,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat (session ses_e9ca14555ffeTLHJUTXWF1Xhhb) | done | — |
 | R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat (session ses_e9ca11681ffeE6PFvTNI7zruxo) | done | — |
 | R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat (session ses_e9ca0e4f2ffeZl3Ym8V2aTt2I7) | done | — |
-| R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat | running | — |
+| R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat (session ses_e9c9ccc9dffeZjGrdNQ5Br72Qz) | done | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -150,3 +150,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-28 → R-23 on a 5th seat (V4 Pro reviews are slower; review throughput is the bottleneck).
 - 2026-10-22 R-20 pass (P3 wording). T-10 ignore removed; merged T-10 + review; workspace green.
 - 2026-10-22 R-18 round 2 (new-session recovery), R-21, R-22 pass. Merged T-21, T-22, T-25 + reviews; T-21 doc P3 fixed at merge; workspace green. T-4 → ready (all deps merged). Recurring stale-Result P3 removed at the source (L-32).
+- 2026-10-22 R-23 pass (P3). Merged T-28 + review; workspace green.
