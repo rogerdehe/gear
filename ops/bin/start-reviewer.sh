@@ -7,16 +7,22 @@
 # Seats are created on demand, at most MAX_SEATS (default 3).
 set -eu
 n=${1:?task number}; branch=${2:?branch under review}; shift 2
-resume=""; model="DeepSeek V4.1 Flash 1017"; filter=""   # must differ from the writer's model
-alt_model=${REVIEW_ALT_MODEL:-"DeepSeek V4 Pro"}; alt_filter=${REVIEW_ALT_FILTER:-"DeepSeek V4 Pro"}
-while [ $# -gt 0 ]; do case "$1" in --resume) resume=$2; shift 2 ;; --model) model=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;; esac; done
+resume=""; pick=""
+while [ $# -gt 0 ]; do case "$1" in --resume) resume=$2; shift 2 ;; --model) pick=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;; esac; done
 main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
 wtroot=$(dirname "$(git -C "$main" worktree list --porcelain | sed -n 's/^worktree \(.*\/home-data\)$/\1/p')")
 max=${MAX_SEATS:-5}
-# independence: if the writer lane currently runs the reviewer model, use the alternate (lanes may be switched on quota)
+# reviewer model: first `review` line of ops/models.conf whose bar text the
+# writer lane is not showing (independence, 17 §8); --model <filter> forces one.
 writer="gear-${branch%%/*}"
-if herdr agent read "$writer" --source visible 2>/dev/null | grep -E 'Build auto' | grep -qF "$model"; then model=$alt_model; filter=$alt_filter; fi
-[ -n "$filter" ] || filter=$model
+wbar=$(herdr agent read "$writer" --source visible 2>/dev/null | grep -E 'Build auto' | tail -1)
+while IFS='|' read -r role f e v; do
+  [ "$role" = review ] || continue
+  if [ -n "$pick" ]; then [ "$f" = "$pick" ] || continue; fi
+  case "$wbar" in *"$e"*) continue ;; esac
+  filter=$f; model=$e; variant=$v; break
+done < <(grep -v '^#' "$main/ops/models.conf")
+[ -n "${model:-}" ] || { echo "no reviewer model differs from the writer's ($wbar)" >&2; exit 1; }
 
 # 0. a hand-in that does not merge into dev goes straight back to the writer (lesson L-27).
 git -C "$main" fetch -q origin
@@ -78,7 +84,7 @@ if ! bar | grep -qF "$model"; then
   herdr pane send-keys "$pane" enter >/dev/null; sleep 1
   # models with variants (e.g. DeepSeek V4 Pro) open a "Select variant" dialog next (lesson L-30)
   if herdr pane read "$pane" --source visible | grep -q 'Select variant'; then
-    herdr pane send-text "$pane" "${REVIEW_VARIANT:-high}" >/dev/null; sleep 0.5
+    herdr pane send-text "$pane" "${variant/#-/high}" >/dev/null; sleep 0.5
     herdr pane send-keys "$pane" enter >/dev/null; sleep 1
   fi
 fi
