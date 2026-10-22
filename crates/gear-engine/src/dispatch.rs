@@ -161,13 +161,15 @@ pub struct DeliverAction {
 /// design/09 "Delivery content", exactly:
 /// `Continue <task> (contract v<version>). Task packet: <packet>. Report progress/blocked/done with gear send.`
 pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
-    let _ = (task, version, packet);
-    todo!("T-39")
+    format!(
+        "Continue {task} (contract v{version}). Task packet: {packet}. Report progress/blocked/done with gear send."
+    )
 }
 
 /// design/09 "Delivery content", exactly:
 /// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Task packet: <packet>. Read it before starting; report with gear send.`
 pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
-    let _ = (task, version, branch, packet);
-    todo!("T-39")
+    format!(
+        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Task packet: {packet}. Read it before starting; report with gear send."
+    )
 }
