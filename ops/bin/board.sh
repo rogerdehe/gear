@@ -7,6 +7,11 @@ set -u
 WT_ROOT=/Volumes/Data/.herdr-worktrees/gear
 LANES="data:gear-data:home-data runtime:gear-runtime:home-runtime"
 
+main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
+alive="$main/.git/gear-watch.alive"
+if [ ! -e "$alive" ] || [ $(( $(date +%s) - $(stat -f %m "$alive") )) -gt 120 ]; then
+  echo "!! WATCHER OFF — run ops/bin/watch.sh in the background (ops/CAPTAIN.md step 3)"
+fi
 printf '%-13s %-8s %-20s %-8s %-9s %s\n' LANE AGENT BRANCH HEAD STATUS TASKS
 for entry in $LANES; do
   IFS=: read -r lane agent dir <<<"$entry"
