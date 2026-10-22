@@ -2,6 +2,10 @@
 
 Basis: [PRD v0.8](../PRD.md), [TECH-MVP](../TECH-MVP.md). This directory breaks the MVP into a module skeleton; each module is reviewed before code is written. Signatures are design conventions and may be renamed during implementation, but responsibility boundaries and contracts must not drift.
 
+## 0. Scope (2026-10-22, user)
+
+GEAR runs one piece of work with several agents: a new product, **or one requirement iterated inside an existing large repo** (named after the requirement, on its own integration branch). Every project starts with a kickoff aligned with the user — installed agents and models, lanes, a per-role model chain with fallbacks — see 17 §0.
+
 ## 1. Two confirmed decisions (2026-10-21, user)
 
 1. **Temp worker resume**: must be supported by the mechanism. **New work opens a new session; when the same piece of work needs the worker back midway, bring back the original temp worker (resume the original session).** When resume is unavailable, fall back to a new session that reads the task packet, explicitly marked as "new-session recovery". See [10-staff.md](10-staff.md).
