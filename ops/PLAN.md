@@ -19,23 +19,24 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 | gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
 | gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
 
-## In flight
+## Board
 
-| Task | Lane | Branch | Content | State |
-|---|---|---|---|---|
-| T-1 | data | `data/t1-store` | gear-store implementation | ready to dispatch |
-| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready to dispatch |
+Single writer: the captain (see `ops/CAPTAIN.md`). States follow GEAR `TaskState`. Rows are in dispatch order per lane.
 
-## Ready next
-
-| Task | Lane | Content | Depends on |
-|---|---|---|---|
-| T-3 | data | gear-app: identity + mail (send/select_batch/reply) + home | T-1 |
-| T-4 | runtime | gear-engine: observe + doorbell + ops + tick; slice1 tests pass | T-1, T-2, T-3 |
-| T-5 | runtime | gear-cli: slice-1 commands, `gear run` loop, `--skill` | T-3, T-4 |
-| T-6 | captain | skills/gear/SKILL.md v1 (includes 17-conventions) | — |
+| Task | Lane | Branch | Content | State | Depends on |
+|---|---|---|---|---|---|
+| T-1 | data | `data/t1-store` | gear-store implementation | ready | — |
+| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready | — |
+| T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home | draft | T-1 |
+| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + doorbell + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3 |
+| T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop, `--skill` | draft | T-3, T-4 |
+| T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
 
 ## Done
 
 - M1-0 skeleton (captain): workspace, gear-model (8 tests), FakeHerdr (4 tests incl. worktrees), signatures and contract tests for every layer.
 - 2026-10-22 docs translated to English; 17-conventions written; slot pool removed from design and schema.
+
+## Log
+
+- 2026-10-22 manual scaffold set up: board (this file), packets with checklists + lane record, `ops/CAPTAIN.md`, `ops/bin/board.sh`.
