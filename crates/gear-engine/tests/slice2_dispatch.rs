@@ -90,7 +90,6 @@ fn attempt_state(w: &mut World) -> AttemptState {
 }
 
 #[test]
-#[ignore = "T-49: slice-2 acceptance; un-ignored by the captain when T-49 merges"]
 fn full_work_loop() {
     let mut w = world();
 
