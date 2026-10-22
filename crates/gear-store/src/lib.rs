@@ -1086,45 +1086,181 @@ impl<'s> Tx<'s> {
 
     /// Insert a plan version. Duplicate (project, version) → BadFormat (constraint violation, as every insert).
     pub fn insert_plan(&self, row: &PlanRow) -> GearResult<()> {
-        todo!("T-33")
+        self.tx
+            .execute(
+                "INSERT INTO plans (project, version, draft, applied, by_seat, by_gen)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    row.project,
+                    row.version,
+                    row.draft,
+                    row.applied,
+                    row.by_seat,
+                    row.by_gen
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
     }
 
     /// Highest applied plan version of the project; 0 when none.
     pub fn plan_version(&self, project: &str) -> GearResult<i64> {
-        todo!("T-33")
+        let version: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT MAX(version) FROM plans WHERE project=?1",
+                params![project],
+                |row| row.get(0),
+            )
+            .map_err(map_sqlite)?;
+        Ok(version.unwrap_or(0))
     }
 
     pub fn get_plan(&self, project: &str, version: i64) -> GearResult<Option<PlanRow>> {
-        todo!("T-33")
+        let row: Option<PlanRow> = self
+            .tx
+            .query_row(
+                "SELECT project, version, draft, applied, by_seat, by_gen
+                 FROM plans WHERE project=?1 AND version=?2",
+                params![project, version],
+                plan_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
     }
 
     /// Insert a task. Duplicate (project, id) → BadFormat (constraint violation, as every insert).
     pub fn insert_task(&self, row: &TaskRow) -> GearResult<()> {
-        todo!("T-33")
+        self.tx
+            .execute(
+                "INSERT INTO tasks
+                   (project, id, rank, state, priority, lane, milestone, required, contract_version,
+                    deps, followup_of, wait_on, wait_cond, rework_note, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    row.project,
+                    row.id,
+                    row.rank,
+                    row.state.as_str(),
+                    row.priority,
+                    row.lane,
+                    row.milestone,
+                    row.required as i64,
+                    row.contract_version,
+                    json_strings_to_text(&row.deps).map_err(map_sqlite)?,
+                    row.followup_of,
+                    row.wait_on,
+                    row.wait_cond,
+                    row.rework_note,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
     }
 
     pub fn get_task(&self, project: &str, id: &str) -> GearResult<Option<TaskRow>> {
-        todo!("T-33")
+        let row: Option<TaskRow> = self
+            .tx
+            .query_row(
+                &task_select(" WHERE project=?1 AND id=?2"),
+                params![project, id],
+                task_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
     }
 
     /// All tasks of the project ordered by rank, then id.
     pub fn tasks_of_project(&self, project: &str) -> GearResult<Vec<TaskRow>> {
-        todo!("T-33")
+        let mut stmt = self
+            .tx
+            .prepare(&task_select(" WHERE project=?1 ORDER BY rank, id"))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], task_from_row)
+            .map_err(map_sqlite)?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row.map_err(map_sqlite)?);
+        }
+        Ok(tasks)
     }
 
     /// Replace every column of an existing task (raw write, no transition
     /// check — callers use `require_transition`). Missing → NoTarget.
     pub fn update_task(&self, row: &TaskRow) -> GearResult<()> {
-        todo!("T-33")
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE tasks
+                 SET rank=?3, state=?4, priority=?5, lane=?6, milestone=?7, required=?8,
+                     contract_version=?9, deps=?10, followup_of=?11, wait_on=?12, wait_cond=?13,
+                     rework_note=?14, updated=?15
+                 WHERE project=?1 AND id=?2",
+                params![
+                    row.project,
+                    row.id,
+                    row.rank,
+                    row.state.as_str(),
+                    row.priority,
+                    row.lane,
+                    row.milestone,
+                    row.required as i64,
+                    row.contract_version,
+                    json_strings_to_text(&row.deps).map_err(map_sqlite)?,
+                    row.followup_of,
+                    row.wait_on,
+                    row.wait_cond,
+                    row.rework_note,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "task",
+            &format!("{} in project {}", row.id, row.project),
+        )
     }
 
     /// Insert a contract version. Duplicate (project, task, version) → BadFormat (constraint violation, as every insert).
     pub fn insert_contract(&self, row: &ContractRow) -> GearResult<()> {
-        todo!("T-33")
+        self.tx
+            .execute(
+                "INSERT INTO contracts
+                   (project, task, version, goal, accept, evidence_files, evidence_due_min, body, created)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    row.project,
+                    row.task,
+                    row.version,
+                    row.goal,
+                    row.accept,
+                    json_strings_to_text(&row.evidence_files).map_err(map_sqlite)?,
+                    row.evidence_due_min,
+                    row.body,
+                    row.created,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
     }
 
     pub fn get_contract(&self, project: &str, task: &str, version: i64) -> GearResult<Option<ContractRow>> {
-        todo!("T-33")
+        let row: Option<ContractRow> = self
+            .tx
+            .query_row(
+                "SELECT project, task, version, goal, accept, evidence_files, evidence_due_min, body, created
+                 FROM contracts WHERE project=?1 AND task=?2 AND version=?3",
+                params![project, task, version],
+                contract_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
     }
 
     // ---- attempts, verdicts (slice 2; T-34)
@@ -1352,6 +1488,62 @@ fn op_select(tail: &str) -> String {
                 state, result, check_budget, created, updated
          FROM operations{tail}"
     )
+}
+
+fn task_select(tail: &str) -> String {
+    format!(
+        "SELECT project, id, rank, state, priority, lane, milestone, required, contract_version,
+                deps, followup_of, wait_on, wait_cond, rework_note, updated
+         FROM tasks{tail}"
+    )
+}
+
+fn plan_from_row(row: &rusqlite::Row) -> rusqlite::Result<PlanRow> {
+    Ok(PlanRow {
+        project: row.get(0)?,
+        version: row.get(1)?,
+        draft: row.get(2)?,
+        applied: row.get(3)?,
+        by_seat: row.get(4)?,
+        by_gen: row.get(5)?,
+    })
+}
+
+fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
+    let state: String = row.get(3)?;
+    let deps: String = row.get(9)?;
+    Ok(TaskRow {
+        project: row.get(0)?,
+        id: row.get(1)?,
+        rank: row.get(2)?,
+        state: state.parse::<TaskState>().map_err(as_sqlite_error)?,
+        priority: row.get(4)?,
+        lane: row.get(5)?,
+        milestone: row.get(6)?,
+        required: row.get::<_, i64>(7)? != 0,
+        contract_version: row.get(8)?,
+        deps: json_strings_from_text(&deps)?,
+        followup_of: row.get(10)?,
+        wait_on: row.get(11)?,
+        wait_cond: row.get(12)?,
+        rework_note: row.get(13)?,
+        updated: row.get(14)?,
+    })
+}
+
+fn contract_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContractRow> {
+    let evidence_files: String = row.get(5)?;
+    Ok(ContractRow {
+        project: row.get(0)?,
+        task: row.get(1)?,
+        version: row.get(2)?,
+        goal: row.get(3)?,
+        accept: row.get(4)?,
+        evidence_files: json_strings_from_text(&evidence_files)?,
+        evidence_due_min: row.get(6)?,
+        body: row.get(7)?,
+        created: row.get(8)?,
+    })
 }
 
 fn project_from_row(row: &rusqlite::Row) -> rusqlite::Result<ProjectRow> {
