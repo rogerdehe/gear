@@ -12,6 +12,7 @@ Invariants upheld: one writer per write resource (when uncertain, do not hand ov
 | ACTIVE | Has an attempt in progress | 09 continues | Result submitted and no next item → STANDBY |
 | STANDBY (standby) | No assignable task | **Sends no messages at all**; records start time; included in review snapshot; triggers 11's "idle lane" | A task becomes ready → assign immediately |
 | PARKED | Plan draft `park … until=/until-task=` | No assignment | Time reached / condition met → re-evaluate (assign if there is work, otherwise STANDBY); a new ready task also ends it early |
+| PARKED (quota) | Engine, on a quota stop with `on_quota = "wait"` (01) | No assignment; a new ready task does **not** end it | Reset time reached → engine checks the pane is idle, prompts the agent to run its inbox (same model); a stop on quota again re-parks with the next window |
 | HELD | Draft `hold … reason=` | No assignment; new tasks do not interrupt either | Only the draft releasing the hold |
 | RETIRING | Draft `retire` | No new work; in-flight attempts go to a safe point via 06's preemption flow; unstarted tasks go back to unassigned (lane cleared, captain reassigns); submitted ones continue through acceptance | Handover complete → RETIRED; captain receives a merged review item |
 | MISSING | 08 observes that the pane/Agent of a seat expected to have an Agent has disappeared | No assignment; in-flight attempts frozen; unstarted tasks may be reassigned by the captain | User registers a new session → NEEDS_CHECK |

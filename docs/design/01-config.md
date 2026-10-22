@@ -32,6 +32,8 @@ profile = "opencode"
 lanes   = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4.1-flash"]
 review  = ["deepseek/deepseek-v4.1-flash", "minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4-pro"]
 captain = []                       # empty = whatever the captain's CLI runs; not switched by GEAR
+on_quota = { lanes = "fallback", review = "fallback" }   # or "wait": park until reset, then wake on the same model
+quota_reset_h = 5                  # provider plan window, used when the error states no reset time
 # a lane may override with its own `models = [...]`
 
 [temps]                            # temp workers: worktree + pane created via Herdr when needed, nothing pre-registered
@@ -59,7 +61,7 @@ busy_markers = ["esc interrupt"]
 - Long-lived lanes: `duty` and `owns` are required; `owns` must not overlap pairwise; `name` conforms to 17 §2 and `<project>-<name>` ≤ 32 characters. A lane's worktree and pane are not written in config; the engine creates them via `worktree.create` at onboarding (10).
 - The profile for each lane's kind is verified (04 `verified=true`); otherwise rejected.
 - Number of lanes ≤ quota.lanes.
-- `[models]`: every listed model is reachable by the role's agent kind (profile `list_models`, e.g. `opencode models`); `review` holds at least one model that differs from each lane's primary. Engine use: start/onboard on the chain's first entry; on a quota stop move to the next and log it; probe the earlier entry again after `timing.quota_retry_min` (default 60); reviewers take the first entry ≠ the writer's current model.
+- `[models]`: every listed model is reachable by the role's agent kind (profile `list_models`, e.g. `opencode models`); `review` holds at least one model that differs from each lane's primary. Engine use: start/onboard on the chain's first entry; on a quota stop move to the next and log it; probe the earlier entry again after `timing.quota_retry_min` (default 60); with `on_quota = "wait"` the seat goes PARKED `until=` the reset time (10) instead and is woken then; reviewers take the first entry ≠ the writer's current model.
 - Captain and long-lived lanes: init only registers the seats; **they are restarted and onboarded by GEAR** (03); CLIs that support resume may carry a `resume_ref` to keep the original session context.
 - cooldown_s > tick_s.
 - The same worktree cannot be held by two seats (after the engine creates it, it is written to 02 resources, keyed by the path Herdr returns, unique across projects).
