@@ -27,22 +27,24 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 |---|---|---|---|---|---|
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
-| T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | verifying | — |
+| T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | done | — |
 | T-16 | data | `data/t16-select-batch` | app: inbox batch selection | ready | — |
-| T-14 | data | `data/t14-send` | app: gear send | draft | T-13 |
-| T-15 | data | `data/t15-reply` | app: gear reply | draft | T-13 |
+| T-14 | data | `data/t14-send` | app: gear send | ready | — |
+| T-15 | data | `data/t15-reply` | app: gear reply | ready | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | draft | T-13, T-16 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
-| T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | verifying | — |
+| T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
+| T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
-| T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | verifying | — |
-| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | ready | — |
+| T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
+| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | rework | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
+| T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -50,9 +52,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | done | — |
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | done | — |
 | R-5 | r9 | `review/t9` | review T-9 (branch `runtime/t9-skill`) — temp reviewer gear-r9 (session ses_e9cf4091fffejJRMFPr6pkDgum) | done | — |
-| R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 | running | — |
-| R-7 | r11 | `review/t11` | review T-11 (branch `data/t11-config-trim`) — temp reviewer gear-r11 | running | — |
-| R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 | running | — |
+| R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 (session ses_e9cf4091fffejJRMFPr6pkDgum) | done | — |
+| R-7 | r11 | `review/t11` | review T-11 (branch `data/t11-config-trim`) — temp reviewer gear-r11 (session ses_e9cefccd8ffezPlP9TL2p98Ctf) | done | — |
+| R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 (session ses_e9cef8ed2ffe4Rh4t71sju79cH) | done | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -82,3 +84,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 practice finding: a long-lived review lane must be cleared before every review, which an async lane cannot do → retired gear-review (exited, worktree removed via Herdr); reviews are temp workers from now on (17 §8, §8a; ops/REVIEW.md requirements-only). T-9 handed in → R-5 by temp reviewer gear-r9.
 - 2026-10-22 T-13 handed in → R-6 by temp reviewer gear-r13 (started with ops/bin/start-reviewer.sh).
 - 2026-10-22 R-5 pass (no findings; first temp reviewer). Merged T-9 + review; reviewer exited, worktree removed, session recorded. Help-text question → T-6.
+- 2026-10-22 R-7 pass (T-11), R-8 pass (T-12), R-6 fail overridden → pass: its only failed fact was T-11's contract test, red on the branch base before dev-green (L-19), not T-13's work. Merged T-11, T-12, T-13 + reviews; T-11 ignore removed; slice-1 acceptance tests ignored until T-4 (L-23). T-14, T-15 → ready. Follow-ups: T-22 (R-6 question + P3: agent-less pane rejected), T-23 (R-8 question: two refusal codes). Reviews sat undecided because the watcher was off after a compaction; data lane idle at the cap → L-22 (heartbeat, `capped` event).
+- 2026-10-22 T-18 handed in with a captain question (engine cannot enumerate projects). Decision (b): captain added `Tx::project_ids()` + contract test on dev; T-18 → rework (M-1) to use it and drop its private meta-table registry. No review started on the first hand-in (it would review code about to change).

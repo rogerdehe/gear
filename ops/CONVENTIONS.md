@@ -39,7 +39,7 @@ cargo build -p <crate> --all-targets 2>&1 | grep -E '^(warning|error)' && echo "
 cargo test -p <crate>
 ```
 
-Zero warnings, zero errors, every listed test passes.
+Zero warnings, zero errors, every listed test passes. `dev` is always green: a contract test for a task not merged yet is `#[ignore = "T-<n>: …"]` on `dev`; that task's packet tells you to run it with `-- --include-ignored`; the captain removes the ignore when merging.
 
 ## Result format (exact headings; 17 §6)
 
