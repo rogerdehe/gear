@@ -54,4 +54,6 @@ Reviewed: <branch> @ <short sha>   Reviewer: <agent name> (<model>)   Round: 1 |
 - … | none
 ```
 
+Do not report the Result's `Branch:` sha naming the code commit rather than the hand-in tip, or the absence of diff counts — that is the format (ops/CONVENTIONS.md, lesson L-32).
+
 A `fail` becomes the writer's rework: write each finding so the writer can act on it without asking.

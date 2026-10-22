@@ -47,10 +47,11 @@ Zero warnings, zero errors, every listed test passes. `dev` is always green: a c
 
 ```
 Scope: T-<n> — <what shipped, one line>
-Branch: <branch> @ <short sha>
+Branch: <branch> (code @ <short sha of the last code commit>)
 Files: <path> — <what/why>, one line each
 Verification: <command> → <result>, one line each
 Open questions: <each> | none
 Out of scope: <noticed, not touched> | none
-Diff: <+/- lines across N files>
 ```
+
+No diff counts and no hand-in sha: the Result is written in the hand-in commit itself, so it can never name that commit's own sha or final line counts. The reviewer reads both from git (lesson L-32).

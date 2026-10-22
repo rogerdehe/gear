@@ -43,7 +43,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | done | — |
-| T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | verifying | — |
+| T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | done | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
@@ -52,14 +52,14 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | done | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
-| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | verifying | — |
+| T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | done | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
-| T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | verifying | — |
+| T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | done | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | verifying | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | ready | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-21 |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | ready | — |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -78,11 +78,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
 | R-16 | r17 | `review/t17` | review T-17 (branch `data/t17-home`) — temp reviewer gear-r17 on seat (session ses_e9cb776fdffe7xhq2Jh4IWaxRZ), 2 rounds | done | — |
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat (session ses_e9cad4a35ffec27oj5H7Z4AMDZ) | done | — |
-| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | running | — |
+| R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 (round 1 ses_e9cacb72bffe85APn13cVdEnng; round 2 new-session recovery ses_e9c9f4c20ffeR4s83ApKF3UHMP) | done | — |
 | R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat (session ses_e9ca9da55ffetpXMr32sRFk5gM) | done | — |
 | R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat (session ses_e9ca14555ffeTLHJUTXWF1Xhhb) | done | — |
-| R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat | running | — |
-| R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat | running | — |
+| R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat (session ses_e9ca11681ffeE6PFvTNI7zruxo) | done | — |
+| R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat (session ses_e9ca0e4f2ffeZl3Ym8V2aTt2I7) | done | — |
 | R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
@@ -149,3 +149,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 runtime lowready → T-30 (CLI home).
 - 2026-10-22 T-28 → R-23 on a 5th seat (V4 Pro reviews are slower; review throughput is the bottleneck).
 - 2026-10-22 R-20 pass (P3 wording). T-10 ignore removed; merged T-10 + review; workspace green.
+- 2026-10-22 R-18 round 2 (new-session recovery), R-21, R-22 pass. Merged T-21, T-22, T-25 + reviews; T-21 doc P3 fixed at merge; workspace green. T-4 → ready (all deps merged). Recurring stale-Result P3 removed at the source (L-32).
