@@ -46,7 +46,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | done | — |
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | done | — |
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | done | — |
-| T-43 | data | `data/t43-settle` | slice 2: settle verdicts | ready | — |
+| T-43 | data | `data/t43-settle` | slice 2: settle verdicts | verifying | — |
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
@@ -73,9 +73,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | done | — |
 | T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | done | — |
 | T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | done | — |
-| T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | verifying | — |
+| T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | done | — |
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | done | — |
-| T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | draft | T-41, T-42 |
+| T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | ready | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -117,8 +117,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat (session ses_e9c625c7cffe83nTPnqq88jCPX), 2 rounds | done | — |
 | R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat (session ses_e9c5c5744ffeS3on5K6XAPD49g) | done | — |
 | R-39 | r42 | `review/t42` | review T-42 (branch `data/t42-attempt-lifecycle`) — temp reviewer gear-r42 on seat (session ses_e9c51cd97ffeTfg58BlmtujMiP) | done | — |
-| R-40 | r41 | `review/t41` | review T-41 (branch `runtime/t41-lane-view`) — temp reviewer gear-r41 on seat | running | — |
+| R-40 | r41 | `review/t41` | review T-41 (branch `runtime/t41-lane-view`) — temp reviewer gear-r41 on seat (session ses_e9c4db501ffel4I1Yxj7jRdydK) | done | — |
 | R-41 | r44 | `review/t44` | review T-44 (branch `runtime/t44-stale-delivery`) — temp reviewer gear-r44 on seat (session ses_e9c4d4795ffelOAIJwNJzCrEMX) | done | — |
+| R-42 | r43 | `review/t43` | review T-43 (branch `data/t43-settle`) — temp reviewer gear-r43 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -227,3 +228,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Dispatch-tick contract on dev (`dispatch_tick_contract.rs`, 3 ignored; packet_ref/task_branch by captain). T-46 drafted (after T-41, T-42).
 - 2026-10-22 R-39 pass; T-42 merged; T-43, T-45 ready.
 - 2026-10-22 R-41 pass; T-44 merged. Question → T-47 (missing attempt voided; captain adjusted deliver_contract to record the attempt).
+- 2026-10-22 R-40 pass (P3: a blocked view also clears pending_op — harmless, decide returns None without attempt or ready tasks). T-41 merged; T-46 ready.
+- 2026-10-22 T-43 → R-42.
