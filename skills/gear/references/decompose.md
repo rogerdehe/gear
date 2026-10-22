@@ -64,6 +64,7 @@ A step is written so the implementer can write exactly one reasonable thing: a t
 - **Type consistency:** names and signatures used in later tasks match the Produces blocks of earlier ones.
 - **Contracts:** every cross-lane call has a merged (or first-queued) contract task with tests and a fake.
 - **Acceptance scope:** a packet's acceptance runs the whole crate without ignored tests, plus only **its own** ignored contract tests by file and name (`--test <file> -- --include-ignored <names>`); a crate-wide `--include-ignored` also runs other unmerged tasks' contracts and fails for reasons the task cannot fix (lesson L-36).
+- **No stale contracts:** a contract that changes existing behaviour comes with updates to every older test that asserts the old behaviour (grep for it), in the same commit (lesson L-38).
 - **Reachability:** every Goal item can be done with the packet's Allowed changes and the `pub` API already on `dev`; if not, add the API first (contract-first) or drop the item (lesson L-28). Same for follow-up packets written from review findings.
 - **Proportion:** a packet longer than the code it describes is writing the code; replace bodies with signatures and test names.
 
