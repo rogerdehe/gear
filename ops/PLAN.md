@@ -77,7 +77,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-16 | r17 | `review/t17` | review T-17 (branch `data/t17-home`) — temp reviewer gear-r17 on seat (session ses_e9cb776fdffe7xhq2Jh4IWaxRZ) | running | — |
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat | running | — |
 | R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat | running | — |
-| R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23, queued for a free seat | ready | — |
+| R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -132,3 +132,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 User: GEAR is also for one requirement iterated inside an existing repo, and every project starts with a kickoff aligned with the user — installed agents/models inventory, lanes, per-role model chains with fallbacks. Written into 17 §0, 01 `[models]`, 00 §0; T-27 (config `[models]`) drafted.
 - 2026-10-22 Handed in: T-26 → R-17, T-21 → R-18, T-17 rework → R-16 round 2, T-23 → R-19 (queued: 3 seats busy).
 - 2026-10-22 runtime lowready → T-28 (CLI plumbing, independent). Next for runtime after T-17 lands: T-4 packet; CLI send/reply wiring needs a captain decision on how CLI tests get a Herdr fingerprint (T-22 rejects an agent-less caller).
+- 2026-10-22 Both lanes capped (2 in review each) while 3 seats were busy → 4th seat; review throughput is the bottleneck now. start-reviewer waits for the UI before the model check and confirms the prompt was picked up.
