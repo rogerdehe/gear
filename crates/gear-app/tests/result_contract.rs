@@ -40,7 +40,6 @@ fn result(contract: i64, candidate: Option<&str>, rid: &str) -> SendArgs {
 }
 
 #[test]
-#[ignore = "T-45: un-ignored by the captain when T-45 merges"]
 fn result_submits_the_attempt_and_reaches_the_captain() {
     let mut s = world();
     let (env, fp) = lane();
@@ -54,7 +53,6 @@ fn result_submits_the_attempt_and_reaches_the_captain() {
 }
 
 #[test]
-#[ignore = "T-45: un-ignored by the captain when T-45 merges"]
 fn bad_result_writes_nothing() {
     let mut s = world();
     let (env, fp) = lane();
