@@ -82,10 +82,10 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | done | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | done | — |
-| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | verifying | — |
+| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | done | — |
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | ready | — |
-| T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | ready | — |
+| T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | verifying | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -137,7 +137,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-48 | r51 | `review/t51` | review T-51 (branch `data/t51-home-task`) — temp reviewer gear-r51 on seat (session ses_e9c27071fffeuSvSJr474MQ22u) | done | — |
 | R-49 | r52 | `review/t52` | review T-52 (branch `runtime/t52-cli-plan-result`) — temp reviewer gear-r52 on seat (session ses_e9c2579abffexrPYbsZYHQ00xt) | done | — |
 | R-50 | r53 | `review/t53` | review T-53 (branch `data/t53-task-packet`) — temp reviewer gear-r53 on seat (session ses_e9c1a46d1ffeG9DHAh7yiHz4Ln) | done | — |
-| R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat | running | — |
+| R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat (session ses_e9c1612e6ffefZ8kCK0yBG7WZv) | done | — |
+| R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -269,3 +270,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-49 (slice-2 acceptance) → R-51.
 - 2026-10-22 Found: `gear run` used an empty profile map → every seat fail-closed, nothing dispatched in a real run. T-56 (builtin profiles) ready. Packet template made generic.
 - 2026-10-22 R-50 pass; T-53 merged (task packet rendering); T-54 ready. T-55 question (stale T-36 contract) answered M-5.
+- 2026-10-22 **Milestone: slice-2 work-loop acceptance passes on dev** (`slice2_dispatch::full_work_loop` un-ignored; slice-1 still 7/7). R-51 pass; T-49 merged. T-56 → R-52.
