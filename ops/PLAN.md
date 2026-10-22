@@ -82,7 +82,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | verifying | — |
 | T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-48, T-50, T-51 |
-| T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | ready | — |
+| T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | verifying | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | draft | T-53 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -133,6 +133,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-46 | r48 | `review/t48` | review T-48 (branch `runtime/t48-confirm-delivery`) — temp reviewer gear-r48 on seat (session ses_e9c32a21dffe4jKmnxeVGcynpz) | running | — |
 | R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat | running | — |
 | R-48 | r51 | `review/t51` | review T-51 (branch `data/t51-home-task`) — temp reviewer gear-r51 on seat | running | — |
+| R-49 | r52 | `review/t52` | review T-52 (branch `runtime/t52-cli-plan-result`) — temp reviewer gear-r52 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -256,3 +257,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-46 fail (P2: other op kinds would be budget-bumped and flag seats). T-48 → rework (runtime M-6).
 - 2026-10-22 T-52 question (a captain-owned test it invalidates) → test moved to `admin init` on dev; answered M-7.
 - 2026-10-22 T-51 → R-48; T-48 rework → R-46 round 2.
+- 2026-10-22 T-52 → R-49.
