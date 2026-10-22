@@ -30,10 +30,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | done | — |
 | T-16 | data | `data/t16-select-batch` | app: inbox batch selection | done | — |
 | T-14 | data | `data/t14-send` | app: gear send | done | — |
-| T-15 | data | `data/t15-reply` | app: gear reply | verifying | — |
+| T-15 | data | `data/t15-reply` | app: gear reply | done | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
+| T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | ready | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
 | T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
@@ -63,7 +64,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | done | — |
 | R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat (session ses_e9cc2b643ffejLx5AURY4CHrZ2) | done | — |
 | R-14 | r24 | `review/t24` | review T-24 (branch `data/t24-send-followups`) — temp reviewer gear-r24 on seat (session ses_e9cc1a9dcffer4EBceKwV1scT6) | done | — |
-| R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat | running | — |
+| R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -108,3 +109,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-13 pass (P3s). Merged T-20 + review; workspace green. Decisions: evidence counts from intent time; confirmation records the view → T-25.
 - 2026-10-22 R-14 pass (P3s). Merged T-24 + review. Question (store has no prefix/max thread query): the workaround stands for slice 1. Root cause is the packet: it asked for "one query" that its allowed changes could not reach → L-28.
 - 2026-10-22 T-15 handed in → R-15.
+- 2026-10-22 R-15 pass (P3s). Merged T-15 + review; workspace green. Decisions → T-26: dedupe ids; one answer per (sender, thread); Wait requires wait_until; downgrade/next_check are slice 2.
