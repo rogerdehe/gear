@@ -12,7 +12,7 @@ alt_model=${REVIEW_ALT_MODEL:-"DeepSeek V4 Pro"}; alt_filter=${REVIEW_ALT_FILTER
 while [ $# -gt 0 ]; do case "$1" in --resume) resume=$2; shift 2 ;; --model) model=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;; esac; done
 main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
 wtroot=$(dirname "$(git -C "$main" worktree list --porcelain | sed -n 's/^worktree \(.*\/home-data\)$/\1/p')")
-max=${MAX_SEATS:-4}
+max=${MAX_SEATS:-5}
 # independence: if the writer lane currently runs the reviewer model, use the alternate (lanes may be switched on quota)
 writer="gear-${branch%%/*}"
 if herdr agent read "$writer" --source visible 2>/dev/null | grep -E 'Build auto' | grep -qF "$model"; then model=$alt_model; filter=$alt_filter; fi

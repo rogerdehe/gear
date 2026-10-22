@@ -56,7 +56,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | verifying | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
-| T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | ready | — |
+| T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | verifying | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | ready | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-21 |
@@ -83,6 +83,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat | running | — |
 | R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat | running | — |
 | R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat | running | — |
+| R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -146,3 +147,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 runtime lowready → T-29 (CLI send/reply). Decision: CLI logic in private run_* helpers with injected store/env/herdr, tested with FakeHerdr; cmd_* is glue only.
 - 2026-10-22 T-21 rework handed in → R-18 round 2; its session's seat is busy → new-session recovery on a free seat (no waiting on the critical path to T-4).
 - 2026-10-22 runtime lowready → T-30 (CLI home).
+- 2026-10-22 T-28 → R-23 on a 5th seat (V4 Pro reviews are slower; review throughput is the bottleneck).
