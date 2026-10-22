@@ -85,6 +85,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | verifying | — |
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | draft | T-53 |
+| T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -266,3 +267,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-53 → R-50. merge-task.sh now also parks the reviewer seat.
 - 2026-10-22 Staff (park/hold/retire) contract on dev (`plan_staff_contract.rs`, ignored; `ApplyResult.staffed`); T-55 ready. Temp workers and hold release come later.
 - 2026-10-22 T-49 (slice-2 acceptance) → R-51.
+- 2026-10-22 Found: `gear run` used an empty profile map → every seat fail-closed, nothing dispatched in a real run. T-56 (builtin profiles) ready. Packet template made generic.
