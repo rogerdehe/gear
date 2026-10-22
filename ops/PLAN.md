@@ -50,6 +50,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | verifying | — |
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | ready | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | ready | — |
+| T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -246,3 +247,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice-2 acceptance written: `slice2_dispatch.rs::full_work_loop` (plan → assign → no resend → view → confirm → result → captain rung → verdict pass → quiet), ignored for T-49.
 - 2026-10-22 R-43 pass; T-47 merged.
 - 2026-10-22 T-48 → R-46.
+- 2026-10-22 Deliveries point at `gear --show T-n` → packet rendering contract (`packet_contract.rs`, 2 ignored); T-53 ready (data); CLI `--show` follows.
