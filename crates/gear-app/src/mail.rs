@@ -44,7 +44,7 @@ pub struct SendResult {
 ///   `--reply-to M-x` → the sender of M-x;
 /// - Progress → Info; Question/Blocked/Result/Instruction → Open;
 ///   Reply-kind is produced by `reply()`, not by `send`;
-/// - thread: reply_to inherits; otherwise new thread `<task or seat>:<M-id>`;
+/// - thread: reply_to inherits; otherwise new thread `<task or seat>:<seq>` (seq = next unused number for that prefix, design/07);
 /// - Ack/Result/Blocked side effects (tasks, handover) arrive in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
 pub fn send(
