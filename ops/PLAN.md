@@ -28,11 +28,12 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
 | T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
 | T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | done | — |
-| T-16 | data | `data/t16-select-batch` | app: inbox batch selection | verifying | — |
-| T-14 | data | `data/t14-send` | app: gear send | ready | — |
+| T-16 | data | `data/t16-select-batch` | app: inbox batch selection | done | — |
+| T-14 | data | `data/t14-send` | app: gear send | done | — |
 | T-15 | data | `data/t15-reply` | app: gear reply | ready | — |
-| T-17 | data | `data/t17-home` | app: home page + view record | draft | T-13, T-16 |
+| T-17 | data | `data/t17-home` | app: home page + view record | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
+| T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | ready | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
 | T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
@@ -40,12 +41,12 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
-| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | rework | — |
-| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
-| T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
+| T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
+| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | rework | — |
+| T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | verifying | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -55,7 +56,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-6 | r13 | `review/t13` | review T-13 (branch `data/t13-identity`) — temp reviewer gear-r13 (session ses_e9cf4091fffejJRMFPr6pkDgum) | done | — |
 | R-7 | r11 | `review/t11` | review T-11 (branch `data/t11-config-trim`) — temp reviewer gear-r11 (session ses_e9cefccd8ffezPlP9TL2p98Ctf) | done | — |
 | R-8 | r12 | `review/t12` | review T-12 (branch `runtime/t12-herdr-followups`) — temp reviewer gear-r12 (session ses_e9cef8ed2ffe4Rh4t71sju79cH) | done | — |
-| R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat | running | — |
+| R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4), 2 rounds | done | — |
+| R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
+| R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
+| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | done | — |
+| R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -88,3 +93,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-7 pass (T-11), R-8 pass (T-12), R-6 fail overridden → pass: its only failed fact was T-11's contract test, red on the branch base before dev-green (L-19), not T-13's work. Merged T-11, T-12, T-13 + reviews; T-11 ignore removed; slice-1 acceptance tests ignored until T-4 (L-23). T-14, T-15 → ready. Follow-ups: T-22 (R-6 question + P3: agent-less pane rejected), T-23 (R-8 question: two refusal codes). Reviews sat undecided because the watcher was off after a compaction; data lane idle at the cap → L-22 (heartbeat, `capped` event).
 - 2026-10-22 T-18 handed in with a captain question (engine cannot enumerate projects). Decision (b): captain added `Tx::project_ids()` + contract test on dev; T-18 → rework (M-1) to use it and drop its private meta-table registry. No review started on the first hand-in (it would review code about to change).
 - 2026-10-22 T-16 handed in → R-9 by gear-r16, first job on a warm reviewer seat (ops/bin/start-reviewer.sh).
+- 2026-10-22 R-9 fail (P2 `max_threads = 0` returns a thread; test P3). T-16 → rework (data M-1); per_sender rule and T-17 limits decided there. T-18 re-handed in after M-1 → R-10 on the warm seat.
+- 2026-10-22 T-14 handed in → R-11.
+- 2026-10-22 R-10 pass (P3 stale diff count only). Merged T-18 + review; workspace green. R-10 question (bare op ids are ambiguous across projects): T-4 changes `recover_on_start` to return (project, id) pairs — noted on the T-4 row for its packet.
+- 2026-10-22 R-11 pass (P3s). Merged T-14 + review; thread doc amended to `<seq>`. Decisions: `--to` ⇒ Instruction only, `needs_ack` false in slice 1 → T-24. T-16 rework will meet T-14 in mail.rs imports; the lane resolves when merging origin/dev (17 §8). Data lane ended its turn after a hand-in instead of re-running its inbox → L-26.
+- 2026-10-22 T-19 handed in → R-12.
+- 2026-10-22 R-12 fail: T-19 conflicts with dev in ops.rs imports (T-18 merged after the cut). T-19 → rework (runtime M-2): merge origin/dev, resolve; doc comment says doorbell ops only (decision: other kinds later). New lane rule: check `merge-tree` before every hand-in (L-27). T-16 rework handed in → R-9 round 2 (resume gear-r16's session).
+- 2026-10-22 R-9 round 2 pass. Merged T-16 + review; workspace green. T-17 → ready (T-13, T-16 merged). The round-2 `done` did not ring (event keyed without the round) → watcher keys review events on the round.
+- 2026-10-22 T-20 handed in → R-13. start-reviewer.sh now refuses a branch that does not merge into dev (L-27).
