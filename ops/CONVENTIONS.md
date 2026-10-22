@@ -9,8 +9,8 @@
 ## 分支（GitHub Flow）
 
 - 只有 `main` 一条长期分支，永远可编译、测试全过。
-- 每个任务一个短命分支，命名 `t<n>-<主题>`（如 `t1-store`），由舰长从最新 `main` 切好放进你的 worktree。
-- 舰长审完合回 `main` 并删除分支；下一个任务在同一 worktree 里从新 `main` 切新分支。
+- 每个任务一个短命分支，命名 `t<n>-<主题>`（如 `t1-store`）。舰长用 `herdr worktree create --branch <分支> --base main` 建 worktree，路径由 Herdr 决定：`/Volumes/Data/.herdr-worktrees/gear/<分支>`。
+- 舰长审完合回 `main`，用 `herdr worktree remove` 收掉 worktree 并删除分支；下一个任务再建新的。
 - 你不合并、不 rebase、不 push。
 
 ## 硬规则
