@@ -585,6 +585,60 @@ mod tests {
 /// A pending newer contract version is appended as `## Pending update: v<m>`.
 /// Missing task → `NoTarget`. Read-only.
 pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
-    let _ = (tx, project, task);
-    todo!("T-53")
+    let row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+
+    // The seat's open attempt for this task fixes the contract version the
+    // packet renders from; without one the task's current version applies.
+    let mut adopted = row.contract_version;
+    let mut attempt_arg = "<n>".to_string();
+    if let Some(lane) = &row.lane {
+        let seat_id = format!("{project}:{lane}");
+        if let Some(open) = tx
+            .open_attempts_of_seat(&seat_id)?
+            .into_iter()
+            .filter(|candidate| candidate.task == task)
+            .last()
+        {
+            adopted = open.adopted_version;
+            attempt_arg = open.n.to_string();
+        }
+    }
+    let contract = tx.get_contract(project, task, adopted)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("task {task} has no contract v{adopted}"),
+        )
+    })?;
+
+    let mut text = String::new();
+    text.push_str(&format!("# {task} — {}\n", contract.goal));
+    text.push_str(&format!(
+        "Lane: {} · Contract: v{} · State: {}\n",
+        row.lane.as_deref().unwrap_or("-"),
+        adopted,
+        row.state.as_str()
+    ));
+    text.push_str(&format!("\n## Goal\n{}\n", contract.goal));
+    text.push_str(&format!("\n## Acceptance\n{}\n", contract.accept));
+    text.push_str("\n## Evidence\n");
+    for file in &contract.evidence_files {
+        text.push_str(&format!("{file}\n"));
+    }
+    if let Some(minutes) = contract.evidence_due_min {
+        text.push_str(&format!("Due: {minutes} minutes\n"));
+    }
+    text.push_str("\n## Report\n");
+    text.push_str("gear send --kind progress \"…\"\n");
+    text.push_str(&format!(
+        "gear send --kind result --task {task} --attempt {attempt_arg} --contract {adopted} --candidate <commit> \"Report: <path>\"\n"
+    ));
+    if row.contract_version > adopted {
+        text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
+    }
+    Ok(text)
 }
