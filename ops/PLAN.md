@@ -51,7 +51,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | done | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
-| T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | waiting | — |
+| T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | verifying | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -139,6 +139,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-50 | r53 | `review/t53` | review T-53 (branch `data/t53-task-packet`) — temp reviewer gear-r53 on seat (session ses_e9c1a46d1ffeG9DHAh7yiHz4Ln) | done | — |
 | R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat (session ses_e9c1612e6ffefZ8kCK0yBG7WZv) | done | — |
 | R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat | running | — |
+| R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -271,3 +272,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Found: `gear run` used an empty profile map → every seat fail-closed, nothing dispatched in a real run. T-56 (builtin profiles) ready. Packet template made generic.
 - 2026-10-22 R-50 pass; T-53 merged (task packet rendering); T-54 ready. T-55 question (stale T-36 contract) answered M-5.
 - 2026-10-22 **Milestone: slice-2 work-loop acceptance passes on dev** (`slice2_dispatch::full_work_loop` un-ignored; slice-1 still 7/7). R-51 pass; T-49 merged. T-56 → R-52.
+- 2026-10-22 T-55 → R-53.
