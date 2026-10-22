@@ -175,7 +175,11 @@ fn run(cli: Cli) -> GearResult<()> {
         None => cmd_home(cli.show.as_deref(), cli.diff, cli.all, cli.json),
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
-        Some(Cmd::Plan { op }) => Err(not_yet("plan (slice 2)")),
+        Some(Cmd::Plan { op }) => match op {
+            PlanOp::Apply { path, keep, next, request_id } => {
+                cmd_plan(path, keep, next, request_id, cli.json)
+            }
+        },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op }) => Err(not_yet("admin (slice 3)")),
     }
@@ -357,6 +361,92 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     Ok(())
 }
 
+/// `gear plan apply` glue: env, store, Herdr, the announced request id, print.
+fn cmd_plan(
+    path: Option<std::path::PathBuf>,
+    keep: Option<String>,
+    next: Option<String>,
+    request_id: Option<String>,
+    json: bool,
+) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let request_id = announce_request_id(request_id);
+    let out = run_plan(
+        &mut store,
+        &env,
+        &mut herdr,
+        path.as_deref(),
+        keep,
+        next,
+        &request_id,
+        now_ts(),
+        json,
+    )?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear plan apply` body, over injected state: read the draft, parse it and
+/// apply it as the captain (design/05).
+fn run_plan(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    path: Option<&std::path::Path>,
+    keep: Option<String>,
+    next: Option<String>,
+    request_id: &str,
+    now: i64,
+    json: bool,
+) -> GearResult<String> {
+    if keep.is_some() || next.is_some() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            "--keep/--next (review conclusions) are not in slice 2".to_string(),
+        ));
+    }
+    let Some(path) = path else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            "give the draft path: gear plan apply <path>".to_string(),
+        ));
+    };
+    let text = std::fs::read_to_string(path).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read {}: {e}", path.display()),
+        )
+    })?;
+    let draft = gear_app::draft::parse(&text)?;
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
+    if json {
+        return serde_json::to_string(&result).map_err(json_error);
+    }
+    Ok(render_apply(&result))
+}
+
+/// One line per item of an apply: version, created, contract changes, the
+/// tasks the draft did not mention, and the verdicts settled.
+fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
+    let mut lines = vec![format!("plan version {}", result.version)];
+    for id in &result.created {
+        lines.push(format!("created {id}"));
+    }
+    for (id, version) in &result.contract_changed {
+        lines.push(format!("contract {id} v{version}"));
+    }
+    for id in &result.not_mentioned {
+        lines.push(format!("not mentioned {id}"));
+    }
+    for settled in &result.settled {
+        lines.push(format!("settled {settled}"));
+    }
+    lines.join("\n")
+}
+
 /// `gear send` body, over injected state (the command itself only wires this
 /// to the process environment, the socket and the store).
 fn run_send(
@@ -370,7 +460,6 @@ fn run_send(
 ) -> GearResult<String> {
     reject_unsupported(&[
         ("--need", c.need.is_some()),
-        ("--candidate", c.candidate.is_some()),
         ("--preempted", c.preempted.is_some()),
         ("--saved", c.saved.is_some()),
     ])?;
@@ -380,7 +469,8 @@ fn run_send(
         task: c.task.clone(),
         attempt: c.attempt,
         contract: c.contract,
-        candidate: None,
+        // A result's candidate (T-45): the commit or ref handed in.
+        candidate: c.candidate.clone(),
         about: c.about.clone(),
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
@@ -735,7 +825,7 @@ mod tests {
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
     use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
-    use gear_store::{testing, Store};
+    use gear_store::{testing, Store, TaskRow};
     use std::collections::BTreeMap;
 
 
@@ -843,9 +933,8 @@ mod tests {
     fn unsupported_flag_is_bad_format() {
         // Every flag whose behaviour is slice 2+ is rejected by name, never
         // silently dropped.
-        let flags: [(&str, fn(&mut SendCmd)); 4] = [
+        let flags: [(&str, fn(&mut SendCmd)); 3] = [
             ("--need", |c| c.need = Some("a decision".into())),
-            ("--candidate", |c| c.candidate = Some("T-2".into())),
             ("--preempted", |c| c.preempted = Some("T-3".into())),
             ("--saved", |c| c.saved = Some("branch".into())),
         ];
@@ -859,6 +948,136 @@ mod tests {
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
             assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
         }
+    }
+
+    /// Write `text` to a unique temp file and return its path.
+    fn write_draft(text: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir()
+            .join(format!("gear-draft-{}-{nanos}.md", std::process::id()));
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn plan_draft() -> String {
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+            .to_string()
+    }
+
+    #[test]
+    fn plan_apply_creates_tasks() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft());
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        assert!(out.contains("created T-1"), "{out}");
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    #[test]
+    fn plan_apply_without_path_is_bad_format() {
+        let (mut store, mut herdr) = world();
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            None,
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("draft path"), "{}", err.detail);
+    }
+
+    #[test]
+    fn keep_is_not_in_slice_2() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft());
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            Some("V-1".into()),
+            Some("+10m".into()),
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("not in slice 2"), "{}", err.detail);
+    }
+
+    #[test]
+    fn send_candidate_reaches_mail() {
+        let (mut store, mut herdr) = world();
+        // A started attempt on T-7, so a result can be submitted.
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-7".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    updated: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let mut c = send_cmd("result");
+        c.task = Some("T-7".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc123".into());
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "done, see abc123".into(),
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("Delivered to p:captain"), "{out}");
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
     }
 
     #[test]
