@@ -2,7 +2,7 @@
 
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 
 /// Reason stored with an op that the engine found Executing after a restart.
@@ -245,12 +245,16 @@ pub fn confirm_pending(
         let mut flagged: Vec<String> = Vec::new();
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
-                if op.kind != OpKind::Doorbell {
-                    // Slice 1 settles doorbells; the other kinds have their
-                    // own evidence rules.
-                    continue;
-                }
-                if let Some(view_ts) = shown_in_a_view(tx, &op)? {
+                let evidence = match op.kind {
+                    // A doorbell is proven by the message ids it carried.
+                    OpKind::Doorbell => shown_in_a_view(tx, &op)?,
+                    // A delivery is proven by the task/attempt it announced.
+                    OpKind::Deliver => shown_delivery(tx, &op)?,
+                    // Onboard/release/title/notify have no evidence rule yet:
+                    // leave them completely alone — no budget, no flag (R-46).
+                    _ => continue,
+                };
+                if let Some(view_ts) = evidence {
                     require_transition(
                         state.can_transition(OpState::Confirmed),
                         "operation",
@@ -260,6 +264,10 @@ pub fn confirm_pending(
                     // design/08: confirm(op, evidence) — keep the pointer.
                     let evidence = format!("view {}/{} @ {view_ts}", op.seat, op.generation);
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
+                    if op.kind == OpKind::Deliver {
+                        // Design/06: the confirmed delivery starts the attempt.
+                        start_confirmed_attempt(tx, project, &op, now)?;
+                    }
                     confirmed.push(op.id.clone());
                     continue;
                 }
@@ -301,6 +309,37 @@ fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         .map(|view| view.ts))
 }
 
+/// The time of the view that shows the delivery's task and attempt, if any.
+/// Same window as a doorbell: same seat and generation, at or after `created`.
+fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(None);
+    };
+    let views = tx.views_since(&op.seat, op.generation, op.created)?;
+    Ok(views
+        .iter()
+        .find(|view| {
+            view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
+        })
+        .map(|view| view.ts))
+}
+
+/// A confirmed delivery starts its attempt: `Delivered` → `Started` and the
+/// task `Ready` → `Running`, in the same transaction (design/06).
+fn start_confirmed_attempt(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<()> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(());
+    };
+    let still_delivered = tx
+        .get_attempt(project, task, attempt)?
+        .map(|row| row.state == AttemptState::Delivered)
+        .unwrap_or(false);
+    if still_delivered {
+        gear_app::tasks::on_delivery_confirmed(tx, project, task, attempt, now)?;
+    }
+    Ok(())
+}
+
 /// On engine start: every Executing op becomes Unknown (the previous process
 /// died mid-call). Nothing is re-sent.
 ///
@@ -322,4 +361,57 @@ pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<(String, S
         }
         Ok(recovered)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::SeatRole;
+    use gear_store::testing;
+
+    const T0: i64 = 1_800_000_000;
+
+    /// An op in `Submitted` for `seat`, with the kind and payload given.
+    fn submitted_op(tx: &Tx<'_>, seat: &str, kind: OpKind) -> String {
+        let op = tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: seat.into(),
+                generation: 1,
+                kind,
+                task: None,
+                attempt: None,
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "x" }),
+                created: T0,
+            })
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0).unwrap();
+        op.id
+    }
+
+    #[test]
+    fn kinds_without_an_evidence_rule_are_left_untouched() {
+        // R-46: an Onboard op has no evidence rule yet, so confirm_pending must
+        // neither bump its budget nor flag its seat — it must skip it.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                submitted_op(tx, "p:heat", OpKind::Onboard);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
+
+        assert!(confirmed.is_empty());
+        assert!(flagged.is_empty(), "an op without a rule never flags its seat");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(op.check_budget, 0, "no budget is spent on it");
+    }
 }
