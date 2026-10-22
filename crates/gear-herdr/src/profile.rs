@@ -40,13 +40,56 @@ pub struct Profile {
 
 /// Flags present in the last `profile.tail_lines` lines of `tail`.
 /// Matching is literal substring per line (no regex). Pure function.
+///
+/// Only the tail window is inspected: an error that scrolled out of it is not
+/// a current fact. Empty markers are ignored (they would match every line).
 pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
-    todo!("T-herdr")
+    let lines: Vec<&str> = tail.lines().collect();
+    let start = lines.len().saturating_sub(profile.tail_lines as usize);
+    let window = &lines[start..];
+
+    let mut flags = BTreeSet::new();
+    for line in window {
+        if matches_any(&profile.busy_markers, line) {
+            flags.insert(ScreenFlag::Busy);
+        }
+        if matches_any(&profile.ratelimit_markers, line) {
+            flags.insert(ScreenFlag::RateLimit);
+        }
+        if matches_any(&profile.quota_markers, line) {
+            flags.insert(ScreenFlag::Quota);
+        }
+        if matches_any(&profile.auth_markers, line) {
+            flags.insert(ScreenFlag::Auth);
+        }
+    }
+    flags
 }
 
 /// Reject a prompt template that contains any marker of `profile`
 /// (old keeper incident: the nudge text tripped its own rate-limit detector).
 /// Returns the offending marker in the error.
 pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String> {
-    todo!("T-herdr")
+    let lists = [
+        ("busy", &profile.busy_markers),
+        ("ratelimit", &profile.ratelimit_markers),
+        ("quota", &profile.quota_markers),
+        ("auth", &profile.auth_markers),
+    ];
+    for (kind, markers) in lists {
+        for marker in markers {
+            if marker.is_empty() {
+                continue;
+            }
+            if template.contains(marker.as_str()) {
+                return Err(format!("template must not contain the {kind} marker: {marker}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Literal substring match of `line` against a marker list.
+fn matches_any(markers: &[String], line: &str) -> bool {
+    markers.iter().any(|m| !m.is_empty() && line.contains(m.as_str()))
 }
