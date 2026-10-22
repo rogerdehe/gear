@@ -1,0 +1,28 @@
+//! GEAR application layer: what each `gear` command does (design/03, /07, /13).
+//!
+//! Rules: commands only change data (one short transaction each, via
+//! `gear_store::Store::write` + `run_request`). Herdr is touched read-only, and
+//! only **before** the transaction (identity fingerprint). No side effects.
+//!
+//! Slice 1 (messaging loop): identity, mail::{send, reply, select_batch}, home.
+//! Slice 2 adds plan/tasks/verdicts.
+
+#![allow(unused_variables, dead_code)] // skeleton
+
+pub mod home;
+pub mod identity;
+pub mod mail;
+
+use gear_model::GearCtx;
+
+/// What a `gear` process knows about where it runs. Built once from the
+/// process environment by the CLI; constructed directly in tests.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Env {
+    /// Parsed `GEAR_CTX`; None for the user's own shell or unmanaged agents.
+    pub ctx: Option<GearCtx>,
+    /// `HERDR_PANE_ID`, used only as an extra consistency check.
+    pub pane_id: Option<String>,
+    /// `GEAR_ADMIN=1` (user-only commands).
+    pub admin: bool,
+}

@@ -1,0 +1,13 @@
+[package]
+name = "gear-herdr"
+version.workspace = true
+edition.workspace = true
+description = "GEAR's only door to Herdr: read-only observation + side-effecting actions, CLI profiles, and a scriptable fake for tests."
+
+[dependencies]
+board-herdr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+board-herdr = { workspace = true }

@@ -1,0 +1,65 @@
+[
+  {
+    "name": "bmad-loop",
+    "url": "https://github.com/bmad-code-org/bmad-loop.git",
+    "commit": "a5a8f09781e151eb5691f55d55316f47f9f16f1c",
+    "commit_time": "2026-10-17T23:01:29-07:00",
+    "local_checkout": "/tmp/orch-deep-research/bmad-loop"
+  },
+  {
+    "name": "bmad-loop-adapter-herdr",
+    "url": "https://github.com/pbean/bmad-loop-adapter-herdr.git",
+    "commit": "13306abd6d880f3bddb1419bcd39a0ae6bf33998",
+    "commit_time": "2026-07-26T22:39:14-07:00",
+    "local_checkout": "/tmp/orch-deep-research/bmad-loop-adapter-herdr"
+  },
+  {
+    "name": "captains-deck",
+    "url": "https://github.com/deimantasnork/captains-deck.git",
+    "commit": "058ff8af75b336ffdc8537b92c7e4825025be0f4",
+    "commit_time": "2026-10-16T23:02:56+03:00",
+    "local_checkout": "/tmp/orch-deep-research/captains-deck"
+  },
+  {
+    "name": "firstmate",
+    "url": "https://github.com/kunchenguid/firstmate.git",
+    "commit": "45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681",
+    "commit_time": "2026-10-18T07:20:17-07:00",
+    "local_checkout": "/tmp/orch-deep-research/firstmate"
+  },
+  {
+    "name": "herdr",
+    "url": "https://github.com/herdrdev/herdr.git",
+    "commit": "143bf5fd4781d164260c63fe28e7dc08054ad32f",
+    "commit_time": "2026-10-16T01:05:23+02:00",
+    "local_checkout": "/tmp/orch-deep-research/herdr"
+  },
+  {
+    "name": "herdr-board",
+    "url": "https://github.com/nelsonPires5/herdr-board.git",
+    "commit": "7a215a179acb4e098dd1c2971332497806309360",
+    "commit_time": "2026-10-14T10:56:38-03:00",
+    "local_checkout": "/tmp/orch-deep-research/herdr-board"
+  },
+  {
+    "name": "herdr-dispatch",
+    "url": "https://github.com/husniadil/herdr-dispatch.git",
+    "commit": "852f94150a5159b261ca0e932aa126fb1f24b7ff",
+    "commit_time": "2026-08-31T08:39:58+07:00",
+    "local_checkout": "/tmp/orch-deep-research/herdr-dispatch"
+  },
+  {
+    "name": "herdr-tasks",
+    "url": "https://github.com/husniadil/herdr-tasks.git",
+    "commit": "305c9ac978d3cdbafb07f15f031b9295a9a84be5",
+    "commit_time": "2026-08-30T15:02:38+07:00",
+    "local_checkout": "/tmp/orch-deep-research/herdr-tasks"
+  },
+  {
+    "name": "herdr-workboard",
+    "url": "https://github.com/Phoobobo/herdr-workboard.git",
+    "commit": "4ed467d4ff03b0d8c222e03271686c867d27f85a",
+    "commit_time": "2026-07-30T10:08:27+08:00",
+    "local_checkout": "/tmp/orch-deep-research/herdr-workboard"
+  }
+]

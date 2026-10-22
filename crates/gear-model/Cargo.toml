@@ -1,0 +1,9 @@
+[package]
+name = "gear-model"
+version.workspace = true
+edition.workspace = true
+description = "GEAR state model: enums, legal transitions, error codes, caller context. Pure, no I/O."
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
