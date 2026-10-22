@@ -42,8 +42,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
-| T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
-| T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
+| T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | verifying | — |
+| T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | verifying | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | done | — |
@@ -54,7 +54,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | rework | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | done | — |
-| T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | ready | — |
+| T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | verifying | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | ready | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-21 |
@@ -78,6 +78,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat (session ses_e9cad4a35ffec27oj5H7Z4AMDZ) | done | — |
 | R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | done | — |
 | R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat (session ses_e9ca9da55ffetpXMr32sRFk5gM) | done | — |
+| R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat | running | — |
+| R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat | running | — |
+| R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -137,3 +140,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-16 round 2 pass, R-19 pass. Merged T-17, T-23 + reviews; workspace green. slice1_messaging now fails only at `engine::tick` (T-4), which waits on T-21 alone.
 - 2026-10-22 R-18 fail (P1: private expects_agent with the wrong state set). T-21 → rework (runtime M-3). Re-reviews resume on the session's own seat (L-31).
 - 2026-10-22 data lowready → captain added `[models]` types (parse) + contract test `models_rules` (ignored for T-27); T-27 ready.
+- 2026-10-22 T-10 → R-20, T-22 → R-21, T-25 → R-22.
