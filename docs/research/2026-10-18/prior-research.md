@@ -1,245 +1,245 @@
-> 历史调研记录：其中固定 Codex 总负责人 / Claude 执行主管以及采用 Firstmate 为基础的推荐已撤回。当前结论见 [decision.md](decision.md)。此文件只保留当时源码观察与测试依据，不作为实施方案。
+> Historical research record: the fixed Codex overall-owner / Claude execution-lead arrangement and the recommendation to build on Firstmate have been withdrawn. The current conclusion is in [decision.md](decision.md). This file only preserves the source observations and test evidence from that time; it is not an implementation plan.
 
-# Herdr 多 Agent 持续交付调研与选型
+# Research and Selection for Herdr Multi-Agent Continuous Delivery
 
-调研日期：2026-10-18（America/Chicago）。源码以 [sources.lock.json](sources.lock.json) 中的 commit 固定。本文是选型和实施设计，未把任何插件接入现有生产会话。
+Research date: 2026-10-18 (America/Chicago). Sources are pinned by the commits in [sources.lock.json](sources.lock.json). This document is a selection and implementation design; no plugin was connected to an existing production session.
 
-**决策：复用 Firstmate 的队伍管理、消息、监督与恢复机制，复用 Herdr 运行环境，复用 Captain’s Deck 终端看板；BMAD 保留需求、设计、story 与验收规范。保留 Codex 作为总负责人，先配一名 Claude Code 常驻执行主管，执行主管管理异构执行者与临时审核者。开发范围限定为 BMAD 衔接、精确队列操作和必要的兼容修复。不从零开发调度运行时，也不把 bmad-loop 放在整个并行队伍的总控位置。**
+**Decision: reuse Firstmate's crew management, messaging, supervision, and recovery mechanisms; reuse the Herdr runtime environment; reuse the Captain’s Deck terminal board; BMAD retains requirements, design, story, and acceptance standards. Keep Codex as the overall owner, first pairing it with one resident Claude Code execution lead, who manages heterogeneous executors and temporary reviewers. Development scope is limited to BMAD bridging, precise queue operations, and necessary compatibility fixes. Do not build a scheduling runtime from scratch, and do not put bmad-loop in the master-control position of the whole parallel crew.**
 
-选型可以确定；生产可用性尚不能宣称。本机隔离测试暴露了失败和超时，必须作为上线门槛解决。源码测试证明的是机制，不证明某个真实模型永远不会停顿。最终应保证“未完成必有可恢复的记录、必有人或程序继续处理，失败必升级”，而非“每个任务必定无限自动成功”。
+The selection can be settled; production readiness cannot yet be claimed. Isolated testing on this machine exposed failures and timeouts, which must be resolved as a go-live gate. Source tests prove mechanisms; they do not prove that a real model will never stall. The final guarantee should be "anything unfinished always has a recoverable record, always has a person or program continuing to handle it, and failures always escalate", not "every task will always succeed automatically without limit".
 
-**1. 用什么标准选型**
+**1. Selection criteria**
 
-用户的核心诉求不是必须保留 Bash 脚本，也不是必须一直使用同一个执行会话，而是：
+The user's core demand is neither that the Bash scripts must be kept, nor that the same execution session must always be used, but rather:
 
-1. 已授权任务不会因模型结束一轮而无人继续。
-2. 主控不承担每个执行者的普通催办、重复状态问询和常规修复对话。
-3. 需求能够拆成有验收条件的任务，形成可查看、可调整的队列。
-4. 依赖出现后能调整派工，其他可开展的工作继续。
-5. 原生 Codex、Claude Code、OpenCode、Grok、Pi 等可混用。
-6. SSH 服务器上运行，终端中查看与控制；关掉看板不应停止任务。
-7. 常驻管理职责与临时执行/审核会话有不同的生命周期。
-8. BMAD 产物与研发规范持续保留，而不是迁移后丢失。
+1. Authorized tasks are not left with no one continuing just because the model ended a turn.
+2. The controller does not bear routine nagging of each executor, repeated status inquiries, or routine fix conversations.
+3. Requirements can be broken into tasks with acceptance conditions, forming a queue that can be viewed and adjusted.
+4. When dependencies appear, dispatch can be adjusted while other workable items continue.
+5. Native Codex, Claude Code, OpenCode, Grok, Pi, etc. can be mixed.
+6. Runs on an SSH server, viewed and controlled from a terminal; closing the board should not stop tasks.
+7. Resident management duties and temporary execution/review sessions have different lifecycles.
+8. BMAD artifacts and development standards are retained continuously, not lost after migration.
 
-评价顺序：持续推进与恢复 > 主控负担 > 异构与并发 > 状态正确性 > BMAD 接入 > 队列交互 > 安装量。一个好看的看板不能弥补执行闭环缺失；一个支持无人值守的串行 story 引擎也不能自动变成十线调度器。
+Evaluation order: continuous progress and recovery > controller burden > heterogeneity and concurrency > state correctness > BMAD integration > queue interaction > install footprint. A nice-looking board cannot make up for a missing execution loop; an unattended serial story engine cannot automatically become a ten-lane scheduler either.
 
-**2. 前两轮结论的纠正**
+**2. Corrections to the previous two rounds' conclusions**
 
-- BMAD Loop 已有外部 Herdr 后端：[pbean/bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr)。此前“未找到 Herdr 后端，因此需要自己适配”的判断不完整。
-- Herdr Dispatch 确实处理已经认领且处于 doing 的 idle worker。不能只把它描述成“催未认领任务”。
-- Firstmate 不是普通看板附件。它已有长期主管、异构 worker、持久收件箱、消息确认、监督、恢复、隔离工作树、回收与远程主管机制，应该是主要候选。
-- 上一轮查看的网页缓存与当前仓库不完全同步。例如当前 bmad-loop 0.13.2 已含 BMAD v7 ticket-tree 模式。选型以本次固定源码为准，不混用搜索缓存的旧版本结论。
+- BMAD Loop already has an external Herdr backend: [pbean/bmad-loop-adapter-herdr](https://github.com/pbean/bmad-loop-adapter-herdr). The earlier judgment "no Herdr backend found, so we need to write our own adapter" was incomplete.
+- Herdr Dispatch does handle idle workers that have already claimed a task and are in doing. It cannot be described only as "nagging unclaimed tasks".
+- Firstmate is not an ordinary board add-on. It already has a long-lived lead, heterogeneous workers, a persistent inbox, message acknowledgment, supervision, recovery, isolated worktrees, reclamation, and a remote lead mechanism; it should be the primary candidate.
+- The web cache viewed in the previous round was not fully in sync with the current repositories. For example, the current bmad-loop 0.13.2 already includes the BMAD v7 ticket-tree mode. Selection is based on the sources pinned this time; old-version conclusions from search caches are not mixed in.
 
-**3. 候选方案的实际边界**
+**3. Actual boundaries of the candidates**
 
-| 方案 | 源码/文档确认的能力 | 对本需求的决定性不足 | 选型 |
+| Option | Capabilities confirmed by source/docs | Decisive shortcomings for this need | Selection |
 |---|---|---|---|
-| 原有四个脚本 | idle/done 续做、冷却、hold/mute、部分限流判断、汇报约定 | 没有统一任务事实、完成验收和持久事件确认；项目配置硬编码 | 作为故障案例和需求来源，不继续扩成总平台 |
-| Herdr 本体 | 原生终端、Agent 状态、启动/提示/读取、工作区、插件入口 | 管进程与会话，不负责判定业务任务完成 | 保留运行底座 |
-| hassox/herdr-kanban | pane 即卡片、列触发器、conductor | pane 生命周期与任务生命周期耦合，缺完整任务恢复闭环 | 不作为底座 |
-| nelsonPires5/herdr-board | SQLite、TUI、卡片/运行历史、自动列流水线、异构启动、并发队列 | idle/done 未提交结果进入 awaiting；缺总控减负和长期主管层 | 不作为本次主底座 |
-| husniadil/herdr-tasks + herdr-dispatch | 依赖就绪、任务租约、证据与审核、自动 worker、doing/idle 催办 | 两种可接收输入状态处理不一致；doing 催办无相应次数上限；provider 路径特化；审核/合入留给外部 | 不采用其总调度；参考任务租约和纯决策测试 |
-| Phoobobo/herdr-workboard | 工作流与角色运行记录、TUI、幂等状态转移 | 无常驻执行引擎，不能独立解决停顿 | 不采用 |
-| bmad-loop + Herdr adapter | 产物验证、修复重试、独立审核、恢复、停滞唤醒、BMAD v6/v7 接入 | 当前单个运行串行；并发设置被压成 1；外部 adapter 存在接口漂移；缺多队伍动态调度 | 保留为独立串行批处理选项，不叠加到默认队伍 |
-| Firstmate + Captain’s Deck | 队伍/主管、异构 worker、持久消息、监督、恢复、回收、终端总览 | 工具链较多；Codex 主控监督能力有边界；精确队列编辑和 BMAD 双向衔接需补 | 采用其机制与核心，不宣称开箱完全满足 |
+| Original four scripts | idle/done continuation, cooldown, hold/mute, partial rate-limit detection, reporting conventions | No unified task facts, completion acceptance, or persistent event acknowledgment; project config hard-coded | Used as failure cases and a source of requirements; not extended further into a general platform |
+| Herdr itself | Native terminal, Agent state, start/prompt/read, workspaces, plugin entry points | Manages processes and sessions; not responsible for judging business task completion | Kept as the runtime base |
+| hassox/herdr-kanban | pane as card, column triggers, conductor | Pane lifecycle coupled to task lifecycle; lacks a complete task recovery loop | Not used as the base |
+| nelsonPires5/herdr-board | SQLite, TUI, card/run history, automatic column pipelines, heterogeneous launch, concurrent queue | Uncommitted idle/done results go to awaiting; lacks controller offloading and a long-lived lead layer | Not the main base this time |
+| husniadil/herdr-tasks + herdr-dispatch | Dependency readiness, task leases, evidence and review, automatic workers, doing/idle nagging | The two input-receivable states are handled inconsistently; doing nagging has no corresponding count cap; provider paths specialized; review/merge left to external | Its overall scheduling not adopted; task leases and pure decision tests used as reference |
+| Phoobobo/herdr-workboard | Workflow and role run records, TUI, idempotent state transitions | No resident execution engine; cannot solve stalls on its own | Not adopted |
+| bmad-loop + Herdr adapter | Artifact verification, fix retries, independent review, recovery, stall wakeup, BMAD v6/v7 integration | A single run is currently serial; the concurrency setting is clamped to 1; the external adapter has interface drift; lacks multi-crew dynamic scheduling | Kept as a standalone serial batch option, not layered onto the default crew |
+| Firstmate + Captain’s Deck | Crew/lead, heterogeneous workers, persistent messages, supervision, recovery, reclamation, terminal overview | Many tools in the chain; Codex controller supervision capability has limits; precise queue editing and two-way BMAD bridging need to be added | Adopt its mechanisms and core, without claiming it fully satisfies the need out of the box |
 
-官方项目：[Herdr](https://github.com/herdrdev/herdr)、[Herdr Board](https://github.com/nelsonPires5/herdr-board)、[Herdr Tasks](https://github.com/husniadil/herdr-tasks)、[Herdr Dispatch](https://github.com/husniadil/herdr-dispatch)、[Firstmate](https://github.com/kunchenguid/firstmate)、[Captain’s Deck](https://github.com/deimantasnork/captains-deck)。
+Official projects: [Herdr](https://github.com/herdrdev/herdr), [Herdr Board](https://github.com/nelsonPires5/herdr-board), [Herdr Tasks](https://github.com/husniadil/herdr-tasks), [Herdr Dispatch](https://github.com/husniadil/herdr-dispatch), [Firstmate](https://github.com/kunchenguid/firstmate), [Captain’s Deck](https://github.com/deimantasnork/captains-deck).
 
-**4. 四项影响选型的源码证据**
+**4. Four pieces of source evidence that affect the selection**
 
-**4.1 Herdr Board 能检测停止，但默认不恢复未完成任务。**
+**4.1 Herdr Board can detect stopping, but by default does not recover unfinished tasks.**
 
-`crates/board-core/src/engine/signals.rs::decide_signal` 把 `Done` 和 `IdleExpired` 映射到 `CardStatus::Awaiting`，发出通知；`lifecycle.rs::decide_lifecycle` 对 Awaiting 的 timeout 返回 `TimeoutPaused`。这是明确的产品策略，并非漏看了某个 keep-alive 设置。结果是任务可能仍需外部主管处理。
+`crates/board-core/src/engine/signals.rs::decide_signal` maps `Done` and `IdleExpired` to `CardStatus::Awaiting` and emits a notification; `lifecycle.rs::decide_lifecycle` returns `TimeoutPaused` for an Awaiting timeout. This is an explicit product policy, not a keep-alive setting we overlooked. The result is that tasks may still need handling by an external lead.
 
-[固定源码](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/crates/board-core/src/engine/signals.rs)
+[Pinned source](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/crates/board-core/src/engine/signals.rs)
 
-**4.2 Herdr Dispatch 的做了一半续跑机制仍有实际缺口。**
+**4.2 Herdr Dispatch's half-done continuation mechanism still has real gaps.**
 
-`internal/decide/decide.go::Decide` 只在 `task.Status == "doing" && agentStatus == "idle"` 时催办，`done` 没有同等分支。`internal/loop/loop.go` 将读到的状态原样写入快照，没有在这里把 done 归一化成 idle。doing 分支也没有使用 todo 分支的 `MaxPrompts` 上限。
+`internal/decide/decide.go::Decide` only nags when `task.Status == "doing" && agentStatus == "idle"`; `done` has no equivalent branch. `internal/loop/loop.go` writes the state it reads into the snapshot as-is and does not normalize done into idle there. The doing branch also does not use the todo branch's `MaxPrompts` cap.
 
-本次把未修改的纯决策包复制到隔离目录，增加一个探针：任务 doing、100 次历史提示、配置上限 2。实际结果：idle 仍返回 Prompt；done、blocked、unknown、working 均不返回动作。测试文件与输出见 [探针](evidence/dispatch_probe_test.go)、[结果](evidence/dispatch-probe.log)。这不等于证明线上所有 done 都会永远停住，但足以否定“默认已正确覆盖 Herdr 所有正常停轮状态”。
+This pass copied the unmodified pure decision package into an isolated directory and added a probe: task doing, 100 historical prompts, configured cap 2. Actual result: idle still returns Prompt; done, blocked, unknown, and working all return no action. Test file and output: [probe](evidence/dispatch_probe_test.go), [result](evidence/dispatch-probe.log). This does not prove that every done in production will stall forever, but it is enough to refute "the default already correctly covers all of Herdr's normal turn-end states".
 
-[固定源码](https://github.com/husniadil/herdr-dispatch/blob/852f94150a5159b261ca0e932aa126fb1f24b7ff/internal/decide/decide.go)
+[Pinned source](https://github.com/husniadil/herdr-dispatch/blob/852f94150a5159b261ca0e932aa126fb1f24b7ff/internal/decide/decide.go)
 
-**4.3 BMAD Loop 不是十线并行引擎。**
+**4.3 BMAD Loop is not a ten-lane parallel engine.**
 
-`src/bmad_loop/policy.py` 明确执行 `max_parallel=min(requested_parallel, 1)`。直接加载 `max_parallel = 10`，实测结果为 1；上游也有 `test_scm_max_parallel_clamped_to_one`。`docs/FEATURES.md` 把 Parallel units 标成 planned。
+`src/bmad_loop/policy.py` explicitly executes `max_parallel=min(requested_parallel, 1)`. Loading `max_parallel = 10` directly, the measured result is 1; upstream also has `test_scm_max_parallel_clamped_to_one`. `docs/FEATURES.md` marks Parallel units as planned.
 
-可以在隔离仓库里运行多个 loop，但那会额外引入任务唯一分配、story 状态合并、分支合入和跨运行依赖管理。那已经是在写并行总调度器，不能称为配置一下就有十线能力。更不能在同一个工作副本上开十个 loop，寄希望于状态文件写锁等同于任务唯一认领。
+Multiple loops can be run in isolated repositories, but that additionally introduces unique task assignment, story state merging, branch merging, and cross-run dependency management. That is already writing a parallel master scheduler; it cannot be called getting ten-lane capability with a bit of configuration. Even less can ten loops be started on the same working copy, hoping that a state file write lock equals unique task claiming.
 
-[固定源码](https://github.com/bmad-code-org/bmad-loop/blob/a5a8f09781e151eb5691f55d55316f47f9f16f1c/src/bmad_loop/policy.py)、[能力说明](https://github.com/bmad-code-org/bmad-loop/blob/a5a8f09781e151eb5691f55d55316f47f9f16f1c/docs/FEATURES.md)
+[Pinned source](https://github.com/bmad-code-org/bmad-loop/blob/a5a8f09781e151eb5691f55d55316f47f9f16f1c/src/bmad_loop/policy.py), [Capability notes](https://github.com/bmad-code-org/bmad-loop/blob/a5a8f09781e151eb5691f55d55316f47f9f16f1c/docs/FEATURES.md)
 
-**4.4 Firstmate 的监督并非所有主控 CLI 都相同。**
+**4.4 Firstmate's supervision is not the same for every controller CLI.**
 
-- Pi：同进程独立 supervision conversation，任务级常规处理可不占主对话。
-- Claude/Cursor：supervision host 可在有人在场时处理常规事件。
-- Codex：默认前台 checkpoint，期间不能推理；host 在 attended 状态是 pass-through。`quiet` 的 daemon 会过滤/批处理事件，但不能冒充具有同样判断能力的独立监督会话。
-- Firstmate 的纯 Bash watcher 不消耗模型 token；判断如何修复、重排任务和重新派发仍可能消耗主管模型 token。不能宣传“整个编排零 token”。
+- Pi: an independent supervision conversation in the same process; task-level routine handling need not occupy the main conversation.
+- Claude/Cursor: the supervision host can handle routine events while someone is present.
+- Codex: by default a foreground checkpoint, during which it cannot reason; the host is pass-through in the attended state. The `quiet` daemon filters/batches events, but cannot pose as an independent supervision session with the same judgment capability.
+- Firstmate's pure-Bash watcher consumes no model tokens; judging how to fix, reordering tasks, and redispatching may still consume lead model tokens. We cannot advertise "the whole orchestration costs zero tokens".
 
-因此本方案不赌原生 Codex 已有同等后台监督能力，而使用已有 secondmate 角色把十条执行线下沉到一名 Claude 主管。Codex 保留全局判断和用户沟通，不直接消费每个 worker 的普通停轮事件。
+Therefore this plan does not bet that native Codex already has equivalent background supervision; instead it uses the existing secondmate role to push the ten lanes down to one Claude lead. Codex keeps global judgment and user communication and does not directly consume each worker's routine turn-end events.
 
-[监督 host](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-host.md)、[Codex 协议](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-protocols/codex.md)、[Pi 分支](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/pi-supervision-branch.md)
+[Supervision host](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-host.md), [Codex protocol](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-protocols/codex.md), [Pi branch](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/pi-supervision-branch.md)
 
-**5. 推荐的组织方式与控制权**
+**5. Recommended organization and control authority**
 
 ```text
-用户
-  ↕ 需求、关键决策、交付结果
-Codex 总负责人（Firstmate primary）
-  ├─ 持有 PRD/架构意图、任务拆解、优先级与变更权
-  └─ 一名 Claude Code 执行主管（Firstmate persistent secondmate）
-       ├─ 同一执行 home 的任务队列与监督记录
-       ├─ Codex / Claude / OpenCode / Grok / Pi 临时执行者
-       ├─ 独立审核和验证会话
-       └─ Herdr panes + 隔离 worktrees
+User
+  ↕ requirements, key decisions, delivery results
+Codex overall owner (Firstmate primary)
+  ├─ holds PRD/architecture intent, task breakdown, priority, and change authority
+  └─ one Claude Code execution lead (Firstmate persistent secondmate)
+       ├─ task queue and supervision records for the same execution home
+       ├─ Codex / Claude / OpenCode / Grok / Pi temporary executors
+       ├─ independent review and verification sessions
+       └─ Herdr panes + isolated worktrees
 
-Captain’s Deck 显示各 home 的现有事实，不另存一份任务状态。
+Captain’s Deck displays the existing facts of each home; it does not keep a separate copy of task state.
 ```
 
-第一阶段只设一名执行主管，不机械地分十个组长。它的 charter 明确：在已授权任务与技术约束内持续推进；普通停轮、brief 已回答的问题、测试失败、断线恢复由自己处理；需求变化、接口语义冲突、预算耗尽、不可自行决定的事项才上报 Codex。
+Phase one has only one execution lead; it does not mechanically split into ten team leads. Its charter is explicit: keep advancing within authorized tasks and technical constraints; handle routine turn-ends, questions already answered in the brief, test failures, and disconnect recovery itself; escalate to Codex only for requirement changes, interface semantics conflicts, exhausted budgets, and matters it cannot decide itself.
 
-这增加一个长期模型会话，换来主控上下文隔离与批量汇报。它不是免费；应实测每完成一个任务的监督 token、总耗时与人工介入次数。小项目只有一两项短任务时可由主控直接监督，避免多一层的固定成本；这不改变十线项目的推荐拓扑。
+This adds one long-lived model session in exchange for controller context isolation and batched reporting. It is not free; the supervision tokens per completed task, total elapsed time, and number of human interventions should be measured. For small projects with only one or two short tasks, the controller can supervise directly, avoiding the fixed cost of an extra layer; this does not change the recommended topology for ten-lane projects.
 
-Firstmate 已有 `data/secondmates.md`、charter、home seed、`config/secondmate-harness`、跨 home backlog handoff、路由回复和恢复流程。不需要自己实现“组长系统”。同机和服务器部署优先让整个 home 靠近代码；用户 SSH 到服务器使用 TUI。跨机器时采用整个 secondmate home 的远程路由，而不是让本地后台进程隔着 SSH 逐条轮询所有 worker。
+Firstmate already has `data/secondmates.md`, a charter, home seed, `config/secondmate-harness`, cross-home backlog handoff, routed replies, and recovery flow. There is no need to implement a "team lead system" ourselves. For same-machine and server deployments, prefer keeping the whole home close to the code; the user SSHes into the server and uses the TUI. Across machines, use remote routing of the whole secondmate home, rather than having a local background process poll every worker one by one over SSH.
 
-**单一控制权必须严格保持：**总负责人定策略，执行 home 对其任务负责，worker 只能推进自己被分配的工作。总负责人调整正在执行的事项时，通过主管 steering 路径处理，不同时直接向该 worker 发第二套指令。主管接收更高层变更后更新 brief，并留下变更与执行确认。
+**Single control authority must be strictly maintained:** the overall owner sets strategy, the execution home is responsible for its tasks, and workers may only advance the work assigned to them. When the overall owner adjusts an in-progress item, it goes through the lead's steering path, without simultaneously sending a second set of instructions directly to that worker. After receiving a higher-level change, the lead updates the brief and leaves a record of the change and execution acknowledgment.
 
-重要限制：当前 Firstmate 将 `local-only` 项目留在 primary home，不能在不修改规则的情况下声称全部项目都可交给 secondmate。需要本地直合、不走 PR 的项目，应使用单 home 的 Claude 执行负责人加外部 Codex 策略输入，或把 local-only secondmate 支持作为明确扩展；默认落地选择 PR 交付，不偷偷改变用户原项目的交付方式。
+Important limitation: current Firstmate keeps `local-only` projects in the primary home; without modifying the rules, we cannot claim all projects can be handed to a secondmate. Projects that need direct local merges without PRs should use a single-home Claude execution owner plus external Codex strategy input, or make local-only secondmate support an explicit extension; the default rollout chooses PR delivery, and does not quietly change the delivery method of the user's original projects.
 
-**6. 一项任务具体怎样持续做下去**
+**6. How a task actually keeps going**
 
-以“实现 T-21，跑测试，提交审核”为例：
+Take "implement T-21, run tests, submit for review" as an example:
 
-1. **准备**：任务记录包含 story 链接、输入版本、变更范围、验收命令、预期产物和依赖；依赖没满足不派发。
-2. **派发**：Firstmate `fm-spawn.sh` 创建隔离 worktree 与 Herdr endpoint，并在启用 tasks-axi 时同步 In flight 状态。任务不是派出后才靠主控记住。
-3. **普通停止**：worker 写两行后结束一轮。watcher 根据执行状态、任务声明、产物/活跃证据判断是否需要唤醒；可行动事件进入持久 wake queue。执行主管处理，不让用户先发现。
-4. **续做**：主管通过 `fm-send.sh` 的持久 steering inbox 给出具体剩余工作。未确认的消息保留、重响，不能只凭一次 CLI 返回 0 当作任务已接收。
-5. **纠偏与恢复**：先检查 brief 与当前产物；必要时定向纠正；确实卡死再通过 `fm-control.sh relaunch --note ...` 在原工作树替换会话。旧会话停止和新会话启动需核实，不能两个执行者同时写同一工作树。
-6. **验证**：预配置测试/构建与独立审核验证产物；一个“完成”回复只是声明。分支、验证结果、审核结果与待交付项一致才可进入交付。
-7. **失败处理**：重复修复无进展、重启也失败，保留成果与原因，形成阻塞/失败记录并上报。可开展的其他任务继续。
-8. **回收与下一项**：交付条件满足后通过 `fm-teardown.sh` 回收自己拥有的会话/工作树；执行主管重新检查 ready 队列及容量，继续派发。
+1. **Preparation**: the task record contains the story link, input version, change scope, acceptance commands, expected artifacts, and dependencies; it is not dispatched if dependencies are unmet.
+2. **Dispatch**: Firstmate `fm-spawn.sh` creates an isolated worktree and Herdr endpoint, and syncs the In flight status when tasks-axi is enabled. A task does not rely on the controller remembering it after dispatch.
+3. **Routine stop**: the worker writes two lines and ends a turn. The watcher judges whether a wakeup is needed based on execution state, task declarations, and artifact/activity evidence; actionable events enter a persistent wake queue. The execution lead handles it, rather than letting the user discover it first.
+4. **Continuation**: the lead gives the specific remaining work via `fm-send.sh`'s persistent steering inbox. Unacknowledged messages are retained and re-rung; a single CLI return of 0 cannot be taken as the task having been received.
+5. **Correction and recovery**: first check the brief and current artifacts; correct in a targeted way if necessary; if truly stuck, replace the session in the original worktree via `fm-control.sh relaunch --note ...`. Stopping the old session and starting the new one must be verified; two executors must not write the same worktree at the same time.
+6. **Verification**: preconfigured tests/builds and independent review verify the artifacts; a "done" reply is only a claim. Only when the branch, verification results, review results, and pending deliverables agree can it proceed to delivery.
+7. **Failure handling**: if repeated fixes make no progress and restart also fails, preserve the work and the reason, create a blocked/failed record, and escalate. Other workable tasks continue.
+8. **Reclamation and next item**: once delivery conditions are met, reclaim the sessions/worktrees it owns via `fm-teardown.sh`; the execution lead rechecks the ready queue and capacity and continues dispatching.
 
-其中 2、4、5、8 的工具与数据通道已经存在；3 有 watcher 和 supervisor 协议；6 复用现有交付 gate；任务语义是否满足、何时换活仍需要主管判断。我们不声称所有策略已经是纯程序自动判定。
+Of these, the tools and data channels for 2, 4, 5, and 8 already exist; 3 has the watcher and supervisor protocol; 6 reuses the existing delivery gate; whether task semantics are satisfied and when to switch work still requires the lead's judgment. We do not claim that all policies are already pure programmatic automatic decisions.
 
-[恢复流程](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/.agents/skills/stuck-crewmate-recovery/SKILL.md)、[控制事务](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/agent-control.md)
+[Recovery flow](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/.agents/skills/stuck-crewmate-recovery/SKILL.md), [Control transactions](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/agent-control.md)
 
-**7. BMAD 怎么接，哪些东西直接复用**
+**7. How BMAD connects, and what is reused directly**
 
-BMAD 保持研发事实：PRD、架构、UX、epic、story/ticket、验收要求。Firstmate 保持执行事实：任务队列、执行归属、工作树、监督消息、审核/交付状态。
+BMAD keeps the development facts: PRD, architecture, UX, epics, stories/tickets, acceptance requirements. Firstmate keeps the execution facts: task queue, execution ownership, worktrees, supervision messages, review/delivery status.
 
-具体接入约定（这些是拟实现接口，不是冒充已有命令）：
+Concrete integration conventions (these are proposed interfaces, not posing as existing commands):
 
-- `orch bmad import <project>`：检测实际安装的 BMAD 代际和产物格式；按 project + story/ticket ID 幂等导入 tasks-axi；保留原文路径和内容摘要。一个 story 可拆为多个执行项，但父子映射必须记录。
-- `orch bmad brief <task>`：生成给执行者的最小工作包：故事与验收条件、必要架构片段、接口契约、验证命令、禁止改动范围、结果格式。引用已安装的 BMAD 开发 skill，不把整份 PRD 广播给每个执行者。
-- `orch bmad reconcile <project>`：由一个指定写入者把经过验证/交付的执行结果回写 BMAD 状态。任一必需子任务/审核未完成，父 story 不能被标 done。以实际版本决定 v6 YAML/story 或 v7 ticket 工具，不让多个 worker 直接改共享 sprint 文件。
-- 任务启动时冻结需求版本；运行中需求变更必须留下修订记录和续做/重开决定，不能让同一个 task ID 静默换验收标准。
+- `orch bmad import <project>`: detect the actually installed BMAD generation and artifact format; idempotently import into tasks-axi by project + story/ticket ID; keep the original path and content digest. One story can be split into multiple execution items, but the parent-child mapping must be recorded.
+- `orch bmad brief <task>`: generate a minimal work package for the executor: story and acceptance conditions, necessary architecture excerpts, interface contracts, verification commands, forbidden change scope, result format. Reference the installed BMAD development skill; do not broadcast the whole PRD to every executor.
+- `orch bmad reconcile <project>`: one designated writer writes verified/delivered execution results back to BMAD state. If any required subtask/review is incomplete, the parent story cannot be marked done. Use v6 YAML/story or v7 ticket tooling according to the actual version; do not let multiple workers directly edit a shared sprint file.
+- Freeze the requirement version when a task starts; a requirement change during execution must leave a revision record and a continue/reopen decision; the same task ID must not silently switch acceptance criteria.
 
-**交付路径只选一条。**默认复用 Firstmate 已支持的 no-mistakes 管理 review → test → docs/lint → PR/CI，BMAD 的验收条件与相关设计进入它的 review/test instructions。它支持异构 CLI、独立验证工作树和修复循环。
+**Choose only one delivery path.** By default, reuse the no-mistakes management already supported by Firstmate: review → test → docs/lint → PR/CI, with BMAD acceptance conditions and related design fed into its review/test instructions. It supports heterogeneous CLIs, independent verification worktrees, and fix loops.
 
-如果任务明确要求原生 BMAD 某个独立审核 workflow，则把该工作流作为具名独立审核项或验证 gate 接入并保存报告；不能谎称 no-mistakes 的普通 review 就等于那个 BMAD workflow。审核结论必须绑定同一候选 commit，审核后补丁需要重新验证。是否额外进行两套同范围 review，要在任务合同中明确，避免无意重复付费。
+If a task explicitly requires a specific native BMAD independent review workflow, that workflow is connected as a named independent review item or verification gate and its report saved; we cannot falsely claim that no-mistakes' ordinary review equals that BMAD workflow. Review conclusions must be bound to the same candidate commit; patches after review need re-verification. Whether to run two same-scope reviews must be stated explicitly in the task contract, to avoid unintentionally paying twice.
 
-第一版不把 bmad-loop 和 no-mistakes 同时套在同一个 story 上。两套引擎都会运行验证、审核和状态推进，并可能各自创建 worktree/commit；这种堆叠使恢复与验收权不清。bmad-loop 可留给独立的串行批处理项目，不能与默认执行队列争用同一 story。
+The first version does not apply bmad-loop and no-mistakes to the same story simultaneously. Both engines run verification, review, and state advancement, and may each create worktrees/commits; such stacking makes recovery and acceptance authority unclear. bmad-loop can be reserved for standalone serial batch projects and must not compete with the default execution queue for the same story.
 
-[no-mistakes 项目](https://github.com/kunchenguid/no-mistakes)、[可配置审核/验证入口](https://kunchenguid.github.io/no-mistakes/reference/repo-config/)
+[no-mistakes project](https://github.com/kunchenguid/no-mistakes), [Configurable review/verification entry](https://kunchenguid.github.io/no-mistakes/reference/repo-config/)
 
-**8. 看板与精确队列：现成的和必须补的**
+**8. Board and precise queue: what exists and what must be added**
 
-Captain’s Deck 已有按 crew/home 查看、工作/等待/完成视图、Agent 与模型信息、跳转 pane、Captain’s Call 决策输入及给 Firstmate 发消息。它使用 Firstmate snapshot，适合继续复用。
+Captain’s Deck already has per-crew/home views, working/waiting/done views, Agent and model info, jump-to-pane, Captain’s Call decision input, and sending messages to Firstmate. It uses the Firstmate snapshot and is suitable to keep reusing.
 
-它目前不是完整的可编辑排程器。tasks-axi 有 ready 查询、依赖、priority、hold/unhold 与任务更新，但不能把 priority 0–4 宣传成任意精确排队，更不能说现成 TUI 已支持拖动任一 Agent 的任务队列。
+It is currently not a complete editable scheduler. tasks-axi has ready queries, dependencies, priority, hold/unhold, and task updates, but priority 0–4 cannot be advertised as arbitrary precise queuing, much less can we say the existing TUI already supports dragging any Agent's task queue.
 
-需要补两个互相配合的表面：
+Two cooperating surfaces need to be added:
 
-| 补充能力 | 实现位置 | 状态归属 |
+| Added capability | Implementation location | State ownership |
 |---|---|---|
-| 明确的工作线归属和精确队列顺序 | 扩展 tasks-axi task 模型/adapter，或经其受控更新保存等价字段；引入 lane 与 queue_rank | 仍由同一个任务后端写入 |
-| 键盘移动、置顶、改派、暂停/恢复 | Captain’s Deck 的动作入口 | 调任务 CLI/Firstmate 命令，不直接改 snapshot |
-| 卡片详情看到后续任务、依赖、验收、最新失败 | 扩展现有 snapshot projection | 只读投影 |
-| 运行中改派 | 通过主管与 `fm-control` 事务，保留原任务与产物 | 先确认交接，再改变唯一 owner |
+| Explicit lane ownership and precise queue order | Extend the tasks-axi task model/adapter, or store equivalent fields via its controlled updates; introduce lane and queue_rank | Still written by the same task backend |
+| Keyboard move, pin to top, reassign, pause/resume | Captain’s Deck action entry points | Call task CLI/Firstmate commands; do not edit the snapshot directly |
+| Card details showing follow-up tasks, dependencies, acceptance, latest failure | Extend the existing snapshot projection | Read-only projection |
+| Reassignment while running | Via the lead and `fm-control` transactions, preserving the original task and artifacts | Confirm handoff first, then change the single owner |
 
-先支持键盘 `上移/下移/置顶/改派/暂停/恢复`，无需新 Web 应用。多个项目或 home 的跨队列移动复用已有 handoff；运行中任务不能当作一张静态卡直接移走。
+First support keyboard `move up/move down/pin to top/reassign/pause/resume`; no new web application is needed. Cross-queue moves across multiple projects or homes reuse the existing handoff; a running task cannot be moved directly as if it were a static card.
 
-如要任意 rank，必须同时修改排序与读取路径，并加并发写保护；只在 Markdown 正文写“排第一”不算实现。临时按 priority 调整可以作为过渡，但不是完整验收。
+For arbitrary rank, both the ordering and the read path must be changed, with concurrent write protection added; just writing "rank first" in the Markdown body does not count as implementation. Temporarily adjusting by priority can serve as a transition, but is not full acceptance.
 
-[Deck 控件与边界](https://github.com/deimantasnork/captains-deck/blob/058ff8af75b336ffdc8537b92c7e4825025be0f4/README.md)、[tasks-axi](https://github.com/kunchenguid/tasks-axi)
+[Deck controls and boundaries](https://github.com/deimantasnork/captains-deck/blob/058ff8af75b336ffdc8537b92c7e4825025be0f4/README.md), [tasks-axi](https://github.com/kunchenguid/tasks-axi)
 
-**9. 长期线和临时线的落地规则**
+**9. Rollout rules for long-lived and temporary lanes**
 
-- 长期保留总负责人、执行主管、工作线责任与队列。只有确实需要持续项目上下文的职责才保留常驻会话。
-- 具体实现任务默认短会话；相关连续任务可以保留上下文，但不以“永久养着十个聊天窗口”为默认。
-- 独立审核使用新会话，只拿任务/设计/候选 diff/验证证据，不继承实现者对话。退出后保留报告与 commit 关联。
-- 空队列不发送“还有活吗”消息，不消耗模型回合。新任务、依赖解除或明确复查时间触发下一次工作。
-- 你原来的休息 20–30 分钟，主要是在规避脚本不断唤醒空线。采用事件与持久队列后，可直接安静等待；如果仍需要定时复查，另存 wake_at，不能使用永不自动恢复的 mute 标记冒充定时暂停。
-- “临时 Agent 用完回收”指会话资源可释放；工作树必须满足产物保存和交付条件。一个进程退出不授权删除未提交工作。
+- Long-lived: the overall owner, execution lead, lane responsibilities, and queues. Only duties that genuinely need ongoing project context keep resident sessions.
+- Concrete implementation tasks default to short sessions; related consecutive tasks can keep context, but "permanently keeping ten chat windows alive" is not the default.
+- Independent review uses a new session that only receives the task/design/candidate diff/verification evidence and does not inherit the implementer's conversation. After exit, the report and its commit association are retained.
+- An empty queue sends no "any more work?" messages and consumes no model turns. A new task, a dependency being cleared, or an explicit recheck time triggers the next piece of work.
+- Your original 20–30 minute rests were mainly to avoid the scripts constantly waking empty lanes. With events and a persistent queue, it can simply wait quietly; if periodic rechecks are still needed, store a separate wake_at; a mute flag that never auto-recovers must not pose as a timed pause.
+- "Reclaim temporary Agents after use" means session resources can be released; worktrees must meet artifact preservation and delivery conditions. A process exiting does not authorize deleting uncommitted work.
 
-**10. 依赖与动态调度**
+**10. Dependencies and dynamic scheduling**
 
-现实项目不可能所有任务都无依赖。默认执行 ready 队列，而不是盲目执行文本列表的第一项。
+In real projects it is impossible for all tasks to have no dependencies. The default is to execute the ready queue, not blindly execute the first item of a text list.
 
-例如 T-22 页面接入依赖 T-21 的接口契约：可把“定义契约”提前做成小任务，后续实现并行；若契约还不明确，T-22 阻塞，执行主管派其他 ready 任务。不要让执行者自行猜接口，也不要每次都暂停整个项目。
+For example, T-22 page integration depends on T-21's interface contract: "define the contract" can be pulled forward as a small task, with subsequent implementation in parallel; if the contract is still unclear, T-22 is blocked and the execution lead dispatches other ready tasks. Do not let executors guess the interface themselves, and do not pause the whole project each time.
 
-依赖之外，还要看共享外部资源、数据库迁移、同一环境部署、分支基线与最终合入。worktree 只隔离文件系统，不自动解决这些语义冲突。Firstmate 的 project capacity 是 worker 容量限制，不能冒充包括所有 gate 子进程在内的全局模型并发限制；部署时另核算审核/验证并发和资源开销。
+Beyond dependencies, also consider shared external resources, database migrations, deployment to the same environment, branch baselines, and final merging. A worktree only isolates the filesystem and does not automatically resolve these semantic conflicts. Firstmate's project capacity is a worker capacity limit and cannot pose as a global model concurrency limit that includes all gate subprocesses; account separately for review/verification concurrency and resource overhead at deployment.
 
-**11. 要装多少东西，轻量性在哪里**
+**11. How much needs installing, and where the lightness lies**
 
-Firstmate 的维护成本不能隐瞒。它不是一个小 skill。当前文档列出的通用依赖包括 Node、Git、gh、no-mistakes、gh-axi、chrome-devtools-axi、tasks-axi、quota-axi；Herdr 后端还需要 jq、treehouse。Lavish 是呈现层可降级依赖，不要求为了本项目加 Web 看板。真实使用哪些功能与上游 bootstrap 要求哪些工具，是两个不同问题。
+Firstmate's maintenance cost must not be hidden. It is not a small skill. General dependencies listed in the current docs include Node, Git, gh, no-mistakes, gh-axi, chrome-devtools-axi, tasks-axi, quota-axi; the Herdr backend also needs jq and treehouse. Lavish is a degradable presentation-layer dependency; there is no requirement to add a web board for this project. Which features are actually used and which tools the upstream bootstrap requires are two different questions.
 
-优点是这些都是已有工具与终端流程，不需要 Orca 的独立桌面工作环境，也不需要我们维护自己的 PTY、模型 SDK、Agent 启动器、远程控制协议和恢复数据库。
+The advantage is that these are all existing tools and terminal flows; we need neither Orca's standalone desktop work environment, nor to maintain our own PTY, model SDK, Agent launcher, remote control protocol, and recovery database.
 
-建议完整保留固定版本 Firstmate 核心；不要摘出几十个 shell 文件拼成一个所谓轻量版。这些脚本共享锁、消息确认、home 路由和权限约定，拆散后维护成本会回到我们自己身上。定制保持在私有 home 配置、BMAD bridge 与小范围 UI/任务模型补丁。
+Recommend keeping the pinned-version Firstmate core intact; do not extract dozens of shell files and stitch them into a so-called lightweight version. These scripts share locks, message acknowledgment, home routing, and permission conventions; once split apart, the maintenance cost falls back on us. Keep customization to private home configuration, the BMAD bridge, and small UI/task-model patches.
 
-[依赖与配置](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/configuration.md)
+[Dependencies and configuration](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/configuration.md)
 
-**12. 实施顺序与明确交付物**
+**12. Implementation order and explicit deliverables**
 
-| 阶段 | 实际工作 | 完成标志 |
+| Phase | Actual work | Completion signal |
 |---|---|---|
-| A 固定基础 | 固定 Herdr/Firstmate/Deck/依赖版本；隔离测试 home；修复或定位本次失败；保留旧脚本运行范围 | 与目标服务器版本配对的兼容记录，测试不触碰默认会话 |
-| B 现成闭环 | Codex primary + 一名 Claude secondmate + 两种 worker；配置 brief、容量、汇报权限、恢复；打开 Deck | 人不催时，普通中断能恢复，主管失效能被发现，完成有证据 |
-| C BMAD 衔接 | 幂等导入、最小任务包、版本检测、子任务映射、单写回、审核证据绑定 | 一个真实 story 从已批准需求到交付再回写，失败状态不会被抹掉 |
-| D 队列交互 | lane/rank、排序、置顶、改派、暂停/恢复、详情投影 | TUI 修改影响实际下一次派发，关闭 TUI 不影响执行 |
-| E 故障与规模 | 十任务压力、主管/worker 重启、断连、重复事件、依赖变更、审核失败 | 下列验收矩阵通过后再替换原脚本 |
+| A Pin the base | Pin Herdr/Firstmate/Deck/dependency versions; isolated test home; fix or locate this round's failures; keep the old scripts' running scope | A compatibility record matched to the target server version; tests do not touch the default session |
+| B Off-the-shelf loop | Codex primary + one Claude secondmate + two kinds of workers; configure brief, capacity, reporting permissions, recovery; open the Deck | Without human nagging, routine interruptions recover, lead failure is detected, completion has evidence |
+| C BMAD bridging | Idempotent import, minimal task packet, version detection, subtask mapping, single write-back, review evidence binding | A real story goes from approved requirement to delivery and is written back; failure states are not erased |
+| D Queue interaction | lane/rank, ordering, pin to top, reassign, pause/resume, detail projection | TUI changes affect the actual next dispatch; closing the TUI does not affect execution |
+| E Failures and scale | Ten-task stress, lead/worker restarts, disconnects, duplicate events, dependency changes, review failures | Replace the original scripts only after the acceptance matrix below passes |
 
-这是集成与有限扩展，不是零开发。核心运行时不重写；BMAD 与排程交互需要工程工作。A 的测试问题未解决前，不应直接接管用户现有项目。
+This is integration plus limited extension, not zero development. The core runtime is not rewritten; BMAD and scheduling interaction need engineering work. Until A's test problems are resolved, the user's existing projects should not be taken over directly.
 
-**13. 上线验收矩阵**
+**13. Go-live acceptance matrix**
 
-下列是拟定的交付门槛，不能当成本次已经全部实测通过。
+The following are proposed delivery gates and must not be taken as all having been measured and passed this time.
 
-| 注入场景 | 必须出现的行为 | 不允许出现 |
+| Injected scenario | Required behavior | Not allowed |
 |---|---|---|
-| worker 只改两行就停止 | 未通过验收；监督发现；自动续做或恢复 | 没人处理，或仅因 Agent done 标任务 done |
-| idle 与 done 两种停轮状态 | 都进入任务状态核对 | done 因未归一化被漏过 |
-| 一次提示提交响应丢失 | 先读当前状态/回执，再决定重送 | 重复执行同一派发 |
-| working 但长时间没有任务进展 | 保守检查工具/验证进程；确认停滞后升级 | 单靠终端静默杀掉长测试 |
-| supervisor 会话退出 | 持久记录仍在；父级发现并恢复执行主管 | 只能等用户看见 |
-| daemon/watch 崩溃 | 未确认事件可重放；所有权不被重复取得 | 消息已丢却显示健康 |
-| Herdr/SSH 暂时不可达 | unknown 与 dead 分开；连回后核对 | 误判死亡并双开 worker |
-| T1 阻塞、T2 可做 | T1 记录具体依赖；T2 继续 | 全部工作停在队首 |
-| 修改下一任务顺序 | 下次派发使用新顺序，历史有记录 | 只有看板顺序变了 |
-| 临时 reviewer 完成 | 报告/commit 持久；会话可回收 | 复用实现者上下文冒充独立审核 |
-| 队列空/人工暂停 | 无重复模型回合；新任务或定时条件可唤醒 | mute 永久遗忘、空线无限催办 |
-| 十任务完成/失败混合 | 主管汇总；总负责人只看异常与决策 | 每个 token/每次普通修复都直接打扰总负责人 |
+| Worker changes only two lines and stops | Fails acceptance; supervision detects it; automatic continuation or recovery | No one handles it, or the task is marked done just because the Agent is done |
+| Both idle and done turn-end states | Both enter task state reconciliation | done is missed because it was not normalized |
+| A prompt submission response is lost | Read the current state/receipt first, then decide whether to resend | The same dispatch is executed twice |
+| working but no task progress for a long time | Conservatively check tool/verification processes; escalate after confirming the stall | Killing a long test based only on terminal silence |
+| Supervisor session exits | Persistent records remain; the parent detects and recovers the execution lead | Can only wait for the user to notice |
+| daemon/watch crashes | Unacknowledged events can be replayed; ownership is not acquired twice | Messages lost while showing healthy |
+| Herdr/SSH temporarily unreachable | unknown kept separate from dead; reconcile after reconnecting | Misjudged as dead and a duplicate worker started |
+| T1 blocked, T2 workable | T1 records the specific dependency; T2 continues | All work stops at the head of the queue |
+| Change the order of the next task | The next dispatch uses the new order, with a history record | Only the board order changed |
+| Temporary reviewer completes | Report/commit persisted; session reclaimable | Reusing the implementer's context while posing as an independent review |
+| Queue empty/manually paused | No repeated model turns; a new task or timed condition can wake it | mute permanently forgotten, empty lanes nagged endlessly |
+| Ten tasks with mixed completion/failure | Lead summarizes; overall owner sees only anomalies and decisions | Every token/every routine fix directly disturbs the overall owner |
 
-建议测量：人工“继续干”次数（目标 0）、无人处理的未完成任务数（目标 0）、重复派发数（目标 0）、停滞发现与恢复延迟、主控事件条数、监督 token、单位任务总时长。延迟门槛要按实际任务类型设置，不能对长构建和短文件修改一刀切。
+Suggested measurements: number of human "keep going" prompts (target 0), number of unfinished tasks with no one handling them (target 0), number of duplicate dispatches (target 0), stall detection and recovery latency, number of controller events, supervision tokens, total time per task. Latency thresholds should be set per actual task type; long builds and short file edits cannot be treated with one blanket threshold.
 
-**14. 本次验证的结果与局限**
+**14. Results and limitations of this round's verification**
 
-本次克隆并固定 9 个仓库；检查关键源码及上游测试；使用临时工作树、模拟 CLI 与隔离状态进行验证。没有消耗真实 coding-agent 模型额度，没有调用用户现有 Agent，也没有升级 Herdr 服务端。本地客户端版本只读查询为 0.9.1，未据此推断服务端版本。
+This round cloned and pinned 9 repositories; inspected key source and upstream tests; verified using temporary worktrees, mock CLIs, and isolated state. It consumed no real coding-agent model quota, did not invoke the user's existing Agents, and did not upgrade the Herdr server. The local client version, queried read-only, is 0.9.1; the server version was not inferred from it.
 
-- BMAD Loop：11 个定向故障/策略用例通过，含未产生结果的停轮后续做、停滞唤醒、提示发送失败计数、重试、恢复、no-work 暂停、并发压制。见 [日志](evidence/bmad-targeted.log)。
-- BMAD 较广测试运行：565 通过、1 失败后主动中止，以便聚焦关键场景；失败是 macOS 临时文件系统不接受测试构造的非法字节文件名，不能算实现逻辑缺陷，也不能算全套通过。见 [日志](evidence/bmad-tests.log)。
-- Herdr 外部 adapter：111 通过、2 失败。一个是 `switch_client` 返回类型约定与当前核心漂移；另一个是 Windows 后端选择测试仍预期旧默认。这不能证明 Linux 启动必失败，但能证明最新版组合尚不能直接标为兼容。见 [日志](evidence/bmad-herdr-adapter.log)。
-- Herdr Dispatch：纯决策 package 上游测试通过；研究探针确认 doing/done 与次数上限的实际行为。config package 也通过；loop package 在 10 分钟总时限超时，spawn 未取得完成结果。其余细节见验证汇总，不把未完成部分记为通过。
-- Captain’s Deck：110 通过、2 失败；涉及 macOS `/var` 与 `/private/var` 路径比较，以及模拟启动 20 秒超时。将临时目录规范化为 `/private/tmp` 后单独复验这两项，2 项均通过（12.31 秒），没有改产品源码。不能因此把首次整套运行改写成全绿。
-- Firstmate：Herdr event-wait 的 5 个 Python 用例通过；所选 6 个 shell suite 中出现锁/时序/状态断言失败及 300 秒超时。本机未获得这些 suite 全绿结果；有些 suite 在失败后仍继续输出，不能只凭退出码或末行判断成功。checkpoint 单独复验仍失败于 Perl fallback 的清理时序断言，不能仅归因于并行测试。原日志保留，需在目标 Linux 环境进一步区分产品问题、测试假设和机器负载。
+- BMAD Loop: 11 targeted failure/policy cases passed, including continuation after a turn-end that produced no result, stall wakeup, prompt send failure counting, retries, recovery, no-work pause, and concurrency suppression. See [log](evidence/bmad-targeted.log).
+- Broader BMAD test run: 565 passed, 1 failed, after which it was deliberately aborted to focus on key scenarios; the failure was the macOS temporary filesystem not accepting a test-constructed filename with invalid bytes. It cannot count as an implementation logic defect, nor as the full suite passing. See [log](evidence/bmad-tests.log).
+- Herdr external adapter: 111 passed, 2 failed. One is that the `switch_client` return type convention has drifted from the current core; the other is that a Windows backend selection test still expects the old default. This does not prove Linux startup will necessarily fail, but it does prove the latest combination cannot yet be labeled compatible directly. See [log](evidence/bmad-herdr-adapter.log).
+- Herdr Dispatch: upstream tests for the pure decision package passed; the research probe confirmed the actual behavior of doing/done and the count cap. The config package also passed; the loop package timed out at the 10-minute overall limit, and spawn did not get a completed result. See the verification summary for other details; unfinished parts are not recorded as passed.
+- Captain’s Deck: 110 passed, 2 failed; involving macOS `/var` vs `/private/var` path comparison, and a 20-second timeout on simulated startup. After normalizing the temp directory to `/private/tmp`, these two were rechecked separately and both passed (12.31 seconds), without changing product source. The first full run therefore cannot be rewritten as all green.
+- Firstmate: 5 Python cases for Herdr event-wait passed; among the 6 selected shell suites there were lock/timing/state assertion failures and 300-second timeouts. No all-green result for these suites was obtained on this machine; some suites keep producing output after failing, so success cannot be judged only by exit code or the last line. A separate recheck of checkpoint still failed on a cleanup timing assertion in the Perl fallback, so it cannot be attributed solely to parallel testing. The original logs are retained; product issues, test assumptions, and machine load need further separation in the target Linux environment.
 
-这些结果足以确定复用边界和实现方向，不足以作生产认证。最终验证明细以 [validation.json](validation.json) 与 evidence 目录为准。
+These results are enough to determine the reuse boundary and implementation direction, but not enough for production certification. The final verification details are authoritative in [validation.json](validation.json) and the evidence directory.
 
-**15. 为什么这条路比继续扩脚本更合适**
+**15. Why this path is more suitable than continuing to extend the scripts**
 
-它已经把你不断在脚本里补的共同问题做成可复用机制：消息先持久化再唤醒、确认后才消费、任务与会话分离、失败保留工作、主管自身被监督、暂停与异常分开、临时资源受控回收。我们需要补的主要是你的 BMAD 任务接口和排程体验。
+It has already turned the common problems you kept patching in the scripts into reusable mechanisms: persist messages before waking, consume only after acknowledgment, separate tasks from sessions, preserve work on failure, supervise the lead itself, separate pauses from anomalies, and reclaim temporary resources in a controlled way. What we mainly need to add is your BMAD task interface and the scheduling experience.
 
-继续扩原脚本，要重新解决这些基础问题；从 Herdr Board 开始，要另外补监督与恢复；从 bmad-loop 开始，要另外补并发调度。Firstmate 的代价是接受一套现成工具链与主管角色，但这是当前已发现候选中，距离“十个 Agent 持续工作、主控处理少量关键决策”最短的路径。
+Continuing to extend the original scripts means re-solving these foundational problems; starting from Herdr Board means separately adding supervision and recovery; starting from bmad-loop means separately adding concurrent scheduling. Firstmate's cost is accepting an existing toolchain and the lead role, but among the candidates found so far it is the shortest path to "ten Agents working continuously, with the controller handling a small number of key decisions".
 
-**最终采用路线：Firstmate 负责协作与持续监督，Herdr 负责运行，BMAD 负责研发合同，Captain’s Deck 负责终端可视化；只做连接层和队列交互扩展。先完成隔离兼容与故障验收，再迁移真实项目。**
+**Final adopted route: Firstmate handles collaboration and continuous supervision, Herdr handles running, BMAD handles the development contract, Captain’s Deck handles terminal visualization; build only the connection layer and queue interaction extensions. Complete isolated compatibility and failure acceptance first, then migrate real projects.**

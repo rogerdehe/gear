@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS seats (
   state TEXT NOT NULL, state_since INTEGER NOT NULL, state_reason TEXT,
   park_until INTEGER, park_task TEXT, hold_reason TEXT,
   task_id TEXT,                        -- temp: the one task it is bound to for life
-  slot TEXT);
+  worktree TEXT);                      -- resources.path of the worktree Herdr created for it
 
 CREATE TABLE IF NOT EXISTS bindings (
   seat TEXT NOT NULL, generation INTEGER NOT NULL, session TEXT NOT NULL, pane_id TEXT NOT NULL,
@@ -31,11 +31,10 @@ CREATE TABLE IF NOT EXISTS bindings (
   handover_id TEXT, created INTEGER NOT NULL,
   PRIMARY KEY (seat, generation));
 
+-- Worktrees created through Herdr (conventions 17 §4); path is what Herdr returned.
 CREATE TABLE IF NOT EXISTS resources (path TEXT PRIMARY KEY, project TEXT NOT NULL,
+  branch TEXT NOT NULL, workspace_id TEXT,  -- NULL while not open in Herdr
   holder_seat TEXT, state TEXT NOT NULL, last_task TEXT, note TEXT, updated INTEGER NOT NULL);
-
-CREATE TABLE IF NOT EXISTS slots (project TEXT NOT NULL, id TEXT NOT NULL, pane_id TEXT NOT NULL,
-  worktree TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
 CREATE TABLE IF NOT EXISTS plans (project TEXT NOT NULL, version INTEGER NOT NULL, draft TEXT NOT NULL,
   applied INTEGER NOT NULL, by_seat TEXT, by_gen INTEGER, PRIMARY KEY (project, version));

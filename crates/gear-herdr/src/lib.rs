@@ -38,6 +38,17 @@ pub enum Outcome<T> {
     Uncertain { reason: String },
 }
 
+/// A worktree opened in Herdr (design/04, conventions 17 §4): the Herdr
+/// workspace that shows it, that workspace's root pane, the checkout path Herdr
+/// chose, and the branch checked out there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    pub workspace_id: String,
+    pub pane_id: String,
+    pub path: String,
+    pub branch: String,
+}
+
 pub trait HerdrRead {
     /// All agents of the bound session (one `session.snapshot` call).
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError>;
@@ -58,6 +69,15 @@ pub trait HerdrAct: HerdrRead {
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()>;
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()>;
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()>;
+    /// Herdr `worktree.create` (never focuses): new branch `branch` cut from
+    /// `base` in the repo at `repo`, opened in a new workspace labelled `label`.
+    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree>;
+    /// Herdr `worktree.open` (never focuses): reopen the existing worktree of
+    /// `branch` (temp-worker rework / resume).
+    fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree>;
+    /// Herdr `worktree.remove` (never forced): removes the checkout and its
+    /// workspace; the branch is kept.
+    fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()>;
 }
 
 /// Real Herdr over its unix socket. Holds one blocking client connection.
@@ -105,6 +125,15 @@ impl HerdrAct for SocketHerdr {
         todo!("T-herdr")
     }
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()> {
+        todo!("T-herdr")
+    }
+    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
+        todo!("T-herdr")
+    }
+    fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree> {
+        todo!("T-herdr")
+    }
+    fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()> {
         todo!("T-herdr")
     }
 }
