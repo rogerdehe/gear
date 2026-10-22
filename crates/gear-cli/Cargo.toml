@@ -1,0 +1,18 @@
+[package]
+name = "gear-cli"
+version.workspace = true
+edition.workspace = true
+description = "The `gear` binary: agent commands, admin commands, and `gear run` (engine loop)."
+
+[[bin]]
+name = "gear"
+path = "src/main.rs"
+
+[dependencies]
+gear-model = { workspace = true }
+gear-store = { workspace = true }
+gear-herdr = { workspace = true }
+gear-app = { workspace = true }
+gear-engine = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "gear-app"
+version.workspace = true
+edition.workspace = true
+description = "GEAR business rules behind the CLI commands: identity, mail, home (plan/tasks/verdicts come in slice 2)."
+
+[dependencies]
+gear-model = { workspace = true }
+gear-store = { workspace = true }
+gear-herdr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

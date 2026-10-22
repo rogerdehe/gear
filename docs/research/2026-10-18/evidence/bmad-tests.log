@@ -1,0 +1,46 @@
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  7%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 15%]
+........................................................................ [ 18%]
+.....F........................................................
+=================================== FAILURES ===================================
+_______________ test_z_output_undecodable_path_becomes_git_error _______________
+
+project = ProjectPaths(project=PosixPath('/private/var/folders/vw/chb_f3w93l7dbmt13hw3ztjw0000gp/T/pytest-of-roger/pytest-2/test...codable_path0/sandbox'), era='v6', active_initiative='', initiative_folder=None, ignored_v6_keys=(), shared_store=None)
+
+    @needs_strict_codec
+    @pytest.mark.skipif(
+        sys.platform == "win32", reason="Windows filenames are UTF-16; no undecodable path exists"
+    )
+    def test_z_output_undecodable_path_becomes_git_error(project):
+        """#377: a filename carrying bytes invalid in the run's codec makes `_run_git`'s
+        strict decode raise UnicodeDecodeError — a third fault raised before any return
+        code exists, and the one the taxonomy missed. Being a ValueError it matched
+        neither `except` arm, so it sailed past every `except GitError` guard: here
+        `dirty_paths`, reached from `clean_incoming_collisions`' merge pre-flight, whose
+        callers guard exactly that type.
+    
+        The file is real and so is git. Monkeypatching `subprocess.run` would hand the
+        code str objects and never run the stdlib's decoding at all, so that version
+        passes identically with the fix ablated (tests/test_install.py:1996 documents
+        the same trap).
+    
+        Ablation: delete the `except UnicodeDecodeError` arm in `_run_git` and this
+        fails with the raw UnicodeDecodeError."""
+        repo = project.project
+        # POSIX filenames are arbitrary bytes, so build the path as bytes — a str path
+        # would have to carry the byte as a surrogate and re-encode on the way out.
+>       with open(os.fsencode(repo) + b"/weird-\xff-name.txt", "wb") as fh:
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       OSError: [Errno 92] Illegal byte sequence: b'/private/var/folders/vw/chb_f3w93l7dbmt13hw3ztjw0000gp/T/pytest-of-roger/pytest-2/test_z_output_undecodable_path0/sandbox/weird-\xff-name.txt'
+
+tests/test_verify.py:511: OSError
+=========================== short test summary info ============================
+FAILED tests/test_verify.py::test_z_output_undecodable_path_becomes_git_error
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! KeyboardInterrupt !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+/Users/roger/miniconda3/lib/python3.13/selectors.py:398: KeyboardInterrupt
+(to show a full traceback on KeyboardInterrupt use --full-trace)
+1 failed, 565 passed in 455.58s (0:07:35)

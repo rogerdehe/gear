@@ -1,0 +1,49 @@
+.............F.......................................................... [ 63%]
+........F................................                                [100%]
+=================================== FAILURES ===================================
+__________ test_implements_every_seam_method_with_the_seam_signature ___________
+
+    def test_implements_every_seam_method_with_the_seam_signature():
+        import inspect
+    
+        from bmad_loop.adapters.multiplexer import TerminalMultiplexer
+    
+        def sig(owner, name):
+            # Normalize whitespace only: both modules use `from __future__ import
+            # annotations`, so the annotations compare as the source strings they are.
+            return " ".join(str(inspect.signature(getattr(owner, name))).split())
+    
+        drift = {}
+        for name in sorted(TerminalMultiplexer.__abstractmethods__):
+            assert not getattr(
+                getattr(HerdrMultiplexer, name), "__isabstractmethod__", False
+            ), f"HerdrMultiplexer does not implement the abstract seam method {name!r}"
+            seam, ours = sig(TerminalMultiplexer, name), sig(HerdrMultiplexer, name)
+            if seam != ours:
+                drift[name] = (seam, ours)
+>       assert not drift, f"signature drift against the bmad-loop seam: {drift}"
+E       AssertionError: signature drift against the bmad-loop seam: {'switch_client': ("(self, target: 'str', last_fallback: 'bool' = False) -> 'bool | None'", "(self, target: 'str', last_fallback: 'bool' = False) -> 'bool'")}
+E       assert not {'switch_client': ("(self, target: 'str', last_fallback: 'bool' = False) -> 'bool | None'", "(self, target: 'str', last_fallback: 'bool' = False) -> 'bool'")}
+
+tests/test_backend.py:478: AssertionError
+_____________ test_win32_falls_back_to_herdr_even_when_unavailable _____________
+
+fresh_registry = <module 'bmad_loop.adapters.multiplexer' from '/private/tmp/orch-deep-research/bmad-loop/src/bmad_loop/adapters/multiplexer.py'>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x107427700>
+
+    def test_win32_falls_back_to_herdr_even_when_unavailable(fresh_registry, monkeypatch):
+        """With no binary installed on win32, the historical fallback returns the first
+        platform match regardless of availability — herdr, once this adapter is
+        installed (without it, core bottom-falls-back to tmux)."""
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(shutil, "which", _which_only())  # nothing available
+        backend, name, reason = fresh_registry._select()
+>       assert isinstance(backend, HerdrMultiplexer)
+E       assert False
+E        +  where False = isinstance(<bmad_loop.adapters.psmux_backend.PsmuxMultiplexer object at 0x1071b5a90>, HerdrMultiplexer)
+
+tests/test_registration.py:149: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_backend.py::test_implements_every_seam_method_with_the_seam_signature
+FAILED tests/test_registration.py::test_win32_falls_back_to_herdr_even_when_unavailable
+2 failed, 111 passed in 26.55s

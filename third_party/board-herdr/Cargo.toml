@@ -1,0 +1,17 @@
+[package]
+name = "board-herdr"
+version = "0.19.1"
+edition = "2021"
+license = "MIT"
+description = "Vendored from nelsonPires5/herdr-board@7a215a179acb4e098dd1c2971332497806309360 (crates/board-herdr), MIT. See NOTICE."
+
+[dependencies]
+libc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }

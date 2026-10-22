@@ -1,0 +1,61 @@
+//! Contract tests for profile.rs and outcome mapping. Do not edit to make them pass.
+
+use gear_herdr::{classify_screen, outcome_from_error, validate_template, Outcome, Profile, ScreenFlag};
+
+fn opencode() -> Profile {
+    Profile {
+        kind: "opencode".into(),
+        busy_markers: vec!["esc interrupt".into()],
+        ratelimit_markers: vec!["Error: Rate limit exceeded".into()],
+        quota_markers: vec!["insufficient_quota".into()],
+        auth_markers: vec!["Unauthorized".into()],
+        tail_lines: 3,
+        confirm_rounds: 2,
+        session_ref: false,
+        resume_args: None,
+        exit_keys: vec!["ctrl+c".into()],
+        verified: false,
+    }
+}
+
+#[test]
+fn only_tail_window_is_matched() {
+    let p = opencode();
+    let screen = "Error: Rate limit exceeded\nok\nok\nok";
+    assert!(classify_screen(&p, screen).is_empty(), "old error scrolled out of the 3-line window");
+    let screen = "x\nError: Rate limit exceeded\ny";
+    assert_eq!(classify_screen(&p, screen).into_iter().collect::<Vec<_>>(), vec![ScreenFlag::RateLimit]);
+}
+
+#[test]
+fn multiple_flags() {
+    let p = opencode();
+    let flags = classify_screen(&p, "  esc interrupt  \ninsufficient_quota\n");
+    assert!(flags.contains(&ScreenFlag::Busy));
+    assert!(flags.contains(&ScreenFlag::Quota));
+    assert!(!flags.contains(&ScreenFlag::Auth));
+}
+
+#[test]
+fn template_must_not_contain_markers() {
+    let p = opencode();
+    assert!(validate_template(&p, "继续 T-17。任务包：tasks/T-17.md").is_ok());
+    let err = validate_template(&p, "如果 Error: Rate limit exceeded 就停下").unwrap_err();
+    assert!(err.contains("Rate limit"));
+}
+
+#[test]
+fn transport_errors_are_uncertain_protocol_refusals_are_refused() {
+    let io = board_herdr_err_io();
+    assert!(matches!(outcome_from_error::<()>(&io), Outcome::Uncertain { .. }));
+    let blocked = board_herdr::HerdrError::Protocol { code: "agent_blocked".into(), message: "x".into() };
+    assert!(matches!(outcome_from_error::<()>(&blocked), Outcome::Refused { .. }));
+    let weird = board_herdr::HerdrError::Protocol { code: "something_new".into(), message: "x".into() };
+    assert!(matches!(outcome_from_error::<()>(&weird), Outcome::Uncertain { .. }), "unknown code = uncertain");
+    let deadline = board_herdr::HerdrError::Deadline { operation: "read" };
+    assert!(matches!(outcome_from_error::<()>(&deadline), Outcome::Uncertain { .. }));
+}
+
+fn board_herdr_err_io() -> board_herdr::HerdrError {
+    board_herdr::HerdrError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"))
+}

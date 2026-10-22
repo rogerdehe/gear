@@ -1,0 +1,68 @@
+...................................................................F.... [ 64%]
+..................................F.....                                 [100%]
+=================================== FAILURES ===================================
+____________ test_discover_homes_adds_a_remote_route_as_a_crew_tab _____________
+
+    def test_discover_homes_adds_a_remote_route_as_a_crew_tab():
+        with tempfile.TemporaryDirectory() as tmp:
+            home = _captain_home(tmp, LOCAL + REMOTE)
+            env = {"FM_FLOW_HOMES": f"captain={home}", "FM_FLOW_HOMES_ONLY": "1"}
+            with _patched("_live_agent_homes", lambda: set()), mock.patch.dict(os.environ, env):
+                homes = flow.discover_homes()
+        labels = [h.label for h in homes]
+        assert "captain" in labels and "vps" in labels
+        remote = next(h for h in homes if h.label == "vps")
+>       assert remote.route == "vps" and remote.via == home
+E       AssertionError: assert ('vps' == 'vps'
+E         
+E           vps and '/private/var...k_4/firstmate' == '/var/folders...k_4/firstmate'
+E         
+E         - /var/folders/vw/chb_f3w93l7dbmt13hw3ztjw0000gp/T/tmp7khgek_4/firstmate
+E         + /private/var/folders/vw/chb_f3w93l7dbmt13hw3ztjw0000gp/T/tmp7khgek_4/firstmate
+E         ? ++++++++)
+
+tests/test_flow_remote_homes.py:82: AssertionError
+________________ test_open_deck_creates_workspace_when_missing _________________
+
+    def test_open_deck_creates_workspace_when_missing():
+        with tempfile.TemporaryDirectory() as tmp:
+            fake, state, log, cfg = _setup(tmp)
+            _write_state(state, {"panes": [], "workspaces": [], "seq": 0})
+>           proc = _run(OPEN_DECK, fake, state, log, cfg)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_open_scripts.py:352: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_open_scripts.py:159: in _run
+    return subprocess.run(
+/Users/roger/miniconda3/lib/python3.13/subprocess.py:556: in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/roger/miniconda3/lib/python3.13/subprocess.py:1222: in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/roger/miniconda3/lib/python3.13/subprocess.py:2155: in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <Popen: returncode: -9 args: ['bash', '/private/tmp/orch-deep-research/capta...>
+endtime = 1300646.51057975, orig_timeout = 20, stdout_seq = [], stderr_seq = []
+skip_check_and_raise = False
+
+    def _check_timeout(self, endtime, orig_timeout, stdout_seq, stderr_seq,
+                       skip_check_and_raise=False):
+        """Convenience for checking if a timeout has expired."""
+        if endtime is None:
+            return
+        if skip_check_and_raise or _time() > endtime:
+>           raise TimeoutExpired(
+                    self.args, orig_timeout,
+                    output=b''.join(stdout_seq) if stdout_seq else None,
+                    stderr=b''.join(stderr_seq) if stderr_seq else None)
+E           subprocess.TimeoutExpired: Command '['bash', '/private/tmp/orch-deep-research/captains-deck/scripts/open-captain-deck.sh']' timed out after 20 seconds
+
+/Users/roger/miniconda3/lib/python3.13/subprocess.py:1269: TimeoutExpired
+=========================== short test summary info ============================
+FAILED tests/test_flow_remote_homes.py::test_discover_homes_adds_a_remote_route_as_a_crew_tab
+FAILED tests/test_open_scripts.py::test_open_deck_creates_workspace_when_missing
+2 failed, 110 passed in 335.98s (0:05:35)

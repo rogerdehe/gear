@@ -1,0 +1,2 @@
+ok - quiet checkpoint exits 124 with a clean checkpoint line and no live lock
+not ok - the Perl fallback killed the watcher before its 8-second cleanup bound

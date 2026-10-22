@@ -1,0 +1,152 @@
+{
+  "date": "2026-10-18 America/Chicago",
+  "python": "3.13.13",
+  "herdr_client": "0.9.1 (version only; live server not queried)",
+  "platform": "macOS arm64",
+  "live_agents_used": false,
+  "upstream_sources": "sources.lock.json",
+  "tests": [
+    {
+      "name": "BMAD targeted fault/policy tests",
+      "result": "passed",
+      "passed": 11,
+      "failed": 0,
+      "seconds": 38.17,
+      "evidence": "evidence/bmad-targeted.log",
+      "scope": "mock adapters and temporary repositories; no provider calls"
+    },
+    {
+      "name": "BMAD broader selected suites",
+      "result": "interrupted",
+      "passed": 565,
+      "failed": 1,
+      "seconds": 455.58,
+      "evidence": "evidence/bmad-tests.log",
+      "note": "Interrupted by researcher after adequate broad sample; failure creating invalid-byte filename on macOS filesystem, not a demonstrated engine bug."
+    },
+    {
+      "name": "BMAD Herdr adapter backend/registration/poller",
+      "result": "failed",
+      "passed": 111,
+      "failed": 2,
+      "seconds": 26.55,
+      "evidence": "evidence/bmad-herdr-adapter.log",
+      "note": "switch_client annotation seam drift and stale Windows default expectation; no real Herdr session"
+    },
+    {
+      "name": "Dispatch pure decide upstream suite",
+      "result": "passed",
+      "seconds": 6.68,
+      "note": "decide passed. config also passed (135.387s); loop hit Go 10-minute package timeout (610.638s). Researcher sent SIGINT before completion; spawn has no completed result and is unverified."
+    },
+    {
+      "name": "Dispatch task doing vs agent states probe",
+      "result": "passed",
+      "evidence": "evidence/dispatch-probe.log",
+      "note": "Confirmed idle prompts despite exhausted MaxPrompts; done yields no action. Probe assertions reproduce current behavior, not desired behavior."
+    },
+    {
+      "name": "Captain Deck full collected tests",
+      "result": "failed",
+      "passed": 110,
+      "failed": 2,
+      "seconds": 335.98,
+      "evidence": "evidence/captains-deck-tests.log",
+      "note": "macOS path canonicalization assertion and simulated launcher timeout"
+    },
+    {
+      "name": "Captain Deck failed tests rerun",
+      "result": "passed",
+      "passed": 2,
+      "failed": 0,
+      "seconds": 12.31,
+      "evidence": "evidence/deck-targeted-retry.log",
+      "note": "TMPDIR=/private/tmp; reran only failing tests separately, no source modification"
+    },
+    {
+      "name": "Firstmate fm-backend-herdr.test.sh",
+      "result": "timeout",
+      "seconds": 300.0,
+      "observed_ok_lines": 49,
+      "observed_failure_lines": [],
+      "evidence": "evidence/fm-backend-herdr.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate fm-watch-checkpoint.test.sh",
+      "result": "failed",
+      "seconds": 42.3,
+      "observed_ok_lines": 4,
+      "observed_failure_lines": [
+        "not ok - queue-append checkpoint did not take the watcher lock"
+      ],
+      "evidence": "evidence/fm-watch-checkpoint.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate fm-watch-triage.test.sh",
+      "result": "failed",
+      "seconds": 129.9,
+      "observed_ok_lines": 19,
+      "observed_failure_lines": [
+        "not ok - watcher did not surface a turn-end whose crew is not provably working"
+      ],
+      "evidence": "evidence/fm-watch-triage.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate fm-wake-queue.test.sh",
+      "result": "failed",
+      "seconds": 40.9,
+      "observed_ok_lines": 3,
+      "observed_failure_lines": [
+        "not ok - presentation lock delayed the drain for 15s"
+      ],
+      "evidence": "evidence/fm-wake-queue.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate fm-dispatch-resolve.test.sh",
+      "result": "timeout",
+      "seconds": 300.1,
+      "observed_ok_lines": 21,
+      "observed_failure_lines": [],
+      "evidence": "evidence/fm-dispatch-resolve.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate fm-crew-state.test.sh",
+      "result": "timeout",
+      "seconds": 300.1,
+      "observed_ok_lines": 25,
+      "observed_failure_lines": [
+        "not ok - failed-outcome/github/open: delivered work: state: failed · source: run-step · run failed (missing: 'state: done')"
+      ],
+      "evidence": "evidence/fm-crew-state.test.sh",
+      "note": "suite partial observations are not a full pass; 300s wall-clock cap imposed by researcher"
+    },
+    {
+      "name": "Firstmate Codex checkpoint rerun",
+      "result": "failed",
+      "evidence": "evidence/firstmate-checkpoint-retry.log",
+      "note": "Repeated in isolation; failed at Perl fallback cleanup timing, different assertion from initial run. Root cause not established."
+    },
+    {
+      "name": "Firstmate Herdr event-wait parser",
+      "result": "passed",
+      "passed": 5,
+      "seconds": 0.174,
+      "evidence": "evidence/firstmate-eventwait.log",
+      "note": "isolated Python unit tests; not live Herdr E2E"
+    },
+    {
+      "name": "Dispatch broader packages",
+      "result": "incomplete_with_timeout",
+      "config": "passed in 135.387s",
+      "loop": "Go test timeout after 10m; reported 610.638s",
+      "spawn": "no completed result; unverified",
+      "evidence": "evidence/dispatch-suite-receipt.txt",
+      "note": "stdout excerpts transcribed from tool results; not a full raw log. Researcher also requested interruption."
+    }
+  ]
+}

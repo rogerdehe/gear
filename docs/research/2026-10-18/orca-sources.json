@@ -1,0 +1,163 @@
+{
+  "repository": "https://github.com/stablyai/orca",
+  "commit": "76f9978880752f2b3ed63bb8c2698b8a7236440d",
+  "commit_date_utc": "2026-10-19T02:40:33Z",
+  "research_date_local": "2026-10-18",
+  "timezone": "America/Chicago",
+  "evidence_type": "source_and_test_inspection",
+  "application_run": false,
+  "upstream_tests_executed": false,
+  "note": "Fetched official source files; inclusion records retrieval, not full inspection of every line. Findings and supporting references are in orca-lessons.md. Commit UTC date can differ from local research date.",
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "7fff8237c0eebc35ed411a9ac2b2ca750a99ddb0ce0db33710cb135e3e6ca2ad",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/README.md"
+    },
+    {
+      "path": "docs/readme/worktree-storage-maintenance.md",
+      "sha256": "f62d3e1bd07ecf5e55786154b72094936bd09f6e01894dd983213049f8bf25c2",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/docs/readme/worktree-storage-maintenance.md"
+    },
+    {
+      "path": "skill-guides/orchestration/references/coordinator-loop.md",
+      "sha256": "4eb2229faf6179b4a4578840a0f461ce36923c2094f46ec48db7879f27259742",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/coordinator-loop.md"
+    },
+    {
+      "path": "skill-guides/orchestration/references/messaging-and-gates.md",
+      "sha256": "c201fe5da4ce4300e3c5f4d8784c69ff57cfb9c3bccaa1c487be914c1fdf872c",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/messaging-and-gates.md"
+    },
+    {
+      "path": "skill-guides/orchestration/references/placement-and-remote.md",
+      "sha256": "52ff2c6cb1c93782a949cdb9457054266e68198441dc4e869d2d2048adf93e40",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/placement-and-remote.md"
+    },
+    {
+      "path": "skill-guides/orchestration/references/recovery-and-cleanup.md",
+      "sha256": "9b99dbf4d71863667090af7fe3e5781df1e2af10825e040a15ee2e51f3a32596",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/recovery-and-cleanup.md"
+    },
+    {
+      "path": "skill-guides/orchestration/references/worker-contract.md",
+      "sha256": "8cad6c7540fa5fa6dbf264077492855710eff71c06b7f63c84854c7e943baa91",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/worker-contract.md"
+    },
+    {
+      "path": "skill-guides/orchestration.md",
+      "sha256": "f0009a1bbe18ff6a8efd6a64c75a8fb047ebb6f01788fcf9b9ecede6378d9f89",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration.md"
+    },
+    {
+      "path": "src/cli/handlers/orchestration/check-keepalive.ts",
+      "sha256": "8efb86b8dc07e14e63abb0e2999848f2d6d625f04f04ec6c3bdad716c1cacb8b",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/cli/handlers/orchestration/check-keepalive.ts"
+    },
+    {
+      "path": "src/main/git/worktree-remove-branch-deletion.test.ts",
+      "sha256": "394cbd3b36be47c721da724a35047877bdd294664b68bd1cea0a377a9c53e4df",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/git/worktree-remove-branch-deletion.test.ts"
+    },
+    {
+      "path": "src/main/git/worktree.ts",
+      "sha256": "b7dbb16ad6e5df0552f9ccffcab4856e461663dbc0fb35e98da953d6a4278eca",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/git/worktree.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/coordinator-dispatch-unobserved-prompt.test.ts",
+      "sha256": "011704dff8bfc04ff522b13f594357fc8a9a85f853583a08adb3e6725c3afef8",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-dispatch-unobserved-prompt.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/coordinator-task-dispatch.ts",
+      "sha256": "80e8b3c7d51bf68ae9d6bcf7f216d26f9d5856df573e4dc696a23b712026c9dc",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-task-dispatch.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db/dispatch-mailbox-consumer-fencing.test.ts",
+      "sha256": "a1034ac18545160f77c389fd8fc805321177c125d2c855eef243d2f899842516",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/dispatch-mailbox-consumer-fencing.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db/messages/role-mailbox-delivery.ts",
+      "sha256": "179acfc031529f3dbe2d8ce26609a9753462e8610d1fca4ad11c441c1ffd5361",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/messages/role-mailbox-delivery.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db/worker-dispatch/failed-start-circuit-breaker.test.ts",
+      "sha256": "2dca95beb1abeffa841f65f0dd91a69b6998e18bf1c4a8db89a0dd5b06288f36",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-dispatch/failed-start-circuit-breaker.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db/worker-terminal/worker-terminal-release.ts",
+      "sha256": "610964e58bba473bf81b3ff0f8089beabd8c6715405e4c6c1b2f4e2a6134d549",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-terminal/worker-terminal-release.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db-task-create-readiness.test.ts",
+      "sha256": "747c025fca022aa0099b9094635fe7395440dc2c0e53a3d998c203eebbabadf7",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-create-readiness.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db-task-dispatch-invariant.test.ts",
+      "sha256": "8a4430f5b820cd45fdd908c9e553580ee0385cdf20aed8287076d7d508e14600",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-invariant.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/db-task-dispatch-races.test.ts",
+      "sha256": "214b41ccf975e7d5037f2b4bc96d64c531bad437554cc82c703130f30f4de054",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-races.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/lightweight-run-worker-exit-escalation.test.ts",
+      "sha256": "6256c4a3d8b5456a88b8fe832592cd68b8b9e1475b9cddfc3fae755316aaf1cf",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/lightweight-run-worker-exit-escalation.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/worker-attention-context.ts",
+      "sha256": "33541764b66ece0a718dc99ef775d37c628c2d39249c30310d9aa40036f13c45",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-attention-context.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/worker-start-unobserved-prompt-settlement.test.ts",
+      "sha256": "45edc86368f34d4925253e54efbcc02cd74bdc6ec454ec1bc00cd1c6da8c7103",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-start-unobserved-prompt-settlement.test.ts"
+    },
+    {
+      "path": "src/main/runtime/orchestration/worker-terminal-ownership.ts",
+      "sha256": "64533ec724deecc8c5b509a3485f9f7202f54b57b152258dc1345fe270a1e42a",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-terminal-ownership.ts"
+    },
+    {
+      "path": "src/main/runtime/remote-runtime-terminal-create-idempotency.ts",
+      "sha256": "49bdd7ac063ee631e27a970c7e4f10f762d353519b909413ae159270ae618c2e",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/remote-runtime-terminal-create-idempotency.ts"
+    },
+    {
+      "path": "src/renderer/src/components/dashboard-popout/AgentKanbanBoard.tsx",
+      "sha256": "f27af77e6876cb124e560c49afc89a7b17867e4be725f2ac4e16d4fd58ec826f",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/dashboard-popout/AgentKanbanBoard.tsx"
+    },
+    {
+      "path": "src/renderer/src/components/sidebar/WorkspaceKanbanDrawer.task-status-sync.test.tsx",
+      "sha256": "d4f893ab89a5210a571e4e54cf7e216bf97b1ca5cd630416e632a7ab0a7f02a0",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/WorkspaceKanbanDrawer.task-status-sync.test.tsx"
+    },
+    {
+      "path": "src/renderer/src/components/sidebar/use-workspace-kanban-status-actions.ts",
+      "sha256": "ab62a05e0a0699f60b3fc3bf153841b86bd6ce30527114cd6030296ebb88cc39",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/use-workspace-kanban-status-actions.ts"
+    },
+    {
+      "path": "src/shared/orchestration-fleet-attention.ts",
+      "sha256": "5130c8e24642022025fe9c8ff21ea84733de65bd1bc4a67ceafd6a1e0fae9809",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/shared/orchestration-fleet-attention.ts"
+    },
+    {
+      "path": "src/shared/orchestration-fleet-worker-projection.ts",
+      "sha256": "1c5cf53c5a7eaeccabebeaf40866b4bf8a796763919bc3597972fc81782e618d",
+      "source_url": "https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/shared/orchestration-fleet-worker-projection.ts"
+    }
+  ]
+}

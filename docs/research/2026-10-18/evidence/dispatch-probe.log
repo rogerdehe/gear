@@ -1,0 +1,9 @@
+=== RUN   TestResearchDoingIdleDoneAndBudget
+    research_probe_test.go:7: task=doing agent=idle prompts=100 configured_max=2 actions=[{Kind:prompt TaskID:t Pane:p Reason:the board still has the task in doing and the pane is idle Profile: AskedFor: QuotaNote:}]
+    research_probe_test.go:7: task=doing agent=done prompts=100 configured_max=2 actions=[]
+    research_probe_test.go:7: task=doing agent=blocked prompts=100 configured_max=2 actions=[]
+    research_probe_test.go:7: task=doing agent=unknown prompts=100 configured_max=2 actions=[]
+    research_probe_test.go:7: task=doing agent=working prompts=100 configured_max=2 actions=[]
+--- PASS: TestResearchDoingIdleDoneAndBudget (0.00s)
+PASS
+ok  	_/private/tmp/orch-deep-research/decide-probe	4.349s

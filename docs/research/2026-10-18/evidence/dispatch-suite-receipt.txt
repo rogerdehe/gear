@@ -1,0 +1,7 @@
+Tool output excerpts (not a full raw log)
+Command: go test ./internal/decide ./internal/loop ./internal/config ./internal/spawn
+ok github.com/husniadil/herdr-dispatch/internal/decide 6.680s
+panic: test timed out after 10m0s
+FAIL github.com/husniadil/herdr-dispatch/internal/loop 610.638s
+ok github.com/husniadil/herdr-dispatch/internal/config 135.387s
+No completed spawn result observed. Researcher also requested interruption.
