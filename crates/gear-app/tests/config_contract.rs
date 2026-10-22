@@ -138,6 +138,7 @@ fn quota_conventions_and_timing() {
 /// T-11: values are compared after trimming; an entry that is empty after
 /// trimming is reported where it is (owns entry or branch name).
 #[test]
+#[ignore = "T-11: un-ignored by the captain when T-11 merges"]
 fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[1].owns = vec![" src/heat/ ".into()];

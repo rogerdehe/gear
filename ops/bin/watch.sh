@@ -61,13 +61,15 @@ while :; do
   for lane in data runtime $temps; do
     agent="gear-$lane"
     standby=$(grep -E "^\| *$agent *\|" "$board" | grep -c standby)
-    work=0; ready=0
+    work=0; ready=0; inrev=0
     while IFS='|' read -r _ task l branch _ state _; do
       [ "$(echo $l)" = "$lane" ] || continue
       b=$(echo $branch | tr -d '`')
+      t=$(echo $task)
+      case "$t" in T-*) [ "$(git -C "$main" show "origin/$b:ops/tasks/$t.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)" = review ] && inrev=$((inrev+1)) ;; esac
       case "$(echo $state)" in
         rework|running) case "$lane" in r[0-9]*) work=$((work+1)) ;; *) [ "$(echo $state)" = rework ] && work=$((work+1)) ;; esac ;;
-        ready) git -C "$main" rev-parse -q --verify "origin/$b" >/dev/null || { work=$((work+1)); ready=$((ready+1)); } ;;
+        ready) git -C "$main" rev-parse -q --verify "origin/$b" >/dev/null || { ready=$((ready+1)); [ "$inrev" -lt 2 ] && work=$((work+1)); } ;;
       esac
     done < <(grep -E '^\| *[TR]-[0-9]' "$board")
     [ -f "$main/ops/mail/$lane.md" ] && work=$((work + $(grep -c '^### .*\[open\]' "$main/ops/mail/$lane.md")))
