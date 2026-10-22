@@ -552,3 +552,19 @@ mod tests {
         assert_eq!(err.code, ErrorCode::StaleVersion, "step 3 is checked before step 4");
     }
 }
+
+/// The task packet a lane reads (`gear --show T-n`, design/05 "Views"),
+/// rendered from the contract version the seat's open attempt adopted (else
+/// the task's current version). Plain text, in this order:
+/// `# <task> — <goal>` / `Lane: <lane> · Contract: v<n> · State: <state>` /
+/// `## Goal` goal / `## Acceptance` accept / `## Evidence` files and due (only
+/// when set) / `## Report` with the copyable commands
+/// `gear send --kind progress "…"` and
+/// `gear send --kind result --task <T> --attempt <n> --contract <v> --candidate <commit> "Report: <path>"`
+/// (attempt number of the open attempt; `<n>` literally when there is none).
+/// A pending newer contract version is appended as `## Pending update: v<m>`.
+/// Missing task → `NoTarget`. Read-only.
+pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
+    let _ = (tx, project, task);
+    todo!("T-53")
+}

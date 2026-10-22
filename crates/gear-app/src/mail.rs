@@ -74,14 +74,28 @@ pub fn send(
             Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
         )?;
 
-        // Slice 1 kinds only: the side effects of ack/result/blocked belong to
-        // slice 2, and a reply is written by `gear reply`.
+        // Slice 1 kinds, plus `result` (T-45): a result names the exact
+        // attempt/contract/candidate and submits it in this transaction.
+        // Ack/blocked still belong to later tasks and a reply is written by
+        // `gear reply`.
         match args.kind {
             MsgKind::Progress | MsgKind::Question | MsgKind::Instruction => {}
+            MsgKind::Result => {
+                if args.task.is_none()
+                    || args.attempt.is_none()
+                    || args.contract.is_none()
+                    || args.candidate.is_none()
+                {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        "a result needs `--task`, `--attempt`, `--contract` and `--candidate`",
+                    ));
+                }
+            }
             other => {
                 return Err(GearError::new(
                     ErrorCode::BadFormat,
-                    format!("kind {} is not available in slice 1", other.as_str()),
+                    format!("kind {} is not available yet", other.as_str()),
                 ))
             }
         }
@@ -145,7 +159,7 @@ pub fn send(
         };
 
         let args_key = format!(
-            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
             ctx.project,
             ctx.seat,
             ctx.generation,
@@ -154,6 +168,7 @@ pub fn send(
             args.task,
             args.attempt,
             args.contract,
+            args.candidate,
             args.about,
             args.to,
             args.reply_to,
@@ -161,6 +176,29 @@ pub fn send(
         );
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            // A result submits the attempt before the message is stored; an
+            // error here aborts the whole send, so nothing is kept.
+            if args.kind == MsgKind::Result {
+                crate::tasks::submit_result(
+                    tx,
+                    &ctx.project,
+                    args.task.as_deref().ok_or_else(|| {
+                        GearError::new(ErrorCode::BadFormat, "a result needs `--task`")
+                    })?,
+                    args.attempt.ok_or_else(|| {
+                        GearError::new(ErrorCode::BadFormat, "a result needs `--attempt`")
+                    })?,
+                    args.contract.ok_or_else(|| {
+                        GearError::new(ErrorCode::BadFormat, "a result needs `--contract`")
+                    })?,
+                    args.candidate.as_deref().ok_or_else(|| {
+                        GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
+                    })?,
+                    &args.body,
+                    now,
+                )?;
+            }
+
             // The thread of a new message is numbered here, after the replay
             // check: a replay returns the stored result and numbers nothing.
             let thread = match &inherited_thread {

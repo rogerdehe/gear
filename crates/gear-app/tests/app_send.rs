@@ -218,10 +218,14 @@ fn request_conflict() {
 #[test]
 fn slice2_kinds_rejected() {
     let mut s = world();
-    for kind in [MsgKind::Ack, MsgKind::Result, MsgKind::Blocked, MsgKind::Reply] {
+    // `result` is accepted since T-45 (and needs its four fields); ack, blocked
+    // and reply are still rejected.
+    for kind in [MsgKind::Ack, MsgKind::Blocked, MsgKind::Reply] {
         let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(kind), NOW).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BadFormat, "{kind:?} must not be stored in slice 1");
+        assert_eq!(err.code, ErrorCode::BadFormat, "{kind:?} must not be stored yet");
     }
+    let result_without_fields = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(MsgKind::Result), NOW).unwrap_err();
+    assert_eq!(result_without_fields.code, ErrorCode::BadFormat, "a result needs its four fields");
     let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW)).unwrap();
     assert!(inbox.is_empty(), "nothing was stored");
 }
