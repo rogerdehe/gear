@@ -148,6 +148,7 @@ Review is asynchronous: the lane has already moved on. The captain fetches the p
 
 - A **long-lived lane** is for work where accumulated context is an asset: a duty and owned paths it gets better at over time. It pulls its own queue asynchronously.
 - A **temp worker** is for work that must start clean every time and ends with one deliverable — reviews, one-off investigations, isolated fixes. The captain/engine pushes the job to a fresh session; nobody has to remember to clear anything. Same job coming back (rework, follow-up) resumes the same session.
+- **Clean context comes from a new session, never from `/clear`.** Measured 2026-10-22 (OpenCode on Herdr, this Rust repo): a fresh temp agent costs ~20 s (worktree 0.8 s, shell init ~12 s, `agent start --auto` 4.4 s, model check ~3 s) plus a cold build (~1 min here); tokens are the same either way, because a cleared session re-reads everything too. When cold setup is expensive, a **warm seat** is allowed: keep the worktree and its build cache, and before each job the captain/engine exits the agent and starts a new session (`agent start` without `-s`, seconds). It is still push-dispatched temp work; a re-review resumes that job's session id.
 - There is no such thing as "a long-lived lane that must be cleared before each task": an agent cannot clear its own context, and an asynchronous lane is never cleared by anyone. If a role needs a clean context per task, it is temp work.
 
 ## 9. Status comes from facts
