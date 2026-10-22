@@ -36,7 +36,6 @@ fn seat(s: &mut Store, name: &str) -> (SeatState, Option<String>) {
 }
 
 #[test]
-#[ignore = "T-55: un-ignored by the captain when T-55 merges"]
 fn park_hold_retire() {
     let mut s = world();
     let r = run(&mut s, "- park heat until-task=T-12\n- hold wire reason=waiting for user authorization\n- retire prompts\n", "r1").unwrap();
@@ -47,7 +46,6 @@ fn park_hold_retire() {
 }
 
 #[test]
-#[ignore = "T-55: un-ignored by the captain when T-55 merges"]
 fn bad_staff_writes_nothing() {
     let mut s = world();
     for (rid, line) in [
