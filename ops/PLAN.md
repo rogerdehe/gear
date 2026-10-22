@@ -203,3 +203,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-34 pass; merged T-38 + review. T-37 → R-36.
 - 2026-10-22 R-35 pass: T-39 merged via merge-task.sh (first use). R-33 fail: T-36 rework (data M-3: every contract field opens a version; base check first). R-35 question → T-44 (stale delivery voided).
 - 2026-10-22 R-36 pass; T-37 merged (merge-task.sh).
+- 2026-10-22 runtime starved (T-41, T-44 wait on T-40) → data M-4: T-40 before the T-36 rework.
