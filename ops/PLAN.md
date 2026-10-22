@@ -82,7 +82,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | done | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | done | — |
-| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | ready | — |
+| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | verifying | — |
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | draft | T-53 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
@@ -136,6 +136,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-48 | r51 | `review/t51` | review T-51 (branch `data/t51-home-task`) — temp reviewer gear-r51 on seat (session ses_e9c27071fffeuSvSJr474MQ22u) | done | — |
 | R-49 | r52 | `review/t52` | review T-52 (branch `runtime/t52-cli-plan-result`) — temp reviewer gear-r52 on seat (session ses_e9c2579abffexrPYbsZYHQ00xt) | done | — |
 | R-50 | r53 | `review/t53` | review T-53 (branch `data/t53-task-packet`) — temp reviewer gear-r53 on seat | running | — |
+| R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -264,3 +265,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-48, R-49 pass. Merged T-51 (home shows current task), T-52 (cli plan apply, --candidate). T-49 ready — the last piece of the slice-2 acceptance.
 - 2026-10-22 T-53 → R-50. merge-task.sh now also parks the reviewer seat.
 - 2026-10-22 Staff (park/hold/retire) contract on dev (`plan_staff_contract.rs`, ignored; `ApplyResult.staffed`); T-55 ready. Temp workers and hold release come later.
+- 2026-10-22 T-49 (slice-2 acceptance) → R-51.
