@@ -30,12 +30,15 @@ pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction]
     Ok(ops)
 }
 
-/// Execute every Intended op of `project`:
+/// Execute every Intended **doorbell** op of `project`:
 /// - in a tx: re-check the seat's current generation/state still match the
 ///   op (else → Void) and move it to Executing;
 /// - outside any tx: call Herdr;
 /// - in a tx: Ok → Submitted, Refused → Failed, Uncertain → Unknown.
 /// Returns (op id, final state) pairs.
+///
+/// Slice 1 drains doorbell ops only: the other kinds (deliver, onboard,
+/// release, title, notify) carry no text and get their own packets.
 pub fn execute_intended(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
