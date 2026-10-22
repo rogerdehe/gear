@@ -14,6 +14,7 @@ pub mod draft;
 pub mod home;
 pub mod identity;
 pub mod mail;
+pub mod plan;
 
 use gear_model::GearCtx;
 

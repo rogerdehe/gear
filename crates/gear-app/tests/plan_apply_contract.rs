@@ -1,0 +1,115 @@
+//! Contract for gear_app::plan::apply, queue cut (T-36, design/05). Needs the
+//! slice-2 store (T-33).
+
+use gear_app::draft::{parse, Draft};
+use gear_app::identity::Fingerprint;
+use gear_app::plan::apply;
+use gear_app::Env;
+use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
+use gear_store::{testing, Store};
+
+const NOW: i64 = 1_800_000_000;
+const CAP_PANE: &str = "w1:p1";
+
+fn world() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+fn cap() -> (Env, Fingerprint) {
+    (
+        Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP_PANE.into()), admin: false },
+        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+    )
+}
+
+fn draft(base: i64, queue: &str) -> (Draft, String) {
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
+    (parse(&text).unwrap(), text)
+}
+
+fn run(s: &mut Store, d: &(Draft, String), rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let (env, fp) = cap();
+    apply(s, &env, Some(&fp), &d.0, &d.1, rid, NOW)
+}
+
+const TWO_NEW: &str = "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\ndeps: T-1\n";
+
+#[test]
+#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
+fn new_tasks_get_ids_rank_and_contract_v1() {
+    let mut s = world();
+    let r = run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
+    assert_eq!((r.version, r.created.clone()), (1, vec!["T-1".to_string(), "T-2".to_string()]));
+    let tasks = s.read(|tx| tx.tasks_of_project("p")).unwrap();
+    assert_eq!(tasks.iter().map(|t| (t.id.as_str(), t.rank, t.state)).collect::<Vec<_>>(),
+        vec![("T-1", 1, TaskState::Ready), ("T-2", 2, TaskState::Ready)]);
+    assert_eq!(tasks[1].deps, vec!["T-1".to_string()]);
+    assert_eq!(s.read(|tx| tx.get_contract("p", "T-2", 1)).unwrap().unwrap().goal, "B");
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+}
+
+#[test]
+#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
+fn stale_base_and_replay() {
+    let mut s = world();
+    let d = draft(0, TWO_NEW);
+    let first = run(&mut s, &d, "r1").unwrap();
+    assert_eq!(run(&mut s, &d, "r1").unwrap(), first, "same request id + text replays");
+    assert_eq!(run(&mut s, &d, "r2").unwrap_err().code, ErrorCode::StaleVersion);
+}
+
+#[test]
+#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
+fn reorder_change_contract_and_unmentioned_keep_order() {
+    let mut s = world();
+    run(&mut s, &draft(0, &format!("{TWO_NEW}\n## NEW [could] lane=heat\ngoal: C\naccept: c\ndeps: -\n")), "r1").unwrap();
+    // v1 → v2: mention only T-3 (first) and T-1 (goal changed); T-2 not mentioned
+    let r = run(&mut s, &draft(1, "## T-3 [now] lane=heat\ngoal: C\naccept: c\ndeps: -\n\n## T-1 [must] lane=heat\ngoal: A2\naccept: a\ndeps: -\n"), "r2").unwrap();
+    assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
+    assert_eq!(r.not_mentioned, vec!["T-2".to_string()]);
+    let order: Vec<String> = s.read(|tx| tx.tasks_of_project("p")).unwrap().into_iter().map(|t| t.id).collect();
+    assert_eq!(order, vec!["T-3", "T-1", "T-2"]);
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version, 2);
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-3")).unwrap().unwrap().contract_version, 1, "unchanged contract keeps its version");
+}
+
+#[test]
+#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
+fn invalid_drafts_write_nothing() {
+    let mut s = world();
+    run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
+    for (rid, q) in [
+        ("a", "## T-9 [must] lane=heat\ngoal: x\naccept: x\ndeps: -\n"),                 // unknown task
+        ("b", "## NEW [must]\ngoal: x\naccept: x\ndeps: -\n"),                              // NEW without lane
+        ("c", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: T-2\n"),                 // cycle T-1 ↔ T-2
+        ("d", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: T-7\n"),                 // unknown dep
+        ("e", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\nstate: ready\n"),     // Ready → ready not allowed
+    ] {
+        assert_eq!(run(&mut s, &draft(1, q), rid).unwrap_err().code, ErrorCode::BadFormat, "{rid}");
+    }
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
+    let staff = "<!-- gear-plan project=p base=1 -->\n# Staff\n- retire heat\n";
+    let (env, fp) = cap();
+    assert_eq!(apply(&mut s, &env, Some(&fp), &parse(staff).unwrap(), staff, "f", NOW).unwrap_err().code, ErrorCode::BadFormat);
+}
+
+#[test]
+#[ignore = "T-36: un-ignored by the captain when T-36 merges"]
+fn cancel_and_lane_cannot_apply() {
+    let mut s = world();
+    run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
+    run(&mut s, &draft(1, "## T-2 [should] lane=heat\ngoal: B\naccept: b\ndeps: T-1\nstate: cancelled\n"), "r2").unwrap();
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-2")).unwrap().unwrap().state, TaskState::Cancelled);
+    let lane = Env { ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }), pane_id: Some("w1:p2".into()), admin: false };
+    let lfp = Fingerprint { pane_id: "w1:p2".into(), kind: Some("opencode".into()), session_ref: None };
+    let d = draft(2, "");
+    assert_eq!(apply(&mut s, &lane, Some(&lfp), &d.0, &d.1, "r3", NOW).unwrap_err().code, ErrorCode::Forbidden);
+}
