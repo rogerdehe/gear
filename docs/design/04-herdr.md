@@ -6,7 +6,7 @@ Invariants upheld: an observation failure is not treated as "nothing happened"; 
 ## Responsibilities
 
 - Wrap all Herdr calls in one place: call the CLI via subprocess through `HERDR_BIN_PATH` (default `herdr`), with timeouts, JSON parsing, and error classification.
-- Socket path: calls may instead go over the Herdr socket through the vendored board-herdr client (`third_party/board-herdr`). Methods it already wraps are called directly; methods it lacks (e.g. `worktree.create` / `worktree.open` / `worktree.remove`) are called through its generic `call(method, params)`. Timeouts, error classification, and `uncertain` handling are the same on either path.
+- Socket path: calls may instead go over the Herdr socket through the board-herdr client (MIT, pinned git dependency). Methods it already wraps are called directly; methods it lacks (e.g. `worktree.create` / `worktree.open` / `worktree.remove`) are called through its generic `call(method, params)`. Timeouts, error classification, and `uncertain` handling are the same on either path.
 - Explicit session binding: engine calls always carry the project's bound session (`--session <name>`) and do not depend on UI focus.
 - Maintain per-CLI profiles: screen-reading signatures, resume method, capability declarations.
 - Two layers: `HerdrReadOnly` (also usable from the command line, read-only) and `HerdrActor` (engine only, has side effects).

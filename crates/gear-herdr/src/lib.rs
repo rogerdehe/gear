@@ -5,7 +5,7 @@
 //! - [`HerdrAct`]: side effects (prompt, start, close…). **Only the engine**
 //!   may hold one.
 //! - [`SocketHerdr`]: real implementation over the Herdr socket, built on the
-//!   vendored `board-herdr` client (MIT, see third_party/board-herdr/NOTICE).
+//!   `board-herdr` client (MIT, git dependency pinned in the workspace Cargo.toml).
 //! - [`fake::FakeHerdr`]: scriptable in-memory Herdr for tests.
 //!
 //! Outcome rules (design/04, /08): an action whose effect may have happened
