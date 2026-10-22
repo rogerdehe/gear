@@ -111,6 +111,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-34 | r38 | `review/t38` | review T-38 (branch `runtime/t38-dispatch-delivered`) — temp reviewer gear-r38 on seat (session ses_e9c71adadffeNqEPO3RJKDwFHB) | done | — |
 | R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat (session ses_e9c6ebc9effef9Fb7NcakyILcA) | done | — |
 | R-36 | r37 | `review/t37` | review T-37 (branch `data/t37-draft-strict`) — temp reviewer gear-r37 on seat (session ses_e9c6aeaedffebAeYJcEaEZ1Api) | done | — |
+| R-37 | r6 | `review/t6` | review T-6 (branch `captain/t6-skill`) — temp reviewer gear-r6 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | verifying | — |
 
 ## Done
@@ -204,3 +205,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-35 pass: T-39 merged via merge-task.sh (first use). R-33 fail: T-36 rework (data M-3: every contract field opens a version; base check first). R-35 question → T-44 (stale delivery voided).
 - 2026-10-22 R-36 pass; T-37 merged (merge-task.sh).
 - 2026-10-22 runtime starved (T-41, T-44 wait on T-40) → data M-4: T-40 before the T-36 rework.
+- 2026-10-22 T-6 (captain's own task) handed in → R-37: the captain's work is reviewed like any lane's.
