@@ -1,6 +1,6 @@
 //! `gear plan apply` (design/05 "Apply flow"), first cut: the `# Queue`
 //! section. One transaction via `run_request`; an invalid draft writes
-//! nothing. `# Verdicts` is settled here (T-50); `# Staff` and `# Review` come in later tasks and are
+//! nothing. `# Verdicts` (T-50) and `# Staff` park/hold/retire (T-55) are applied here; `temp` staff lines and `# Review` come in later tasks and are
 //! rejected here when non-empty (`BadFormat`, naming the section).
 
 use crate::draft::{Draft, Priority, QueueItem, StaffItem};
@@ -645,7 +645,7 @@ mod tests {
         let mut s = world();
         run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"), "r1").unwrap();
 
-        let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- retire heat\n";
+        let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n";
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         let err = apply(&mut s, &env, Some(&fp), &draft, text, "r2", NOW).unwrap_err();

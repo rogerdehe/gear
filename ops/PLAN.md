@@ -51,7 +51,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | done | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
-| T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | verifying | — |
+| T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | done | — |
 | T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
@@ -140,7 +140,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-50 | r53 | `review/t53` | review T-53 (branch `data/t53-task-packet`) — temp reviewer gear-r53 on seat (session ses_e9c1a46d1ffeG9DHAh7yiHz4Ln) | done | — |
 | R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat (session ses_e9c1612e6ffefZ8kCK0yBG7WZv) | done | — |
 | R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat (session ses_e9c0b056bffeN388Em2XWRzNEh) | done | — |
-| R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat | running | — |
+| R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat (session ses_e9c0a4336ffeivxaX6BlsMPzfj) | done | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -278,3 +278,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 User: MiniMax reset, DeepSeek nearly spent. Chains moved to `ops/models.conf` (start-reviewer reads it); reviewers now MiniMax-M3 (variant thinking, label verified in the picker); lanes go back to MiniMax-M3.1-Flash as they stop.
 - 2026-10-22 Slice 3 starts: admin init contract (`admin_init_contract.rs`, 2 ignored); T-57 ready. gear-data switched back to MiniMax-M3.1-Flash.
 - 2026-10-22 R-52 pass; T-56 merged (`gear run` now has the opencode profile).
+- 2026-10-22 R-53 pass; T-55 merged (Staff park/hold/retire); its two P3s fixed by the captain at merge.
