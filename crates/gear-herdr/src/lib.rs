@@ -224,13 +224,43 @@ impl HerdrAct for SocketHerdr {
     }
 
     fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
-        todo!("T-herdr")
+        // `focus: false`: GEAR never steals the user's focus.
+        let params = json!({
+            "cwd": repo,
+            "branch": branch,
+            "base": base,
+            "label": label,
+            "focus": false,
+        });
+        match self.client.call("worktree.create", params) {
+            Ok(result) => worktree_from_reply(&result),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree> {
-        todo!("T-herdr")
+        let params = json!({
+            "cwd": repo,
+            "branch": branch,
+            "label": label,
+            "focus": false,
+        });
+        match self.client.call("worktree.open", params) {
+            Ok(result) => worktree_from_reply(&result),
+            Err(e) => outcome_from_error(&e),
+        }
     }
+
     fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()> {
-        todo!("T-herdr")
+        // `force: false` always: a dirty worktree is never discarded silently.
+        let params = json!({
+            "workspace_id": workspace_id,
+            "force": false,
+        });
+        match self.client.call("worktree.remove", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
     }
 }
 
