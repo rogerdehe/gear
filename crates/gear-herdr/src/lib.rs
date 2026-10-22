@@ -12,8 +12,6 @@
 //! (timeout, disconnect, undecodable reply) is `Uncertain`, never `Refused`.
 //! Only a reply that proves nothing was executed is `Refused`.
 
-#![allow(unused_variables, dead_code)] // skeleton: SocketHerdr bodies are `todo!()`
-
 pub mod fake;
 pub mod profile;
 
