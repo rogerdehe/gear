@@ -16,8 +16,8 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 
 | Lane | Herdr workspace / pane | Worktree | Anchor branch |
 |---|---|---|---|
-| gear-data (standby: short skeleton queue on purpose) | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
-| gear-runtime (standby: short skeleton queue on purpose) | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
+| gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` (standby: short skeleton queue on purpose) |
+| gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` (standby: short skeleton queue on purpose) |
 
 ## Models (this project's chains, 17 §0)
 
@@ -88,7 +88,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | done | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
-| T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | rework | — |
+| T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | done | — |
 | T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | ready | — (start now against the T-58/T-59 signatures on dev; hand in after they merge) |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -148,6 +148,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | done | — |
 | T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
+| R-56 | r58 | `review/t58` | review T-58 (branch `runtime/t58-onboard-plan`) — temp reviewer gear-r58 on seat | done | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -296,3 +297,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-57 merged (admin init). T-62 released early to runtime (codes against the stub signatures) to shorten the path to the first real run.
 - 2026-10-22 T-58 had been handed in without a review being started (captain missed the event during the scope discussion) → R-56 now. Lanes marked standby for lowready: queues are short on purpose in the skeleton phase.
 - 2026-10-22 T-58 conflicts with dev (captain's stub in the same file) → rework M-8 before review.
+- 2026-10-22 T-58 re-handed in after the dev merge → R-56. gear-data kept stopping after a thought at 68% context → captain ran /compact, lane continues T-59.
+- 2026-10-22 R-56 pass; T-58 merged (onboarding plan).
