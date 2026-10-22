@@ -45,6 +45,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | verifying | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | ready | — |
 | T-40 | data | `data/t40-open-attempts` | slice 2: store open attempts of a seat (stub + contract by captain) | ready | — |
+| T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | ready | — |
+| T-43 | data | `data/t43-settle` | slice 2: settle verdicts | draft | T-42 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -195,3 +197,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 runtime lowready → slice-2 delivery contract on dev (`deliver_contract.rs`, 3 ignored); T-39 ready.
 - 2026-10-22 R-32 pass (P3 format fixed at merge). Merged T-34 + review; its tests un-ignored; T-40 ready. T-36 → R-33, T-38 → R-34.
 - 2026-10-22 T-39 → R-35. Lane-view contract on dev (`lane_view_contract.rs`, 3 ignored); T-41 drafted (after T-40).
+- 2026-10-22 Slice-2 tasks contract on dev (`gear_app::tasks`, `tasks_contract.rs` 5 ignored). T-42 ready, T-43 after T-42.
