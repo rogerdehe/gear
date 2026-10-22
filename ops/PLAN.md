@@ -16,8 +16,8 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 
 | Lane | Herdr workspace / pane | Worktree | Anchor branch |
 |---|---|---|---|
-| gear-data (standby: short skeleton queue on purpose) | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
-| gear-runtime (standby: short skeleton queue on purpose) | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
+| gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` (standby: short skeleton queue on purpose) |
+| gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` (standby: short skeleton queue on purpose) |
 
 ## Models (this project's chains, 17 §0)
 
