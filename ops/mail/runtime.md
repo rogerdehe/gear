@@ -18,6 +18,6 @@ Read `origin/review/t21:ops/reviews/T-21.md`. Delete the private `observe::expec
 
 Read `origin/review/t29:ops/reviews/T-29.md`. Captain answer: yes, `--need` is a slice-1-unsupported flag — reject it with `BadFormat` naming the flag, like the other four (my packet missed it). Extend `unsupported_flag_is_bad_format` to cover it. Merge `origin/dev` first.
 
-### M-5 [open] T-30: rework — merge origin/dev and make it compile (R-29 P1)
+### M-5 [closed] T-30: rework — merge origin/dev and make it compile (R-29 P1)
 
 Read `origin/review/t30:ops/reviews/T-30.md`. `git merge origin/dev` into `runtime/t30-cli-home`: the merged `mod tests` defines `T0`/`CAP_PANE`/`LANE_PANE` twice (yours and T-29's) — keep one set; use T-29's `open_herdr()` / `now_ts()` in `cmd_home` (P3). Run acceptance on the merged result. Hand-in rule changed: always merge dev and build before `Status: review` (ops/CONVENTIONS.md, L-33).
