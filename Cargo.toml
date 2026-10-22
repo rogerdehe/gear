@@ -7,7 +7,6 @@ members = [
     "crates/gear-app",
     "crates/gear-engine",
     "crates/gear-cli",
-    "third_party/board-herdr",
 ]
 
 [workspace.package]
@@ -21,7 +20,7 @@ gear-store = { path = "crates/gear-store" }
 gear-herdr = { path = "crates/gear-herdr" }
 gear-app = { path = "crates/gear-app" }
 gear-engine = { path = "crates/gear-engine" }
-board-herdr = { path = "third_party/board-herdr" }
+board-herdr = { git = "https://github.com/nelsonPires5/herdr-board", rev = "7a215a179acb4e098dd1c2971332497806309360" }
 
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
