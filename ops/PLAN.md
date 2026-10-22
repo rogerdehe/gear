@@ -86,7 +86,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | done | — |
 | T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | done | — |
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | done | — |
-| T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | verifying | — |
+| T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | done | — |
 | T-56 | runtime | `runtime/t56-builtin-profiles` | built-in opencode profile; `gear run` uses it (contract by captain) | done | — |
 | T-58 | runtime | `runtime/t58-onboard-plan` | slice 3: plan a seat's onboarding (stub + contract by captain) | ready | — |
 | T-62 | runtime | `runtime/t62-onboard-run` | **walking skeleton**: engine onboards queued lanes in `tick` (contract by captain) | draft | T-57, T-58, T-59 |
@@ -144,7 +144,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-51 | r49 | `review/t49` | review T-49 (branch `runtime/t49-tick-dispatch`) — temp reviewer gear-r49 on seat (session ses_e9c1612e6ffefZ8kCK0yBG7WZv) | done | — |
 | R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat (session ses_e9c0b056bffeN388Em2XWRzNEh) | done | — |
 | R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat (session ses_e9c0a4336ffeivxaX6BlsMPzfj) | done | — |
-| R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | running | — |
+| R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | done | — |
 | R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | running | — |
 | T-61 | captain | — | prune skill, SOPs, CONVENTIONS, CAPTAIN to what is necessary + real special cases (positive procedures, not accumulated don'ts); align with the user first | draft | slice 3 |
 | T-60 | captain | — | remove every stopgap in `ops/STOPGAPS.md` once `gear run` drives this project (hook, watcher, manual scripts, seats) | draft | slice 3 |
@@ -292,3 +292,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 User: temporary workarounds must not become permanent. `ops/STOPGAPS.md` lists each with its removal trigger; T-60 removes them when GEAR runs this project. New stopgaps get a row in the same commit.
 - 2026-10-22 User: stop adding to SOP/skill/conventions after each incident; prefer subtraction. Lessons stay in the log; a pruning pass (T-61) is planned, aligned with the user.
 - 2026-10-22 User: run the skeleton end to end before polishing modules; MVP had grown ~2.5x (≈7,800 product lines vs 3,000). New direction: only walking-skeleton work (T-57, T-58, T-59, T-62) then a real run on Herdr; everything else frozen until that run.
+- 2026-10-22 R-54 found a P2 (unsupported --show target reports a missing-env error instead of BadFormat) — does not stop the loop; merged T-54 under the skeleton rule, finding logged only.
