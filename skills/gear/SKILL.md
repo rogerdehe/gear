@@ -9,7 +9,7 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 ## 1. Guard
 
-No `GEAR_CTX` in your environment → GEAR did not start you. Do not run `gear send` or `gear reply`; tell the user.
+No `GEAR_CTX` in your environment → GEAR did not start you. Run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user.
 
 ## 2. Start every turn with `gear`
 
@@ -21,17 +21,18 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Do not run `gear s
 - Report with `gear send --kind <kind> "<text>"`:
   - `progress` — a step done (one line; not a substitute for committing and pushing);
   - `question` — you need a decision; say Question / Options / Context / Default (conventions §7), then continue with other ready work if there is any;
-  - `blocked` — you cannot continue at all;
-  - `result` — use the exact command in your task packet (it names task, attempt and contract).
+  - `blocked` — you cannot continue at all: use the exact command in your task packet (it names task, attempt and contract); waiting on another task is `--about T-<x> --need "<what you wait on>"`;
+  - `result` — use the exact command in your task packet.
 - Answer a captain instruction with `gear send --kind ack --reply-to M-<n> "<text>"`.
+- Slice 1 (this version) accepts only `progress` and `question`; `blocked`, `result`, `ack` and `--about` arrive with slice 2 and return `BAD_FORMAT` until then.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id` it printed; never resend it reworded.
-- Do not edit plan or task files; do not start background jobs that keep writing after your turn ends.
+- Do not edit the plan or the task packets GEAR renders — report through `gear send`; do not start background jobs that keep writing after your turn ends. (While a project runs GEAR by hand, its own `ops/CONVENTIONS.md` may let a lane update its packet's status and lane record.)
 
 ## 4. Captain
 
 - `gear` shows the inbox batch: answer with `gear reply M-<n> … -m "<text>"` (`--resolve` default, `--wait <who> --until +2h`, `--note`). Close exactly the ids you handled.
 - `gear send --to <seat> --kind instruction "<text>"` gives a lane an instruction.
-- Plan, staffing and acceptance go through a plan draft and `gear plan apply` (its format topic `plan-format` ships with slice 2).
+- Plan, staffing and acceptance go through a plan draft and `gear plan apply` (slice 2; the topics `captain` and `plan-format` ship with it).
 - You decide; you do not review code yourself. Reviews are done by temp reviewers on a model other than the writer's (conventions §8).
 - Ask the user only what is theirs: release to main, money, scope, destructive acts on things you did not create.
 
@@ -49,4 +50,11 @@ Names, branches, worktrees, the task loop, review and merge: `gear --skill conve
 | `BAD_FORMAT` | arguments or text malformed (detail says where) | fix and resend |
 | `STALE_VERSION` | the plan changed since your draft's base | export a new draft, reapply |
 | `UNCONFIRMED` | outcome unknown | rerun with the same `--request-id` |
+| `NO_TARGET` | the task, message or seat named does not exist | check the id |
+| `BAD_TRANSITION` | that state change is not allowed from the current state | run `gear`; do not force |
+| `REQUEST_CONFLICT` | this `--request-id` was used with different arguments | resend the original exactly, or use a new id for new content |
+| `QUOTA` | no capacity for that (lanes/temps) | wait; the captain decides |
+| `ENGINE_DOWN` | the engine is not running | your write is stored; tell the user if it persists |
 | `LOCKED` | the store is busy | retry shortly |
+
+A fuller `errors` topic ships with slice 2.

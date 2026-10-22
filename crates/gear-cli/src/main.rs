@@ -694,6 +694,7 @@ fn write_error(e: std::io::Error) -> GearError {
 
 /// Skill topics and their embedded text. The skill is compiled into the
 /// binary, so the printed rules always match this binary's version.
+/// The `--skill` help text must list exactly these names (test `help_lists_every_skill_topic`).
 const SKILL_TOPICS: &[(&str, &str)] = &[
     ("main", include_str!("../../../skills/gear/SKILL.md")),
     ("conventions", include_str!("../../../docs/design/17-conventions.md")),
@@ -719,6 +720,16 @@ fn print_skill(topic: &str) -> GearResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn help_lists_every_skill_topic() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        for (name, _) in SKILL_TOPICS {
+            let shown = if *name == "main" { "(none)=SKILL.md" } else { name };
+            assert!(help.contains(shown), "--skill help misses topic {name}");
+        }
+    }
+
     use super::*;
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
