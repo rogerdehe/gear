@@ -56,8 +56,8 @@ fn queued_lane_gets_worktree_env_and_agent() {
         if command == "export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db")), "{:?}", herdr.calls);
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
         if name == "toy-heat" && kind == "opencode" && args == &vec!["--auto".to_string()])), "{:?}", herdr.calls);
-    // the captain is not onboarded by the engine in this cut
-    assert_eq!(s.read(|tx| tx.get_seat("toy:captain")).unwrap().unwrap().state, SeatState::Queued);
+    // the captain is bound at init (T-63), not onboarded by the engine
+    assert_eq!(s.read(|tx| tx.get_seat("toy:captain")).unwrap().unwrap().state, SeatState::Active);
     // nothing to do on the next run
     assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 2).unwrap().is_empty());
 }

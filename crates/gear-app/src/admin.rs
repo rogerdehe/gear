@@ -5,7 +5,7 @@
 use crate::config;
 use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
-use gear_store::{ProjectRow, SeatRow, Store};
+use gear_store::{BindingRow, BindingStatus, ProjectRow, SeatRow, Store};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InitResult {
@@ -26,7 +26,8 @@ pub struct InitResult {
 ///    `<id>:captain` (Captain, profile = `captain.profile`) and `<id>:<lane>`
 ///    for each lane (Lane, its profile) — all generation 0, state Queued,
 ///    `state_reason` "registered". Onboarding (worktree, pane, agent) is the
-///    engine's job afterwards, not init's.
+///    engine's job afterwards, not init's — except the captain (skeleton, T-63):
+///    it is the user's running agent in `captain.pane`, bound Active as generation 1.
 /// Checks that need Herdr or git (session, repo, branch) are not part of this cut.
 pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
     // 1. only the user runs this: an agent never does.
@@ -99,6 +100,23 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
         for lane in &config.lanes {
             register(&lane.name, SeatRole::Lane, &lane.profile)?;
         }
+
+        // 5. walking skeleton (T-63): the captain is the user's own agent, already
+        // running in `captain.pane`; bind it as generation 1 instead of onboarding it.
+        let captain = format!("{project_id}:captain");
+        tx.set_seat_generation(&captain, 1)?;
+        tx.set_seat_state(&captain, SeatState::Active, Some("bound to the existing captain pane at init"), now)?;
+        tx.insert_binding(&BindingRow {
+            seat: captain,
+            generation: 1,
+            session: config.project.herdr_session.clone(),
+            pane_id: config.captain.pane.clone(),
+            kind: config.captain.kind.clone(),
+            session_ref: None,
+            status: BindingStatus::Active,
+            handover_id: None,
+            created: now,
+        })?;
 
         Ok(InitResult { project: project_id, config_version: 1, seats })
     })
