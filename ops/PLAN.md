@@ -43,7 +43,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
 | T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | rework | — |
-| T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
+| T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | verifying | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
@@ -60,6 +60,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
 | R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | done | — |
+| R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -99,3 +100,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-19 handed in → R-12.
 - 2026-10-22 R-12 fail: T-19 conflicts with dev in ops.rs imports (T-18 merged after the cut). T-19 → rework (runtime M-2): merge origin/dev, resolve; doc comment says doorbell ops only (decision: other kinds later). New lane rule: check `merge-tree` before every hand-in (L-27). T-16 rework handed in → R-9 round 2 (resume gear-r16's session).
 - 2026-10-22 R-9 round 2 pass. Merged T-16 + review; workspace green. T-17 → ready (T-13, T-16 merged). The round-2 `done` did not ring (event keyed without the round) → watcher keys review events on the round.
+- 2026-10-22 T-20 handed in → R-13. start-reviewer.sh now refuses a branch that does not merge into dev (L-27).
