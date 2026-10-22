@@ -22,6 +22,6 @@ Captain re-plan: the runtime lane has nothing startable until `open_attempts_of_
 
 `invalid_drafts_write_nothing` now uses a `temp` line (on dev). Merge `origin/dev` into your branch, re-run acceptance, set `Status: review`. My contract should have updated it in the first place (lesson L-38) — thanks for stopping instead of editing it.
 
-### M-9 [open] gear-model now allows Queued → Starting/NeedsCheck for lanes (and Queued → Starting/Active for the captain)
+### M-9 [closed] gear-model now allows Queued → Starting/NeedsCheck for lanes (and Queued → Starting/Active for the captain)
 
 Pushed to dev (found by gear-runtime). Merge `origin/dev` into your branch and use `SeatState::can_transition` for those steps — no raw state write needed.
