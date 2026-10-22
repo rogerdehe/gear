@@ -7,11 +7,16 @@
 # Seats are created on demand, at most MAX_SEATS (default 3).
 set -eu
 n=${1:?task number}; branch=${2:?branch under review}; shift 2
-resume=""; model="DeepSeek V4.1 Flash 1017"     # must differ from the writer's model
+resume=""; model="DeepSeek V4.1 Flash 1017"; filter=""   # must differ from the writer's model
+alt_model=${REVIEW_ALT_MODEL:-"DeepSeek V4 Pro"}; alt_filter=${REVIEW_ALT_FILTER:-"deepseek-v4-pro"}
 while [ $# -gt 0 ]; do case "$1" in --resume) resume=$2; shift 2 ;; --model) model=$2; shift 2 ;; *) echo "bad arg $1" >&2; exit 2 ;; esac; done
 main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree //p')
 wtroot=$(dirname "$(git -C "$main" worktree list --porcelain | sed -n 's/^worktree \(.*\/home-data\)$/\1/p')")
 max=${MAX_SEATS:-3}
+# independence: if the writer lane currently runs the reviewer model, use the alternate (lanes may be switched on quota)
+writer="gear-${branch%%/*}"
+if herdr agent read "$writer" --source visible 2>/dev/null | grep -E 'Build auto' | grep -qF "$model"; then model=$alt_model; filter=$alt_filter; fi
+[ -n "$filter" ] || filter=$model
 
 # 0. a hand-in that does not merge into dev goes straight back to the writer (lesson L-27).
 git -C "$main" fetch -q origin
@@ -53,7 +58,7 @@ else herdr agent start "$agent" --kind opencode --pane "$pane" --timeout 60000 -
 bar() { herdr pane read "$pane" --source visible | grep -E 'Build auto' | tail -1; }
 if ! bar | grep -qF "$model"; then
   herdr pane send-text "$pane" "/model" >/dev/null; herdr pane send-keys "$pane" enter >/dev/null; sleep 1
-  herdr pane send-text "$pane" "$model" >/dev/null; sleep 1
+  herdr pane send-text "$pane" "$filter" >/dev/null; sleep 1
   herdr pane send-keys "$pane" enter >/dev/null; sleep 1
 fi
 bar | grep -qF "$model" || { echo "model check failed: $(bar)" >&2; exit 1; }
