@@ -21,6 +21,8 @@ The general lane rules in `ops/CONVENTIONS.md` apply (English only, git limits, 
 
 ## Delivering
 
+- Check out the reviewed commit **inside your own worktree**: `git fetch origin && git switch --detach origin/<branch>`, run the checks, then `git switch review/t<n>`. Never create another git worktree or clone (worktrees are Herdr's job; lesson L-18).
+
 - Work on branch `review/t<n>` (the captain created your worktree on it). Write `ops/reviews/T-<n>.md` with `Status: running` first, commit, push; at the end set `Status: done`, commit, push, and end your turn. You review exactly one task.
 
 ## Template (`ops/reviews/T-<n>.md`)

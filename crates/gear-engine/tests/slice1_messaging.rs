@@ -96,6 +96,7 @@ fn show_home(w: &mut World, seat: &str, pane: &str, kind: &str, now: i64) -> Str
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn full_messaging_loop() {
     let mut w = world();
 
@@ -172,6 +173,7 @@ fn full_messaging_loop() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn send_is_replayed_for_same_request_id() {
     let mut w = world();
     let a = ask(&mut w, "x", "same", T0);
@@ -182,6 +184,7 @@ fn send_is_replayed_for_same_request_id() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn stale_generation_and_wrong_pane_are_rejected() {
     let mut w = world();
     let args = mail::SendArgs {
@@ -214,6 +217,7 @@ fn stale_generation_and_wrong_pane_are_rejected() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn lane_cannot_reply_or_target_seats() {
     let mut w = world();
     ask(&mut w, "q", "r1", T0);
@@ -237,6 +241,7 @@ fn lane_cannot_reply_or_target_seats() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn busy_or_unobservable_captain_is_not_rung() {
     let mut w = world();
     ask(&mut w, "q", "r1", T0);
@@ -264,6 +269,7 @@ fn busy_or_unobservable_captain_is_not_rung() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn uncertain_doorbell_is_never_resent() {
     let mut w = world();
     ask(&mut w, "q", "r1", T0);
@@ -278,6 +284,7 @@ fn uncertain_doorbell_is_never_resent() {
 }
 
 #[test]
+#[ignore = "T-4: slice-1 acceptance; un-ignored by the captain when T-4 merges"]
 fn reply_only_closes_listed_ids() {
     let mut w = world();
     ask(&mut w, "q1", "r1", T0);

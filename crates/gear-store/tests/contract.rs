@@ -254,6 +254,7 @@ fn concurrent_writers_do_not_duplicate_ids() {
 /// T-10: a raw state write whose target row does not exist is `NoTarget`,
 /// never a silent success, and writes nothing.
 #[test]
+#[ignore = "T-10: un-ignored by the captain when T-10 merges"]
 fn raw_writes_on_a_missing_target_are_no_target() {
     let mut s = store();
     s.write(|tx| {
@@ -280,4 +281,17 @@ fn raw_writes_on_a_missing_target_are_no_target() {
     .unwrap();
     let seat = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::Standby);
+}
+
+#[test]
+fn project_ids_lists_every_project_in_order() {
+    let mut s = store();
+    assert!(s.read(|tx| tx.project_ids()).unwrap().is_empty());
+    s.write(|tx| {
+        testing::seed_project(tx, "zeta", "default", NOW)?;
+        testing::seed_project(tx, "alpha", "default", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(s.read(|tx| tx.project_ids()).unwrap(), vec!["alpha".to_string(), "zeta".to_string()]);
 }
