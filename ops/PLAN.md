@@ -60,7 +60,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | done | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | done | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | done | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | verifying | — |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | done | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | verifying | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | ready | — |
@@ -90,7 +90,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat (session ses_e9c9ccc9dffeZjGrdNQ5Br72Qz) | done | — |
 | R-24 | r27 | `review/t27` | review T-27 (branch `data/t27-config-models`) — temp reviewer gear-r27 on seat (session ses_e9c950e3affeO983U45knVsJzf) | done | — |
 | R-25 | r29 | `review/t29` | review T-29 (branch `runtime/t29-cli-send-reply`) — temp reviewer gear-r29 on seat (session ses_e9c94d900ffeYli6RP1JMvQLPH) | running | — |
-| R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat | running | — |
+| R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat (session ses_e9c924489ffeZdxVO157xCH2ue) | done | — |
 | R-27 | r31 | `review/t31` | review T-31 (branch `data/t31-draft-parse`) — temp reviewer gear-r31 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
@@ -167,3 +167,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-24 pass (no findings). T-27 ignore removed; merged T-27 + review; workspace green.
 - 2026-10-22 R-25 fail (P2 `--need` silently ignored; my packet's unsupported-flag list missed it). T-29 → rework (runtime M-4).
 - 2026-10-22 T-31 → R-27; T-29 rework → R-25 round 2.
+- 2026-10-22 **Milestone: slice-1 messaging acceptance passes on dev** (slice1_messaging 7/7, no ignores). R-26 pass; merged T-4 + review; slice-1 ignores removed; engine crate's skeleton allow removed (no warnings). TickReport.intended bare ids: noted, qualify when a multi-project consumer needs it.
