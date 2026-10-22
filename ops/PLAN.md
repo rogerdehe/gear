@@ -42,6 +42,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | verifying | — |
 | T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | verifying | — |
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | ready | — |
+| T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | draft | T-33 |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -173,3 +174,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 **Milestone: slice-1 messaging acceptance passes on dev** (slice1_messaging 7/7, no ignores). R-26 pass; merged T-4 + review; slice-1 ignores removed; engine crate's skeleton allow removed (no warnings). TickReport.intended bare ids: noted, qualify when a multi-project consumer needs it.
 - 2026-10-22 R-25 round 2 pass; merged T-29 + review. T-33 → R-28, T-30 → R-29.
 - 2026-10-22 Slice-2 dispatch contract on dev (`dispatch.rs` types + `decide` stub, `dispatch_contract.rs` 5 ignored). T-35 ready.
+- 2026-10-22 Slice-2 `plan apply` (queue cut) contract on dev: `plan.rs` stub + `plan_apply_contract.rs` (5 ignored). T-36 draft until T-33 merges.
