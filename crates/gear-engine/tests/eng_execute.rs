@@ -151,6 +151,27 @@ fn unreachable_seat_is_void() {
 }
 
 #[test]
+fn void_reason_is_stored_on_the_op() {
+    let mut store = store_with_projects();
+    store
+        .write(|tx| {
+            insert_doorbell(tx, "p", "p:captain", 1, T0 + 1);
+            // The seat was re-onboarded: the op's generation is stale.
+            tx.set_seat_generation("p:captain", 2).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = herdr_with_agent(CAP_PANE);
+
+    execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+    let stored = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+    assert_eq!(stored.state, OpState::Void);
+    let reason = stored.result.expect("a voided op says why");
+    assert!(reason.contains("generation"), "{reason}");
+}
+
+#[test]
 fn other_projects_untouched() {
     let mut store = store_with_projects();
     store
