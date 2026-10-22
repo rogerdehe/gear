@@ -44,5 +44,54 @@ pub struct DoorbellAction {
 /// covers.len(); when urgent > 0 the first sentence becomes
 /// `GEAR: <n> item(s) waiting for you (<urgent> urgent).` Never message bodies.
 pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<DoorbellAction> {
-    todo!("slice1")
+    inputs
+        .iter()
+        .filter(|input| rings(input, cooldown_s, now))
+        .map(|input| {
+            let covers = covered_ids(input);
+            let n = covers.len();
+            let urgent = if input.urgent > 0 {
+                format!(" ({} urgent)", input.urgent)
+            } else {
+                String::new()
+            };
+            DoorbellAction {
+                project: input.project.clone(),
+                seat: input.seat.clone(),
+                generation: input.generation,
+                pane_id: input.pane_id.clone(),
+                text: format!("GEAR: {n} item(s) waiting for you{urgent}. Run `gear` to see them."),
+                covers,
+            }
+        })
+        .collect()
+}
+
+/// Whether this seat may be rung right now.
+fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
+    if input.actionable.is_empty() && input.unshown.is_empty() {
+        return false; // nothing to show
+    }
+    if !input.idle {
+        return false; // the agent is busy: a doorbell would interrupt a turn
+    }
+    if input.slot_busy {
+        return false; // a delivery already occupies the seat
+    }
+    match input.last_settled_at {
+        None => true,
+        Some(settled) => now - settled >= cooldown_s,
+    }
+}
+
+/// The message ids this doorbell is about: `actionable` in order, then the
+/// `unshown` ids not already covered.
+fn covered_ids(input: &DoorbellInput) -> Vec<String> {
+    let mut covers = input.actionable.clone();
+    for id in &input.unshown {
+        if !covers.contains(id) {
+            covers.push(id.clone());
+        }
+    }
+    covers
 }
