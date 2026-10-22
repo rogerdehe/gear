@@ -7,7 +7,7 @@
 
 - 2026-10-22 语言 Rust；由外向内切片；舰长搭骨架（model 全实现；store/herdr/app/engine/cli 签名 + 合同测试）；两条线实现。
 - 2026-10-22 Herdr 适配直接走 socket，vendored herdr-board 的 board-herdr（MIT）。
-- 2026-10-22 分支用 GitHub Flow：`main` + 每任务短命分支 `t<n>-<主题>`；worktree 一律用 `herdr worktree create`，落在 `/Volumes/Data/.herdr-worktrees/gear/<分支>`（Herdr 配置决定，不自造路径）；远端 `rogerdehe/gear`（私有）。
+- 2026-10-22 分支用 GitHub Flow：`main` + 每任务短命分支 `t<n>-<主题>`；worktree 一律用 `herdr worktree create`（路径由 Herdr 配置决定）；长期线 A/B 长期占有 `lane-a`（w5:p1）、`lane-b`（w6:p1）两个 worktree，任务分支在里面切换；临时工才单独开 worktree；远端 `rogerdehe/gear`（私有）。
 
 ## 在途
 
