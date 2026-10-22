@@ -39,9 +39,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-14 | data | `data/t14-send` | app: gear send | done | — |
 | T-15 | data | `data/t15-reply` | app: gear reply | done | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | done | — |
-| T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | ready | — |
-| T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | ready | — |
+| T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | done | — |
+| T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | done | — |
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | ready | — |
+| T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | ready | — |
+| T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -60,10 +62,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | done | — |
 | T-27 | data | `data/t27-config-models` | config: validate `[models]` (types + contract test by captain) | done | — |
 | T-28 | runtime | `runtime/t28-cli-plumbing` | cli: env, store, request id | done | — |
-| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | verifying | — |
-| T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | rework | — |
-| T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
-| T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | ready | — |
+| T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | done | — |
+| T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | done | — |
+| T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | rework | — |
+| T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | verifying | — |
+| T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -89,8 +92,12 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat (session ses_e9ca0e4f2ffeZl3Ym8V2aTt2I7) | done | — |
 | R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat (session ses_e9c9ccc9dffeZjGrdNQ5Br72Qz) | done | — |
 | R-24 | r27 | `review/t27` | review T-27 (branch `data/t27-config-models`) — temp reviewer gear-r27 on seat (session ses_e9c950e3affeO983U45knVsJzf) | done | — |
-| R-25 | r29 | `review/t29` | review T-29 (branch `runtime/t29-cli-send-reply`) — temp reviewer gear-r29 on seat (session ses_e9c94d900ffeYli6RP1JMvQLPH) | done | — |
-| R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat | running | — |
+| R-25 | r29 | `review/t29` | review T-29 (branch `runtime/t29-cli-send-reply`) — temp reviewer gear-r29 on seat (session ses_e9c94d900ffeYli6RP1JMvQLPH), 2 rounds | done | — |
+| R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat (session ses_e9c924489ffeZdxVO157xCH2ue) | done | — |
+| R-27 | r31 | `review/t31` | review T-31 (branch `data/t31-draft-parse`) — temp reviewer gear-r31 on seat (session ses_e9c8a6b70ffeh5sqWBqyBMu4L0) | done | — |
+| R-28 | r33 | `review/t33` | review T-33 (branch `data/t33-store-tasks`) — temp reviewer gear-r33 on seat (session ses_e9c877257ffeehrl85pVJ8vmd7) | done | — |
+| R-29 | r30 | `review/t30` | review T-30 (branch `runtime/t30-cli-home`) — temp reviewer gear-r30 on seat (session ses_e9c873476ffe0YBhVayZdcwiD9) | done | — |
+| R-30 | r32 | `review/t32` | review T-32 (branch `runtime/t32-gear-run`) — temp reviewer gear-r32 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -165,3 +172,10 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice-2 store contract on dev: row types, method signatures (todo!), `slice2_contract.rs` (5 ignored). T-33, T-34 ready (independent bodies).
 - 2026-10-22 R-24 pass (no findings). T-27 ignore removed; merged T-27 + review; workspace green.
 - 2026-10-22 R-25 fail (P2 `--need` silently ignored; my packet's unsupported-flag list missed it). T-29 → rework (runtime M-4).
+- 2026-10-22 T-31 → R-27; T-29 rework → R-25 round 2.
+- 2026-10-22 **Milestone: slice-1 messaging acceptance passes on dev** (slice1_messaging 7/7, no ignores). R-26 pass; merged T-4 + review; slice-1 ignores removed; engine crate's skeleton allow removed (no warnings). TickReport.intended bare ids: noted, qualify when a multi-project consumer needs it.
+- 2026-10-22 R-25 round 2 pass; merged T-29 + review. T-33 → R-28, T-30 → R-29.
+- 2026-10-22 Slice-2 dispatch contract on dev (`dispatch.rs` types + `decide` stub, `dispatch_contract.rs` 5 ignored). T-35 ready.
+- 2026-10-22 Slice-2 `plan apply` (queue cut) contract on dev: `plan.rs` stub + `plan_apply_contract.rs` (5 ignored). T-36 draft until T-33 merges.
+- 2026-10-22 R-27 pass (2 P3 strictness gaps → T-37). T-31 ignores removed; merged T-31 + review; workspace green.
+- 2026-10-22 R-28 pass: merged T-33 + review, its slice2 tests un-ignored; T-36 ready. R-29 fail: T-30 merges textually but does not compile with T-29 (duplicate test consts) → rework (runtime M-5); hand-in rule now merges dev and builds (L-33). T-32 → R-30.
