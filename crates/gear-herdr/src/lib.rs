@@ -117,9 +117,7 @@ impl HerdrRead for SocketHerdr {
                     Ok(Some(info))
                 }
             }
-            Err(board_herdr::HerdrError::Protocol { code, .. }) if MISSING_CODES.contains(&code.as_str()) => {
-                Ok(None)
-            }
+            Err(board_herdr::HerdrError::Protocol { code, .. }) if is_missing(&code) => Ok(None),
             Err(e) => Err(ObserveError(format!("agent.get failed: {e}"))),
         }
     }
@@ -267,9 +265,7 @@ impl HerdrAct for SocketHerdr {
 /// else (io, deadline, disconnect, decode, unknown code) → Uncertain.
 pub fn outcome_from_error<T>(err: &board_herdr::HerdrError) -> Outcome<T> {
     match err {
-        board_herdr::HerdrError::Protocol { code, message }
-            if REFUSED_CODES.contains(&code.as_str()) =>
-        {
+        board_herdr::HerdrError::Protocol { code, message } if is_refused(code) => {
             Outcome::Refused { code: code.clone(), message: message.clone() }
         }
         board_herdr::HerdrError::Protocol { code, message } => {
@@ -290,11 +286,31 @@ const REFUSED_CODES: &[&str] = &[
     "agent_not_found",
     "pane_not_found",
     "pane_not_available",
+    // Pre-execution refusals of `agent.start` (captain decision, review R-3):
+    // the pane was busy, the agent kind is unavailable or the name is taken —
+    // in each case nothing was started.
+    "agent_pane_busy",
+    "agent_pane_unavailable",
+    "agent_name_taken",
 ];
 
-/// Protocol error codes that answer "there is no agent in that pane": a
-/// negative answer to a question, not a failed observation.
-const MISSING_CODES: &[&str] = &["not_found", "agent_not_found", "pane_not_found"];
+/// Protocol error codes that answer "there is no agent in that pane": an
+/// unambiguous negative answer to a question, not a failed observation. The
+/// generic `not_found` is **not** one of them: an unexplained "not found"
+/// must stay an observation failure, never a destructive "agent gone"
+/// judgement (design/08).
+const MISSING_CODES: &[&str] = &["pane_not_found", "agent_not_found"];
+
+/// Whether this protocol error code proves that nothing was executed.
+fn is_refused(code: &str) -> bool {
+    REFUSED_CODES.contains(&code)
+}
+
+/// Whether this protocol error code unambiguously means "no agent in that
+/// pane".
+fn is_missing(code: &str) -> bool {
+    MISSING_CODES.contains(&code)
+}
 
 /// Startup timeout for `agent.start` (design/04: 60 seconds).
 const AGENT_START_TIMEOUT_MS: u64 = 60_000;
@@ -325,5 +341,39 @@ fn worktree_from_reply(reply: &Value) -> Outcome<Worktree> {
         _ => Outcome::Uncertain {
             reason: format!("worktree reply is incomplete: {reply}"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refusal_codes_prove_nothing_ran() {
+        for code in [
+            "agent_blocked",
+            "not_found",
+            "invalid_request",
+            "invalid_params",
+            "agent_not_found",
+            "pane_not_found",
+            "pane_not_available",
+            "agent_pane_busy",
+            "agent_pane_unavailable",
+            "agent_name_taken",
+        ] {
+            assert!(is_refused(code), "{code} must be a refusal");
+        }
+        assert!(!is_refused("something_new"), "an unknown code is uncertain");
+    }
+
+    #[test]
+    fn only_unambiguous_codes_mean_no_agent() {
+        assert!(is_missing("pane_not_found"));
+        assert!(is_missing("agent_not_found"));
+        assert!(
+            !is_missing("not_found"),
+            "an unexplained not_found stays an observation failure"
+        );
     }
 }
