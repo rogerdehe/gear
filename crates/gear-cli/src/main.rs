@@ -26,7 +26,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | captain | plan-format | errors.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | agent:opencode.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -696,6 +696,7 @@ fn write_error(e: std::io::Error) -> GearError {
 /// binary, so the printed rules always match this binary's version.
 const SKILL_TOPICS: &[(&str, &str)] = &[
     ("main", include_str!("../../../skills/gear/SKILL.md")),
+    ("conventions", include_str!("../../../docs/design/17-conventions.md")),
     ("decompose", include_str!("../../../skills/gear/references/decompose.md")),
     ("agent:opencode", include_str!("../../../skills/gear/references/agents/opencode.md")),
 ];
