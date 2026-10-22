@@ -6,7 +6,7 @@ Files: `gear/config.py`, `gear/cli/admin.py` (init). Budget 100–130 lines.
 
 ```toml
 [project]
-id = "harbor"
+id = "harbor"                       # a new product, or the short name of one requirement iterated inside an existing repo (17 §0)
 herdr_session = "marina"          # required, explicit binding
 repo = "/path/to/repo"
 
@@ -27,6 +27,12 @@ owns = ["src/heat/", "tests/heat/"]
 not = ["UI"]
 kind = "opencode"
 profile = "opencode"
+
+[models]                           # agreed with the user at kickoff (17 §0); ordered: primary, then fallbacks
+lanes   = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4.1-flash"]
+review  = ["deepseek/deepseek-v4.1-flash", "minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4-pro"]
+captain = []                       # empty = whatever the captain's CLI runs; not switched by GEAR
+# a lane may override with its own `models = [...]`
 
 [temps]                            # temp workers: worktree + pane created via Herdr when needed, nothing pre-registered
 kind = "opencode"
@@ -53,6 +59,7 @@ busy_markers = ["esc interrupt"]
 - Long-lived lanes: `duty` and `owns` are required; `owns` must not overlap pairwise; `name` conforms to 17 §2 and `<project>-<name>` ≤ 32 characters. A lane's worktree and pane are not written in config; the engine creates them via `worktree.create` at onboarding (10).
 - The profile for each lane's kind is verified (04 `verified=true`); otherwise rejected.
 - Number of lanes ≤ quota.lanes.
+- `[models]`: every listed model is reachable by the role's agent kind (profile `list_models`, e.g. `opencode models`); `review` holds at least one model that differs from each lane's primary. Engine use: start/onboard on the chain's first entry; on a quota stop move to the next and log it; probe the earlier entry again after `timing.quota_retry_min` (default 60); reviewers take the first entry ≠ the writer's current model.
 - Captain and long-lived lanes: init only registers the seats; **they are restarted and onboarded by GEAR** (03); CLIs that support resume may carry a `resume_ref` to keep the original session context.
 - cooldown_s > tick_s.
 - The same worktree cannot be held by two seats (after the engine creates it, it is written to 02 resources, keyed by the path Herdr returns, unique across projects).
@@ -61,4 +68,4 @@ busy_markers = ["esc interrupt"]
 
 ## Not done
 
-No automatic Agent discovery, no inference of team composition (an initialization dialogue is a final-form feature); missing items are reported as errors for the user to fill in, never guessed from pane names.
+No silent discovery: the kickoff (17 §0) inventories installed agents and models only to *propose* a config, which the user confirms; init itself never infers team composition, and missing items are reported as errors for the user to fill in, never guessed from pane names.

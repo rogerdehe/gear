@@ -19,6 +19,13 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 | gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
 | gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
 
+## Models (this project's chains, 17 §0)
+
+| Role | Chain (primary → fallbacks) | Now |
+|---|---|---|
+| lanes | MiniMax M3.1 Flash → DeepSeek V4.1 Flash 1017 | DeepSeek V4.1 Flash 1017 (MiniMax quota, 2026-10-22) |
+| reviewers | DeepSeek V4.1 Flash 1017 → DeepSeek V4 Pro (first ≠ writer's current model) | per job |
+
 ## Board
 
 Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in order; lanes take the first `ready` row (`ops/bin/inbox.sh`). States: `draft → ready → running → verifying → done`, `rework`, `waiting`, `cancelled`.
@@ -48,6 +55,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
 | T-25 | runtime | `runtime/t25-confirm-evidence` | confirm: link evidence; Unknown path test (from R-13) | ready | — |
+| T-27 | data | `data/t27-config-models` | config: `[models]` chains + validation (01, 17 §0) | draft | — |
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | draft | T-14, T-15, T-17, T-18, T-19, T-20, T-21 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -117,3 +125,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 MiniMax quota hit on both lanes → switched gear-data and gear-runtime to DeepSeek V4.1 Flash (switch-model.sh); switch back after the reset.
 - 2026-10-22 Correction: the first switch picked the free OpenCode tier (prefix match), which hit its limit; lanes now on DeepSeek V4.1 Flash 1017 (L-29).
 - 2026-10-22 R-16 fail (P1 same-second message lost; P2 instruction shown twice). T-17 → rework (data M-2); line cap out of T-17.
+- 2026-10-22 User: GEAR is also for one requirement iterated inside an existing repo, and every project starts with a kickoff aligned with the user — installed agents/models inventory, lanes, per-role model chains with fallbacks. Written into 17 §0, 01 `[models]`, 00 §0; T-27 (config `[models]`) drafted.
