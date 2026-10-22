@@ -67,6 +67,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | done | — |
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | done | — |
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | done | — |
+| T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
