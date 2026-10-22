@@ -93,3 +93,15 @@ pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String
 fn matches_any(markers: &[String], line: &str) -> bool {
     markers.iter().any(|m| !m.is_empty() && line.contains(m.as_str()))
 }
+
+/// Built-in profile for an agent kind, from the verified facts in
+/// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
+/// are built in: today `opencode` —
+/// busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
+/// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
+/// confirm 2 rounds; unattended `--auto`; session_ref false; resume
+/// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified. Any other kind → None.
+pub fn builtin(kind: &str) -> Option<Profile> {
+    let _ = kind;
+    todo!("T-56")
+}
