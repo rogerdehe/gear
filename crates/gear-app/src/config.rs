@@ -176,7 +176,7 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 }
 
 /// All findings, in field order (project, quota, captain, lanes in order,
-/// conventions, timing); empty = valid. Rules:
+/// conventions, timing, models); empty = valid. Rules:
 /// - `project.id`, every lane `name`: `[a-z][a-z0-9-]*` (`gear_model::valid_name`
 ///   is NOT this rule — check it here);
 /// - `<project.id>-<lane.name>` and `<project.id>-captain` ≤ 32 chars (Herdr agent names);
@@ -187,7 +187,14 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 /// - number of lanes ≤ `quota.lanes`;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
-/// - `timing.cooldown_s > timing.tick_s`.
+/// - `timing.cooldown_s > timing.tick_s`;
+/// - `models.lanes`, `models.review`, `models.captain` and each lane's `models`
+///   hold no blank and no repeated entry (compared trimmed);
+/// - a non-empty `models.review` holds at least one model different from every
+///   lane's primary (`models[0]`, else `models.lanes[0]`), so the reviewer
+///   never runs the model it reviews;
+/// - `models.quota_reset_h ≥ 1`.
+/// Empty chains are valid: models are not managed by GEAR then.
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
@@ -336,6 +343,55 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
+    // ---- models (17 §0): empty chains mean models are not managed
+    let models = &cfg.models;
+    for (field, chain) in [
+        ("models.lanes", &models.lanes),
+        ("models.review", &models.review),
+        ("models.captain", &models.captain),
+    ] {
+        if let Some(problem) = chain_problem(chain) {
+            issues.push(issue(field, problem));
+        }
+    }
+    for (index, lane) in cfg.lanes.iter().enumerate() {
+        if let Some(problem) = chain_problem(&lane.models) {
+            issues.push(issue(&format!("lanes[{index}].models"), problem));
+        }
+    }
+
+    // The reviewer must not run the model it reviews.
+    let review_models: Vec<&str> = models
+        .review
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .collect();
+    if !review_models.is_empty() {
+        let independent = review_models.iter().any(|review_model| {
+            cfg.lanes
+                .iter()
+                .all(|lane| match lane_primary(lane, &models.lanes) {
+                    Some(primary) => primary != *review_model,
+                    None => true,
+                })
+        });
+        if !independent {
+            issues.push(issue(
+                "models.review",
+                "the review chain must hold a model that no lane runs as its primary"
+                    .to_string(),
+            ));
+        }
+    }
+
+    if models.quota_reset_h < 1 {
+        issues.push(issue(
+            "models.quota_reset_h",
+            "the quota reset window must be at least one hour".to_string(),
+        ));
+    }
+
     issues
 }
 
@@ -366,6 +422,31 @@ fn agent_name(project: &str, seat: &str) -> String {
 /// Herdr agent names are at most 32 characters long.
 fn agent_name_fits(project: &str, seat: &str) -> bool {
     agent_name(project, seat).len() <= 32
+}
+
+/// A model chain problem: no entry may be blank and no entry may repeat
+/// (both compared after trimming). Empty chains are fine.
+fn chain_problem(chain: &[String]) -> Option<String> {
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in chain {
+        let model = entry.trim();
+        if model.is_empty() {
+            return Some("a model chain entry is empty after trimming".to_string());
+        }
+        if seen.contains(&model) {
+            return Some(format!("the model {model:?} appears twice in one chain"));
+        }
+        seen.push(model);
+    }
+    None
+}
+
+/// The primary model of a lane: its own first entry, else the lane chain's.
+fn lane_primary<'a>(lane: &'a LaneSection, lanes_chain: &'a [String]) -> Option<&'a str> {
+    lane.models
+        .first()
+        .or_else(|| lanes_chain.first())
+        .map(|model| model.trim())
 }
 
 /// Two path lists overlap when a path is equal to another or one is its
