@@ -17,6 +17,8 @@
 pub mod fake;
 pub mod profile;
 
+use serde_json::Value;
+
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
 pub use profile::{classify_screen, validate_template, Profile, ScreenFlag};
 
@@ -142,5 +144,64 @@ impl HerdrAct for SocketHerdr {
 /// Protocol errors with a code that proves no execution → Refused; everything
 /// else (io, deadline, disconnect, decode, unknown code) → Uncertain.
 pub fn outcome_from_error<T>(err: &board_herdr::HerdrError) -> Outcome<T> {
-    todo!("T-herdr")
+    match err {
+        board_herdr::HerdrError::Protocol { code, message }
+            if REFUSED_CODES.contains(&code.as_str()) =>
+        {
+            Outcome::Refused { code: code.clone(), message: message.clone() }
+        }
+        board_herdr::HerdrError::Protocol { code, message } => {
+            Outcome::Uncertain { reason: format!("herdr error [{code}]: {message}") }
+        }
+        other => Outcome::Uncertain { reason: other.to_string() },
+    }
+}
+
+/// Protocol error codes that prove nothing was executed: the call was
+/// rejected before it ran. Every other code (and every transport error) is
+/// Uncertain — the call may have taken effect.
+const REFUSED_CODES: &[&str] = &[
+    "agent_blocked",
+    "not_found",
+    "invalid_request",
+    "invalid_params",
+    "agent_not_found",
+    "pane_not_found",
+    "pane_not_available",
+];
+
+/// Protocol error codes that answer "there is no agent in that pane": a
+/// negative answer to a question, not a failed observation.
+const MISSING_CODES: &[&str] = &["not_found", "agent_not_found", "pane_not_found"];
+
+/// Startup timeout for `agent.start` (design/04: 60 seconds).
+const AGENT_START_TIMEOUT_MS: u64 = 60_000;
+
+/// The key that submits a line in a terminal pane.
+const ENTER_KEY: &str = "enter";
+
+/// The source GEAR reports pane metadata under.
+const METADATA_SOURCE: &str = "gear";
+
+/// Build a [`Worktree`] from a `worktree.create` / `worktree.open` reply.
+/// A reply missing any of the four fields → Uncertain: the worktree may exist
+/// even though GEAR cannot name it.
+fn worktree_from_reply(reply: &Value) -> Outcome<Worktree> {
+    let workspace_id = reply
+        .pointer("/workspace/workspace_id")
+        .and_then(Value::as_str);
+    let pane_id = reply.pointer("/root_pane/pane_id").and_then(Value::as_str);
+    let path = reply.pointer("/worktree/path").and_then(Value::as_str);
+    let branch = reply.pointer("/worktree/branch").and_then(Value::as_str);
+    match (workspace_id, pane_id, path, branch) {
+        (Some(workspace_id), Some(pane_id), Some(path), Some(branch)) => Outcome::Ok(Worktree {
+            workspace_id: workspace_id.to_string(),
+            pane_id: pane_id.to_string(),
+            path: path.to_string(),
+            branch: branch.to_string(),
+        }),
+        _ => Outcome::Uncertain {
+            reason: format!("worktree reply is incomplete: {reply}"),
+        },
+    }
 }
