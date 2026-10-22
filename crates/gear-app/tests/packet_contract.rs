@@ -24,7 +24,6 @@ fn world(attempt: bool) -> Store {
 }
 
 #[test]
-#[ignore = "T-53: un-ignored by the captain when T-53 merges"]
 fn packet_has_contract_and_copyable_commands() {
     let mut s = world(true);
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
@@ -41,7 +40,6 @@ fn packet_has_contract_and_copyable_commands() {
 }
 
 #[test]
-#[ignore = "T-53: un-ignored by the captain when T-53 merges"]
 fn pending_update_and_missing_task() {
     let mut s = world(true);
     s.write(|tx| {
