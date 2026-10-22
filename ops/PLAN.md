@@ -30,10 +30,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-13 | data | `data/t13-identity` | app: caller identity (observe, require_seat, classify) | done | — |
 | T-16 | data | `data/t16-select-batch` | app: inbox batch selection | done | — |
 | T-14 | data | `data/t14-send` | app: gear send | done | — |
-| T-15 | data | `data/t15-reply` | app: gear reply | verifying | — |
-| T-17 | data | `data/t17-home` | app: home page + view record | ready | — |
+| T-15 | data | `data/t15-reply` | app: gear reply | done | — |
+| T-17 | data | `data/t17-home` | app: home page + view record | rework | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
+| T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | ready | — |
 | T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | ready | — |
 | T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | ready | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
@@ -42,7 +43,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
-| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | rework | — |
+| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | done | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
@@ -60,10 +61,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4), 2 rounds | done | — |
 | R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
-| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | done | — |
+| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf), 2 rounds | done | — |
 | R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat (session ses_e9cc2b643ffejLx5AURY4CHrZ2) | done | — |
 | R-14 | r24 | `review/t24` | review T-24 (branch `data/t24-send-followups`) — temp reviewer gear-r24 on seat (session ses_e9cc1a9dcffer4EBceKwV1scT6) | done | — |
-| R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat | running | — |
+| R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
+| R-16 | r17 | `review/t17` | review T-17 (branch `data/t17-home`) — temp reviewer gear-r17 on seat (session ses_e9cb776fdffe7xhq2Jh4IWaxRZ) | done | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -108,3 +110,10 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-13 pass (P3s). Merged T-20 + review; workspace green. Decisions: evidence counts from intent time; confirmation records the view → T-25.
 - 2026-10-22 R-14 pass (P3s). Merged T-24 + review. Question (store has no prefix/max thread query): the workaround stands for slice 1. Root cause is the packet: it asked for "one query" that its allowed changes could not reach → L-28.
 - 2026-10-22 T-15 handed in → R-15.
+- 2026-10-22 R-15 pass (P3s). Merged T-15 + review; workspace green. Decisions → T-26: dedupe ids; one answer per (sender, thread); Wait requires wait_until; downgrade/next_check are slice 2.
+- 2026-10-22 T-17 handed in → R-16. T-19 rework handed in → R-12 round 2 (resume gear-r19).
+- 2026-10-22 R-12 round 2 pass (P3s). Merged T-19 + review; workspace green.
+- 2026-10-22 User: when MiniMax quota runs out, switch the long-lived lanes temporarily to DeepSeek V4.1 Flash. Mechanism: watcher `quota` event (screen markers), ops/bin/switch-model.sh, start-reviewer picks an alternate reviewer model when the writer runs the default reviewer model (independence).
+- 2026-10-22 MiniMax quota hit on both lanes → switched gear-data and gear-runtime to DeepSeek V4.1 Flash (switch-model.sh); switch back after the reset.
+- 2026-10-22 Correction: the first switch picked the free OpenCode tier (prefix match), which hit its limit; lanes now on DeepSeek V4.1 Flash 1017 (L-29).
+- 2026-10-22 R-16 fail (P1 same-second message lost; P2 instruction shown twice). T-17 → rework (data M-2); line cap out of T-17.
