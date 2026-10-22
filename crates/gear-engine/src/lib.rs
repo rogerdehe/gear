@@ -82,11 +82,31 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
         let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
 
-        // 4. intend: fix the actions as Intended ops in one transaction.
+        // 4. intend: fix the doorbell actions as Intended ops in one transaction.
         let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
-        // 5. execute: re-check each op, call Herdr, record the outcome.
+        // 5. dispatch: per lane seat a view and a decision, read-only with this
+        //    tick's observations …
+        let dispatch_cfg = dispatch::DispatchCfg {
+            cooldown_s: cfg.cooldown_s,
+            ..Default::default()
+        };
+        let planned =
+            store.read(|tx| dispatch::plan_dispatch(tx, &project, &observed, &dispatch_cfg, now))?;
+        for (seat, action) in &planned {
+            // An escalated seat needs a human; nothing is sent to it.
+            if matches!(action, dispatch::Action::Escalate { .. })
+                && !report.flagged.contains(&seat.id)
+            {
+                report.flagged.push(seat.id.clone());
+            }
+        }
+        // … then the attempts and their deliveries in one write transaction.
+        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
+        report.intended.extend(deliveries.into_iter().map(|op| op.id));
+
+        // 6. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)
