@@ -33,7 +33,6 @@ fn world(with_attempt: bool) -> Store {
 }
 
 #[test]
-#[ignore = "T-51: un-ignored by the captain when T-51 merges"]
 fn current_task_is_shown_and_recorded() {
     let mut s = world(true);
     let (env, fp) = lane();
@@ -43,7 +42,6 @@ fn current_task_is_shown_and_recorded() {
 }
 
 #[test]
-#[ignore = "T-51: un-ignored by the captain when T-51 merges"]
 fn no_open_attempt_no_task_line() {
     let mut s = world(false);
     let (env, fp) = lane();
