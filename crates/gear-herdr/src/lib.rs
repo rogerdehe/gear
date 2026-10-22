@@ -117,9 +117,7 @@ impl HerdrRead for SocketHerdr {
                     Ok(Some(info))
                 }
             }
-            Err(board_herdr::HerdrError::Protocol { code, .. }) if MISSING_CODES.contains(&code.as_str()) => {
-                Ok(None)
-            }
+            Err(board_herdr::HerdrError::Protocol { code, .. }) if is_missing(&code) => Ok(None),
             Err(e) => Err(ObserveError(format!("agent.get failed: {e}"))),
         }
     }
@@ -179,6 +177,8 @@ impl HerdrAct for SocketHerdr {
                     if let Ok(fresh) = self.client.agent_get(pane_id) {
                         info = fresh;
                     }
+                    // A failed refresh keeps the start reply's info: the start
+                    // itself was submitted, so the outcome stays Ok.
                 }
                 Outcome::Ok(info)
             }
@@ -267,9 +267,7 @@ impl HerdrAct for SocketHerdr {
 /// else (io, deadline, disconnect, decode, unknown code) → Uncertain.
 pub fn outcome_from_error<T>(err: &board_herdr::HerdrError) -> Outcome<T> {
     match err {
-        board_herdr::HerdrError::Protocol { code, message }
-            if REFUSED_CODES.contains(&code.as_str()) =>
-        {
+        board_herdr::HerdrError::Protocol { code, message } if is_refused(code) => {
             Outcome::Refused { code: code.clone(), message: message.clone() }
         }
         board_herdr::HerdrError::Protocol { code, message } => {
@@ -290,11 +288,31 @@ const REFUSED_CODES: &[&str] = &[
     "agent_not_found",
     "pane_not_found",
     "pane_not_available",
+    // Pre-execution refusals of `agent.start` (captain decision, review R-3):
+    // the pane was busy, the agent kind is unavailable or the name is taken —
+    // in each case nothing was started.
+    "agent_pane_busy",
+    "agent_pane_unavailable",
+    "agent_name_taken",
 ];
 
-/// Protocol error codes that answer "there is no agent in that pane": a
-/// negative answer to a question, not a failed observation.
-const MISSING_CODES: &[&str] = &["not_found", "agent_not_found", "pane_not_found"];
+/// Protocol error codes that answer "there is no agent in that pane": an
+/// unambiguous negative answer to a question, not a failed observation. The
+/// generic `not_found` is **not** one of them: an unexplained "not found"
+/// must stay an observation failure, never a destructive "agent gone"
+/// judgement (design/08).
+const MISSING_CODES: &[&str] = &["pane_not_found", "agent_not_found"];
+
+/// Whether this protocol error code proves that nothing was executed.
+fn is_refused(code: &str) -> bool {
+    REFUSED_CODES.contains(&code)
+}
+
+/// Whether this protocol error code unambiguously means "no agent in that
+/// pane".
+fn is_missing(code: &str) -> bool {
+    MISSING_CODES.contains(&code)
+}
 
 /// Startup timeout for `agent.start` (design/04: 60 seconds).
 const AGENT_START_TIMEOUT_MS: u64 = 60_000;
@@ -325,5 +343,106 @@ fn worktree_from_reply(reply: &Value) -> Outcome<Worktree> {
         _ => Outcome::Uncertain {
             reason: format!("worktree reply is incomplete: {reply}"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `worktree.create` reply (schema variant `worktree_created`).
+    fn created_reply() -> Value {
+        serde_json::json!({
+            "type": "worktree_created",
+            "workspace": {"workspace_id": "w3", "label": "gear-data"},
+            "tab": {"tab_id": "w3:t1"},
+            "root_pane": {"pane_id": "w3:p1", "terminal_id": "term-1"},
+            "worktree": {
+                "branch": "t1-store",
+                "path": "/Volumes/Data/.herdr-worktrees/gear/t1-store",
+                "is_bare": false,
+            }
+        })
+    }
+
+    #[test]
+    fn refusal_codes_prove_nothing_ran() {
+        for code in [
+            "agent_blocked",
+            "not_found",
+            "invalid_request",
+            "invalid_params",
+            "agent_not_found",
+            "pane_not_found",
+            "pane_not_available",
+            "agent_pane_busy",
+            "agent_pane_unavailable",
+            "agent_name_taken",
+        ] {
+            assert!(is_refused(code), "{code} must be a refusal");
+        }
+        assert!(!is_refused("something_new"), "an unknown code is uncertain");
+    }
+
+    #[test]
+    fn only_unambiguous_codes_mean_no_agent() {
+        assert!(is_missing("pane_not_found"));
+        assert!(is_missing("agent_not_found"));
+        assert!(
+            !is_missing("not_found"),
+            "an unexplained not_found stays an observation failure"
+        );
+    }
+
+    #[test]
+    fn worktree_created_reply_maps_to_the_four_fields() {
+        let Outcome::Ok(w) = worktree_from_reply(&created_reply()) else {
+            panic!("a complete reply must map to a worktree");
+        };
+        assert_eq!(
+            w,
+            Worktree {
+                workspace_id: "w3".into(),
+                pane_id: "w3:p1".into(),
+                path: "/Volumes/Data/.herdr-worktrees/gear/t1-store".into(),
+                branch: "t1-store".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_opened_reply_maps_to_the_four_fields() {
+        let mut reply = created_reply();
+        reply["type"] = serde_json::json!("worktree_opened");
+        reply["already_open"] = serde_json::json!(false);
+        let Outcome::Ok(w) = worktree_from_reply(&reply) else {
+            panic!("a complete reply must map to a worktree");
+        };
+        assert_eq!(w.workspace_id, "w3");
+        assert_eq!(w.pane_id, "w3:p1");
+        assert_eq!(w.branch, "t1-store");
+        assert_eq!(w.path, "/Volumes/Data/.herdr-worktrees/gear/t1-store");
+    }
+
+    #[test]
+    fn incomplete_worktree_reply_is_uncertain() {
+        assert!(
+            matches!(worktree_from_reply(&Value::Null), Outcome::Uncertain { .. }),
+            "a null reply names no worktree"
+        );
+
+        let mut no_branch = created_reply();
+        no_branch["worktree"]["branch"] = Value::Null;
+        assert!(
+            matches!(worktree_from_reply(&no_branch), Outcome::Uncertain { .. }),
+            "a null branch leaves the worktree unnamed"
+        );
+
+        let mut no_path = created_reply();
+        no_path["worktree"]["path"] = Value::Null;
+        assert!(
+            matches!(worktree_from_reply(&no_path), Outcome::Uncertain { .. }),
+            "a null path leaves the worktree unnamed"
+        );
     }
 }
