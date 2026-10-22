@@ -213,3 +213,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-37 round 2 pass; T-6 merged (SKILL.md v1, `--skill conventions`).
 - 2026-10-22 R-33 round 2 pass; T-36 merged (`plan apply` queue part; its contract un-ignored).
 - 2026-10-22 R-38 pass; T-40 merged; T-41, T-44 ready (runtime unblocked).
+- 2026-10-22 R-33 r2 questions: evidence fields absent = none, goal/accept absent = keep (documented in plan.rs); packet acceptance narrowed to own ignored tests (L-36, T-41/42/43 packets fixed). Store skeleton allow removed.

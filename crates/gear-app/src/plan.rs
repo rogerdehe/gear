@@ -38,6 +38,9 @@ pub struct ApplyResult {
 ///    contract version; rank = position in the draft (1, 2, …), unmentioned
 ///    non-terminal tasks keep their relative order after them; lane, milestone,
 ///    required, priority and deps as written; `insert_plan(version = base + 1)`;
+///    an existing task's block: absent `goal`/`accept` keep the current text
+///    (they cannot be empty), absent `evidence-files`/`evidence-due` mean none —
+///    an exported draft always writes every field (R-33 decision);
 /// 7. replay: same `request_id` + same text → the stored result.
 pub fn apply(
     store: &mut Store,

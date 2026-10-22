@@ -1079,8 +1079,6 @@ impl<'s> Tx<'s> {
     }
 }
 
-// Slice-2 skeleton: bodies are T-33/T-34; the allow goes when they land.
-#[allow(unused_variables)]
 impl<'s> Tx<'s> {
     // ---- plans, tasks, contracts (slice 2; T-33)
 
