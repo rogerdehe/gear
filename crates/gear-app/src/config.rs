@@ -3,7 +3,7 @@
 //! Checks that need the outside world (session exists, repo/branch exist,
 //! profile verified) live in `gear admin init`, not here.
 
-use gear_model::GearResult;
+use gear_model::{ErrorCode, GearError, GearResult};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -82,7 +82,12 @@ pub struct Conventions {
 
 impl Default for Conventions {
     fn default() -> Self {
-        todo!("T-7")
+        Self {
+            integration: "dev".to_string(),
+            release: "main".to_string(),
+            staging: String::new(),
+            review_max_rounds: 3,
+        }
     }
 }
 
@@ -98,7 +103,12 @@ pub struct Timing {
 
 impl Default for Timing {
     fn default() -> Self {
-        todo!("T-7")
+        Self {
+            tick_s: 4,
+            cooldown_s: 90,
+            sample_min: 20,
+            review_timer_min: 45,
+        }
     }
 }
 
@@ -112,7 +122,8 @@ pub struct ConfigIssue {
 /// Parse TOML text. Syntax errors, unknown keys, wrong types and missing
 /// required keys → `ErrorCode::BadFormat` with the TOML error message as detail.
 pub fn parse(text: &str) -> GearResult<ProjectConfig> {
-    todo!("T-7")
+    toml::from_str::<ProjectConfig>(text)
+        .map_err(|e| GearError::new(ErrorCode::BadFormat, e.to_string()))
 }
 
 /// All findings, in field order (project, quota, captain, lanes in order,
@@ -129,5 +140,232 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 ///   if non-empty differs from both;
 /// - `timing.cooldown_s > timing.tick_s`.
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
-    todo!("T-7")
+    let mut issues = Vec::new();
+
+    // ---- project
+    if !is_name(&cfg.project.id) {
+        issues.push(issue(
+            "project.id",
+            format!(
+                "project id {:?} must match [a-z][a-z0-9-]*",
+                cfg.project.id
+            ),
+        ));
+    }
+    if !agent_name_fits(&cfg.project.id, "captain") {
+        issues.push(issue(
+            "project.id",
+            format!(
+                "agent name {:?} is longer than 32 characters",
+                agent_name(&cfg.project.id, "captain")
+            ),
+        ));
+    }
+
+    // ---- quota
+    if cfg.lanes.len() as u32 > cfg.quota.lanes {
+        issues.push(issue(
+            "quota.lanes",
+            format!(
+                "{} lanes are configured but the quota allows {}",
+                cfg.lanes.len(),
+                cfg.quota.lanes
+            ),
+        ));
+    }
+
+    // ---- captain: nothing to check here (pane, kind and profile are checked
+    // against Herdr by `gear admin init`).
+
+    // ---- lanes, in order
+    let mut first_lane_with_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, lane) in cfg.lanes.iter().enumerate() {
+        let field = format!("lanes[{index}].name");
+        if !is_name(&lane.name) {
+            issues.push(issue(
+                &field,
+                format!("lane name {:?} must match [a-z][a-z0-9-]*", lane.name),
+            ));
+        }
+        if !agent_name_fits(&cfg.project.id, &lane.name) {
+            issues.push(issue(
+                &field,
+                format!(
+                    "agent name {:?} is longer than 32 characters",
+                    agent_name(&cfg.project.id, &lane.name)
+                ),
+            ));
+        }
+        match first_lane_with_name.get(lane.name.as_str()) {
+            Some(first) => issues.push(issue(
+                &field,
+                format!("lane name {:?} is already used by lanes[{first}]", lane.name),
+            )),
+            None => {
+                first_lane_with_name.insert(lane.name.as_str(), index);
+            }
+        }
+
+        if lane.duty.trim().is_empty() {
+            issues.push(issue(
+                &format!("lanes[{index}].duty"),
+                "a lane must state its duty (conventions 17 §1)".to_string(),
+            ));
+        }
+
+        let owns_field = format!("lanes[{index}].owns");
+        if lane.owns.is_empty() {
+            issues.push(issue(
+                &owns_field,
+                "a lane must state what it owns (conventions 17 §1)".to_string(),
+            ));
+        } else if let Some(other) = cfg.lanes[..index]
+            .iter()
+            .find(|earlier| owns_overlap(&earlier.owns, &lane.owns))
+        {
+            issues.push(issue(
+                &owns_field,
+                format!("overlaps the paths owned by lane {:?}", other.name),
+            ));
+        }
+    }
+
+    // ---- conventions
+    let conventions = &cfg.conventions;
+    if conventions.integration.trim().is_empty() {
+        issues.push(issue(
+            "conventions.integration",
+            "the integration branch must not be empty".to_string(),
+        ));
+    }
+    if conventions.release.trim().is_empty() {
+        issues.push(issue(
+            "conventions.release",
+            "the release branch must not be empty".to_string(),
+        ));
+    }
+    if !conventions.integration.trim().is_empty()
+        && !conventions.release.trim().is_empty()
+        && conventions.integration == conventions.release
+    {
+        issues.push(issue(
+            "conventions.release",
+            format!(
+                "the release branch must differ from the integration branch {:?}",
+                conventions.integration
+            ),
+        ));
+    }
+    if !conventions.staging.trim().is_empty() {
+        let clash = if conventions.staging == conventions.integration {
+            Some(&conventions.integration)
+        } else if conventions.staging == conventions.release {
+            Some(&conventions.release)
+        } else {
+            None
+        };
+        if let Some(other) = clash {
+            issues.push(issue(
+                "conventions.staging",
+                format!("the staging branch must differ from {other:?}"),
+            ));
+        }
+    }
+
+    // ---- timing
+    if cfg.timing.cooldown_s <= cfg.timing.tick_s {
+        issues.push(issue(
+            "timing.cooldown_s",
+            format!(
+                "the cooldown ({} s) must be longer than the tick ({} s)",
+                cfg.timing.cooldown_s, cfg.timing.tick_s
+            ),
+        ));
+    }
+
+    issues
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn issue(field: &str, problem: String) -> ConfigIssue {
+    ConfigIssue {
+        field: field.to_string(),
+        problem,
+    }
+}
+
+/// Project and lane names: `[a-z][a-z0-9-]*` (conventions 17 §2).
+fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The Herdr agent name of a seat: `<project>-<seat>`.
+fn agent_name(project: &str, seat: &str) -> String {
+    format!("{project}-{seat}")
+}
+
+/// Herdr agent names are at most 32 characters long.
+fn agent_name_fits(project: &str, seat: &str) -> bool {
+    agent_name(project, seat).len() <= 32
+}
+
+/// Two path lists overlap when a path is equal to another or one is its
+/// prefix on a `/` boundary: `src/a/` and `src/a/b.rs` overlap,
+/// `src/a` and `src/ab` do not.
+fn owns_overlap(earlier: &[String], later: &[String]) -> bool {
+    earlier
+        .iter()
+        .any(|a| later.iter().any(|b| paths_overlap(a, b)))
+}
+
+fn paths_overlap(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    if let Some(rest) = b.strip_prefix(a) {
+        return rest.starts_with('/') || a.ends_with('/');
+    }
+    if let Some(rest) = a.strip_prefix(b) {
+        return rest.starts_with('/') || b.ends_with('/');
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_follow_the_lane_rule() {
+        for good in ["heat", "a", "a-b", "lane-2", "x9"] {
+            assert!(is_name(good), "{good}");
+        }
+        for bad in ["", "Heat", "9oxford", "a b", "a_b", "-a", "heat!"] {
+            assert!(!is_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn agent_names_are_at_most_32_characters() {
+        assert!(agent_name_fits("oxford", "heat"));
+        assert!(agent_name_fits("oxford", "captain"));
+        assert!(!agent_name_fits("oxford", "a-very-long-lane-name-for-oxford"));
+    }
+
+    #[test]
+    fn paths_overlap_only_on_path_boundaries() {
+        assert!(paths_overlap("src/heat/", "src/heat/model.rs"));
+        assert!(paths_overlap("src/heat/model.rs", "src/heat/"));
+        assert!(paths_overlap("tests/heat/", "tests/heat/"));
+        assert!(paths_overlap("src/a", "src/a/b.rs"));
+        assert!(!paths_overlap("src/a", "src/ab"));
+        assert!(!paths_overlap("src/heat/", "tests/heat/"));
+        assert!(!paths_overlap("src/heat/", "src/pricing/"));
+    }
 }
