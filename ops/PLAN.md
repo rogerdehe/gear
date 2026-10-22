@@ -39,10 +39,11 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-14 | data | `data/t14-send` | app: gear send | done | — |
 | T-15 | data | `data/t15-reply` | app: gear reply | done | — |
 | T-17 | data | `data/t17-home` | app: home page + view record | done | — |
-| T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | verifying | — |
+| T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | done | — |
 | T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | verifying | — |
 | T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | ready | — |
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | draft | T-33 |
+| T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -93,7 +94,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-24 | r27 | `review/t27` | review T-27 (branch `data/t27-config-models`) — temp reviewer gear-r27 on seat (session ses_e9c950e3affeO983U45knVsJzf) | done | — |
 | R-25 | r29 | `review/t29` | review T-29 (branch `runtime/t29-cli-send-reply`) — temp reviewer gear-r29 on seat (session ses_e9c94d900ffeYli6RP1JMvQLPH), 2 rounds | done | — |
 | R-26 | r4 | `review/t4` | review T-4 (branch `runtime/t4-tick`) — temp reviewer gear-r4 on seat (session ses_e9c924489ffeZdxVO157xCH2ue) | done | — |
-| R-27 | r31 | `review/t31` | review T-31 (branch `data/t31-draft-parse`) — temp reviewer gear-r31 on seat | running | — |
+| R-27 | r31 | `review/t31` | review T-31 (branch `data/t31-draft-parse`) — temp reviewer gear-r31 on seat (session ses_e9c8a6b70ffeh5sqWBqyBMu4L0) | done | — |
 | R-28 | r33 | `review/t33` | review T-33 (branch `data/t33-store-tasks`) — temp reviewer gear-r33 on seat | running | — |
 | R-29 | r30 | `review/t30` | review T-30 (branch `runtime/t30-cli-home`) — temp reviewer gear-r30 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
@@ -175,3 +176,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-25 round 2 pass; merged T-29 + review. T-33 → R-28, T-30 → R-29.
 - 2026-10-22 Slice-2 dispatch contract on dev (`dispatch.rs` types + `decide` stub, `dispatch_contract.rs` 5 ignored). T-35 ready.
 - 2026-10-22 Slice-2 `plan apply` (queue cut) contract on dev: `plan.rs` stub + `plan_apply_contract.rs` (5 ignored). T-36 draft until T-33 merges.
+- 2026-10-22 R-27 pass (2 P3 strictness gaps → T-37). T-31 ignores removed; merged T-31 + review; workspace green.
