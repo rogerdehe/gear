@@ -1,6 +1,6 @@
 //! Contract for gear_app::config (T-7). Pure: no store, no Herdr.
 
-use gear_app::config::{parse, validate, ConfigIssue, Conventions, Timing};
+use gear_app::config::{parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Timing};
 use gear_model::ErrorCode;
 
 const MINIMAL: &str = r#"
@@ -155,4 +155,48 @@ fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "  ".into();
     assert_eq!(validate(&cfg), vec![], "blank staging means no staging");
+}
+
+// ---- [models] (17 §0, design/01)
+
+const MODELS: &str = r#"
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4.1-flash"]
+review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]
+on_quota = { lanes = "wait" }
+quota_reset_h = 4
+"#;
+
+#[test]
+fn models_parse_with_defaults() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.models, Models::default());
+    assert_eq!(cfg.models.quota_reset_h, 5);
+    let cfg = parse(&format!("{MINIMAL}{MODELS}")).unwrap();
+    assert_eq!(cfg.models.lanes[0], "minimax-cn/MiniMax-M3.1-Flash");
+    assert_eq!(cfg.models.on_quota.lanes, QuotaPolicy::Wait);
+    assert_eq!(cfg.models.on_quota.review, QuotaPolicy::Fallback);
+    assert_eq!(cfg.models.quota_reset_h, 4);
+    assert!(cfg.lanes[0].models.is_empty());
+    assert_eq!(parse(&format!("{MINIMAL}\n[models]\non_quota = {{ lanes = \"later\" }}\n")).unwrap_err().code, ErrorCode::BadFormat);
+}
+
+#[test]
+#[ignore = "T-27: un-ignored by the captain when T-27 merges"]
+fn models_rules() {
+    // valid as given
+    assert!(validate(&parse(&format!("{MINIMAL}{MODELS}")).unwrap()).is_empty());
+    // review must hold a model different from every lane's primary
+    let same = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["minimax-cn/MiniMax-M3.1-Flash"]"#);
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review"]);
+    // no blank or repeated entries in a chain (after trim)
+    let blank = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""  ""#);
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{blank}")).unwrap())), vec!["models.review"]);
+    let dup = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""deepseek/deepseek-v4.1-flash ""#);
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{dup}")).unwrap())), vec!["models.review"]);
+    // wait needs a window
+    let zero = MODELS.replace("quota_reset_h = 4", "quota_reset_h = 0");
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{zero}")).unwrap())), vec!["models.quota_reset_h"]);
+    // empty chains = models not managed by GEAR: valid
+    assert!(validate(&parse(MINIMAL).unwrap()).is_empty());
 }
