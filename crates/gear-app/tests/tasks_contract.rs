@@ -75,7 +75,6 @@ fn submit_must_name_the_adopted_contract() {
 }
 
 #[test]
-#[ignore = "T-43: un-ignored by the captain when T-43 merges"]
 fn pass_and_fail_settle() {
     let mut s = submitted();
     s.write(|tx| settle(tx, &verdict(true), T0 + 3)).unwrap();
@@ -91,7 +90,6 @@ fn pass_and_fail_settle() {
 }
 
 #[test]
-#[ignore = "T-43: un-ignored by the captain when T-43 merges"]
 fn verdict_must_match_the_attempt() {
     let mut s = submitted();
     for bad in [
