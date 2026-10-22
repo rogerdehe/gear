@@ -137,13 +137,32 @@ fn binding_not_active() {
 }
 
 #[test]
-fn wrong_pane() {
+fn wrong_env_pane() {
     let mut s = world();
+    // The occupant comes from the bound pane; only HERDR_PANE_ID is wrong.
     let err = s
         .read(|tx| {
             require_seat(
                 tx,
                 &env(Some("heat"), 1, Some("w9:p9"), false),
+                Some(&fp(LANE_PANE, "opencode")),
+                None,
+                None,
+            )
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotRegistered);
+}
+
+#[test]
+fn wrong_fingerprint_pane() {
+    let mut s = world();
+    // The env pane is right; the observed occupant sits in another pane.
+    let err = s
+        .read(|tx| {
+            require_seat(
+                tx,
+                &env(Some("heat"), 1, Some(LANE_PANE), false),
                 Some(&fp("w9:p9", "opencode")),
                 None,
                 None,
@@ -151,6 +170,21 @@ fn wrong_pane() {
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered);
+}
+
+#[test]
+fn agentless_pane_is_rejected() {
+    let mut s = world();
+    // The shell in the seat's pane still carries GEAR_CTX after the agent
+    // exited, but no agent runs there: it is not the seat (design/03).
+    let env = env(Some("heat"), 1, Some(LANE_PANE), false);
+
+    let err = s.read(|tx| require_seat(tx, &env, None, None, None)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotRegistered);
+
+    // A read-only caller cannot prove it is the seat either.
+    let caller = s.read(|tx| classify(tx, &env, None)).unwrap();
+    assert_eq!(caller, Caller::Anonymous);
 }
 
 #[test]

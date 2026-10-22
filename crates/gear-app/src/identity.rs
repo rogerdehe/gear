@@ -53,7 +53,8 @@ pub fn observe(env: &Env, herdr: &mut dyn HerdrRead) -> GearResult<Option<Finger
 /// - no GEAR_CTX → NotRegistered (never falls back to Admin);
 /// - seat missing → NotRegistered;
 /// - ctx.generation != seat.generation or binding not Active → StaleGeneration;
-/// - pane or agent kind differs from the binding → NotRegistered;
+/// - the pane hosts no agent, or the pane or agent kind differs from the
+///   binding → NotRegistered (a shell left in the pane is not the seat);
 /// - seat role/state not in `roles`/`states` (when given) → Forbidden.
 pub fn require_seat(
     tx: &Tx<'_>,
@@ -107,26 +108,32 @@ pub fn require_seat(
             ));
         }
     }
-    if let Some(fp) = fp {
-        if fp.pane_id != binding.pane_id {
+    // A seat pane must host its agent: the shell left behind after the agent
+    // exited still carries GEAR_CTX, but it is not the seat (design/03).
+    let fp = fp.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NotRegistered,
+            format!("the pane of {seat_id} hosts no agent, so the caller cannot be the seat"),
+        )
+    })?;
+    if fp.pane_id != binding.pane_id {
+        return Err(GearError::new(
+            ErrorCode::NotRegistered,
+            format!(
+                "the occupant is in pane {}, the binding of {seat_id} is in pane {}",
+                fp.pane_id, binding.pane_id
+            ),
+        ));
+    }
+    if let Some(kind) = &fp.kind {
+        if kind != &binding.kind {
             return Err(GearError::new(
                 ErrorCode::NotRegistered,
                 format!(
-                    "the occupant is in pane {}, the binding of {seat_id} is in pane {}",
-                    fp.pane_id, binding.pane_id
+                    "pane {} hosts {kind}, the binding of {seat_id} expects {}",
+                    fp.pane_id, binding.kind
                 ),
             ));
-        }
-        if let Some(kind) = &fp.kind {
-            if kind != &binding.kind {
-                return Err(GearError::new(
-                    ErrorCode::NotRegistered,
-                    format!(
-                        "pane {} hosts {kind}, the binding of {seat_id} expects {}",
-                        fp.pane_id, binding.kind
-                    ),
-                ));
-            }
         }
     }
     if let Some(roles) = roles {
