@@ -205,11 +205,236 @@ fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
-    todo!("slice1")
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let body = match c.body.clone() {
+        Some(body) => body,
+        None => read_stdin()?,
+    };
+    // Announce before any write: a lost receipt is replayed with this id.
+    let request_id = announce_request_id(c.request_id.clone());
+    let c = SendCmd { request_id: Some(request_id), ..c };
+    let mut herdr = open_herdr()?;
+    let out = run_send(&mut store, &env, &mut herdr, &c, body, now_ts(), json)?;
+    println!("{out}");
+    Ok(())
 }
 
 fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
-    todo!("slice1")
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let request_id = announce_request_id(c.request_id.clone());
+    let c = ReplyCmd { request_id: Some(request_id), ..c };
+    let mut herdr = open_herdr()?;
+    let out = run_reply(&mut store, &env, &mut herdr, &c, now_ts(), json)?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear send` body, over injected state (the command itself only wires this
+/// to the process environment, the socket and the store).
+fn run_send(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    c: &SendCmd,
+    body: String,
+    now: i64,
+    json: bool,
+) -> GearResult<String> {
+    reject_unsupported(&[
+        ("--candidate", c.candidate.is_some()),
+        ("--preempted", c.preempted.is_some()),
+        ("--saved", c.saved.is_some()),
+    ])?;
+    let args = gear_app::mail::SendArgs {
+        kind: parse_kind(&c.kind)?,
+        body,
+        task: c.task.clone(),
+        attempt: c.attempt,
+        contract: c.contract,
+        about: c.about.clone(),
+        to: c.to.clone(),
+        reply_to: c.reply_to.clone(),
+        urgent: c.urgent,
+        request_id: require_request_id(&c.request_id)?,
+    };
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
+    if json {
+        return serde_json::to_string(&result).map_err(json_error);
+    }
+    {
+        let mut line = format!(
+            "Delivered to {} inbox {} (thread {})",
+            result.recipient, result.msg_id, result.thread
+        );
+        if result.replayed {
+            line.push_str(" [replayed]");
+        }
+        Ok(line)
+    }
+}
+
+/// `gear reply` body, over injected state.
+fn run_reply(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    c: &ReplyCmd,
+    now: i64,
+    json: bool,
+) -> GearResult<String> {
+    reject_unsupported(&[("--next-check", c.next_check.is_some())])?;
+    let (mode, wait_on, wait_until) = reply_mode(c, now)?;
+    let args = gear_app::mail::ReplyArgs {
+        ids: c.ids.clone(),
+        text: c.message.clone(),
+        mode,
+        wait_on,
+        wait_until,
+        downgrade: c.downgrade,
+        request_id: require_request_id(&c.request_id)?,
+    };
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let result = gear_app::mail::reply(store, env, fp.as_ref(), &args, now)?;
+    if json {
+        return serde_json::to_string(&result).map_err(json_error);
+    }
+    // One line per item: every id that was handled, then the answers written.
+    let mut lines: Vec<String> = result
+        .handled
+        .iter()
+        .map(|(id, state)| format!("{id}: {state}"))
+        .collect();
+    for id in &result.replies {
+        lines.push(format!("reply {id}"));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// A slice-1 command rejects flags whose behaviour arrives later, naming the
+/// flag instead of ignoring it.
+fn reject_unsupported(flags: &[(&str, bool)]) -> GearResult<()> {
+    for (flag, given) in flags {
+        if *given {
+            return Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("{flag} is not supported in slice 1"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The request id the glue announced; the command body always has one.
+fn require_request_id(given: &Option<String>) -> GearResult<String> {
+    given.clone().ok_or_else(|| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            "--request-id is required (the CLI announces one before writing)".to_string(),
+        )
+    })
+}
+
+/// `--kind` text → [`MsgKind`]. The CLI's kinds are the design/13 ones: a
+/// reply is written by `gear reply`, never by `gear send`.
+fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
+    let kind: gear_model::MsgKind = text.parse()?;
+    match kind {
+        gear_model::MsgKind::Progress
+        | gear_model::MsgKind::Question
+        | gear_model::MsgKind::Blocked
+        | gear_model::MsgKind::Result
+        | gear_model::MsgKind::Ack
+        | gear_model::MsgKind::Instruction => Ok(kind),
+        gear_model::MsgKind::Reply | gear_model::MsgKind::System => Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("--kind {text} is not a `gear send` kind"),
+        )),
+    }
+}
+
+/// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`, or
+/// `--resolve` (the default; `--downgrade` alone also means a note).
+fn reply_mode(c: &ReplyCmd, now: i64) -> GearResult<(gear_app::mail::ReplyMode, Option<String>, Option<i64>)> {
+    use gear_app::mail::ReplyMode;
+    if let Some(who) = &c.wait {
+        let until = c.until.as_deref().ok_or_else(|| {
+            GearError::new(gear_model::ErrorCode::BadFormat, "--wait needs --until <t>".to_string())
+        })?;
+        return Ok((ReplyMode::Wait, Some(who.clone()), Some(parse_until(until, now)?)));
+    }
+    if c.note || (c.downgrade && !c.resolve) {
+        return Ok((ReplyMode::Note, None, None));
+    }
+    Ok((ReplyMode::Resolve, None, None))
+}
+
+/// A recheck time: `+<n>m` / `+<n>h` relative to `now`, or unix seconds.
+fn parse_until(text: &str, now: i64) -> GearResult<i64> {
+    let bad = || {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("--until {text:?}: expected +<n>m, +<n>h or unix seconds"),
+        )
+    };
+    if let Some(rest) = text.strip_prefix('+') {
+        let (number, seconds) = match (rest.strip_suffix('m'), rest.strip_suffix('h')) {
+            (Some(number), _) => (number, 60),
+            (None, Some(number)) => (number, 3600),
+            (None, None) => return Err(bad()),
+        };
+        let n: i64 = number.parse().map_err(|_| bad())?;
+        if n <= 0 {
+            return Err(bad());
+        }
+        return Ok(now + n * seconds);
+    }
+    text.parse::<i64>().map_err(|_| bad())
+}
+
+/// A result that cannot be serialized is a data problem, not a command error.
+fn json_error(e: serde_json::Error) -> GearError {
+    GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!("cannot serialize the result: {e}"),
+    )
+}
+
+/// Body from stdin when the command line did not carry it.
+fn read_stdin() -> GearResult<String> {
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut body).map_err(|e| {
+        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read stdin: {e}"))
+    })?;
+    Ok(body)
+}
+
+/// The Herdr client for this process: `HERDR_SOCKET_PATH`, else the default
+/// session socket (design/04).
+fn open_herdr() -> GearResult<gear_herdr::SocketHerdr> {
+    let path = match std::env::var_os("HERDR_SOCKET_PATH") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+            home.join(".config/herdr/herdr.sock")
+        }
+    };
+    gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::NotRegistered,
+            format!("cannot reach herdr at {}: {}", path.display(), e.0),
+        )
+    })
+}
+
+/// Unix seconds — the clock the store and the engine share.
+fn now_ts() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn cmd_run() -> GearResult<()> {
@@ -238,4 +463,193 @@ fn print_skill(topic: &str) -> GearResult<()> {
     // last line is never lost.
     let _ = std::io::Write::flush(&mut std::io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::AgentStatus;
+    use gear_model::{GearCtx, MsgKind, MsgState, SeatRole};
+    use gear_store::{testing, Store};
+
+    const T0: i64 = 1_800_000_000;
+    const CAP_PANE: &str = "w1:p1";
+    const LANE_PANE: &str = "w1:p2";
+
+    /// Project `p` with an active captain (codex) and lane `heat` (opencode).
+    fn world() -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    fn env(seat: &str, pane: &str) -> gear_app::Env {
+        gear_app::Env {
+            ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
+            pane_id: Some(pane.into()),
+            admin: false,
+        }
+    }
+
+    fn send_cmd(kind: &str) -> SendCmd {
+        SendCmd {
+            kind: kind.into(),
+            task: None,
+            attempt: None,
+            contract: None,
+            about: None,
+            need: None,
+            to: None,
+            reply_to: None,
+            urgent: false,
+            candidate: None,
+            preempted: None,
+            saved: None,
+            request_id: Some("r-1".into()),
+            body: None,
+        }
+    }
+
+    fn reply_cmd(ids: &[&str]) -> ReplyCmd {
+        ReplyCmd {
+            ids: ids.iter().map(|id| id.to_string()).collect(),
+            resolve: false,
+            wait: None,
+            until: None,
+            note: false,
+            downgrade: false,
+            next_check: None,
+            request_id: Some("r-2".into()),
+            message: "Use v2".into(),
+        }
+    }
+
+    #[test]
+    fn send_maps_kind_and_stores() {
+        let (mut store, mut herdr) = world();
+        let c = send_cmd("question");
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Schema v1 or v2?".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("Delivered to p:captain"), "{out}");
+        assert!(out.contains("M-1"), "{out}");
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(stored.kind, MsgKind::Question);
+        assert_eq!(stored.body, "Schema v1 or v2?");
+    }
+
+    #[test]
+    fn unknown_kind_is_bad_format() {
+        let (mut store, mut herdr) = world();
+        let err = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &send_cmd("nonsense"),
+            "x".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+    }
+
+    #[test]
+    fn unsupported_flag_is_bad_format() {
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("question");
+        c.candidate = Some("T-2".into());
+        let err = run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), T0 + 1, false)
+            .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("--candidate"), "{}", err.detail);
+    }
+
+    #[test]
+    fn send_json_is_the_result() {
+        let (mut store, mut herdr) = world();
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &send_cmd("progress"),
+            "working".into(),
+            T0 + 1,
+            true,
+        )
+        .unwrap();
+        let parsed: gear_app::mail::SendResult = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed.msg_id, "M-1");
+        assert_eq!(parsed.recipient, "p:captain");
+        assert!(!parsed.replayed);
+    }
+
+    #[test]
+    fn reply_resolves_by_default() {
+        let (mut store, mut herdr) = world();
+        // The lane asks the captain a question.
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &send_cmd("question"),
+            "v1 or v2?".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let out = run_reply(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &reply_cmd(&["M-1"]),
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("M-1"), "{out}");
+        assert!(out.contains("resolved"), "{out}");
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(stored.state, MsgState::Resolved);
+        // The answer went back to the lane's inbox.
+        let reply = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+        assert_eq!(reply.kind, MsgKind::Reply);
+        assert_eq!(reply.recipient, "p:heat");
+    }
+
+    #[test]
+    fn wait_until_relative_and_absolute() {
+        assert_eq!(parse_until("+10m", 1_000).unwrap(), 1_600);
+        assert_eq!(parse_until("+2h", 1_000).unwrap(), 8_200);
+        assert_eq!(parse_until("1800000123", 1_000).unwrap(), 1_800_000_123);
+    }
+
+    #[test]
+    fn bad_until_is_bad_format() {
+        for text in ["soon", "+10x", "+", "10:30", "+0m"] {
+            let err = parse_until(text, 1_000).unwrap_err();
+            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{text}");
+        }
+    }
 }
