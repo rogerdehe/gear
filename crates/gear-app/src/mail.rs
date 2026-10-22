@@ -372,15 +372,23 @@ pub struct ReplyArgs {
 pub struct ReplyResult {
     /// (message id, new state as string)
     pub handled: Vec<(String, String)>,
-    /// Reply messages created, one per original sender.
+    /// Reply messages created, one per (original sender, thread).
     pub replies: Vec<String>,
     pub replayed: bool,
 }
 
 /// `gear reply` (captain only). Each id must be in this project, addressed to
-/// the captain, Open or Waiting. Resolve → Resolved; Wait → Waiting with
-/// wait_on/wait_until; Note → state unchanged. Writes one Reply (state Info)
-/// into each original sender's inbox, same thread. Never changes task state.
+/// the captain, Open or Waiting. Resolve → Resolved; Wait → Waiting until
+/// wait_until (required; wait_on is an optional label); Note → state unchanged.
+/// Writes one Reply (state Info) per (original sender, thread) into that
+/// sender's inbox. Never changes task state.
+///
+/// Slice 1 rules:
+/// - a repeated id is handled once; `handled` lists every id once;
+/// - one answer per (sender, thread): every thread a sender has listed gets
+///   an answer of its own, so nothing is answered silently;
+/// - `Wait` needs `wait_until`, the recheck time that makes the message due
+///   again; `wait_on` is only a label.
 pub fn reply(
     store: &mut Store,
     env: &Env,
@@ -389,15 +397,23 @@ pub fn reply(
     now: Ts,
 ) -> GearResult<ReplyResult> {
     store.write(|tx| {
-        // Only the captain answers.
+        // Only the captain answers, and only in a state a captain can hold.
         let (ctx, seat) = require_seat(
             tx,
             env,
             fp,
             Some(&[SeatRole::Captain]),
-            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+            Some(&[SeatState::Active]),
         )?;
         let captain_id = seat.id.clone();
+
+        // A wait without a recheck time would never become due again.
+        if args.mode == ReplyMode::Wait && args.wait_until.is_none() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "a wait needs `wait_until`, the time it is checked again",
+            ));
+        }
 
         let args_key = format!(
             "{}|{}:{}|reply|ids={:?}|mode={:?}|text={:?}|wait_on={:?}|wait_until={:?}|downgrade={}",
@@ -418,7 +434,13 @@ pub fn reply(
             // after the replay check, so a repeated request returns the
             // stored result instead of meeting a closed message.
             let mut originals: Vec<MessageRow> = Vec::new();
+            let mut seen: Vec<String> = Vec::new();
             for id in &args.ids {
+                // A repeated id is handled once; the first place keeps it.
+                if seen.iter().any(|known| known == id) {
+                    continue;
+                }
+                seen.push(id.clone());
                 let message = tx.get_message(&ctx.project, id)?.ok_or_else(|| {
                     GearError::new(
                         ErrorCode::NoTarget,
@@ -445,7 +467,8 @@ pub fn reply(
 
             let mut handled: Vec<(String, String)> = Vec::new();
             let mut replies: Vec<String> = Vec::new();
-            let mut answered: Vec<String> = Vec::new();
+            // One answer per (sender, thread).
+            let mut answered: Vec<(String, String)> = Vec::new();
             for original in &originals {
                 let new_state = match args.mode {
                     ReplyMode::Resolve => MsgState::Resolved,
@@ -474,9 +497,10 @@ pub fn reply(
                 }
                 handled.push((original.id.clone(), new_state.as_str().to_string()));
 
-                // One answer per sender, in the thread of the message.
-                if !answered.contains(&original.sender) {
-                    answered.push(original.sender.clone());
+                // One answer per thread of the sender, in the thread of the message.
+                let key = (original.sender.clone(), original.thread.clone());
+                if !answered.contains(&key) {
+                    answered.push(key);
                     let answer = NewMessage {
                         project: ctx.project.clone(),
                         thread: original.thread.clone(),

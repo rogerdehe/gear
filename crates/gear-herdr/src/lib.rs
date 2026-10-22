@@ -294,6 +294,10 @@ const REFUSED_CODES: &[&str] = &[
     "agent_pane_busy",
     "agent_pane_unavailable",
     "agent_name_taken",
+    // Captain decision (review R-8): starting an unsupported kind and removing
+    // an unknown workspace are refused before anything runs.
+    "unsupported_agent_kind",
+    "workspace_not_found",
 ];
 
 /// Protocol error codes that answer "there is no agent in that pane": an
@@ -378,6 +382,8 @@ mod tests {
             "agent_pane_busy",
             "agent_pane_unavailable",
             "agent_name_taken",
+            "unsupported_agent_kind",
+            "workspace_not_found",
         ] {
             assert!(is_refused(code), "{code} must be a refusal");
         }

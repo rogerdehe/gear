@@ -6,6 +6,28 @@ Purpose: when several agents build one product over weeks, every name, branch, w
 
 Lineage: §5–§9 absorb the collaboration rules of the user's BMAD-Team skills (claim, dev, review, merge, review-loop discipline, fallback idempotency). BMAD-Team uses GitHub PRs and HTML markers as its message bus because it has no shared daemon; GEAR has one (the SQLite store + engine), so the *rules* carry over while the *transport* becomes `gear send` / `gear reply` / the plan.
 
+## 0. What a GEAR project is, and the kickoff
+
+**Scope.** A GEAR project is one *piece of work* with a goal, not necessarily a new repository. Two shapes are supported equally:
+- **Greenfield:** a new product; `integration`/`release` are the repo's own `dev`/`main`.
+- **Iteration in an existing repo:** one requirement or feature inside a large codebase. The project gets a short name from the requirement (`billing-v2`, `sso-login`) — that name prefixes every agent, workspace and branch (§2), so several iterations can run in one repo and one Herdr server side by side. `integration` is a feature integration branch cut from the repo's mainline (e.g. `feat/billing-v2`), lanes' `owns` cover only the paths the requirement touches, and `release` is the repo's mainline; delivering into it follows the repo's own process (usually a PR), which the user decides.
+
+**Kickoff — align with the user before any lane starts.** The captain (later `gear admin init`) proposes, the user confirms:
+1. **Inventory** what is actually installed: agent CLIs Herdr can start (`herdr agent` kinds) and, per CLI, the models it can reach (e.g. `opencode models`), including plan/quota limits the user knows about. Never plan around a model that is not there.
+2. **Work and names:** the goal, greenfield or iteration, the project name, the branches (above).
+3. **Lanes:** duties and `owns` (§1), how many, and which agent kind each runs.
+4. **Model plan** — per role an ordered chain, primary first, then fallbacks (`[models]`, design/01):
+   - e.g. lanes `MiniMax M3.1 Flash → DeepSeek V4.1 Flash`, reviewers `DeepSeek V4.1 Flash → MiniMax M3.1 Flash → DeepSeek V4 Pro`.
+   - **On a provider limit, one of two policies, chosen per role at kickoff** (`on_quota`):
+     - `fallback` — switch the agent to the next model in its chain and continue; switch back when the provider resets.
+     - `wait` — park the agent until the provider's reset (`quota_reset_h`, e.g. 5 h for a 5-hour plan window, or the reset time the error message states), then wake it on the same model to continue its inbox. Cheaper or more consistent output, slower calendar time.
+     Either way the stop is detected from the screen (quota markers, SOP), never mistaken for a finished turn, and every switch/park is logged.
+   - **Reviewer independence wins over order:** a reviewer takes the first model in its chain that differs from the writer's *current* model; if none differs, the review waits and the captain tells the user.
+   - Models are named by their full provider/model id (or full picker label), never a display prefix (lesson L-29).
+5. **First milestone** and how the user wants to be involved (release gate, questions).
+
+The agreed answers are written to the project config and the plan; changing them later is a plan change the user confirms.
+
 ## 1. Duty first, then a lane
 
 - Every long-lived lane declares in project config: `duty` (one sentence), `owns` (directories/modules it is responsible for), `not` (explicitly out of scope, may be empty).
@@ -171,4 +193,4 @@ staging = ""               # pre-release branch; empty = none
 review_max_rounds = 3
 ```
 
-Not overridable: duty declaration, the naming scheme, worktrees through Herdr, writer ≠ reviewer, the merge checklist.
+Not overridable: kickoff alignment (§0), duty declaration, the naming scheme, worktrees through Herdr, writer ≠ reviewer, the merge checklist.

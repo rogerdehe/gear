@@ -21,6 +21,9 @@ pub struct ProjectConfig {
     pub conventions: Conventions,
     #[serde(default)]
     pub timing: Timing,
+    /// Model chains per role, agreed at kickoff (17 §0). Empty = not managed.
+    #[serde(default)]
+    pub models: Models,
     /// Per-kind profile overrides, kept as raw TOML; merged by the engine (04).
     #[serde(default)]
     pub profiles: BTreeMap<String, toml::Table>,
@@ -61,6 +64,9 @@ pub struct LaneSection {
     pub not: Vec<String>,
     pub kind: String,
     pub profile: String,
+    /// Overrides `models.lanes` for this lane; empty = use the role chain.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -87,6 +93,49 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
+        }
+    }
+}
+
+/// What to do when an agent stops on a provider limit (17 §0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QuotaPolicy {
+    /// Switch to the next model in the chain; back after the reset.
+    #[default]
+    Fallback,
+    /// Park until the reset, then wake on the same model.
+    Wait,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct OnQuota {
+    pub lanes: QuotaPolicy,
+    pub review: QuotaPolicy,
+}
+
+/// Ordered model chains (primary first, then fallbacks), named by full
+/// provider/model id. Defaults: all chains empty, both policies Fallback,
+/// quota_reset_h 5.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Models {
+    pub lanes: Vec<String>,
+    pub review: Vec<String>,
+    pub captain: Vec<String>,
+    pub on_quota: OnQuota,
+    pub quota_reset_h: u32,
+}
+
+impl Default for Models {
+    fn default() -> Self {
+        Self {
+            lanes: Vec::new(),
+            review: Vec::new(),
+            captain: Vec::new(),
+            on_quota: OnQuota::default(),
+            quota_reset_h: 5,
         }
     }
 }

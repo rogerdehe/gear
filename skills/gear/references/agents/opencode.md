@@ -114,6 +114,8 @@ herdr pane read <pane> --source visible          # OpenCode start screen, "Ask a
 ## Pitfalls
 
 - **Provider quota / plan limit looks like a finished turn.** Herdr reports `done`, not `blocked`. The screen shows a "Session failed" toast and an `Error:` line from the provider, e.g. MiniMax: `Error: <message in Chinese saying the Token Plan usage limit is reached> (2056)` (seen 2026-10-22). Always read the screen when an agent stops; treat this as quota (wait for the reset or `/model` to another provider), never as completion. Profile quota markers: `Session failed`, `Token Plan`, `(2056)`, and OpenCode's free tier: `Free usage limit reached`.
+- **A session belongs to its directory.** `opencode -s <id>` started elsewhere still works in the directory the session was created in (`opencode session export <id>` → `"directory"`). Resume a session only from that directory.
+- **A model with variants opens a second dialog.** After choosing e.g. `DeepSeek V4 Pro` in `/model`, a mid-screen "Select variant" list (Default/none/low/high/max) appears; anything typed next — including a prompt — goes into its search box. Pick the variant (type it, Enter) and check the status bar (`… · high`) before prompting.
 - **Same display name, different provider.** The `/model` picker lists e.g. `DeepSeek V4.1 Flash 1017` (DeepSeek) and `DeepSeek V4.1 Flash Free` (OpenCode free tier). Filter with and verify the full label; a prefix can pick the wrong one.
 
 - Typing a shell command into a pane that hosts OpenCode submits it as a prompt and the agent starts working on it. Check the occupant first; if it happened, `herdr agent send-keys <name> esc` stops the turn.
