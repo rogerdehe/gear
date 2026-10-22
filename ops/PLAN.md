@@ -48,7 +48,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-42 | data | `data/t42-attempt-lifecycle` | slice 2: start attempt, confirm delivery, submit result (stubs + contract by captain) | done | — |
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | done | — |
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | done | — |
-| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | verifying | — |
+| T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | done | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | verifying | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -80,8 +80,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | done | — |
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | done | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
-| T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | verifying | — |
-| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-48, T-50, T-51 |
+| T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | done | — |
+| T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-51 |
 | T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | verifying | — |
 | T-54 | runtime | `runtime/t54-cli-show` | cli: `gear --show T-n` | draft | T-53 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
@@ -130,8 +130,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-43 | r47 | `review/t47` | review T-47 (branch `runtime/t47-missing-attempt`) — temp reviewer gear-r47 on seat (session ses_e9c3ec62bffe7DLXPgCT5qkfRW) | done | — |
 | R-44 | r46 | `review/t46` | review T-46 (branch `runtime/t46-dispatch-tick`) — temp reviewer gear-r46 on seat (session ses_e9c3e8e6affe2zdySh07ehBlAW) | done | — |
 | R-45 | r45 | `review/t45` | review T-45 (branch `data/t45-send-result`) — temp reviewer gear-r45 on seat (session ses_e9c37bdc7ffeT9sHr3t67ud0bt) | done | — |
-| R-46 | r48 | `review/t48` | review T-48 (branch `runtime/t48-confirm-delivery`) — temp reviewer gear-r48 on seat (session ses_e9c32a21dffe4jKmnxeVGcynpz) | running | — |
-| R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat | running | — |
+| R-46 | r48 | `review/t48` | review T-48 (branch `runtime/t48-confirm-delivery`) — temp reviewer gear-r48 on seat (session ses_e9c32a21dffe4jKmnxeVGcynpz), round 2 new-session recovery ses_e9c26a7eaffegviPNb0J1QzM41 | done | — |
+| R-47 | r50 | `review/t50` | review T-50 (branch `data/t50-plan-verdicts`) — temp reviewer gear-r50 on seat (session ses_e9c2d132fffeCvFXhxwoQcT0qp) | done | — |
 | R-48 | r51 | `review/t51` | review T-51 (branch `data/t51-home-task`) — temp reviewer gear-r51 on seat | running | — |
 | R-49 | r52 | `review/t52` | review T-52 (branch `runtime/t52-cli-plan-result`) — temp reviewer gear-r52 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
@@ -258,3 +258,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-52 question (a captain-owned test it invalidates) → test moved to `admin init` on dev; answered M-7.
 - 2026-10-22 T-51 → R-48; T-48 rework → R-46 round 2.
 - 2026-10-22 T-52 → R-49.
+- 2026-10-22 R-47 pass (stale doc P3s fixed at merge), R-46 round 2 pass. Merged T-50 (verdicts), T-48 (delivery confirmation). T-49 waits only on T-51.

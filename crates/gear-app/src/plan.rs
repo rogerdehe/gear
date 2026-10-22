@@ -1,6 +1,6 @@
 //! `gear plan apply` (design/05 "Apply flow"), first cut: the `# Queue`
 //! section. One transaction via `run_request`; an invalid draft writes
-//! nothing. `# Staff`, `# Verdicts` and `# Review` come in later tasks and are
+//! nothing. `# Verdicts` is settled here (T-50); `# Staff` and `# Review` come in later tasks and are
 //! rejected here when non-empty (`BadFormat`, naming the section).
 
 use crate::draft::{Draft, Priority, QueueItem, StaffItem};
@@ -390,7 +390,7 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
     GearError::new(ErrorCode::BadFormat, format!("line {line}: {detail}"))
 }
 
-/// Staff, verdicts and reviews belong to later cuts; a draft that carries them
+/// Staff and reviews belong to later cuts; a draft that carries them
 /// is rejected whole.
 fn reject_sections(draft: &Draft) -> GearResult<()> {
     if let Some(item) = draft.staff.first() {
