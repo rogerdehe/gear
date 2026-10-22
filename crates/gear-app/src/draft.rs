@@ -123,15 +123,18 @@ pub fn parse(text: &str) -> GearResult<Draft> {
     };
 
     let mut index = first + 1;
+    let mut seen_sections: Vec<String> = Vec::new();
+    let mut seen_milestones: Vec<String> = Vec::new();
     while index < lines.len() {
         let trimmed = lines[index].trim();
         if trimmed.is_empty() {
             index += 1;
             continue;
         }
+        let line_no = index + 1;
         let section = trimmed.strip_prefix("# ").ok_or_else(|| {
             bad(
-                index + 1,
+                line_no,
                 format!("expected a section header, got {trimmed:?}"),
             )
         })?;
@@ -141,15 +144,30 @@ pub fn parse(text: &str) -> GearResult<Draft> {
         };
         match name {
             "Goal" => {
+                check_once(&mut seen_sections, "Goal", line_no)?;
                 index += 1;
                 draft.goal = collect_body(&lines, &mut index);
             }
             "Milestone" => {
+                let id = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(':')
+                    .to_string();
+                if id.is_empty() {
+                    return Err(bad(line_no, "a milestone header needs an id, e.g. `# Milestone M2: …`"));
+                }
+                if seen_milestones.contains(&id) {
+                    return Err(bad(line_no, format!("milestone {id} appears twice")));
+                }
+                seen_milestones.push(id);
                 index += 1;
                 let body = collect_body(&lines, &mut index);
                 draft.milestones.push((rest.to_string(), body));
             }
             "Decisions" => {
+                check_once(&mut seen_sections, "Decisions", line_no)?;
                 index += 1;
                 loop {
                     match section_line(&lines, &mut index) {
@@ -164,10 +182,12 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                 }
             }
             "Queue" => {
+                check_once(&mut seen_sections, "Queue", line_no)?;
                 index += 1;
                 parse_queue(&lines, &mut index, &mut draft.queue)?;
             }
             "Staff" => {
+                check_once(&mut seen_sections, "Staff", line_no)?;
                 index += 1;
                 loop {
                     match section_line(&lines, &mut index) {
@@ -177,6 +197,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                 }
             }
             "Verdicts" => {
+                check_once(&mut seen_sections, "Verdicts", line_no)?;
                 index += 1;
                 loop {
                     match section_line(&lines, &mut index) {
@@ -186,6 +207,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                 }
             }
             "Review" => {
+                check_once(&mut seen_sections, "Review", line_no)?;
                 index += 1;
                 loop {
                     match section_line(&lines, &mut index) {
@@ -272,6 +294,15 @@ fn section_line<'a>(lines: &'a [&'a str], index: &mut usize) -> Option<(&'a str,
 
 fn is_section(line: &str) -> bool {
     line.trim().starts_with("# ")
+}
+
+/// A known section may appear only once in a draft.
+fn check_once(seen: &mut Vec<String>, name: &str, line: usize) -> GearResult<()> {
+    if seen.iter().any(|known| known == name) {
+        return Err(bad(line, format!("the `# {name}` section appears twice")));
+    }
+    seen.push(name.to_string());
+    Ok(())
 }
 
 fn parse_priority(token: &str) -> Option<Priority> {
@@ -595,10 +626,19 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
     let mut evidence = None;
     let mut rework = None;
     if let Some(value) = tail.strip_prefix("evidence=") {
-        if value.trim().is_empty() {
+        let value = value.trim();
+        if value.is_empty() {
             return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
         }
-        evidence = Some(value.trim().to_string());
+        // A pass verdict carries exactly one `evidence=<path>`: a second field
+        // after it (or a path with a space) is a different tail.
+        if pass && value.chars().any(char::is_whitespace) {
+            return Err(bad(
+                line,
+                "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
+            ));
+        }
+        evidence = Some(value.to_string());
     } else if let Some(value) = tail.strip_prefix("rework=") {
         let quoted = value.trim();
         let inner = quoted
@@ -680,4 +720,40 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
         plan,
         text: rest.trim().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER: &str = "<!-- gear-plan project=p base=0 -->\n";
+
+    fn detail_of(text: &str) -> String {
+        let err = parse(text).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat);
+        err.detail
+    }
+
+    #[test]
+    fn pass_with_rework_after_evidence_is_rejected() {
+        let text = format!(
+            "{HEADER}# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc pass evidence=x rework=\"y\"\n"
+        );
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 3: "), "{detail}");
+    }
+
+    #[test]
+    fn repeated_section_is_rejected() {
+        let text = format!("{HEADER}# Goal\none\n\n# Goal\ntwo\n");
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 5: "), "{detail}");
+    }
+
+    #[test]
+    fn repeated_milestone_id_is_rejected() {
+        let text = format!("{HEADER}# Milestone M2: A\na\n\n# Milestone M2: B\nb\n");
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 5: "), "{detail}");
+    }
 }
