@@ -74,7 +74,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | done | — |
 | T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | done | — |
 | T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | verifying | — |
-| T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | ready | — |
+| T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | verifying | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -116,6 +116,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-38 | r40 | `review/t40` | review T-40 (branch `data/t40-open-attempts`) — temp reviewer gear-r40 on seat (session ses_e9c5c5744ffeS3on5K6XAPD49g) | done | — |
 | R-39 | r42 | `review/t42` | review T-42 (branch `data/t42-attempt-lifecycle`) — temp reviewer gear-r42 on seat | running | — |
 | R-40 | r41 | `review/t41` | review T-41 (branch `runtime/t41-lane-view`) — temp reviewer gear-r41 on seat | running | — |
+| R-41 | r44 | `review/t44` | review T-44 (branch `runtime/t44-stale-delivery`) — temp reviewer gear-r44 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -220,3 +221,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-42 → R-39 (data's next tasks all depend on it).
 - 2026-10-22 Captain: `SendArgs.candidate` added (all constructors updated); result-send contract `result_contract.rs` (2 ignored); T-45 drafted (after T-42). CLI `--candidate` mapping is a runtime follow-up once T-45 lands.
 - 2026-10-22 T-41 → R-40.
+- 2026-10-22 T-44 → R-41.
