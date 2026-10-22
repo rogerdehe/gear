@@ -81,6 +81,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | done | — |
 | T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | verifying | — |
 | T-49 | runtime | `runtime/t49-tick-dispatch` | slice 2: dispatch in the tick; **slice-2 acceptance** (`slice2_dispatch.rs` by captain) | draft | T-45, T-48, T-50, T-51 |
+| T-52 | runtime | `runtime/t52-cli-plan-result` | cli: `gear plan apply`, `--candidate` | draft | T-45 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
