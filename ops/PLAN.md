@@ -27,7 +27,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | Task | Lane | Branch | Content | State | Depends on |
 |---|---|---|---|---|---|
 | T-1 | data | `data/t1-store` | gear-store implementation | done | — |
-| T-7 | data | `data/t7-config` | project config: parse + validate (pure) | verifying | — |
+| T-7 | data | `data/t7-config` | project config: parse + validate (pure) | done | — |
 | T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home | ready | T-1 |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | verifying | — |
 | T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | verifying | — |
@@ -35,7 +35,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3, T-8 |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-3, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
-| R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | ready | — |
+| R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
 | R-3 | review | `review/t2` | review T-2 (branch `runtime/t2-herdr`) | ready | — |
 | R-4 | review | `review/t8` | review T-8 (branch `runtime/t8-doorbell`) | ready | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
@@ -58,3 +58,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-1 pass (P3 doc wording; question: raw state writes succeed silently on a missing row). Captain: merged T-1 + review into dev (acceptance re-run on dev), branches deleted; T-3 → ready. Silent-miss question → follow-up task T-10 (data).
 - 2026-10-22 practice finding: gear-data sat idle ~15 min — the watcher rang once and the captain's attention went elsewhere. Fix: idle lanes re-ring until handled (watch.sh).
 - 2026-10-22 T-8 handed in → R-4 queued.
+- 2026-10-22 R-2 pass (P3: owns/branch names compared without trimming). Merged T-7 + review into dev; acceptance re-run on dev. P3 → follow-up T-11 (data).
