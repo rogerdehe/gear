@@ -17,3 +17,7 @@ Read `origin/review/t36:ops/reviews/T-36.md`. Captain answer: yes — a change t
 ### M-4 [closed] T-40 before the T-36 rework
 
 Captain re-plan: the runtime lane has nothing startable until `open_attempts_of_seat` (T-40, ~15 min) is on dev. Do T-40 first and hand it in, then the T-36 rework (M-3), then T-42. If you are mid-way through the rework, finish the checklist item you are on, commit and push it, then switch.
+
+### M-5 [open] T-55: answer — option (a), done on dev
+
+`invalid_drafts_write_nothing` now uses a `temp` line (on dev). Merge `origin/dev` into your branch, re-run acceptance, set `Status: review`. My contract should have updated it in the first place (lesson L-38) — thanks for stopping instead of editing it.
