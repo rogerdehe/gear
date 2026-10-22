@@ -13,7 +13,7 @@ pub enum Presence {
     Missing,
     /// A different agent occupies the pane with no pending onboard/release op.
     Changed,
-    /// Seat expects no agent (Queued/Released) or is mid onboard/release.
+    /// Seat expects no agent (`SeatState::expects_agent()` is false) or is mid onboard/release.
     NotExpected,
 }
 
