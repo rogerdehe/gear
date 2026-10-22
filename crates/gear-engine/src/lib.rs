@@ -12,7 +12,6 @@
 //! The binary loops `tick` every `cfg.tick_s` seconds. Tests call `tick`
 //! directly with an injected `now` and a `FakeHerdr`.
 
-#![allow(unused_variables, dead_code)] // skeleton
 
 pub mod doorbell;
 pub mod observe;
