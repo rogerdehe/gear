@@ -69,7 +69,8 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | done | — |
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | done | — |
 | T-38 | runtime | `runtime/t38-dispatch-delivered` | dispatch: continue a Delivered attempt (from R-31) | verifying | — |
-| T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | ready | — |
+| T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | verifying | — |
+| T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | draft | T-40 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -105,6 +106,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-32 | r34 | `review/t34` | review T-34 (branch `data/t34-store-attempts`) — temp reviewer gear-r34 on seat (session ses_e9c7a020dffe41ZXCI10PJb0Oe) | done | — |
 | R-33 | r36 | `review/t36` | review T-36 (branch `data/t36-plan-apply-queue`) — temp reviewer gear-r36 on seat | running | — |
 | R-34 | r38 | `review/t38` | review T-38 (branch `runtime/t38-dispatch-delivered`) — temp reviewer gear-r38 on seat | running | — |
+| R-35 | r39 | `review/t39` | review T-39 (branch `runtime/t39-deliveries`) — temp reviewer gear-r39 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -192,3 +194,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-29 r2 pass, R-31 pass. Merged T-30, T-35 + reviews; T-35 ignores removed; workspace green. **Slice-1 CLI complete** (send, reply, home, run). R-31 decisions: continue-preconditions (task Waiting/held/verifying) are enforced when building the LaneView (attempt = None then); a Delivered attempt on an idle seat past cooldown gets Continue like Started — both in the next runtime task.
 - 2026-10-22 runtime lowready → slice-2 delivery contract on dev (`deliver_contract.rs`, 3 ignored); T-39 ready.
 - 2026-10-22 R-32 pass (P3 format fixed at merge). Merged T-34 + review; its tests un-ignored; T-40 ready. T-36 → R-33, T-38 → R-34.
+- 2026-10-22 T-39 → R-35. Lane-view contract on dev (`lane_view_contract.rs`, 3 ignored); T-41 drafted (after T-40).
