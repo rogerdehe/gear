@@ -21,3 +21,11 @@ Read `origin/review/t29:ops/reviews/T-29.md`. Captain answer: yes, `--need` is a
 ### M-5 [closed] T-30: rework — merge origin/dev and make it compile (R-29 P1)
 
 Read `origin/review/t30:ops/reviews/T-30.md`. `git merge origin/dev` into `runtime/t30-cli-home`: the merged `mod tests` defines `T0`/`CAP_PANE`/`LANE_PANE` twice (yours and T-29's) — keep one set; use T-29's `open_herdr()` / `now_ts()` in `cmd_home` (P3). Run acceptance on the merged result. Hand-in rule changed: always merge dev and build before `Status: review` (ops/CONVENTIONS.md, L-33).
+
+### M-6 [open] T-48: rework — skip kinds without an evidence rule (R-46 P2)
+
+Read `origin/review/t48:ops/reviews/T-48.md`. In `confirm_pending`, ops of kinds other than Doorbell/Deliver must be skipped entirely (no budget bump, no flag) as before; add a test that an Onboard op in Submitted is left untouched. Merge `origin/dev` and build before hand-in.
+
+### M-7 [open] T-52: answer — option (a)
+
+`skill_contract::not_yet_commands_fail_cleanly` now uses `gear admin init x` (on dev). Merge `origin/dev` into your branch, re-run `cargo test -p gear-cli`, set `Status: review`. Good question — exactly the right way to raise it.
