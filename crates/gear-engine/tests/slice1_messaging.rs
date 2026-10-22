@@ -99,7 +99,7 @@ fn full_messaging_loop() {
     let mut w = world();
 
     // 1. worker asks; delivered to the captain's inbox immediately.
-    let sent = ask(&mut w, "用 v1 还是 v2 schema？", "r1", T0 + 1);
+    let sent = ask(&mut w, "Schema v1 or v2?", "r1", T0 + 1);
     assert_eq!(sent.recipient, "p:captain");
     assert_eq!(sent.msg_id, "M-1");
     assert!(!sent.replayed);
@@ -120,7 +120,7 @@ fn full_messaging_loop() {
     // 4. captain views home: sees thread, id and original text; view recorded.
     let text = show_home(&mut w, "captain", CAP_PANE, "codex", T0 + 61);
     assert!(text.contains("M-1"));
-    assert!(text.contains("用 v1 还是 v2 schema？"));
+    assert!(text.contains("Schema v1 or v2?"));
 
     // 5. engine confirms the doorbell from the view.
     let rep = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 65).unwrap();
@@ -139,7 +139,7 @@ fn full_messaging_loop() {
         Some(&fp(CAP_PANE, "codex")),
         &mail::ReplyArgs {
             ids: vec!["M-1".into()],
-            text: "用 v2".into(),
+            text: "Use v2".into(),
             mode: mail::ReplyMode::Resolve,
             wait_on: None,
             wait_until: None,
@@ -164,7 +164,7 @@ fn full_messaging_loop() {
 
     // 9. worker views the reply; engine confirms; then silence.
     let text = show_home(&mut w, "heat", LANE_PANE, "opencode", T0 + 80);
-    assert!(text.contains("用 v2"));
+    assert!(text.contains("Use v2"));
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 85).unwrap();
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 200).unwrap();
     assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 1, "shown Info reply needs no more doorbells");

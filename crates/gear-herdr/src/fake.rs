@@ -3,7 +3,7 @@
 //! Tests set panes/agents/screens and failure modes, run the engine or CLI
 //! logic, then assert on [`FakeHerdr::calls`].
 
-use crate::{AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome};
+use crate::{AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome, Worktree};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,9 @@ pub enum Call {
     PaneClose { pane: String },
     SetTitle { pane: String, title: String },
     Notify { title: String, body: String },
+    WorktreeCreate { repo: String, branch: String, base: String, label: String },
+    WorktreeOpen { repo: String, branch: String, label: String },
+    WorktreeRemove { workspace: String },
 }
 
 /// What the next side-effecting call (of any kind) should return.
@@ -41,6 +44,9 @@ pub struct FakeHerdr {
     pub calls: Vec<Call>,
     /// When true, a successful `prompt` flips the agent to Working (like a real turn start).
     pub prompt_starts_turn: bool,
+    /// Worktrees by branch: (workspace id if open, root pane if open, path).
+    worktrees: BTreeMap<String, (Option<String>, Option<String>, String)>,
+    next_workspace: u32,
 }
 
 impl FakeHerdr {
@@ -119,6 +125,22 @@ impl FakeHerdr {
                 value: v.clone(),
             }),
         })
+    }
+
+    /// Branches that currently have a worktree (open or not).
+    pub fn worktree_branches(&self) -> Vec<&str> {
+        self.worktrees.keys().map(String::as_str).collect()
+    }
+
+    /// Open a fresh workspace for `branch`'s worktree, adding a shell root pane.
+    fn open_worktree(&mut self, branch: &str) -> Worktree {
+        self.next_workspace += 1;
+        let ws = format!("wt{}", self.next_workspace);
+        let pane = format!("{ws}:p1");
+        self.add_shell(&pane);
+        let path = format!("/fake-worktrees/{}", branch.replace('/', "-"));
+        self.worktrees.insert(branch.into(), (Some(ws.clone()), Some(pane.clone()), path.clone()));
+        Worktree { workspace_id: ws, pane_id: pane, path, branch: branch.into() }
     }
 
     fn act<T>(&mut self, call: Call, ok: impl FnOnce(&mut Self) -> Outcome<T>) -> Outcome<T> {
@@ -230,6 +252,43 @@ impl HerdrAct for FakeHerdr {
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()> {
         self.act(Call::Notify { title: title.into(), body: body.into() }, |_| Outcome::Ok(()))
     }
+
+    fn worktree_create(&mut self, repo: &str, branch: &str, base: &str, label: &str) -> Outcome<Worktree> {
+        let call = Call::WorktreeCreate { repo: repo.into(), branch: branch.into(), base: base.into(), label: label.into() };
+        let branch = branch.to_string();
+        self.act(call, move |s| {
+            if s.worktrees.contains_key(&branch) {
+                return Outcome::Refused { code: "invalid_request".into(), message: "branch exists".into() };
+            }
+            Outcome::Ok(s.open_worktree(&branch))
+        })
+    }
+
+    fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree> {
+        let call = Call::WorktreeOpen { repo: repo.into(), branch: branch.into(), label: label.into() };
+        let branch = branch.to_string();
+        self.act(call, move |s| match s.worktrees.get(&branch).cloned() {
+            None => Outcome::Refused { code: "not_found".into(), message: "no worktree".into() },
+            Some((Some(ws), Some(pane), path)) => {
+                Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
+            }
+            Some(_) => Outcome::Ok(s.open_worktree(&branch)),
+        })
+    }
+
+    fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()> {
+        let ws = workspace_id.to_string();
+        self.act(Call::WorktreeRemove { workspace: ws.clone() }, move |s| {
+            let Some(branch) = s.worktrees.iter().find(|(_, v)| v.0.as_deref() == Some(&ws)).map(|(k, _)| k.clone())
+            else {
+                return Outcome::Refused { code: "not_found".into(), message: "no workspace".into() };
+            };
+            if let Some((_, Some(pane), _)) = s.worktrees.remove(&branch) {
+                s.panes.remove(&pane);
+            }
+            Outcome::Ok(())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +314,22 @@ mod tests {
         h.add_agent("w1:p1", "codex", AgentStatus::Idle);
         h.observe_fails = true;
         assert!(h.agents().is_err());
+    }
+
+    #[test]
+    fn worktree_create_open_remove() {
+        let mut h = FakeHerdr::new();
+        let w = match h.worktree_create("/repo", "data/t1-store", "dev", "gear-data") {
+            Outcome::Ok(w) => w,
+            o => panic!("{o:?}"),
+        };
+        assert_eq!(w.path, "/fake-worktrees/data-t1-store");
+        assert!(h.agent_get(&w.pane_id).unwrap().is_none(), "root pane is an empty shell");
+        assert!(matches!(h.worktree_create("/repo", "data/t1-store", "dev", "x"), Outcome::Refused { .. }));
+        assert_eq!(h.worktree_open("/repo", "data/t1-store", "x"), Outcome::Ok(w.clone()));
+        assert_eq!(h.worktree_remove(&w.workspace_id), Outcome::Ok(()));
+        assert!(h.worktree_branches().is_empty());
+        assert!(matches!(h.worktree_open("/repo", "data/t1-store", "x"), Outcome::Refused { .. }));
     }
 
     #[test]

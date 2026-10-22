@@ -1,30 +1,41 @@
-# GEAR 开发台账（手动版，模拟 GEAR 的 PLAN 视图）
+# GEAR development ledger (manual stand-in for GEAR's PLAN view)
 
-目标：GEAR MVP。当前里程碑：**M1 骨架 + 第一刀（消息闭环）**。
-完成标准：`cargo test --workspace` 中 `gear-engine/tests/slice1_messaging.rs` 全部通过。
+Goal: GEAR MVP. Current milestone: **M1 skeleton + slice 1 (messaging loop)**.
+Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/slice1_messaging.rs`.
 
-## 决定
+## Decisions
 
-- 2026-10-22 语言 Rust；由外向内切片；舰长搭骨架（model 全实现；store/herdr/app/engine/cli 签名 + 合同测试）；两条线实现。
-- 2026-10-22 Herdr 适配直接走 socket，vendored herdr-board 的 board-herdr（MIT）。
-- 2026-10-22 分支用 GitHub Flow：`main` + 每任务短命分支 `t<n>-<主题>`；worktree 一律用 `herdr worktree create`（路径由 Herdr 配置决定）；长期线 A/B 长期占有 `lane-a`（w5:p1）、`lane-b`（w6:p1）两个 worktree，任务分支在里面切换；临时工才单独开 worktree；远端 `rogerdehe/gear`（私有）。
+- 2026-10-22 Rust; outside-in slices; the captain builds the skeleton (gear-model fully implemented; store/herdr/app/engine/cli as signatures + contract tests); lanes implement.
+- 2026-10-22 Herdr adapter talks to the socket via vendored board-herdr (MIT, from herdr-board).
+- 2026-10-22 Repo `rogerdehe/gear` (private). Branches per 17-conventions: `main` (release), `dev` (integration), task branches `<lane>/t<n>-<slug>` from `dev`; `staging` not used yet.
+- 2026-10-22 Worktrees only through `herdr worktree create`; lanes hold one long-lived worktree each; temp workers get their own. No slot pool, no hand-written paths.
+- 2026-10-22 Lanes named by duty: `gear-data` (storage + business rules), `gear-runtime` (Herdr adapter + engine).
+- 2026-10-22 All repo files in English.
 
-## 在途
+## Lanes
 
-| 任务 | 线 | 分支 | 内容 | 状态 |
+| Lane | Herdr workspace / pane | Worktree | Anchor branch |
+|---|---|---|---|
+| gear-data | `gear-data` (w7) / w7:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-data` | `home/data` |
+| gear-runtime | `gear-runtime` (w8) / w8:p1 | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` | `home/runtime` |
+
+## In flight
+
+| Task | Lane | Branch | Content | State |
 |---|---|---|---|---|
-| T-1 | A | t1-store | gear-store 实现 | 待派 |
-| T-2 | B | t2-herdr | gear-herdr：profile、outcome、SocketHerdr | 待派 |
+| T-1 | data | `data/t1-store` | gear-store implementation | ready to dispatch |
+| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready to dispatch |
 
-## 就绪（下一批）
+## Ready next
 
-| 任务 | 内容 | 依赖 |
-|---|---|---|
-| T-3 | gear-app：identity + mail（send/select_batch/reply）+ home | T-1 |
-| T-4 | gear-engine：observe + doorbell + ops + tick，让 slice1 测试通过 | T-1、T-2、T-3 |
-| T-5 | gear-cli：slice1 命令接线 + `gear run` 循环 + `--skill` | T-3、T-4 |
-| T-6 | skills/gear/SKILL.md 第一版（舰长写） | — |
+| Task | Lane | Content | Depends on |
+|---|---|---|---|
+| T-3 | data | gear-app: identity + mail (send/select_batch/reply) + home | T-1 |
+| T-4 | runtime | gear-engine: observe + doorbell + ops + tick; slice1 tests pass | T-1, T-2, T-3 |
+| T-5 | runtime | gear-cli: slice-1 commands, `gear run` loop, `--skill` | T-3, T-4 |
+| T-6 | captain | skills/gear/SKILL.md v1 (includes 17-conventions) | — |
 
-## 已完成
+## Done
 
-- M1-0 骨架（舰长）：workspace、gear-model（8 测试）、FakeHerdr（3 测试）、各层签名与合同测试。
+- M1-0 skeleton (captain): workspace, gear-model (8 tests), FakeHerdr (4 tests incl. worktrees), signatures and contract tests for every layer.
+- 2026-10-22 docs translated to English; 17-conventions written; slot pool removed from design and schema.

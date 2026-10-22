@@ -1,215 +1,215 @@
-# Herdr 任意 Agent 编排与持续执行：技术候选方案
+# Herdr Any-Agent Orchestration and Continuous Execution: Candidate Technical Approach
 
-**状态：历史候选方案。首个实现切片采用 [最小落地技术方案](../../TECH-MVP.md)，暂不 fork Herdr Board；本文保留为后续扩展参考。产品需求以 [PRD](../../PRD.md) 为准；补充调查见 [Orca 实现与故障经验](orca-lessons.md)。此前直接选定 Herdr Board 的结论过早，以下保留为可评估的扩展路线，不代表已经完成与 Orca 设计的接口、运行依赖和改造成本对照。**
+**Status: historical candidate approach. The first implementation slice adopts the [minimal landing technical approach](../../TECH-MVP.md) and does not fork Herdr Board for now; this document is kept as a reference for later extension. Product requirements are governed by the [PRD](../../PRD.md); supplementary investigation is in [Orca implementation and failure lessons](orca-lessons.md). The earlier conclusion that directly selected Herdr Board was premature. What follows is kept as an extension route that can be evaluated; it does not mean the comparison against Orca's design in terms of interfaces, runtime dependencies, and modification cost has been completed.**
 
-候选路线是扩展 Herdr Board 0.19.1，新增角色无关的持续执行控制器、持久决策收件箱、工作线与依赖调度，以及通用任务上下文传递。已确定的组织要求是：一名总负责人直接管理执行者，不加入主管层；总负责人、执行者和独立审核任务均可配置为任何已通过统一接入验收的 Agent CLI。
+The candidate route is to extend Herdr Board 0.19.1, adding a role-agnostic continuous-execution controller, a persistent decision inbox, lane and dependency scheduling, and generic task context passing. The settled organizational requirement is: one lead directly manages the executors, with no supervisor layer added; the lead, executors, and independent review tasks can each be configured as any Agent CLI that has passed the unified integration acceptance.
 
-这是代码复用与扩展路线，不是“安装现有 Herdr Board 就能满足需求”。持续执行控制器是实质性开发工作，不能包装成一个 skill 或几行 glue。当前没有完成该实现，也没有证明真实十线场景已经通过。此前固定 Codex/Claude 角色的推荐已撤回；历史源码观察与测试保留在 [prior-research.md](prior-research.md)，版本与实验分别见 [sources.lock.json](sources.lock.json)、[validation.json](validation.json)。
+This is a code-reuse-and-extension route, not "install the existing Herdr Board and the requirements are met". The continuous-execution controller is substantive development work and cannot be packaged as a skill or a few lines of glue. That implementation has not been completed, and it has not been proven that a real ten-lane scenario passes. The earlier recommendation of fixed Codex/Claude roles has been withdrawn; historical source observations and tests are kept in [prior-research.md](prior-research.md), and versions and experiments are in [sources.lock.json](sources.lock.json) and [validation.json](validation.json) respectively.
 
-**一、不可妥协的要求**
+**1. Non-negotiable requirements**
 
-1. Agent 品牌、CLI、模型与组织角色完全分离；任何接入的 Agent 都能承担总负责人、执行、审核。
-2. 一轮生成结束不会把未完成任务丢在那里；总负责人自己停止时也受同样机制管理。
-3. 不加入主管层。需要判断的问题直接交给总负责人；常规续做、消息重送、验证与排队按已授权规则由程序完成。
-4. 任务、工作线和运行记录独立于 pane 和模型对话；更换 Agent 不丢队列、产物、决策和验收条件。
-5. 有终端看板、任务详情、工作线队列、精确排序与改派；关闭 TUI 不停止后台执行。
-6. 长期职责可以保留会话；临时审核用新会话，用完释放资源，报告保留。
-7. 研发方法与 skill 可替换，核心编排无需安装任何研发框架；运行在已有 Herdr 与 SSH 服务器工作方式中。
+1. Agent brand, CLI, model, and organizational role are fully separated; any integrated Agent can serve as lead, executor, or reviewer.
+2. The end of a generation turn does not leave unfinished tasks sitting there; when the lead itself stops, it is governed by the same mechanism.
+3. No supervisor layer is added. Questions requiring judgment go directly to the lead; routine continuation, message redelivery, verification, and queuing are done by the program under authorized rules.
+4. Tasks, lanes, and run records are independent of panes and model conversations; switching Agents loses no queue, artifacts, decisions, or acceptance criteria.
+5. There is a terminal board, task details, lane queues, precise ordering and reassignment; closing the TUI does not stop background execution.
+6. Long-lived duties may keep their sessions; temporary reviews use new sessions, release resources when done, and keep their reports.
+7. Development methods and skills are replaceable; core orchestration requires installing no development framework; it runs within the existing Herdr and SSH-server way of working.
 
-**二、为什么换掉 Firstmate 底座**
+**2. Why replace the Firstmate base**
 
-Firstmate 是第三方 Agent 编排发行包：提示词、skills、脚本、任务记录和一组配套工具。它已经实现许多监督与恢复流程，但后台监督与主控 CLI 的 hook/扩展深度耦合。固定版本的 supervision-host 明确写着：attended 模式的独立监督适用于 Claude/Cursor；Codex 等处于 pass-through，Pi 使用自己的进程内分支。
+Firstmate is a third-party Agent orchestration distribution: prompts, skills, scripts, task records, and a set of companion tools. It already implements many supervision and recovery flows, but background supervision is deeply coupled to the primary agent CLI's hooks/extensions. The pinned version's supervision-host states explicitly: independent supervision in attended mode applies to Claude/Cursor; Codex and others are pass-through, and Pi uses its own in-process branch.
 
-这不是说它只允许 Claude 担任主管。它支持多种主管，但监督行为并不等价；此前为了得到较完整的路径而固定 Claude，恰好违背用户要求。把这种差异填平需要深入修改它的监督架构，而它同时带入大量工具链与交付规范。相比之下，Herdr Board 已经把数据库、派发、计时、并发与运行恢复放在独立 daemon 中，更适合扩展为所有角色共用的外部控制器。
+This does not mean it only allows Claude as supervisor. It supports multiple supervisors, but the supervision behavior is not equivalent; fixing on Claude earlier in order to get a more complete path directly contradicted the user's requirement. Leveling out that difference would require deep changes to its supervision architecture, while it also brings in a large toolchain and delivery conventions. By comparison, Herdr Board already places the database, dispatch, timing, concurrency, and run recovery in an independent daemon, which is better suited to extension as an external controller shared by all roles.
 
-[Firstmate 固定版本的监督范围](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-host.md)
+[Supervision scope of the pinned Firstmate version](https://github.com/kunchenguid/firstmate/blob/45dd50a5e12bc3f5e009a4e18fa35ce7f7a71681/docs/supervision-host.md)
 
-**三、为什么将 Herdr Board 列为候选，为什么不是开箱方案**
+**3. Why Herdr Board is listed as a candidate, and why it is not an out-of-the-box solution**
 
-本次检查的候选版本为 `nelsonPires5/herdr-board@7a215a179acb4e098dd1c2971332497806309360`，Cargo workspace 版本 0.19.1。
+The candidate version inspected this time is `nelsonPires5/herdr-board@7a215a179acb4e098dd1c2971332497806309360`, Cargo workspace version 0.19.1.
 
-| 能力 | 已有实现 | 本方案处理 |
+| Capability | Existing implementation | Handling in this approach |
 |---|---|---|
-| 终端看板、卡片、详情、运行历史、列和卡片排序 | board-tui、board-core | 复用，增加角色与工作线视图 |
-| 持久数据与迁移 | SQLite、board-core/db | 复用同一个数据库与写入者，不叠加 tasks-axi |
-| 启动、排队、并发限制、会话/工作区路由 | board-daemon/dispatch、spawner | 复用，补工作线与实际工作树互斥 |
-| 运行生命周期、结果与过期运行检查 | enqueue/promote/finalize 三个事务单元 | 复用，增加提交验收与恢复动作 |
-| Herdr 事件订阅、断连及重启核对 | watchers、supervisor、recovery | 复用观察机制，业务恢复策略需要扩展 |
-| Agent 配置与模型参数 | harness adapters | 保留已验证适配器，增加统一能力接口及 Grok 等接入 |
-| 未完成任务自动续跑 | 当前 idle/done 会进入 awaiting | 必须新增 |
-| 任意 Agent 负责管理决策 | 没有完整角色层 | 必须新增；负责人也作为受监督的角色会话 |
-| 任务依赖、长期工作线、可持续调整的队列 | 当前主要是按 space 串行的 run 队列 | 必须新增/修改 |
-| 完成验证、独立审核、任务产物关联 | 不能由 board done 自报替代 | 必须新增 |
+| Terminal board, cards, details, run history, column and card ordering | board-tui, board-core | Reuse; add role and lane views |
+| Persistent data and migrations | SQLite, board-core/db | Reuse the same database and writer; do not layer tasks-axi on top |
+| Launch, queuing, concurrency limits, session/workspace routing | board-daemon/dispatch, spawner | Reuse; add lane and actual worktree mutual exclusion |
+| Run lifecycle, results, and stale-run checks | the three transactional units enqueue/promote/finalize | Reuse; add submission acceptance and recovery actions |
+| Herdr event subscription, disconnect and restart reconciliation | watchers, supervisor, recovery | Reuse the observation mechanism; business recovery policy needs extension |
+| Agent configuration and model parameters | harness adapters | Keep verified adapters; add a unified capability interface and integrations such as Grok |
+| Automatic continuation of unfinished tasks | Currently idle/done enters awaiting | Must be added |
+| Any Agent responsible for management decisions | No complete role layer | Must be added; the lead is also a supervised role session |
+| Task dependencies, long-lived lanes, continuously adjustable queues | Currently mainly a run queue serialized per space | Must be added/modified |
+| Completion verification, independent review, task artifact linkage | Cannot be replaced by board done self-reporting | Must be added |
 
-[底座设计](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/docs/design.md)、[配置与适配器](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/docs/configuration.md)
+[Base design](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/docs/design.md), [configuration and adapters](https://github.com/nelsonPires5/herdr-board/blob/7a215a179acb4e098dd1c2971332497806309360/docs/configuration.md)
 
-以前排除 Herdr Board，是因为它没有完整持续监督；这项缺口仍然存在。将它列为候选，依据是外部 daemon 的架构边界更适合“任意角色、任意 Agent”这个硬要求，而不是突然认定它已有自动续跑功能。
+Herdr Board was previously excluded because it lacks complete continuous supervision; that gap still exists. It is listed as a candidate because the architectural boundary of an external daemon better fits the hard requirement of "any role, any Agent", not because it has suddenly been deemed to have automatic continuation.
 
-其他候选有以下已知限制：bmad-loop 的 max_parallel 当前压成 1；Herdr Dispatch 的 doing/done 覆盖与重试预算有缺口且 provider 特化；Firstmate 的独立监督方式依赖主控 CLI；Captain’s Deck 深度依赖 Firstmate 的数据模型。它们的经验可参考，但不能把四套独立状态库和控制循环堆在同一个任务上。
+The other candidates have these known limitations: bmad-loop's max_parallel is currently forced to 1; Herdr Dispatch has gaps in doing/done coverage and retry budgets and is provider-specialized; Firstmate's independent supervision depends on the primary agent CLI; Captain’s Deck depends deeply on Firstmate's data model. Their experience can be referenced, but four independent state stores and control loops cannot be stacked on the same task.
 
-**四、运行结构**
+**4. Runtime structure**
 
 ```text
-用户 / 终端看板 / 管理 CLI
+User / terminal board / management CLI
              │
-      独立常驻控制器
-      ├─ 任务、队列、依赖、验收与消息数据库
-      ├─ 观察、派发、续做、验证、恢复、告警
-      ├─ 总负责人角色 ── 任意 Agent 配置
-      ├─ 执行者角色   ── 任意 Agent 配置
-      └─ 审核者角色   ── 任意 Agent 配置、新会话
+      Independent resident controller
+      ├─ Database of tasks, queues, dependencies, acceptance, and messages
+      ├─ Observe, dispatch, continue, verify, recover, alert
+      ├─ Lead role       ── any Agent configuration
+      ├─ Executor role   ── any Agent configuration
+      └─ Reviewer role   ── any Agent configuration, new session
                        │
-                 Herdr 原生 panes
+                 Native Herdr panes
 ```
 
-程序负责确定的动作：下一项就绪任务、恢复计时、重试次数、消息去重、验证命令、持久化与资源归属。模型负责需要判断的动作：需求拆解、依赖重构、接口决策、修复策略、验收中的语义判断。
+The program handles deterministic actions: the next ready task, recovery timing, retry counts, message deduplication, verification commands, persistence, and resource ownership. Models handle actions requiring judgment: requirement decomposition, dependency restructuring, interface decisions, repair strategy, and semantic judgment during acceptance.
 
-总负责人不是保持所有循环运行的唯一进程。它处理决策时正常运行，结束一轮后程序检查是否仍有未处理决策；有则再次唤醒，没有就安静等待。程序本身不调用自己的 shell 来伪装成思考中的 Agent。
+The lead is not the only process keeping all loops running. It runs normally while handling decisions; after it ends a turn, the program checks whether unhandled decisions remain; if so it wakes the lead again, otherwise it waits quietly. The program itself does not invoke its own shell to masquerade as an Agent that is thinking.
 
-**五、任意 Agent 的接入合同**
+**5. Integration contract for any Agent**
 
-“任意”指角色没有 CLI 白名单；每个 CLI 的启动/状态/输入方式仍须有可验证的适配实现。不能因为一个 CLI 没有 Stop hook，就剥夺它担任总负责人的能力；由外部观察、结果提交和恢复机制弥补。也不能因为支持任意 argv 就宣称已经能可靠交互任何 CLI。
+"Any" means roles have no CLI allowlist; each CLI's launch/status/input methods still require a verifiable adapter implementation. A CLI cannot be denied the ability to serve as lead just because it has no Stop hook; external observation, result submission, and recovery mechanisms make up for it. Nor can support for arbitrary argv be used to claim that any CLI can already be interacted with reliably.
 
-统一适配表面：
+Unified adapter surface:
 
-- 启动新会话，传递工作目录与上下文包。
-- 提交输入，并区分 accepted、started、uncertain。
-- 观察 working、ready、blocked、exited、unknown，保留证据来源。
-- 收集任务输出与结果记录。
-- 停止/替换会话，确认旧执行权结束。
-- 可选原生 resume；不支持时明确使用新会话，从任务记录与产物续做。
+- Start a new session, passing the working directory and context bundle.
+- Submit input, distinguishing accepted, started, uncertain.
+- Observe working, ready, blocked, exited, unknown, keeping the evidence source.
+- Collect task output and result records.
+- Stop/replace a session, confirming the old execution right has ended.
+- Optional native resume; when unsupported, explicitly use a new session and continue from task records and artifacts.
 
-现有 Board 的内建 managed adapters 是 Pi、Claude、Codex、OpenCode、Antigravity；自定义 harness 当前是 argv + BOARD_PROMPT 的 unmanaged 路径。**Grok 的完整交互接入必须列为开发与验收项，不能用配置 argv 的存在掩盖它。** 后续新 CLI 同样通过接入测试后可承担所有角色。
+The existing Board's built-in managed adapters are Pi, Claude, Codex, OpenCode, Antigravity; custom harnesses are currently an unmanaged path of argv + BOARD_PROMPT. **Full interactive integration of Grok must be listed as a development and acceptance item; the existence of a configured argv must not be used to mask this.** Later new CLIs can likewise take on all roles after passing the integration tests.
 
-角色绑定采用角色 → AgentProfile → 适配器，运行时保存 profile 快照。更换总负责人不改任务策略：先确认旧持有者停止，递增 assignment generation，再交接当前计划、未处理决策和产物索引。旧会话迟到的结果只能进入历史，不能推进新一轮状态。
+Role binding uses role → AgentProfile → adapter, and a profile snapshot is stored at runtime. Changing the lead does not change task policy: first confirm the old holder has stopped, increment the assignment generation, then hand over the current plan, unhandled decisions, and artifact index. Late results from the old session can only enter history; they cannot advance the new round's state.
 
-不承诺模型能力相同。配置同样自由，任务是否做得好由验收证明；不能把较弱模型的能力问题误写成某个角色必须使用某品牌。
+Equal model capability is not promised. Configuration is equally free, and whether a task is done well is proven by acceptance; a weaker model's capability problem must not be miswritten as a requirement that some role use a particular brand.
 
-**六、持续推进策略**
+**6. Continuous progress policy**
 
-任务状态与会话状态分开。会话 ready/done 不能成为任务 completed 的依据。
+Task state and session state are separate. Session ready/done cannot be the basis for task completed.
 
-| 观察到的事实 | 控制器动作 |
+| Observed fact | Controller action |
 |---|---|
-| 已授权任务未完成，Agent 稳定 ready，无待处理权限提示 | 发送剩余目标与最近检查结果；确认开始执行 |
-| Agent 有完成声明 | 进入验证；检查验收命令/产物；必要时派独立审核 |
-| 验证失败且属于已授权修复范围 | 将失败证据交回执行者，计入有界修复循环 |
-| 提交结果未确认、传输超时 | 查询运行与回执；保留 uncertain，不能无条件重复派发 |
-| 连续停轮且没有实质进展 | 退避；交语义决策角色诊断；确认卡死后替换会话 |
-| blocked | 记录阻塞类型；需要用户的权限问题不自动回答；可由主管解决的技术问题送总负责人 |
-| 任务依赖未满足 | 保持阻塞原因；在资源和授权允许时选其他 ready 任务 |
-| 负责人停轮且有未处理决策 | 使用同一适配器合同唤醒负责人，不依赖其特定 hook |
-| Herdr 暂时不可达 | 记 unknown，保留所有权，重连核对，不能当作已退出并双开 |
-| 队列空 | 不消耗模型轮次；新任务、依赖解除、指定 wake_at 再唤醒 |
+| Authorized task unfinished, Agent stably ready, no pending permission prompt | Send the remaining goal and the latest check results; confirm execution started |
+| Agent has a completion claim | Enter verification; check acceptance commands/artifacts; dispatch an independent review when necessary |
+| Verification failed and falls within authorized repair scope | Return the failure evidence to the executor, counted in a bounded repair loop |
+| Submission result unconfirmed, transport timeout | Query the run and receipt; keep uncertain; must not unconditionally re-dispatch |
+| Consecutive turn stops with no substantive progress | Back off; hand to the semantic-decision role for diagnosis; replace the session once confirmed stuck |
+| blocked | Record the block type; permission questions requiring the user are not auto-answered; technical problems the supervisor can resolve go to the lead |
+| Task dependencies unmet | Keep the block reason; pick other ready tasks when resources and authorization permit |
+| Lead stopped its turn and has unhandled decisions | Wake the lead using the same adapter contract, without relying on its specific hooks |
+| Herdr temporarily unreachable | Record unknown, keep ownership, reconcile on reconnect; must not treat it as exited and double-launch |
+| Queue empty | Consume no model turns; wake again on new tasks, dependency release, or a specified wake_at |
 
-进展不能只看终端滚动或 commit 数。要结合任务阶段、产物变化、运行中的工具/测试、执行回执和验收证据。长测试没有输出不等于卡死；反复回复“正在做”不等于有进展。
+Progress cannot be judged from terminal scrolling or commit count alone. Combine task phase, artifact changes, running tools/tests, execution receipts, and acceptance evidence. A long test with no output does not mean stuck; repeatedly replying "working on it" does not mean progress.
 
-恢复预算包括续做次数、无进展时间、替换次数和成本/时间上限。到达边界后形成可见失败/决策，不无限烧额度。整体任务仍被跟踪，其他就绪任务继续。
+The recovery budget includes continuation count, no-progress time, replacement count, and cost/time limits. When a boundary is reached, a visible failure/decision is produced, rather than burning quota indefinitely. The overall task remains tracked, and other ready tasks continue.
 
-**七、怎样减少主控消息量**
+**7. How to reduce primary-agent message volume**
 
-所有 worker 写结构化事件，程序先归类：
+All workers write structured events, which the program classifies first:
 
-1. 日常进展、普通结束、检查通过：写入任务记录和看板，合并摘要。
-2. 可机械恢复的停顿、已授权测试修复：控制器直接推进，不逐项询问主控。
-3. 新依赖/资源冲突、授权请求、需求不明、越界的接口冲突、预算耗尽、拆解需要修改：创建 decision item，直接发送给总负责人。已授权范围内的接口澄清可以先横向处理，记录不丢失。
+1. Routine progress, normal completion, checks passed: written to the task record and board, merged into summaries.
+2. Mechanically recoverable stalls, authorized test fixes: the controller advances directly without asking the primary agent item by item.
+3. New dependencies/resource conflicts, authorization requests, unclear requirements, out-of-bounds interface conflicts, exhausted budgets, decompositions needing changes: create a decision item and send it directly to the lead. Interface clarifications within authorized scope may be handled laterally first, with records not lost.
 
-同一阻塞对象的重复事件合并；决策具有稳定 ID、版本、处理回执和超时升级记录。总负责人有十条未处理事项时，按预先确定的优先级与依赖排序提供必要上下文，不把十个 worker 的完整聊天都塞进去。原始事件、产物和日志始终可追溯，未知或未能可靠分类的问题不能静默过滤。
+Repeated events for the same blocking object are merged; decisions have stable IDs, versions, handling receipts, and timeout escalation records. When the lead has ten unhandled items, necessary context is provided ordered by predetermined priority and dependencies, without stuffing in the full chats of ten workers. Raw events, artifacts, and logs remain traceable at all times; unknown or not-reliably-classified issues must not be silently filtered.
 
-总负责人处理第 3 类事件；把总负责人配置为 Codex、OpenCode、Grok 或 Pi 不改变通知/重试机制。总负责人失效时保留事件并执行恢复，无法恢复则向用户呈现。独立审核是提供证据与结论的任务，不增加一层拥有派工权的主管。
+The lead handles category 3 events; configuring the lead as Codex, OpenCode, Grok, or Pi does not change the notification/retry mechanism. When the lead fails, events are kept and recovery is executed; if it cannot be recovered, it is presented to the user. Independent review is a task that provides evidence and conclusions; it does not add a supervisor layer with dispatch authority.
 
-**七点一、减少汇报与减少决策的具体约定**
+**7.1 Concrete conventions for reducing reporting and reducing decisions**
 
-- 所有事件保留在任务记录中；日常进度、成功检查和常规完成不要求总负责人逐项回复，按批次展示。
-- 自动动作必须来自任务合同或项目规则：什么算完成、可修改范围、可执行的验证命令、允许的修复/重试预算、下一项任务的选择规则、必须停止的情况。规则不足时不能让程序猜。
-- 已批准任务的普通停轮自动续做；已批准修复范围内的验证失败自动反馈；依赖已满足的队列项按现有顺序派发；这些不生成新的批准请求。
-- 同一根因的重复告警按稳定键合并为一个待处理问题，保留受影响任务列表与原始证据。无法确认根因相同的事件不强行合并。
-- 原始阻塞描述和失败证据直达总负责人。程序可以排序、分组、去重，不能靠模型摘要隐藏不确定性或改写事实。
-- 缺少输入、接口语义冲突、验收失败超过预算、任务范围变化、用户权限问题才进入决策收件箱；未确认的问题保持可见。
-- 第一版不增加 Jev 或另一个通用 Agent 作为强制消息过滤/决策层。Jev 的窄语义分类能力可以单独评估，但程序规则能解决的地方不调用模型，其输出不能单独批准完成、丢弃告警或更改需求。
+- All events are kept in the task record; routine progress, successful checks, and regular completions do not require item-by-item replies from the lead, and are displayed in batches.
+- Automatic actions must come from the task contract or project rules: what counts as done, the modifiable scope, executable verification commands, allowed repair/retry budgets, selection rules for the next task, and situations where it must stop. When the rules are insufficient, the program must not be left to guess.
+- Ordinary turn stops on approved tasks are auto-continued; verification failures within approved repair scope are auto-fed back; queue items with satisfied dependencies are dispatched in the existing order; none of these generate new approval requests.
+- Repeated alerts with the same root cause are merged by a stable key into one pending issue, keeping the list of affected tasks and the raw evidence. Events whose shared root cause cannot be confirmed are not forcibly merged.
+- Raw block descriptions and failure evidence go directly to the lead. The program may sort, group, and deduplicate, but must not rely on model summaries to hide uncertainty or rewrite facts.
+- Only missing input, interface semantic conflicts, acceptance failures beyond budget, task scope changes, and user permission questions enter the decision inbox; unconfirmed issues stay visible.
+- The first version does not add Jev or another generic Agent as a mandatory message-filtering/decision layer. Jev's narrow semantic classification capability can be evaluated separately, but models are not called where program rules suffice, and its output alone cannot approve completion, discard alerts, or change requirements.
 
-用户确认的优化目标是减少需要判断的次数，而非转移到另一名主管处理同样数量的判断。衡量正常任务在派发后的人工/主控介入次数、重复告警数和等待主控时间；不能以删掉记录的方式降低指标。
+The optimization goal confirmed by the user is to reduce the number of judgments needed, not to shift the same number of judgments to another supervisor. Measure the number of human/primary-agent interventions after dispatch for normal tasks, the number of duplicate alerts, and time spent waiting for the primary agent; metrics must not be lowered by deleting records.
 
-**七点二、总负责人的必处理职责与横向协作边界**
+**7.2 The lead's mandatory duties and the boundary of lateral collaboration**
 
-组织采用单一总负责人直接管理执行者。总负责人承担全局决策责任，后台程序执行已批准的规则，执行者可进行有记录的局部协作。一个任务的当前完成和新工作授权是不同事实。
+The organization uses a single lead directly managing executors. The lead bears global decision responsibility, the background program executes approved rules, and executors may carry out recorded local collaboration. A task's current completion and authorization for new work are different facts.
 
-| 总负责人必处理事项 | 必须送达的触发 | 已批准后可由程序/执行者处理 |
+| Lead's mandatory items | Triggers that must be delivered | Can be handled by program/executors once approved |
 |---|---|---|
-| 资源与任务依赖 | 新发现或改变的依赖、环形等待、资源争用、依赖方无法履约 | 按已批准依赖等待/解锁，核实产物、沟通交付细节 |
-| 授权与权限 | 超出任务范围/预算/权限，执行者请求额外授权 | 运行已经允许的命令和修复；真正保留给用户的批准转交用户，负责人不能代签 |
-| 主动评估任务拆解 | 持续阻塞、返工、上下游契约不匹配、粒度失衡、里程碑发现计划不适用 | 收集进展与失败证据，按检查点形成快照 |
-| 安排新工作与容量 | 队列将耗尽/已耗尽、没有适配的 ready 项、需要新目标或重新分配能力 | 派发既已授权且就绪的下一项，不要求每项完成后重新问下一步 |
-| 目标、范围与优先级裁决 | 需求修订、改变验收标准、抢占资源/插队、局部方案影响全局 | 在既定契约和优先级内做局部实现选择 |
-| 例外与失败处置 | 恢复预算耗尽、持续不收敛、证据互相矛盾、负责人/worker 恢复失败 | 有界续做、重试、保存工作、执行已批准的恢复路径 |
-| 项目级验收与收尾 | 子项均完成但整体目标未证明、集成回归、发布/合入决策、遗留问题需接受 | 按预设标准验证单项，收集独立审核证据；不能只凭所有卡片 done 就结束项目 |
+| Resource and task dependencies | Newly discovered or changed dependencies, circular waits, resource contention, a depended-on party unable to deliver | Wait/unlock per approved dependencies, verify artifacts, communicate delivery details |
+| Authorization and permissions | Beyond task scope/budget/permissions, executor requests extra authorization | Run already-allowed commands and fixes; approvals truly reserved for the user are forwarded to the user, the lead cannot sign on their behalf |
+| Proactively evaluating task decomposition | Persistent blocks, rework, upstream/downstream contract mismatch, unbalanced granularity, a milestone finding the plan unfit | Collect progress and failure evidence, form snapshots at checkpoints |
+| Scheduling new work and capacity | Queue about to run out/run out, no suitable ready item, new goals or reallocation of capacity needed | Dispatch the next already-authorized and ready item, without re-asking for the next step after each completion |
+| Goal, scope, and priority rulings | Requirement revisions, changed acceptance criteria, preempting resources/queue-jumping, local solutions with global impact | Make local implementation choices within the established contract and priorities |
+| Exception and failure handling | Recovery budget exhausted, persistent non-convergence, contradictory evidence, lead/worker recovery failure | Bounded continuation, retries, saving work, executing approved recovery paths |
+| Project-level acceptance and wrap-up | All sub-items done but the overall goal unproven, integration regressions, release/merge decisions, leftover issues needing acceptance | Verify individual items against preset criteria, collect independent review evidence; the project must not be ended merely because all cards are done |
 
-总负责人不必亲自做每项技术调查，可以派调查/审核任务获得证据，但上述决策权不会随调查任务转移。执行者不能通过双方同意而改变第三方接口、全局优先级或原始验收要求。
+The lead need not personally do every technical investigation; it may dispatch investigation/review tasks to obtain evidence, but the decision rights above do not transfer with the investigation tasks. Executors cannot, by mutual agreement, change third-party interfaces, global priorities, or original acceptance requirements.
 
-横向协作允许直接索取已约定的 schema、fixture、测试结果、产物位置、接口说明，以及在双方已授权范围内修正实现不一致；所有新依赖和依赖变化仍进入总负责人记录/决策入口。依赖已被总负责人确认后，不需为每次状态查询再请求批准。
+Lateral collaboration allows directly requesting already-agreed schemas, fixtures, test results, artifact locations, interface descriptions, and correcting implementation inconsistencies within scope both sides are authorized for; all new dependencies and dependency changes still go into the lead's record/decision entry point. Once a dependency has been confirmed by the lead, there is no need to request approval for each status query.
 
-协作通过任务关联的请求/回应/交付/验证记录完成，写入版本与产物引用。双方说“同意”不是验证证据，承诺交付不是依赖已满足。程序负责唤醒收件方、去重、检查超时与环形等待。只向相关任务的 owner 发请求，不做全队广播。超过约定协商时限、无法确认权限边界、发生优先级/范围/资源冲突，带上双方方案和原始证据升级总负责人。
+Collaboration is done through request/response/delivery/verification records linked to tasks, with versions and artifact references written in. Both parties saying "agreed" is not verification evidence, and a promise to deliver does not mean the dependency is satisfied. The program is responsible for waking the recipient, deduplicating, and checking for timeouts and circular waits. Requests are sent only to the owners of related tasks, never broadcast to the whole team. When the agreed negotiation time limit is exceeded, permission boundaries cannot be confirmed, or priority/scope/resource conflicts occur, escalate to the lead with both sides' proposals and the raw evidence.
 
-主动复查由阻塞累积、恢复失败、空线/队列低水位、需求变更、里程碑，以及可配置的周期触发；不能仅在执行者汇报时被动反应。复查可以得出“不改计划”，不能为了保持 busy 而制造任务。
+Proactive re-examination is triggered by accumulated blocks, recovery failures, empty lanes/low queue watermark, requirement changes, milestones, and a configurable period; it must not merely react passively when executors report. A re-examination may conclude "no plan change", and must not manufacture tasks just to stay busy.
 
-评估目标：降低重复判断，而不是把本应由总负责人掌握的依赖、权限和项目结果藏在局部协商中。
+Evaluation goal: reduce repeated judgments, not hide dependencies, permissions, and project outcomes that should be in the lead's hands inside local negotiations.
 
-**八、任务队列和资源隔离**
+**8. Task queue and resource isolation**
 
-复用同一 SQLite，新增或扩展 task dependencies、lane、queue position、role binding、decision、delivery receipt 和 recovery record。任务输入版本、attempt、assignment generation 与验收证据必须可关联。
+Reuse the same SQLite, adding or extending task dependencies, lane, queue position, role binding, decision, delivery receipt, and recovery record. Task input version, attempt, assignment generation, and acceptance evidence must be linkable.
 
-看板具备两种投影：按任务阶段看待办/执行/阻塞/审核/完成；按工作线看当前事项和后续顺序。它们读同一组记录。
+The board has two projections: by task phase showing todo/executing/blocked/review/done; by lane showing the current item and subsequent order. They read the same set of records.
 
-运行中改派先完成 checkpoint 与旧所有者释放；调整待执行项则即时影响下一次选择。暂停状态持久且可选到期时间，不再使用多个不兼容的 mute/hold 文件。
+Reassigning while running first completes a checkpoint and the old owner's release; adjusting pending items immediately affects the next selection. The paused state is persistent with an optional expiry time, no longer using multiple incompatible mute/hold files.
 
-现有 Board 的串行 key 是 session + space，它不等同于实际工作树互斥；不同 workspace 可以指向同一个目录。本方案要加入 worktree ownership/lock，保证同一工作树不能被两个写入 attempt 占用。并行 worker 使用隔离 worktree，合入经过单独验证和串行化。依赖、迁移、共享服务等冲突由任务合同/资源约束描述，不能仅靠 Git 分支解决。
+The existing Board's serialization key is session + space, which is not equivalent to actual worktree mutual exclusion; different workspaces can point to the same directory. This approach adds worktree ownership/lock, guaranteeing the same worktree cannot be occupied by two writing attempts. Parallel workers use isolated worktrees, and merging goes through separate verification and serialization. Conflicts such as dependencies, migrations, and shared services are described by task contracts/resource constraints and cannot be solved by Git branches alone.
 
-**九、长期与临时会话**
+**9. Long-lived and temporary sessions**
 
-长期工作线是有责任和队列的对象，可以绑定常驻会话；更换会话不丢工作线。长期会话空闲后休眠，若用户需要 20–30 分钟后复查，记录 wake_at。新任务是否提前唤醒由配置决定。
+A long-lived lane is an object with responsibilities and a queue, and can be bound to a resident session; changing the session does not lose the lane. Long-lived sessions sleep when idle; if the user needs a re-check after 20–30 minutes, wake_at is recorded. Whether a new task wakes it early is decided by configuration.
 
-临时 worker/reviewer 完成后释放会话，结果与审核记录保留。审核者默认新上下文，接收需求、设计、候选 commit 和验证证据，不继承实现者聊天。临时资源由创建者归属记录回收；未提交改动或未归档成果不能随 pane 退出而删除。
+Temporary workers/reviewers release their sessions upon completion, and results and review records are kept. Reviewers default to a fresh context, receiving requirements, design, candidate commit, and verification evidence, without inheriting the implementer's chat. Temporary resources are reclaimed per the creator's ownership records; uncommitted changes or unarchived results cannot be deleted when the pane exits.
 
-**十、研发 skill 与编排解耦**
+**10. Decoupling development skills from orchestration**
 
-以 PRD v0.2 为准，删除此前 BMAD 专用接入方案。BMAD、Superpowers 与自定义 skill 均是可选任务指导，不是运行依赖。核心只接收通用任务合同、上下文引用、可选 skill 指定及验收要求。
+Per PRD v0.2, the earlier BMAD-specific integration plan is removed. BMAD, Superpowers, and custom skills are all optional task guidance, not runtime dependencies. The core only receives a generic task contract, context references, an optional skill designation, and acceptance requirements.
 
-首版不做框架版本检测、story 自动导入、阶段映射、状态双向同步或 sprint 文件回写，也不为此引入通用工作流引擎。需求拆解与研发步骤由总负责人及用户选择的 skill 指导，程序负责派发、协作、持续执行与证据记录。框架特定适配若日后需要，独立评估。
+The first version does no framework version detection, automatic story import, phase mapping, bidirectional state sync, or sprint file write-back, and introduces no generic workflow engine for that purpose. Requirement decomposition and development steps are guided by the lead and the skills the user chooses; the program handles dispatch, collaboration, continuous execution, and evidence recording. Framework-specific adapters, if needed later, are evaluated independently.
 
-此前 bmad-loop 的源码与测试仅保留为验证、重试和审核隔离的研究参考，不构成产品必须支持的流程。
+The earlier bmad-loop source and tests are kept only as research reference for verification, retries, and review isolation, and do not constitute a flow the product must support.
 
-**十一、开发边界与顺序**
+**11. Development boundaries and order**
 
-| 工作包 | 主要修改入口 | 交付验收 |
+| Work package | Main modification entry points | Delivery acceptance |
 |---|---|---|
-| P0 统一适配与角色绑定 | board-core/harness、launch、daemon/spawner、profile/role 表 | 用户列出的五种 CLI 均可绑定每种角色，不依赖专属主管 |
-| P1 未完成续跑与验证 | engine/signals、lifecycle、watchers、dispatch/ops、持久恢复记录 | idle/done 中途停轮均续做；完成必须验证；无进展达到预算升级 |
-| P2 持久决策与负责人自监督 | 新 inbox/outbox/receipt 与角色运行记录 | 负责人停轮可唤醒；重启事件不丢、不重复作用 |
-| P3 依赖、工作线、精确队列 | model/protocol/db migrations、dispatch/pass、TUI | 调整顺序影响实际派发；受阻任务不阻塞无关 ready 工作 |
-| P4 会话与工作树生命周期 | spawner、ownership、recovery、cleanup | 长期休眠可恢复；临时审核可回收；无人丢失未落地工作 |
+| P0 Unified adapters and role binding | board-core/harness, launch, daemon/spawner, profile/role tables | All five CLIs the user listed can be bound to every role, without depending on a dedicated supervisor |
+| P1 Unfinished-task continuation and verification | engine/signals, lifecycle, watchers, dispatch/ops, persistent recovery records | Mid-task turn stops in idle/done are all continued; completion must be verified; no progress reaching budget escalates |
+| P2 Persistent decisions and lead self-supervision | New inbox/outbox/receipt and role run records | A lead that stopped its turn can be woken; restart events are not lost and not applied twice |
+| P3 Dependencies, lanes, precise queues | model/protocol/db migrations, dispatch/pass, TUI | Reordering affects actual dispatch; blocked tasks do not block unrelated ready work |
+| P4 Session and worktree lifecycle | spawner, ownership, recovery, cleanup | Long-lived sleep is recoverable; temporary reviews can be reclaimed; nobody loses unlanded work |
 
-这是一个需要数据库迁移、恢复状态机和 CLI 适配的插件扩展，不能宣称只用几条提示词即可完成。第一步先实现 P0–P2 的最小闭环，证明两个不同 CLI 的执行者停轮后无需人工催办，且把主控换成另一种 CLI 后行为不变，再完善队列、横向协作和任务上下文传递。不能先做完漂亮看板才验证持续工作。
+This is a plugin extension requiring database migrations, a recovery state machine, and CLI adapters; it cannot be claimed to be achievable with just a few prompts. The first step is to implement the minimal closed loop of P0–P2, proving that executors on two different CLIs need no manual nudging after stopping their turns, and that behavior is unchanged after switching the primary agent to another CLI; then refine queues, lateral collaboration, and task context passing. A pretty board must not be finished first before verifying continuous work.
 
-开发沿用现有 Rust workspace 的边界：board-core 管纯策略/数据，board-daemon 管运行副作用，board-herdr 管传输，board-cli/board-tui 管交互。采用本地受控分支开发，不改 Herdr 主程序，不把多个后台写入者直接连同一数据库。上游 Cargo 声明 MIT；固定快照未找到独立 LICENSE 文本，分发前需要核对许可与归属材料，当前没有发布 fork。
+Development follows the existing Rust workspace boundaries: board-core manages pure policy/data, board-daemon manages runtime side effects, board-herdr manages transport, board-cli/board-tui manage interaction. Development uses a locally controlled branch, does not modify the Herdr main program, and does not connect multiple background writers directly to the same database. Upstream Cargo declares MIT; no standalone LICENSE text was found in the pinned snapshot, so license and attribution materials need checking before distribution; no fork has currently been published.
 
-**十二、必须通过的验收**
+**12. Acceptance that must pass**
 
-- 同一组故障测试应用于总负责人、执行、审核全部角色；依次交换 Codex、Claude、OpenCode、Grok、Pi，不能依赖某种品牌专属的恢复捷径。
-- 做两行后停轮、done 未提交结果、提交未确认、会话退出、状态 unknown、长测试无输出、消息重放、总负责人重启均有正确路径。
-- 切换角色绑定后旧会话的迟到结果不改变新任务状态。
-- 关闭 TUI 后后台继续；SSH 断连不等于 worker 死亡；重连不重复派发。
-- 十个 worker 的普通完成和可恢复失败只进入汇总，真正决策才到主控。
-- 可调整每条线后续顺序；运行中改派必须确认原执行权释放。
-- 相同工作树不会因为 workspace 不同而双写。
-- 独立 reviewer 使用新上下文，审核绑定候选 commit；审核后修改重新验证。
-- 原生不支持 resume 的 CLI 用新会话和持久上下文续做，明确显示这一差异，不能声称恢复了原聊天。
+- The same set of failure tests applies to all roles: lead, executor, reviewer; swap Codex, Claude, OpenCode, Grok, Pi in turn, without relying on any brand-specific recovery shortcut.
+- Stopping the turn after two lines, done without submitted results, submission unconfirmed, session exited, status unknown, long test with no output, message replay, and lead restart all have correct paths.
+- After switching role bindings, late results from the old session do not change the new task state.
+- After closing the TUI the background continues; an SSH disconnect does not equal worker death; reconnecting does not re-dispatch.
+- Normal completions and recoverable failures from ten workers go only into summaries; only real decisions reach the primary agent.
+- The subsequent order of each lane can be adjusted; reassignment while running must confirm the original execution right is released.
+- The same worktree is not double-written just because workspaces differ.
+- Independent reviewers use a fresh context, reviews are bound to the candidate commit; modifications after review are re-verified.
+- CLIs that natively do not support resume continue with a new session and persistent context, clearly showing this difference, and must not claim the original chat was restored.
 
-目标指标：人工催“继续干”的次数为 0；无负责人/无恢复记录的未完成任务为 0；重复派发为 0；主控决策消息量、恢复延迟和监督 token 可度量。外部服务失效或授权阻塞必须显式升级，不能许诺模型或网络必定成功。
+Target metrics: the number of manual nudges to "keep going" is 0; unfinished tasks with no owner/no recovery record are 0; duplicate dispatches are 0; primary-agent decision message volume, recovery latency, and supervision tokens are measurable. External service failures or authorization blocks must be explicitly escalated; success of models or networks cannot be promised.
 
-**十三、证据与当前状态**
+**13. Evidence and current status**
 
-此修订复查了 Board 的 harness、configured launcher、model/protocol、dispatch、supervisor 与数据库入口，确认可以复用的边界和仍需开发的部分。没有新增真实 Agent 运行测试，没有把旧测试结果说成新架构已经通过。
+This revision re-examined Board's harness, configured launcher, model/protocol, dispatch, supervisor, and database entry points, confirming the reusable boundaries and the parts still requiring development. No new real Agent run tests were added, and old test results were not presented as the new architecture having passed.
 
-上一轮的原始测试仍有效：BMAD 11 个定向场景通过；Dispatch 研究探针确认 doing/done 漏分支与 doing/idle 提示次数行为；BMAD Herdr adapter 111 通过、2 失败；Firstmate 存在所选测试失败/超时。详见 [validation.json](validation.json)。这些是候选实现的证据，不是本方案的验收证书。
+The previous round's original test results remain valid: 11 targeted BMAD scenarios passed; the Dispatch research probe confirmed the doing/done missed branch and the doing/idle prompt-count behavior; BMAD Herdr adapter 111 passed, 2 failed; Firstmate had selected test failures/timeouts. See [validation.json](validation.json). These are evidence about candidate implementations, not an acceptance certificate for this approach.
 
-**最终结论：需要开发，但开发的是基于 Herdr Board 的通用持续执行与角色层。所有角色的 Agent 选择由用户决定；系统继续推进不能依靠固定 Claude、固定 Codex 或某种专属 hook。**
+**Final conclusion: development is needed, and what is developed is a generic continuous-execution and role layer based on Herdr Board. The Agent choice for every role is decided by the user; the system's continued progress cannot rely on fixed Claude, fixed Codex, or any proprietary hook.**

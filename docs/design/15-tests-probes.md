@@ -1,58 +1,59 @@
-# 15 测试与探针
+# 15 Tests and Probes
 
-## 测试（标准库 unittest，约 1,700–2,700 行）
+## Tests (standard library unittest, about 1,700–2,700 lines)
 
-结构：`tests/unit/`（纯函数）、`tests/flow/`（临时 SQLite + 替身 Herdr 的流程测试）、`tests/live/`（实机，手动触发）。
+Layout: `tests/unit/` (pure functions), `tests/flow/` (flow tests with a temporary SQLite + fake Herdr), `tests/live/` (real machine, triggered manually).
 
-替身 Herdr：一个可编程的假 `herdr` 可执行文件（读场景 JSON，返回 agent list/get/read 结果，记录 prompt/start/close 调用，可模拟超时与被杀）。
+Fake Herdr: a programmable fake `herdr` executable (reads a scenario JSON, returns agent list/get/read results, records prompt/start/close calls, can simulate timeouts and being killed).
 
-必须覆盖的场景（对应 PRD 验收）：
+Scenarios that must be covered (mapped to PRD acceptance):
 
-| 场景 | 模块 |
+| Scenario | Modules |
 |---|---|
-| send 提交后丢回执，重放只一条 | 02、07 |
-| prompt 超时但实际已执行，不重发不双开 | 08、09 |
-| 十条只处理一条；同任务两问只答一；紧急洪峰下普通旧线程有名额；单发件人刷线程 | 07 |
-| 插队：原任务 ID/成果保留，安全点 ack 后才派新任务 | 06、05 |
-| 合同 v3→v4 与迟到结果交错 | 06、12 |
-| 临时工 result 后仍在写不关；关闭未确认不释放额度；resume 成功/失败退回新会话 | 10 |
-| 长期线待命静默、park 到期重评估、新任务提前唤醒、hold 不打断 | 10、09 |
-| 失联线 worktree 不自动改派 | 10 |
-| 手动换舰长：冻结、旧代次拒绝、未确认不生效、重启不丢 | 03 |
-| 舰长额度耗尽：UNAVAILABLE、通知、不自动换 | 03、08 |
-| 两项目同 session 相同任务号不串；一项目慢不拖另一个 | 08、07 |
-| 观察失败不当失联 | 08 |
-| 复盘同因合并、到期重开、两次提醒后通知 | 11 |
-| 旧 keeper 事故回归（催办词含 marker、done 仍在跑、冷却≤tick、HEAD 不变仍续做） | 04、09 |
-| 旧会话子进程带旧 GEAR_CTX，在同 pane 换新 Agent 后迟到写入（同品牌、无 session_ref、查询后到事务前换绑）均被拒；无 GEAR_CTX 的 Agent 调用不变 admin | 03 |
-| 同一座位已接下一任务后，旧任务 result/ack 迟到，归原任务原尝试 | 06、07 |
-| 门铃已提交未观察到开始：冷却后也不重发；无关 working 不确认投递 | 07、08 |
-| resume 超时但实际已启动不另开；resume 后核对原会话；followup-of 的新任务不能借旧 R；RELEASED 不判 MISSING | 10、08 |
-| 多次 apply 相同 Staff 目标不双开；并发临时启动不抢同一额度/槽位/worktree | 05、10 |
-| 验收失败经 apply 回 READY 再开新尝试；reply 不改任务状态；证据存在但结论 fail 不准 DONE | 05、06、12 |
-| 执行线回复/ack 只关闭原事项，不产生无限互相确认；等待依赖满足后恢复，随意回复不解锁 | 07 |
-| 已修改文件再次修改仍识别为变化；progress 刷屏不清零无产出计数 | 12、09 |
-| apply 后不覆盖草稿（含比较与覆盖之间并发写入）；重复打开插件不留第二个常驻进程 | 05、08 |
-| 接入预留代次只加一次（重试/重启复用）；交接 ACK 无任务参数可成功、待接班者其他写入被拒 | 03 |
-| 旧任务迟到的 blocked 不把新任务置为 WAITING；未关联 progress/question 不改任务状态 | 03、07 |
-| INFO 回复未展示时会按铃，展示后不再按；查看记录只在实际展示了投递内容时确认操作 | 07、08、13 |
-| WAITING 恢复后继续同一尝试；临时工首次派发只一次；追问后重新声明安全点才释放 | 06、10 |
-| 历史 Verdict 重复提交不重复结算；fail 不需证据头；同次改合同又验收按最终合同校验 | 05、12 |
-| 预期中的启动/退出不触发"意外占用者变化"；舰长消失进入 UNAVAILABLE 而非 MISSING | 08、03 |
-| v3 候选在合同升到 v4 后可 fail，并以 v4 重试 | 05、06、12 |
-| 接入首投只发一次（任务/交接 + skill 指针合并）；读 skill 不冒充业务确认 | 16、10、08 |
-| 旧 skill 版本或旧代次的 ACK 不采用新版；未确认新版前不派依赖新规则的新工作 | 16、07 |
-| 无安装路径（只用 `gear --skill …`）与待接班舰长都能读取并完成规定确认 | 16、03 |
-| DONE 的同事项返工保留旧 ACCEPTED/Verdict，新建尝试并 resume 原临时工；普通追问不重开任务 | 05、10 |
+| send receipt lost after commit, replay yields only one | 02, 07 |
+| prompt timed out but was actually executed: no resend, no double open | 08, 09 |
+| Ten messages, only one handled; two questions on the same task, only one answered; under an urgent flood ordinary old threads still get a share; a single sender flooding threads | 07 |
+| Preemption: original task ID/results kept, new task dispatched only after the safe-point ack | 06, 05 |
+| Contract v3→v4 interleaved with a late result | 06, 12 |
+| Temp worker still writing after result → not closed; close unconfirmed → quota not released; resume success/failure falls back to a new session | 10 |
+| Long-lived lane standby is silent, park re-evaluated when due, new task wakes it early, hold not interrupted | 10, 09 |
+| A missing lane's worktree is not automatically reassigned | 10 |
+| Manual captain replacement: frozen, old generation rejected, not effective until confirmed, survives restart | 03 |
+| Captain quota exhausted: UNAVAILABLE, notify, no automatic replacement | 03, 08 |
+| Two projects in the same session with identical task numbers do not cross; one slow project does not drag the other | 08, 07 |
+| Observation failure is not treated as missing | 08 |
+| Review same-cause merge, reopen when due, notify after two reminders | 11 |
+| Old keeper incident regressions (nudge text containing a marker, done but still running, cooldown ≤ tick, HEAD unchanged but still continues) | 04, 09 |
+| A child process of an old session carrying an old GEAR_CTX writes late after a new Agent replaces it in the same pane (same brand, no session_ref, rebinding between query and transaction) — all rejected; an Agent call without GEAR_CTX does not become admin | 03 |
+| After a seat has taken the next task, a late result/ack for the old task goes to the original task's original attempt | 06, 07 |
+| Doorbell submitted but no start observed: no resend even after cooldown; unrelated working does not confirm the delivery | 07, 08 |
+| resume timed out but actually started → no second one; original session checked after resume; a new task with followup-of cannot borrow the old R; RELEASED is not judged MISSING | 10, 08 |
+| Applying the same Staff target multiple times does not open twice; concurrent temp starts do not exceed the quota or create two worktrees for the same task | 05, 10 |
+| Failed acceptance goes back to READY via apply and opens a new attempt; reply does not change task state; evidence present but conclusion fail does not allow DONE | 05, 06, 12 |
+| Lane replies/acks only close the original item and do not produce endless mutual confirmations; resumes after the waited-on dependency is satisfied, a casual reply does not unlock it | 07 |
+| A modified file modified again is still detected as a change; progress spam does not reset the no-output count | 12, 09 |
+| apply does not overwrite the draft (including concurrent writes between compare and overwrite); opening the plugin repeatedly leaves no second resident process | 05, 08 |
+| Onboarding reserves the generation only once (reused on retry/restart); a handover ACK without task arguments succeeds, other writes from the pending successor are rejected | 03 |
+| A late blocked from an old task does not set the new task to WAITING; unlinked progress/question does not change task state | 03, 07 |
+| An INFO reply not yet shown rings the doorbell, no more ringing after it is shown; the view record only confirms an operation when the delivered content was actually shown | 07, 08, 13 |
+| After WAITING resumes, the same attempt continues; temp worker first dispatch happens only once; after a follow-up, release only after the safe point is re-declared | 06, 10 |
+| Resubmitting a historical Verdict does not settle twice; fail does not need an evidence header; contract change plus acceptance in the same apply is validated against the final contract | 05, 12 |
+| Expected starts/exits do not trigger "unexpected occupant change"; a vanished captain enters UNAVAILABLE rather than MISSING | 08, 03 |
+| A v3 candidate can be failed after the contract moves to v4, and retried under v4 | 05, 06, 12 |
+| The first onboarding delivery is sent only once (task/handover + skill pointer combined); reading the skill does not pass as a business confirmation | 16, 10, 08 |
+| An ACK for an old skill version or old generation does not adopt the new version; no new work that depends on the new rules is dispatched before the new version is confirmed | 16, 07 |
+| Both the no-install path (only `gear --skill …`) and a pending successor captain can read and complete the required confirmation | 16, 03 |
+| Rework of the same item on a DONE task keeps the old ACCEPTED/Verdict, creates a new attempt and resumes the original temp worker; an ordinary follow-up does not reopen the task | 05, 10 |
 
-## 探针（开发前 1–2 天，实机）
+## Probes (1–2 days before development, real machine)
 
-1. 插件：单实例、切 tab/隐藏不停、关 tab 重开恢复、placement=tab。
-2. remote：本地客户端断开重连，目标端循环连续。
-3. 身份：pane 移动后 ID 变化；同 pane 换 Agent 时 agent get 的变化；各 CLI 是否有 agent_session。
-4. 每种实际使用的 CLI：busy/限流/额度/认证屏幕特征；工具运行中是否误报 idle；prompt 已接受未开始的表现；退出按键；**session_ref 怎么拿、resume 参数、"回到原会话"的判定**。
-4b. `pane run` 中 export `GEAR_CTX` 后 `agent start`，Agent 及其子进程能继承该环境（各 CLI 分别验证）。
-5. `report-metadata --title` 在 UI 的显示。
-6. Agent pane 里 `gear` 的 PATH 与状态目录定位。
+1. Plugin: single instance, keeps running when switching tabs/hiding, recovery after closing and reopening the tab, placement=tab.
+2. remote: local client disconnects and reconnects, the target-side loop continues.
+3. Identity: ID changes after a pane moves; how agent get changes when the Agent in the same pane is replaced; whether each CLI has agent_session.
+4. Every CLI actually used: screen signatures for busy/rate-limit/quota/auth; whether it falsely reports idle while a tool is running; how "prompt accepted but not started" looks; exit keys; **how to get session_ref, resume arguments, how to tell it "returned to the original session"**.
+4b. After exporting `GEAR_CTX` in `pane run` and then `agent start`, the Agent and its child processes inherit that environment (verified separately for each CLI).
+5. How `report-metadata --title` is displayed in the UI.
+6. PATH of `gear` and state directory location inside Agent panes.
+7. Herdr `worktree.create/open/remove` behavior: branch slug turns `/` into `-` in the path (confirmed); `remove` deletes the checkout and the Herdr workspace but keeps the branch (confirmed); `worktree.open` on an existing branch (e.g. resume of a temp worker's task branch) returns the original worktree/workspace.
 
-探针结果写进 `profiles.py` 的 `verified` 与参数；不通过的 CLI 不允许接管真实项目。
+Probe results are written into `verified` and the parameters in `profiles.py`; CLIs that fail are not allowed to take over real projects.

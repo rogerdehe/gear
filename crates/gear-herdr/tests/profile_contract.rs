@@ -39,8 +39,8 @@ fn multiple_flags() {
 #[test]
 fn template_must_not_contain_markers() {
     let p = opencode();
-    assert!(validate_template(&p, "继续 T-17。任务包：tasks/T-17.md").is_ok());
-    let err = validate_template(&p, "如果 Error: Rate limit exceeded 就停下").unwrap_err();
+    assert!(validate_template(&p, "Continue T-17. Task packet: tasks/T-17.md").is_ok());
+    let err = validate_template(&p, "Stop if Error: Rate limit exceeded appears").unwrap_err();
     assert!(err.contains("Rate limit"));
 }
 

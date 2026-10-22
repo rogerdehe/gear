@@ -1,8 +1,8 @@
-# 14 插件打包与运行
+# 14 Plugin Packaging and Runtime
 
-文件：`herdr-plugin.toml`、`bin/gear`、`cli/admin.py`（run）。预算 50–70 行。
+Files: `herdr-plugin.toml`, `bin/gear`, `cli/admin.py` (run). Budget 50–70 lines.
 
-## 清单
+## Manifest
 
 ```toml
 id = "herdr-gear"
@@ -25,18 +25,18 @@ contexts = ["workspace"]
 command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "engine"]
 ```
 
-- 无 `startup`、无 `events`（MVP）；不 nohup 后台进程。
-- 包内带 `skills/gear/`（16）；安装说明包含 `npx skills add … --skill gear -g`。
-- 引擎跑在插件 tab 里；重复打开时第二个实例拿不到锁，打印已有实例位置后退出（08）。
-- `bin/gear`：`exec python3 -m gear "$@"`，并把插件根加入 `PYTHONPATH`。Agent 调用的 `gear` 通过安装时把 `bin/gear` 链接到 PATH（安装说明里一步），或任务包里写绝对路径。
-- 状态：引擎用 `HERDR_PLUGIN_STATE_DIR`；被接入的 Agent 通过接入时设置的 `GEAR_DB` 找到同一数据库（03）。用户运维命令通过安装时记录的 `~/.config/gear/targets.toml`（执行端/session → 数据库路径）定位，并核对数据库 `meta.engine_session` 与当前 Herdr session 一致，不一致拒绝。MVP 每个执行端一个 Herdr session 绑定一个数据库，不按 UI 焦点猜。
+- No `startup`, no `events` (MVP); no nohup background process.
+- The package ships `skills/gear/` (16); install instructions include `npx skills add … --skill gear -g`.
+- The engine runs in the plugin tab; when opened again, the second instance cannot get the lock, prints the location of the existing instance and exits (08).
+- `bin/gear`: `exec python3 -m gear "$@"`, and adds the plugin root to `PYTHONPATH`. The `gear` invoked by Agents is made available by linking `bin/gear` onto PATH at install time (one step in the install instructions), or by writing the absolute path in the task packet.
+- State: the engine uses `HERDR_PLUGIN_STATE_DIR`; onboarded Agents find the same database through `GEAR_DB`, set at onboarding (03). User ops commands locate it via `~/.config/gear/targets.toml` (execution host/session → database path), recorded at install time, and check that the database's `meta.engine_session` matches the current Herdr session, rejecting on mismatch. In the MVP, each execution host binds one Herdr session to one database; it does not guess from UI focus.
 
-## 生命周期边界
+## Lifecycle boundaries
 
-- 切 tab、隐藏、本地 remote 客户端断开：引擎继续。
-- 关闭插件 tab：引擎停止；`gear send` 仍可入库；重开后恢复核对（08）。
-- 升级：先停引擎（关 tab），替换代码，重开；schema 只升不降。
+- Switching tabs, hiding, local remote client disconnecting: the engine keeps running.
+- Closing the plugin tab: the engine stops; `gear send` can still write to the database; after reopening, recovery checks run (08).
+- Upgrade: stop the engine first (close the tab), replace the code, reopen; the schema only migrates up, never down.
 
-## 待探针
+## Pending probes
 
-插件 pane 在 0.9.1 上的单实例与 remote 行为；`placement="tab"` 显示；Agent pane 中 `gear` 的 PATH。
+Single-instance and remote behavior of the plugin pane on 0.9.1; display of `placement="tab"`; PATH of `gear` inside Agent panes.

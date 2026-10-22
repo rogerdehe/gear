@@ -28,7 +28,7 @@ pub struct DoorbellAction {
     pub seat: String,
     pub generation: i64,
     pub pane_id: String,
-    /// One line, no message bodies, e.g. "你有 3 个待处理事项（1 个紧急），先运行 gear".
+    /// One line, no message bodies, e.g. "3 items waiting for you (1 urgent); run gear first".
     pub text: String,
     /// The message ids this doorbell is about (evidence target for confirmation).
     pub covers: Vec<String>,
