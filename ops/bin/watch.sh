@@ -95,7 +95,7 @@ while :; do
     s=$(herdr agent get "$agent" 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p')
     # provider quota: Herdr says done, the screen says otherwise (lesson L-13) — ring at once
     case "$s" in idle|done)
-      if herdr agent read "$agent" --source recent --lines 40 2>/dev/null | grep -qE 'Session failed|Token Plan|\(2056\)'; then
+      if herdr agent read "$agent" --source recent --lines 40 2>/dev/null | grep -qE 'Session failed|Token Plan|\(2056\)|usage limit reached'; then
         nag "quota $agent" "quota $agent: provider limit hit — switch model (ops/bin/switch-model.sh)" && touch "$main/.git/gear-watch.hit"
       fi ;;
     esac
