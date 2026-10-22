@@ -177,6 +177,8 @@ impl HerdrAct for SocketHerdr {
                     if let Ok(fresh) = self.client.agent_get(pane_id) {
                         info = fresh;
                     }
+                    // A failed refresh keeps the start reply's info: the start
+                    // itself was submitted, so the outcome stays Ok.
                 }
                 Outcome::Ok(info)
             }
@@ -348,6 +350,21 @@ fn worktree_from_reply(reply: &Value) -> Outcome<Worktree> {
 mod tests {
     use super::*;
 
+    /// A `worktree.create` reply (schema variant `worktree_created`).
+    fn created_reply() -> Value {
+        serde_json::json!({
+            "type": "worktree_created",
+            "workspace": {"workspace_id": "w3", "label": "gear-data"},
+            "tab": {"tab_id": "w3:t1"},
+            "root_pane": {"pane_id": "w3:p1", "terminal_id": "term-1"},
+            "worktree": {
+                "branch": "t1-store",
+                "path": "/Volumes/Data/.herdr-worktrees/gear/t1-store",
+                "is_bare": false,
+            }
+        })
+    }
+
     #[test]
     fn refusal_codes_prove_nothing_ran() {
         for code in [
@@ -374,6 +391,58 @@ mod tests {
         assert!(
             !is_missing("not_found"),
             "an unexplained not_found stays an observation failure"
+        );
+    }
+
+    #[test]
+    fn worktree_created_reply_maps_to_the_four_fields() {
+        let Outcome::Ok(w) = worktree_from_reply(&created_reply()) else {
+            panic!("a complete reply must map to a worktree");
+        };
+        assert_eq!(
+            w,
+            Worktree {
+                workspace_id: "w3".into(),
+                pane_id: "w3:p1".into(),
+                path: "/Volumes/Data/.herdr-worktrees/gear/t1-store".into(),
+                branch: "t1-store".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_opened_reply_maps_to_the_four_fields() {
+        let mut reply = created_reply();
+        reply["type"] = serde_json::json!("worktree_opened");
+        reply["already_open"] = serde_json::json!(false);
+        let Outcome::Ok(w) = worktree_from_reply(&reply) else {
+            panic!("a complete reply must map to a worktree");
+        };
+        assert_eq!(w.workspace_id, "w3");
+        assert_eq!(w.pane_id, "w3:p1");
+        assert_eq!(w.branch, "t1-store");
+        assert_eq!(w.path, "/Volumes/Data/.herdr-worktrees/gear/t1-store");
+    }
+
+    #[test]
+    fn incomplete_worktree_reply_is_uncertain() {
+        assert!(
+            matches!(worktree_from_reply(&Value::Null), Outcome::Uncertain { .. }),
+            "a null reply names no worktree"
+        );
+
+        let mut no_branch = created_reply();
+        no_branch["worktree"]["branch"] = Value::Null;
+        assert!(
+            matches!(worktree_from_reply(&no_branch), Outcome::Uncertain { .. }),
+            "a null branch leaves the worktree unnamed"
+        );
+
+        let mut no_path = created_reply();
+        no_path["worktree"]["path"] = Value::Null;
+        assert!(
+            matches!(worktree_from_reply(&no_path), Outcome::Uncertain { .. }),
+            "a null path leaves the worktree unnamed"
         );
     }
 }
