@@ -87,6 +87,9 @@ impl Default for BatchLimits {
 /// 3. fill the rest: urgent threads first, then oldest first; at most
 ///    `per_sender` threads per sender (the reserved one counts);
 /// Returns threads in display order. Reading never changes state.
+///
+/// A thread counts once for the sender of its oldest unhandled message, and
+/// `max_threads = 0` returns no thread at all.
 pub fn select_batch(
     tx: &Tx<'_>,
     project: &str,
@@ -136,7 +139,7 @@ pub fn select_batch(
     // 2. one slot is reserved for the oldest normal thread.
     let mut selected: Vec<usize> = Vec::new();
     let mut per_sender: BTreeMap<String, usize> = BTreeMap::new();
-    if limits.per_sender > 0 {
+    if limits.max_threads > 0 && limits.per_sender > 0 {
         if let Some(index) = views.iter().position(|view| !view.urgent) {
             selected.push(index);
             *per_sender.entry(senders[index].clone()).or_insert(0) += 1;

@@ -103,8 +103,14 @@ fn last_reply_is_newest_reply() {
     let mut s = store();
     s.write(|tx| {
         tx.insert_message(&msg("t1", "p:heat", MsgKind::Question, NOW, false))?;
-        tx.insert_message(&msg("t1", "p:captain", MsgKind::Reply, NOW + 1, false))?;
-        tx.insert_message(&msg("t1", "p:captain", MsgKind::Reply, NOW + 2, false))?;
+        // Real replies are stored as info (design/07): they are not candidates
+        // themselves, so only a read of the whole thread finds them.
+        let mut reply = msg("t1", "p:captain", MsgKind::Reply, NOW + 1, false);
+        reply.state = MsgState::Info;
+        tx.insert_message(&reply)?;
+        let mut newer = msg("t1", "p:captain", MsgKind::Reply, NOW + 2, false);
+        newer.state = MsgState::Info;
+        tx.insert_message(&newer)?;
         // An older question in another thread must not become the last reply.
         tx.insert_message(&msg("t2", "p:heat", MsgKind::Question, NOW + 3, false))?;
         Ok(())
@@ -118,6 +124,9 @@ fn last_reply_is_newest_reply() {
     let last = t1.last_reply.as_ref().expect("the thread has replies");
     assert_eq!(last.id, "M-3");
     assert_eq!(last.kind, MsgKind::Reply);
+    // The replies are not unhandled items of the thread.
+    assert_eq!(t1.open.len(), 1);
+    assert_eq!(t1.open[0].id, "M-1");
     let t2 = views.iter().find(|v| v.thread == "t2").expect("thread t2");
     assert!(t2.last_reply.is_none(), "no reply in this thread");
 }
@@ -190,6 +199,21 @@ fn max_threads_cap() {
     let threads = batch(&mut s, NOW + 10, limits);
     assert_eq!(threads.len(), 2);
     assert_eq!(threads, vec!["t0".to_string(), "t1".to_string()]);
+}
+
+#[test]
+fn zero_max_threads_returns_nothing() {
+    let mut s = store();
+    s.write(|tx| {
+        tx.insert_message(&msg("normal", "p:heat", MsgKind::Question, NOW, false))?;
+        tx.insert_message(&msg("urgent", "p:other", MsgKind::Question, NOW + 1, true))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // No slot at all: not even the reserved one.
+    let limits = BatchLimits { max_threads: 0, per_sender: 2 };
+    assert!(batch(&mut s, NOW + 10, limits).is_empty());
 }
 
 #[test]
