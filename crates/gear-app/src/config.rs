@@ -214,10 +214,16 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
 
         let owns_field = format!("lanes[{index}].owns");
-        if lane.owns.is_empty() {
+        let owns: Vec<&str> = lane.owns.iter().map(|entry| entry.trim()).collect();
+        if owns.is_empty() {
             issues.push(issue(
                 &owns_field,
                 "a lane must state what it owns (conventions 17 §1)".to_string(),
+            ));
+        } else if owns.iter().any(|entry| entry.is_empty()) {
+            issues.push(issue(
+                &owns_field,
+                "an owns entry is empty after trimming".to_string(),
             ));
         } else if let Some(other) = cfg.lanes[..index]
             .iter()
@@ -232,35 +238,33 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
 
     // ---- conventions
     let conventions = &cfg.conventions;
-    if conventions.integration.trim().is_empty() {
+    let integration = conventions.integration.trim();
+    let release = conventions.release.trim();
+    let staging = conventions.staging.trim();
+    if integration.is_empty() {
         issues.push(issue(
             "conventions.integration",
             "the integration branch must not be empty".to_string(),
         ));
     }
-    if conventions.release.trim().is_empty() {
+    if release.is_empty() {
         issues.push(issue(
             "conventions.release",
             "the release branch must not be empty".to_string(),
         ));
     }
-    if !conventions.integration.trim().is_empty()
-        && !conventions.release.trim().is_empty()
-        && conventions.integration == conventions.release
-    {
+    if !integration.is_empty() && !release.is_empty() && integration == release {
         issues.push(issue(
             "conventions.release",
-            format!(
-                "the release branch must differ from the integration branch {:?}",
-                conventions.integration
-            ),
+            format!("the release branch must differ from the integration branch {integration:?}"),
         ));
     }
-    if !conventions.staging.trim().is_empty() {
-        let clash = if conventions.staging == conventions.integration {
-            Some(&conventions.integration)
-        } else if conventions.staging == conventions.release {
-            Some(&conventions.release)
+    // A blank staging branch means "no staging branch".
+    if !staging.is_empty() {
+        let clash = if staging == integration {
+            Some(integration)
+        } else if staging == release {
+            Some(release)
         } else {
             None
         };
@@ -317,11 +321,11 @@ fn agent_name_fits(project: &str, seat: &str) -> bool {
 
 /// Two path lists overlap when a path is equal to another or one is its
 /// prefix on a `/` boundary: `src/a/` and `src/a/b.rs` overlap,
-/// `src/a` and `src/ab` do not.
+/// `src/a` and `src/ab` do not. Entries are compared after trimming.
 fn owns_overlap(earlier: &[String], later: &[String]) -> bool {
     earlier
         .iter()
-        .any(|a| later.iter().any(|b| paths_overlap(a, b)))
+        .any(|a| later.iter().any(|b| paths_overlap(a.trim(), b.trim())))
 }
 
 fn paths_overlap(a: &str, b: &str) -> bool {
