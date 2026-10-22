@@ -49,7 +49,6 @@ fn bad_line(text: &str) -> String {
 }
 
 #[test]
-#[ignore = "T-31: un-ignored by the captain when T-31 merges"]
 fn full_draft_parses() {
     let d = parse(FULL).unwrap();
     assert_eq!((d.project.as_str(), d.base), ("oxford", 12));
@@ -78,7 +77,6 @@ fn full_draft_parses() {
 }
 
 #[test]
-#[ignore = "T-31: un-ignored by the captain when T-31 merges"]
 fn sections_are_optional_but_header_is_not() {
     let d = parse("<!-- gear-plan project=p base=0 -->\n# Queue\n").unwrap();
     assert!(d.queue.is_empty() && d.staff.is_empty() && d.goal.is_empty());
@@ -86,7 +84,6 @@ fn sections_are_optional_but_header_is_not() {
 }
 
 #[test]
-#[ignore = "T-31: un-ignored by the captain when T-31 merges"]
 fn errors_name_the_line() {
     let unknown_field = FULL.replace("evidence-due: 60", "owner: bob");
     assert!(bad_line(&unknown_field).starts_with("line 16: "), "{}", bad_line(&unknown_field));
@@ -99,7 +96,6 @@ fn errors_name_the_line() {
 }
 
 #[test]
-#[ignore = "T-31: un-ignored by the captain when T-31 merges"]
 fn verdict_shape_is_strict() {
     let pass_without_evidence = FULL.replace(" evidence=logs/T-29-verify.md", "");
     assert!(bad_line(&pass_without_evidence).starts_with("line 33: "));
@@ -110,7 +106,6 @@ fn verdict_shape_is_strict() {
 }
 
 #[test]
-#[ignore = "T-31: un-ignored by the captain when T-31 merges"]
 fn staff_lines_are_strict() {
     let park_both = FULL.replace("park media until-task=T-12", "park media until=2026-10-21T15:30Z until-task=T-12");
     assert!(bad_line(&park_both).starts_with("line 28: "));

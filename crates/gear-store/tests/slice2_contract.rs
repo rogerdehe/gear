@@ -30,7 +30,6 @@ fn attempt(t: &str, n: i64, seat: &str, state: AttemptState) -> AttemptRow {
 }
 
 #[test]
-#[ignore = "T-33: un-ignored by the captain when T-33 merges"]
 fn plans_version_and_roundtrip() {
     let mut s = store();
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
@@ -43,7 +42,6 @@ fn plans_version_and_roundtrip() {
 }
 
 #[test]
-#[ignore = "T-33: un-ignored by the captain when T-33 merges"]
 fn tasks_roundtrip_order_and_update() {
     let mut s = store();
     s.write(|tx| { tx.insert_task(&task("T-2", 2))?; tx.insert_task(&task("T-1", 1))?; tx.insert_task(&task("T-3", 1)) }).unwrap();
@@ -59,7 +57,6 @@ fn tasks_roundtrip_order_and_update() {
 }
 
 #[test]
-#[ignore = "T-33: un-ignored by the captain when T-33 merges"]
 fn contracts_roundtrip() {
     let mut s = store();
     let c = ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),

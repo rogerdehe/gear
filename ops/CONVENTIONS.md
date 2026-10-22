@@ -39,7 +39,7 @@ cargo build -p <crate> --all-targets 2>&1 | grep -E '^(warning|error)' && echo "
 cargo test -p <crate>
 ```
 
-Before every hand-in (`Status: review`) also run `git fetch origin && git merge-tree --write-tree origin/dev HEAD`. If it reports a conflict, `git merge origin/dev` into your task branch (never rebase), resolve, re-run acceptance, push. A branch that does not merge cleanly fails review (lesson L-27).
+Before every hand-in (`Status: review`): `git fetch origin && git merge origin/dev` into your task branch (never rebase; resolve any conflict), then re-run acceptance **on the merged result**, push. A textually clean merge can still fail to compile (two tasks adding the same name to one test module) — only a build after the merge shows it (lessons L-27, L-33).
 
 Zero warnings, zero errors, every listed test passes. `dev` is always green: a contract test for a task not merged yet is `#[ignore = "T-<n>: …"]` on `dev`; that task's packet tells you to run it with `-- --include-ignored`; the captain removes the ignore when merging.
 
