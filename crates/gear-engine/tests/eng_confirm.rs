@@ -1,8 +1,8 @@
-//! Tests for `gear_engine::ops::confirm_pending` (T-20).
+//! Tests for `gear_engine::ops::confirm_pending` (T-20, T-25).
 
 use gear_engine::ops::confirm_pending;
 use gear_model::{OpKind, OpState, SeatRole};
-use gear_store::{testing, NewOp, Store, ViewRecord};
+use gear_store::{testing, NewOp, Store, Tx, ViewRecord};
 
 const T0: i64 = 1_800_000_000;
 const SEAT: &str = "p:captain";
@@ -21,28 +21,29 @@ fn store_with_project() -> Store {
 
 /// A Submitted doorbell op covering `covers`, created at `created`.
 fn submitted_op(store: &mut Store, covers: &[&str], created: i64) -> String {
-    store
-        .write(|tx| {
-            let id = tx
-                .insert_op(&NewOp {
-                    project: "p".into(),
-                    seat: SEAT.into(),
-                    generation: 1,
-                    kind: OpKind::Doorbell,
-                    task: None,
-                    attempt: None,
-                    ref_msg: None,
-                    plan_version: None,
-                    payload: serde_json::json!({ "text": "t", "covers": covers }),
-                    created,
-                })
-                .unwrap()
-                .id;
-            tx.set_op_state("p", &id, OpState::Executing, None, created).unwrap();
-            tx.set_op_state("p", &id, OpState::Submitted, None, created).unwrap();
-            Ok(id)
+    store.write(|tx| Ok(submitted_op_within(tx, covers, created))).unwrap()
+}
+
+/// The same, inside an existing transaction (so a test can move it further).
+fn submitted_op_within(tx: &Tx<'_>, covers: &[&str], created: i64) -> String {
+    let id = tx
+        .insert_op(&NewOp {
+            project: "p".into(),
+            seat: SEAT.into(),
+            generation: 1,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "t", "covers": covers }),
+            created,
         })
         .unwrap()
+        .id;
+    tx.set_op_state("p", &id, OpState::Executing, None, created).unwrap();
+    tx.set_op_state("p", &id, OpState::Submitted, None, created).unwrap();
+    id
 }
 
 /// A view record: what the seat actually displayed.
@@ -101,14 +102,15 @@ fn partial_view_does_not_confirm() {
 #[test]
 fn older_view_does_not_confirm() {
     let mut store = store_with_project();
-    let id = submitted_op(&mut store, &["M-1"], T0 + 10);
-    // The view is from before the doorbell went out.
-    view(&mut store, 1, T0 + 5, &["M-1"]);
+    let id = submitted_op(&mut store, &["M-1"], T0 + 1);
+    // The seat looked at its home page *before* the doorbell was intended.
+    view(&mut store, 1, T0, &["M-1"]);
 
-    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 20).unwrap();
 
-    assert!(confirmed.is_empty());
+    assert!(confirmed.is_empty(), "a view from before the intent proves nothing");
     assert_eq!(op(&mut store, &id).state, OpState::Submitted);
+    assert_eq!(op(&mut store, &id).check_budget, 1);
 }
 
 #[test]
@@ -122,6 +124,56 @@ fn other_generation_does_not_confirm() {
 
     assert!(confirmed.is_empty());
     assert_eq!(op(&mut store, &id).state, OpState::Submitted);
+}
+
+#[test]
+fn view_at_creation_confirms() {
+    // The boundary is inclusive: a view at exactly the op's created time counts.
+    let mut store = store_with_project();
+    let id = submitted_op(&mut store, &["M-1"], T0 + 1);
+    view(&mut store, 1, T0 + 1, &["M-1"]);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 20).unwrap();
+
+    assert_eq!(confirmed, vec![id.clone()]);
+    assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
+}
+
+#[test]
+fn unknown_op_confirms() {
+    let mut store = store_with_project();
+    let id = store
+        .write(|tx| {
+            // An op whose Herdr call was Uncertain waits in Unknown.
+            let id = submitted_op_within(tx, &["M-1"], T0 + 1);
+            tx.set_op_state("p", &id, OpState::Unknown, Some("deadline"), T0 + 2).unwrap();
+            Ok(id)
+        })
+        .unwrap();
+    assert_eq!(op(&mut store, &id).state, OpState::Unknown);
+    view(&mut store, 1, T0 + 5, &["M-1"]);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 20).unwrap();
+
+    assert_eq!(confirmed, vec![id.clone()]);
+    assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
+}
+
+#[test]
+fn confirmation_records_evidence() {
+    let mut store = store_with_project();
+    let id = submitted_op(&mut store, &["M-1"], T0 + 1);
+    view(&mut store, 1, T0 + 5, &["M-1"]);
+
+    confirm_pending(&mut store, "p", 3, T0 + 20).unwrap();
+
+    let stored = op(&mut store, &id);
+    assert_eq!(stored.state, OpState::Confirmed);
+    assert_eq!(
+        stored.result.as_deref(),
+        Some("view p:captain/1 @ 1800000005"),
+        "the op keeps a pointer to the view that settled it"
+    );
 }
 
 #[test]
