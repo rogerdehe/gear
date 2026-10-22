@@ -1347,7 +1347,22 @@ impl<'s> Tx<'s> {
     /// (Delivered/Started/Stopped/Unknown/Submitted) — ordered by (task, n).
     /// The engine's lane view (design/09) reads the current attempt from here.
     pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
-        todo!("T-40")
+        let mut stmt = self
+            .tx
+            .prepare(&attempt_select(
+                " WHERE seat=?1
+                   AND state IN ('delivered', 'started', 'stopped', 'unknown', 'submitted')
+                 ORDER BY task, n",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![seat], attempt_from_row)
+            .map_err(map_sqlite)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(attempts)
     }
 
     /// Replace every column of an existing attempt (raw write). Missing → NoTarget.
