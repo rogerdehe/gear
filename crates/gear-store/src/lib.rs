@@ -714,6 +714,24 @@ impl<'s> Tx<'s> {
         require_written(changed, "binding", &format!("{seat_id} generation {generation}"))
     }
 
+    /// Raw write of the binding's session ref: the agent session Herdr
+    /// reported for this binding (design/03). The binding must exist.
+    pub fn set_binding_session_ref(
+        &self,
+        seat_id: &str,
+        generation: i64,
+        session_ref: &str,
+    ) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE bindings SET session_ref=?3 WHERE seat=?1 AND generation=?2",
+                params![seat_id, generation, session_ref],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "binding", &format!("{seat_id} generation {generation}"))
+    }
+
     // ---- messages
 
     /// Allocates `M-<n>` via `next_id` and inserts. Returns the stored row.
@@ -1862,6 +1880,49 @@ mod tests {
             assert_eq!(binding_status_from_str(text).unwrap(), status);
         }
         assert!(binding_status_from_str("bogus").is_err());
+    }
+
+    #[test]
+    fn a_binding_session_ref_is_written_and_read_back() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", 0)?;
+            tx.insert_seat(&SeatRow {
+                id: "p:heat".into(),
+                project: "p".into(),
+                role: SeatRole::Lane,
+                name: "heat".into(),
+                profile: "opencode".into(),
+                generation: 1,
+                state: SeatState::Starting,
+                state_since: 0,
+                state_reason: None,
+            })?;
+            tx.insert_binding(&BindingRow {
+                seat: "p:heat".into(),
+                generation: 1,
+                session: "sess".into(),
+                pane_id: "w1:p1".into(),
+                kind: "opencode".into(),
+                session_ref: None,
+                status: BindingStatus::Pending,
+                handover_id: None,
+                created: 0,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+        s.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_x"))
+            .unwrap();
+        let binding = s.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.session_ref.as_deref(), Some("ses_x"));
+
+        // A binding that does not exist is NoTarget, not a silent write.
+        let err = s
+            .write(|tx| tx.set_binding_session_ref("p:heat", 2, "ses_y"))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoTarget);
     }
 
     #[test]
