@@ -25,3 +25,7 @@ Read `origin/review/t30:ops/reviews/T-30.md`. `git merge origin/dev` into `runti
 ### M-6 [open] T-48: rework — skip kinds without an evidence rule (R-46 P2)
 
 Read `origin/review/t48:ops/reviews/T-48.md`. In `confirm_pending`, ops of kinds other than Doorbell/Deliver must be skipped entirely (no budget bump, no flag) as before; add a test that an Onboard op in Submitted is left untouched. Merge `origin/dev` and build before hand-in.
+
+### M-7 [open] T-52: answer — option (a)
+
+`skill_contract::not_yet_commands_fail_cleanly` now uses `gear admin init x` (on dev). Merge `origin/dev` into your branch, re-run `cargo test -p gear-cli`, set `Status: review`. Good question — exactly the right way to raise it.

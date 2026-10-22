@@ -253,3 +253,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-45 pass; T-45 merged (result submits the attempt); T-52 ready.
 - 2026-10-22 T-50 → R-47.
 - 2026-10-22 R-46 fail (P2: other op kinds would be budget-bumped and flag seats). T-48 → rework (runtime M-6).
+- 2026-10-22 T-52 question (a captain-owned test it invalidates) → test moved to `admin init` on dev; answered M-7.
