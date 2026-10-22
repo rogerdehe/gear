@@ -49,6 +49,8 @@ while :; do
   awk -F'|' 'NF>=7 && $2 ~ /[TR]-[0-9]/ { for (i=2;i<=6;i++) gsub(/^ +| +$|`/, "", $i); print $2, $3, $4, $6 }' "$board" |
   while read -r task lane branch state; do
     case "$state" in ready|running|rework|waiting|verifying) ;; *) continue ;; esac
+    # captain sent it back: the next hand-in must ring even if the lane never pushed `running`
+    [ "$state" = rework ] && { sed -i "" "/^packet $task /d" "$seen"; continue; }
     case "$task" in
       T-*) file="ops/tasks/T-${task#T-}.md" ;;
       R-*) file="ops/reviews/T-$(sed -n 's#^review/t\([0-9]*\)$#\1#p' <<<"$branch").md" ;;
