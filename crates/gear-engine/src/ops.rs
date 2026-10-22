@@ -250,8 +250,9 @@ pub fn confirm_pending(
                     OpKind::Doorbell => shown_in_a_view(tx, &op)?,
                     // A delivery is proven by the task/attempt it announced.
                     OpKind::Deliver => shown_delivery(tx, &op)?,
-                    // Onboard/release/title/notify have their own evidence.
-                    _ => None,
+                    // Onboard/release/title/notify have no evidence rule yet:
+                    // leave them completely alone — no budget, no flag (R-46).
+                    _ => continue,
                 };
                 if let Some(view_ts) = evidence {
                     require_transition(
@@ -360,4 +361,57 @@ pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<(String, S
         }
         Ok(recovered)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::SeatRole;
+    use gear_store::testing;
+
+    const T0: i64 = 1_800_000_000;
+
+    /// An op in `Submitted` for `seat`, with the kind and payload given.
+    fn submitted_op(tx: &Tx<'_>, seat: &str, kind: OpKind) -> String {
+        let op = tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: seat.into(),
+                generation: 1,
+                kind,
+                task: None,
+                attempt: None,
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "x" }),
+                created: T0,
+            })
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0).unwrap();
+        op.id
+    }
+
+    #[test]
+    fn kinds_without_an_evidence_rule_are_left_untouched() {
+        // R-46: an Onboard op has no evidence rule yet, so confirm_pending must
+        // neither bump its budget nor flag its seat — it must skip it.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                submitted_op(tx, "p:heat", OpKind::Onboard);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
+
+        assert!(confirmed.is_empty());
+        assert!(flagged.is_empty(), "an op without a rule never flags its seat");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(op.check_budget, 0, "no budget is spent on it");
+    }
 }
