@@ -1,13 +1,29 @@
 //! Side-effect operations: intend → execute → confirm (design/08).
 
 use gear_herdr::HerdrAct;
-use gear_model::{GearResult, Ts};
-use gear_store::{OpRow, Store, Tx};
+use gear_model::{GearResult, OpKind, Ts};
+use gear_store::{NewOp, OpRow, Store, Tx};
 
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
-    todo!("slice1")
+    let mut ops = Vec::with_capacity(actions.len());
+    for action in actions {
+        let payload = serde_json::json!({ "text": action.text, "covers": action.covers });
+        ops.push(tx.insert_op(&NewOp {
+            project: action.project.clone(),
+            seat: action.seat.clone(),
+            generation: action.generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload,
+            created: now,
+        })?);
+    }
+    Ok(ops)
 }
 
 /// Execute every Intended op of `project`:
