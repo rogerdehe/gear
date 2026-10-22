@@ -13,6 +13,11 @@ main=$(git -C "$(dirname "$0")" worktree list --porcelain | sed -n '1s/^worktree
 wtroot=$(dirname "$(git -C "$main" worktree list --porcelain | sed -n 's/^worktree \(.*\/home-data\)$/\1/p')")
 max=${MAX_SEATS:-3}
 
+# 0. a hand-in that does not merge into dev goes straight back to the writer (lesson L-27).
+git -C "$main" fetch -q origin
+git -C "$main" merge-tree --write-tree origin/dev "origin/$branch" >/dev/null ||
+  { echo "origin/$branch conflicts with origin/dev: send it back as rework (merge dev in), no review" >&2; exit 3; }
+
 # 1. a free seat = seat worktree whose pane hosts no agent; else create one.
 seat=""; pane=""
 for k in $(seq 1 "$max"); do

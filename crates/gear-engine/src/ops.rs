@@ -2,13 +2,32 @@
 
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{GearResult, Ts};
-use gear_store::{OpRow, Store, Tx};
+use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, Ts};
+use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
+
+/// Reason stored with an op that the engine found Executing after a restart.
+const RECOVERED_REASON: &str = "engine restarted before the call finished";
 
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
-    todo!("slice1")
+    let mut ops = Vec::with_capacity(actions.len());
+    for action in actions {
+        let payload = serde_json::json!({ "text": action.text, "covers": action.covers });
+        ops.push(tx.insert_op(&NewOp {
+            project: action.project.clone(),
+            seat: action.seat.clone(),
+            generation: action.generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload,
+            created: now,
+        })?);
+    }
+    Ok(ops)
 }
 
 /// Execute every Intended op of `project`:
@@ -26,10 +45,10 @@ pub fn execute_intended(
     // 1. In one transaction: re-check every Intended op of the project and
     //    move the ones that may run to Executing; the others become Void.
     let prepared = store.write(|tx| {
-        let ops = tx.ops_in_state(project, gear_model::OpState::Intended)?;
+        let ops = tx.ops_in_state(project, OpState::Intended)?;
         let mut prepared = Vec::new();
         for op in ops {
-            if op.kind != gear_model::OpKind::Doorbell {
+            if op.kind != OpKind::Doorbell {
                 // Slice 1 sends doorbells; the other kinds have no text yet.
                 continue;
             }
@@ -37,21 +56,21 @@ pub fn execute_intended(
             match &item {
                 Prepared::Run { id, .. } => {
                     require_transition(
-                        gear_model::OpState::Intended.can_transition(gear_model::OpState::Executing),
+                        OpState::Intended.can_transition(OpState::Executing),
                         "operation",
                         "intended",
                         "executing",
                     )?;
-                    tx.set_op_state(project, id, gear_model::OpState::Executing, None, now)?;
+                    tx.set_op_state(project, id, OpState::Executing, None, now)?;
                 }
                 Prepared::Void { id, reason } => {
                     require_transition(
-                        gear_model::OpState::Intended.can_transition(gear_model::OpState::Void),
+                        OpState::Intended.can_transition(OpState::Void),
                         "operation",
                         "intended",
                         "void",
                     )?;
-                    tx.set_op_state(project, id, gear_model::OpState::Void, Some(reason), now)?;
+                    tx.set_op_state(project, id, OpState::Void, Some(reason), now)?;
                 }
             }
             prepared.push(item);
@@ -75,27 +94,27 @@ pub fn execute_intended(
             let (state, result) = match (item, outcome) {
                 // A voided op was written in step 1 and never ran.
                 (Prepared::Void { .. }, _) => {
-                    results.push((item.id().to_string(), gear_model::OpState::Void.as_str().to_string()));
+                    results.push((item.id().to_string(), OpState::Void.as_str().to_string()));
                     continue;
                 }
                 (Prepared::Run { .. }, Some(Outcome::Ok(()))) => {
-                    (gear_model::OpState::Submitted, None)
+                    (OpState::Submitted, None)
                 }
                 (Prepared::Run { .. }, Some(Outcome::Refused { code, message })) => {
-                    (gear_model::OpState::Failed, Some(format!("{code}: {message}")))
+                    (OpState::Failed, Some(format!("{code}: {message}")))
                 }
                 (Prepared::Run { .. }, Some(Outcome::Uncertain { reason })) => {
-                    (gear_model::OpState::Unknown, Some(reason))
+                    (OpState::Unknown, Some(reason))
                 }
                 (Prepared::Run { .. }, None) => {
-                    return Err(gear_model::GearError::new(
-                        gear_model::ErrorCode::BadFormat,
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
                         format!("operation {} has no outcome", item.id()),
                     ))
                 }
             };
             require_transition(
-                gear_model::OpState::Executing.can_transition(state),
+                OpState::Executing.can_transition(state),
                 "operation",
                 "executing",
                 state.as_str(),
@@ -145,7 +164,7 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
         return void("the seat has no binding for this generation".to_string());
     };
-    if binding.status != gear_store::BindingStatus::Active {
+    if binding.status != BindingStatus::Active {
         return void("the seat's binding is not active".to_string());
     }
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
@@ -170,5 +189,20 @@ pub fn confirm_pending(store: &mut Store, project: &str, budget: i64, now: Ts) -
 /// On engine start: every Executing op becomes Unknown (the previous process
 /// died mid-call). Nothing is re-sent.
 pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
-    todo!("slice1")
+    store.write(|tx| {
+        let mut recovered = Vec::new();
+        for project in tx.project_ids()? {
+            for op in tx.ops_in_state(&project, OpState::Executing)? {
+                require_transition(
+                    OpState::Executing.can_transition(OpState::Unknown),
+                    "operation",
+                    "executing",
+                    "unknown",
+                )?;
+                tx.set_op_state(&op.project, &op.id, OpState::Unknown, Some(RECOVERED_REASON), now)?;
+                recovered.push(op.id);
+            }
+        }
+        Ok(recovered)
+    })
 }

@@ -1,9 +1,17 @@
 //! Messages: send, reply, inbox batch selection (design/07).
 
-use crate::identity::Fingerprint;
+use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{GearResult, MsgKind, Ts};
-use gear_store::{MessageRow, Store, Tx};
+use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
+use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
+use std::collections::BTreeMap;
+
+/// Upper bound for the thread sequence search, so a broken database cannot
+/// spin forever.
+const MAX_THREAD_SEQ: u32 = 10_000;
+
+/// Unhandled messages of one thread that are shown in the batch.
+const SHOWN_PER_THREAD: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendArgs {
@@ -40,7 +48,7 @@ pub struct SendResult {
 ///   `--reply-to M-x` → the sender of M-x;
 /// - Progress → Info; Question/Blocked/Result/Instruction → Open;
 ///   Reply-kind is produced by `reply()`, not by `send`;
-/// - thread: reply_to inherits; otherwise new thread `<task or seat>:<M-id>`;
+/// - thread: reply_to inherits; otherwise new thread `<task or seat>:<seq>` (seq = next unused number for that prefix, design/07);
 /// - Ack/Result/Blocked side effects (tasks, handover) arrive in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
 pub fn send(
@@ -50,7 +58,152 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
-    todo!("slice1")
+    store.write(|tx| {
+        // The caller must be a seat that may write (design/03).
+        let (ctx, seat) = require_seat(
+            tx,
+            env,
+            fp,
+            Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
+            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+        )?;
+
+        // Slice 1 kinds only: the side effects of ack/result/blocked belong to
+        // slice 2, and a reply is written by `gear reply`.
+        match args.kind {
+            MsgKind::Progress | MsgKind::Question | MsgKind::Instruction => {}
+            other => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("kind {} is not available in slice 1", other.as_str()),
+                ))
+            }
+        }
+        if args.about.is_some() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "`--about` needs registered task dependencies (slice 2)",
+            ));
+        }
+        if args.to.is_some() && args.reply_to.is_some() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "`--to` and `--reply-to` cannot be combined",
+            ));
+        }
+
+        // Recipient: the sender of the answered message, a seat the captain
+        // addresses, or the project captain.
+        let (recipient, thread) = if let Some(reply_to) = &args.reply_to {
+            let original = tx.get_message(&ctx.project, reply_to)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("no message {reply_to} in project {}", ctx.project),
+                )
+            })?;
+            (original.sender, original.thread)
+        } else if let Some(to) = &args.to {
+            if seat.role != SeatRole::Captain {
+                return Err(GearError::new(
+                    ErrorCode::Forbidden,
+                    "only the captain may address a seat directly",
+                ));
+            }
+            let seat_id = format!("{}:{}", ctx.project, to);
+            tx.get_seat(&seat_id)?.ok_or_else(|| {
+                GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id} in this project"))
+            })?;
+            (seat_id, String::new())
+        } else {
+            let captain = tx.captain_of(&ctx.project)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("project {} has no captain", ctx.project),
+                )
+            })?;
+            (captain.id, String::new())
+        };
+
+        // A new thread is named after the task, or after the sender's seat.
+        let thread = if thread.is_empty() {
+            let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
+            format!("{prefix}:{}", next_thread_seq(tx, &ctx.project, &prefix)?)
+        } else {
+            thread
+        };
+
+        let state = match args.kind {
+            MsgKind::Progress => MsgState::Info,
+            _ => MsgState::Open,
+        };
+
+        let args_key = format!(
+            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+            ctx.project,
+            ctx.seat,
+            ctx.generation,
+            args.kind.as_str(),
+            args.body,
+            args.task,
+            args.attempt,
+            args.contract,
+            args.about,
+            args.to,
+            args.reply_to,
+            args.urgent
+        );
+
+        let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            let message = NewMessage {
+                project: ctx.project.clone(),
+                thread: thread.clone(),
+                task: args.task.clone(),
+                attempt: args.attempt,
+                sender: seat.id.clone(),
+                sender_gen: ctx.generation,
+                recipient: recipient.clone(),
+                kind: args.kind,
+                urgent: args.urgent,
+                body: args.body.clone(),
+                reply_to: args.reply_to.clone(),
+                needs_ack: false,
+                state,
+                created: now,
+            };
+            let stored = tx.insert_message(&message)?;
+            Ok(serde_json::json!({
+                "msg_id": stored.id,
+                "thread": stored.thread,
+                "recipient": stored.recipient,
+            }))
+        })?;
+
+        let (value, replayed) = match outcome {
+            RequestOutcome::Executed(value) => (value, false),
+            RequestOutcome::Replayed(value) => (value, true),
+        };
+        let msg_id = value["msg_id"].as_str().unwrap_or_default().to_string();
+        let thread = value["thread"].as_str().unwrap_or_default().to_string();
+        let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
+        Ok(SendResult { msg_id, thread, recipient, replayed })
+    })
+}
+
+/// The next free sequence number of a thread with this prefix.
+///
+/// The message id is allocated inside the store, so a thread cannot carry the
+/// id of the message that opens it; the thread is numbered instead
+/// (design/07: `<task>:<seq>`).
+fn next_thread_seq(tx: &Tx<'_>, project: &str, prefix: &str) -> GearResult<u32> {
+    for seq in 1..=MAX_THREAD_SEQ {
+        if tx.thread_messages(project, &format!("{prefix}:{seq}"))?.is_empty() {
+            return Ok(seq);
+        }
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!("too many threads named {prefix}:* in project {project}"),
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +236,9 @@ impl Default for BatchLimits {
 /// 3. fill the rest: urgent threads first, then oldest first; at most
 ///    `per_sender` threads per sender (the reserved one counts);
 /// Returns threads in display order. Reading never changes state.
+///
+/// A thread counts once for the sender of its oldest unhandled message, and
+/// `max_threads = 0` returns no thread at all.
 pub fn select_batch(
     tx: &Tx<'_>,
     project: &str,
@@ -90,7 +246,74 @@ pub fn select_batch(
     now: Ts,
     limits: BatchLimits,
 ) -> GearResult<Vec<ThreadView>> {
-    todo!("slice1")
+    // 1. candidates: open messages and waiting messages that are due.
+    let candidates = tx.actionable_for(project, recipient, now)?;
+
+    // Group them by thread, keeping the order of the oldest message.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<MessageRow>> = BTreeMap::new();
+    for message in candidates {
+        if !groups.contains_key(&message.thread) {
+            order.push(message.thread.clone());
+        }
+        groups.entry(message.thread.clone()).or_default().push(message);
+    }
+
+    // One view per thread.
+    let mut views: Vec<ThreadView> = Vec::new();
+    let mut oldest: Vec<Ts> = Vec::new();
+    let mut senders: Vec<String> = Vec::new();
+    for thread in &order {
+        let messages = groups.get(thread).cloned().unwrap_or_default();
+        let shown: Vec<MessageRow> = messages.iter().take(SHOWN_PER_THREAD).cloned().collect();
+        let more = messages.len() - shown.len();
+        let urgent = messages.iter().any(|m| m.urgent);
+        // The latest reply in the thread is context, not an unhandled item.
+        let last_reply = tx
+            .thread_messages(project, thread)?
+            .into_iter()
+            .filter(|m| m.kind == MsgKind::Reply)
+            .max_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+        views.push(ThreadView {
+            thread: thread.clone(),
+            urgent,
+            open: shown,
+            more,
+            last_reply,
+        });
+        oldest.push(messages.first().map(|m| m.created).unwrap_or_default());
+        senders.push(messages.first().map(|m| m.sender.clone()).unwrap_or_default());
+    }
+
+    // 2. one slot is reserved for the oldest normal thread.
+    let mut selected: Vec<usize> = Vec::new();
+    let mut per_sender: BTreeMap<String, usize> = BTreeMap::new();
+    if limits.max_threads > 0 && limits.per_sender > 0 {
+        if let Some(index) = views.iter().position(|view| !view.urgent) {
+            selected.push(index);
+            *per_sender.entry(senders[index].clone()).or_insert(0) += 1;
+        }
+    }
+
+    // 3. the rest: urgent threads first, then oldest first, per sender capped.
+    let mut rest: Vec<usize> = (0..views.len()).filter(|i| !selected.contains(i)).collect();
+    rest.sort_by_key(|index| (if views[*index].urgent { 0 } else { 1 }, oldest[*index]));
+    for index in rest {
+        if selected.len() >= limits.max_threads {
+            break;
+        }
+        let sender = senders[index].clone();
+        let taken = per_sender.get(&sender).copied().unwrap_or(0);
+        if taken >= limits.per_sender {
+            continue;
+        }
+        selected.push(index);
+        *per_sender.entry(sender).or_insert(0) += 1;
+    }
+
+    // Display order: urgent threads first, then oldest first.
+    selected.sort_by_key(|index| (if views[*index].urgent { 0 } else { 1 }, oldest[*index]));
+    Ok(selected.into_iter().map(|index| views[index].clone()).collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
