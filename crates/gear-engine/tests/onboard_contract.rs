@@ -11,7 +11,6 @@ fn seat(name: &str, role: SeatRole) -> SeatRow {
 }
 
 #[test]
-#[ignore = "T-58: un-ignored by the captain when T-58 merges"]
 fn lane_gets_worktree_env_and_unattended_args() {
     let p = builtin("opencode").unwrap();
     let plan = plan_onboard(&seat("heat", SeatRole::Lane), "opencode", &p, 1, "/repo", "dev", "/state/gear.db", None).unwrap();
@@ -22,7 +21,6 @@ fn lane_gets_worktree_env_and_unattended_args() {
 }
 
 #[test]
-#[ignore = "T-58: un-ignored by the captain when T-58 merges"]
 fn captain_has_no_worktree_and_resume_appends_args() {
     let p = builtin("opencode").unwrap();
     let plan = plan_onboard(&seat("captain", SeatRole::Captain), "opencode", &p, 3, "/repo", "dev", "/db", Some("ses_1")).unwrap();
@@ -32,7 +30,6 @@ fn captain_has_no_worktree_and_resume_appends_args() {
 }
 
 #[test]
-#[ignore = "T-58: un-ignored by the captain when T-58 merges"]
 fn refusals() {
     let mut p = builtin("opencode").unwrap();
     let long = seat("averyveryverylongnamethatwillnotfit", SeatRole::Lane);
