@@ -22,6 +22,11 @@ pub struct Home {
 /// - captain: the inbox batch from `mail::select_batch` (thread id, message ids,
 ///   original bodies, "+N more"), then unshown Reply/Instruction messages;
 /// - lane/temp: unshown Reply/Instruction messages addressed to it (originals);
+/// - lane/temp (T-51): a "current task" line for the seat's open attempt
+///   (`open_attempts_of_seat`, first): `task <T-n> attempt <n> contract v<adopted>
+///   — <goal of that contract version>`; the view records `shown_task`,
+///   `shown_attempt`, `shown_contract` (the engine confirms deliveries from them);
+///   no open attempt → no line, those fields None;
 /// - footer: suggested next command.
 /// "Unshown" = created after the seat's latest view that listed it.
 pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) -> GearResult<Home> {

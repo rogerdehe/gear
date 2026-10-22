@@ -49,6 +49,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-43 | data | `data/t43-settle` | slice 2: settle verdicts | verifying | — |
 | T-45 | data | `data/t45-send-result` | slice 2: `gear send --kind result` submits the attempt (contract by captain) | ready | — |
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | draft | T-43 |
+| T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -78,6 +79,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | done | — |
 | T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | verifying | — |
 | T-47 | runtime | `runtime/t47-missing-attempt` | execute: void a delivery for a missing attempt (from R-41) | verifying | — |
+| T-48 | runtime | `runtime/t48-confirm-delivery` | slice 2: confirm deliveries from views (contract by captain) | ready | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -235,3 +237,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-43 → R-42.
 - 2026-10-22 Captain: `ApplyResult.settled` + verdicts contract (`plan_verdicts_contract.rs`, 2 ignored); T-50 drafted (after T-43).
 - 2026-10-22 T-47 → R-43, T-46 → R-44.
+- 2026-10-22 Delivery confirmation designed: a Deliver op is confirmed by a view whose shown_task/attempt match (ViewRecord fields already exist); home records them. Contracts on dev; T-48 (runtime), T-51 (data) ready.
