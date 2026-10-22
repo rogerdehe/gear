@@ -372,15 +372,16 @@ pub struct ReplyArgs {
 pub struct ReplyResult {
     /// (message id, new state as string)
     pub handled: Vec<(String, String)>,
-    /// Reply messages created, one per original sender.
+    /// Reply messages created, one per (original sender, thread).
     pub replies: Vec<String>,
     pub replayed: bool,
 }
 
 /// `gear reply` (captain only). Each id must be in this project, addressed to
-/// the captain, Open or Waiting. Resolve → Resolved; Wait → Waiting with
-/// wait_on/wait_until; Note → state unchanged. Writes one Reply (state Info)
-/// into each original sender's inbox, same thread. Never changes task state.
+/// the captain, Open or Waiting. Resolve → Resolved; Wait → Waiting until
+/// wait_until (required; wait_on is an optional label); Note → state unchanged.
+/// Writes one Reply (state Info) per (original sender, thread) into that
+/// sender's inbox. Never changes task state.
 ///
 /// Slice 1 rules:
 /// - a repeated id is handled once; `handled` lists every id once;
