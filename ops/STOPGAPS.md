@@ -10,3 +10,4 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | `ops/bin/inbox.sh`, `ops/bin/board.sh`, `ops/mail/*.md`, `ops/PLAN.md` board, `ops/tasks/*.md` packets | manual stand-ins for `gear` home, `gear reply`, the plan store and rendered packets | the project's plan lives in GEAR's store (plan apply) | T-60 |
 | `ops/bin/start-reviewer.sh`, warm reviewer seats `home-review-<k>`, `ops/models.conf` | manual temp-reviewer staffing | engine staffs temp reviewers (design/10, 11) and `[models]` is read from config | T-60 |
 | `ops/bin/merge-task.sh`, `ops/bin/switch-model.sh`, `ops/bin/timer.sh` | manual captain operations | the engine performs merge gate / model fallback / quota wait | T-60 |
+| `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | T-60 |
