@@ -52,7 +52,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
 | T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | done | — |
-| T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | ready | — |
+| T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | verifying | — |
 | T-59 | data | `data/t59-seat-onboard` | slice 3: seat onboarding transitions (stub + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
@@ -144,6 +144,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-52 | r56 | `review/t56` | review T-56 (branch `runtime/t56-builtin-profiles`) — temp reviewer gear-r56 on seat (session ses_e9c0b056bffeN388Em2XWRzNEh) | done | — |
 | R-53 | r55 | `review/t55` | review T-55 (branch `data/t55-plan-staff`) — temp reviewer gear-r55 on seat (session ses_e9c0a4336ffeivxaX6BlsMPzfj) | done | — |
 | R-54 | r54 | `review/t54` | review T-54 (branch `runtime/t54-cli-show`) — temp reviewer gear-r54 on seat | running | — |
+| R-55 | r57 | `review/t57` | review T-57 (branch `data/t57-admin-init`) — temp reviewer gear-r57 on seat | running | — |
 | T-6 | captain | `captain/t6-skill` | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | done | — |
 
 ## Done
@@ -284,3 +285,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-53 pass; T-55 merged (Staff park/hold/retire); its two P3s fixed by the captain at merge.
 - 2026-10-22 gear-runtime sat idle with T-54 ready: the captain made T-54 ready without waking the lane, and the watcher was off (not re-armed after a foreground merge); the compaction was the user's, not the cause (correction) → L-39; re-armed, lane woken. T-58 (onboarding plan) ready.
 - 2026-10-22 T-54 → R-54 (first reviewer on MiniMax-M3).
+- 2026-10-22 T-57 → R-55.
