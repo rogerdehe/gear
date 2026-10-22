@@ -61,6 +61,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | ready | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | verifying | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | ready | — |
+| T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | ready | — |
 | T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-14, T-15, T-17, T-4 |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -156,3 +157,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-23 pass (P3). Merged T-28 + review; workspace green.
 - 2026-10-22 Slice 1 data work done → slice 2 starts: captain added `gear_app::draft` types + contract `draft_contract.rs` (5, ignored); T-31 ready. Next slice-2 contracts (store task/attempt accessors, plan apply, settle) follow.
 - 2026-10-22 T-27 → R-24, T-29 → R-25.
+- 2026-10-22 runtime lowready → T-32 (`gear run`); T-5 is now only the slice-1 end-to-end CLI acceptance after T-4/T-29/T-30/T-32.
