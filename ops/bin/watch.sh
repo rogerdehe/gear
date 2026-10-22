@@ -9,6 +9,7 @@
 #            (default 600) until the lane works again
 #   lowready a writing lane has fewer than 2 ready tasks it has not started —
 #            re-rings every REPEAT seconds until restocked
+#   quota    a lane or reviewer stopped on a provider quota error (screen markers)
 #   capped   a writing lane stopped at the review cap while it still has ready
 #            tasks: only the captain's review decisions free it (lesson L-22)
 # Heartbeat: touches .git/gear-watch.alive every loop; board.sh shows
@@ -92,6 +93,12 @@ while :; do
     done < <(grep -E '^\| *[TR]-[0-9]' "$board")
     [ -f "$main/ops/mail/$lane.md" ] && work=$((work + $(grep -c '^### .*\[open\]' "$main/ops/mail/$lane.md")))
     s=$(herdr agent get "$agent" 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p')
+    # provider quota: Herdr says done, the screen says otherwise (lesson L-13) — ring at once
+    case "$s" in idle|done)
+      if herdr agent read "$agent" --source recent --lines 40 2>/dev/null | grep -qE 'Session failed|Token Plan|\(2056\)'; then
+        nag "quota $agent" "quota $agent: provider limit hit — switch model (ops/bin/switch-model.sh)" && touch "$main/.git/gear-watch.hit"
+      fi ;;
+    esac
     case "$s" in
       idle|done|blocked)
         if [ "$work" -gt 0 ]; then

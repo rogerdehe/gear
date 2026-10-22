@@ -43,7 +43,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
-| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | verifying | — |
+| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | done | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | done | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
@@ -61,7 +61,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4), 2 rounds | done | — |
 | R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
-| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf) | running | — |
+| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat (session ses_e9ccac231ffebIFJA0Dk6TAIsf), 2 rounds | done | — |
 | R-13 | r20 | `review/t20` | review T-20 (branch `runtime/t20-confirm`) — temp reviewer gear-r20 on seat (session ses_e9cc2b643ffejLx5AURY4CHrZ2) | done | — |
 | R-14 | r24 | `review/t24` | review T-24 (branch `data/t24-send-followups`) — temp reviewer gear-r24 on seat (session ses_e9cc1a9dcffer4EBceKwV1scT6) | done | — |
 | R-15 | r15 | `review/t15` | review T-15 (branch `data/t15-reply`) — temp reviewer gear-r15 on seat (session ses_e9cbd29c7ffeOo3aMwpvkQjTBf) | done | — |
@@ -112,3 +112,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-15 handed in → R-15.
 - 2026-10-22 R-15 pass (P3s). Merged T-15 + review; workspace green. Decisions → T-26: dedupe ids; one answer per (sender, thread); Wait requires wait_until; downgrade/next_check are slice 2.
 - 2026-10-22 T-17 handed in → R-16. T-19 rework handed in → R-12 round 2 (resume gear-r19).
+- 2026-10-22 R-12 round 2 pass (P3s). Merged T-19 + review; workspace green.
+- 2026-10-22 User: when MiniMax quota runs out, switch the long-lived lanes temporarily to DeepSeek V4.1 Flash. Mechanism: watcher `quota` event (screen markers), ops/bin/switch-model.sh, start-reviewer picks an alternate reviewer model when the writer runs the default reviewer model (independence).
