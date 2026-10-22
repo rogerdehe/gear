@@ -30,6 +30,13 @@ pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction]
     Ok(ops)
 }
 
+/// One Deliver op per action (state Intended): `task`/`attempt` set, payload
+/// `{ "text": <text> }`. Same transaction rules as [`intend_doorbells`].
+pub fn intend_deliveries(tx: &Tx<'_>, actions: &[crate::dispatch::DeliverAction], now: Ts) -> GearResult<Vec<OpRow>> {
+    let _ = (tx, actions, now);
+    todo!("T-39")
+}
+
 /// Execute every Intended **doorbell** op of `project`:
 /// - in a tx: re-check the seat's current generation/state still match the
 ///   op (else → Void) and move it to Executing;
