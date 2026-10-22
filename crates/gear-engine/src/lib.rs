@@ -16,6 +16,7 @@
 pub mod dispatch;
 pub mod doorbell;
 pub mod observe;
+pub mod onboard;
 pub mod ops;
 
 use gear_herdr::HerdrAct;
