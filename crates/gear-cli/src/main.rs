@@ -262,25 +262,8 @@ fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult
     reject_slice2(show, diff, all)?;
     let env = env_from_process()?;
     let mut store = open_store()?;
-    // The socket is HERDR_SOCKET_PATH, else the default session socket (04).
-    let socket = match std::env::var_os("HERDR_SOCKET_PATH") {
-        Some(path) => std::path::PathBuf::from(path),
-        None => {
-            let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
-            home.join(".config/herdr/herdr.sock")
-        }
-    };
-    let mut herdr = gear_herdr::SocketHerdr::connect(&socket).map_err(|e| {
-        GearError::new(
-            gear_model::ErrorCode::NotRegistered,
-            format!("cannot reach herdr at {}: {}", socket.display(), e.0),
-        )
-    })?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    run_home(&mut store, &env, &mut herdr, now, json, &mut std::io::stdout())
+    let mut herdr = open_herdr()?;
+    run_home(&mut store, &env, &mut herdr, now_ts(), json, &mut std::io::stdout())
 }
 
 /// The `--show`/`--diff`/`--all` views are slice 2: reject them by name
@@ -868,10 +851,6 @@ mod tests {
     }
 
     // --- T-30: the home page ---
-
-    const T0: i64 = 1_800_000_000;
-    const CAP_PANE: &str = "w1:p1";
-    const LANE_PANE: &str = "w1:p2";
 
     /// A writer that always fails, standing in for a broken stdout.
     struct FailingWriter;
