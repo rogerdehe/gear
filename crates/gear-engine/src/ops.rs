@@ -258,7 +258,9 @@ fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
 
 /// On engine start: every Executing op becomes Unknown (the previous process
 /// died mid-call). Nothing is re-sent.
-pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
+///
+/// Returns `(project, op id)` pairs: op ids are only unique within a project.
+pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<(String, String)>> {
     store.write(|tx| {
         let mut recovered = Vec::new();
         for project in tx.project_ids()? {
@@ -270,7 +272,7 @@ pub fn recover_on_start(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
                     "unknown",
                 )?;
                 tx.set_op_state(&op.project, &op.id, OpState::Unknown, Some(RECOVERED_REASON), now)?;
-                recovered.push(op.id);
+                recovered.push((op.project.clone(), op.id));
             }
         }
         Ok(recovered)
