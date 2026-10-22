@@ -9,6 +9,7 @@
 
 #![allow(unused_variables, dead_code)] // skeleton
 
+pub mod admin;
 pub mod config;
 pub mod draft;
 pub mod home;

@@ -23,8 +23,8 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 
 | Role | Chain (primary → fallbacks) | Now |
 |---|---|---|
-| lanes | MiniMax M3.1 Flash → DeepSeek V4.1 Flash 1017 | DeepSeek V4.1 Flash 1017 (MiniMax quota, 2026-10-22) |
-| reviewers | DeepSeek V4.1 Flash 1017 → DeepSeek V4 Pro (first ≠ writer's current model) | per job |
+| lanes | MiniMax M3.1 Flash → DeepSeek V4.1 Flash 1017 | back to MiniMax M3.1 Flash (reset; DeepSeek nearly spent) — switched as each lane stops |
+| reviewers | MiniMax M3 (thinking) → DeepSeek V4.1 Flash 1017 → DeepSeek V4 Pro; first ≠ writer's current model (`ops/models.conf`) | per job |
 
 ## Board
 
@@ -52,6 +52,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | done | — |
 | T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | verifying | — |
+| T-57 | data | `data/t57-admin-init` | slice 3: `gear admin init` registers a project (stub + contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -274,3 +275,5 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 **Milestone: slice-2 work-loop acceptance passes on dev** (`slice2_dispatch::full_work_loop` un-ignored; slice-1 still 7/7). R-51 pass; T-49 merged. T-56 → R-52.
 - 2026-10-22 T-55 → R-53.
 - 2026-10-22 Live probe (captain, seat 5): GEAR_CTX exported in the pane before `agent start` reaches OpenCode's tool commands — onboarding mechanism of design/03 confirmed. Also: first prompt right after start can stall (SOP). Probe shell cleaned (unset).
+- 2026-10-22 User: MiniMax reset, DeepSeek nearly spent. Chains moved to `ops/models.conf` (start-reviewer reads it); reviewers now MiniMax-M3 (variant thinking, label verified in the picker); lanes go back to MiniMax-M3.1-Flash as they stop.
+- 2026-10-22 Slice 3 starts: admin init contract (`admin_init_contract.rs`, 2 ignored); T-57 ready. gear-data switched back to MiniMax-M3.1-Flash.
