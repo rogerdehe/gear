@@ -68,7 +68,6 @@ fn contracts_roundtrip() {
 }
 
 #[test]
-#[ignore = "T-34: un-ignored by the captain when T-34 merges"]
 fn attempts_roundtrip_order_and_in_progress() {
     let mut s = store();
     s.write(|tx| {
@@ -91,7 +90,6 @@ fn attempts_roundtrip_order_and_in_progress() {
 }
 
 #[test]
-#[ignore = "T-34: un-ignored by the captain when T-34 merges"]
 fn verdicts_append_and_order() {
     let mut s = store();
     let v = |attempt: i64, passed: bool, created: i64| VerdictRow { project: "p".into(), task: "T-1".into(), attempt,
@@ -99,4 +97,19 @@ fn verdicts_append_and_order() {
     s.write(|tx| { tx.insert_verdict(&v(2, true, NOW + 9))?; tx.insert_verdict(&v(1, false, NOW))?; tx.insert_verdict(&v(1, false, NOW)) }).unwrap();
     let got: Vec<(i64, bool)> = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().into_iter().map(|r| (r.attempt, r.passed)).collect();
     assert_eq!(got, vec![(1, false), (1, false), (2, true)]);
+}
+
+#[test]
+#[ignore = "T-40: un-ignored by the captain when T-40 merges"]
+fn open_attempts_include_submitted() {
+    let mut s = store();
+    s.write(|tx| {
+        tx.insert_attempt(&attempt("T-1", 1, "p:heat", AttemptState::Accepted))?;
+        tx.insert_attempt(&attempt("T-2", 1, "p:heat", AttemptState::Submitted))?;
+        tx.insert_attempt(&attempt("T-3", 1, "p:heat", AttemptState::Delivered))?;
+        tx.insert_attempt(&attempt("T-4", 1, "p:heat", AttemptState::Abandoned))?;
+        tx.insert_attempt(&attempt("T-5", 1, "p:wire", AttemptState::Started))
+    }).unwrap();
+    let got: Vec<String> = s.read(|tx| tx.open_attempts_of_seat("p:heat")).unwrap().into_iter().map(|a| a.task).collect();
+    assert_eq!(got, vec!["T-2", "T-3"]);
 }

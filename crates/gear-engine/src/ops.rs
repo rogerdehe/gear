@@ -30,15 +30,38 @@ pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction]
     Ok(ops)
 }
 
-/// Execute every Intended **doorbell** op of `project`:
+/// One Deliver op per action (state Intended): `task`/`attempt` set, payload
+/// `{ "text": <text> }`. Same transaction rules as [`intend_doorbells`].
+pub fn intend_deliveries(tx: &Tx<'_>, actions: &[crate::dispatch::DeliverAction], now: Ts) -> GearResult<Vec<OpRow>> {
+    let mut ops = Vec::with_capacity(actions.len());
+    for action in actions {
+        let payload = serde_json::json!({ "text": action.text });
+        ops.push(tx.insert_op(&NewOp {
+            project: action.project.clone(),
+            seat: action.seat.clone(),
+            generation: action.generation,
+            kind: OpKind::Deliver,
+            task: Some(action.task.clone()),
+            attempt: Some(action.attempt),
+            ref_msg: None,
+            plan_version: None,
+            payload,
+            created: now,
+        })?);
+    }
+    Ok(ops)
+}
+
+/// Execute every Intended **doorbell or deliver** op of `project`:
 /// - in a tx: re-check the seat's current generation/state still match the
 ///   op (else → Void) and move it to Executing;
 /// - outside any tx: call Herdr;
 /// - in a tx: Ok → Submitted, Refused → Failed, Uncertain → Unknown.
 /// Returns (op id, final state) pairs.
 ///
-/// Slice 1 drains doorbell ops only: the other kinds (deliver, onboard,
-/// release, title, notify) carry no text and get their own packets.
+/// Doorbells and deliveries both carry their text in `payload.text` and are
+/// drained here; onboard/release/title/notify have no text yet and stay
+/// Intended until their own packets.
 pub fn execute_intended(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -51,8 +74,8 @@ pub fn execute_intended(
         let ops = tx.ops_in_state(project, OpState::Intended)?;
         let mut prepared = Vec::new();
         for op in ops {
-            if op.kind != OpKind::Doorbell {
-                // Slice 1 sends doorbells; the other kinds have no text yet.
+            if !matches!(op.kind, OpKind::Doorbell | OpKind::Deliver) {
+                // Onboard/release/title/notify have no text yet.
                 continue;
             }
             let item = check_op(tx, &op)?;
