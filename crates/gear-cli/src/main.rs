@@ -181,7 +181,8 @@ fn run(cli: Cli) -> GearResult<()> {
             }
         },
         Some(Cmd::Run) => cmd_run(),
-        Some(Cmd::Admin { op }) => Err(not_yet("admin (slice 3)")),
+        Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
+        Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
 }
 
@@ -208,6 +209,33 @@ fn env_from(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_app::Env> 
         pane_id: vars("HERDR_PANE_ID"),
         admin: vars(gear_model::ctx::ENV_ADMIN).as_deref() == Some("1"),
     })
+}
+
+/// `gear admin init <config>`: the user registers a project (design/01). The
+/// caller check comes first, so an agent or a shell without `GEAR_ADMIN=1`
+/// is refused before anything is read. The store is `GEAR_DB`.
+fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() || !env.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin init` runs in the user's own shell with GEAR_ADMIN=1, never in an agent",
+        ));
+    }
+    let text = std::fs::read_to_string(config).map_err(|e| {
+        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
+    })?;
+    let mut store = open_store()?;
+    let r = gear_app::admin::init(&mut store, &env, &text, now_ts())?;
+    if json {
+        println!("{}", serde_json::to_string(&r).unwrap_or_default());
+    } else {
+        println!("registered project {} (config v{})", r.project, r.config_version);
+        for seat in &r.seats {
+            println!("seat {seat}");
+        }
+    }
+    Ok(())
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).
