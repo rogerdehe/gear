@@ -44,7 +44,6 @@ fn world() -> Store {
 }
 
 #[test]
-#[ignore = "T-50: un-ignored by the captain when T-50 merges"]
 fn verdicts_settle_in_the_apply() {
     let mut s = world();
     let r = run(&mut s, "<!-- gear-plan project=p base=1 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=c1 pass evidence=logs/t1.md\n- T-2 attempt=1 contract=1 candidate=c2 fail rework=\"edge cases\"\n", "v2").unwrap();
@@ -55,7 +54,6 @@ fn verdicts_settle_in_the_apply() {
 }
 
 #[test]
-#[ignore = "T-50: un-ignored by the captain when T-50 merges"]
 fn a_bad_verdict_aborts_the_whole_apply() {
     let mut s = world();
     let e = run(&mut s, "<!-- gear-plan project=p base=1 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=c1 pass evidence=logs/t1.md\n- T-2 attempt=1 contract=1 candidate=WRONG pass evidence=x\n", "v2").unwrap_err();
