@@ -36,10 +36,14 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
             ctx.generation
         ));
 
-        // What the seat saw the last time: everything created after that
-        // view is unshown.
-        let views = tx.views_since(&seat_id, ctx.generation, 0)?;
-        let since = views.last().map(|view| view.ts).unwrap_or(0);
+        // A message counts as shown when a recorded view of this seat and
+        // generation lists its id. The ids decide, not the timestamps: a
+        // message created in the same second as the view must not be lost,
+        // and a message no view ever listed stays unshown.
+        let mut already_shown: Vec<String> = Vec::new();
+        for view in tx.views_since(&seat_id, ctx.generation, 0)? {
+            already_shown.extend(view.shown_msgs);
+        }
 
         let mut shown_msgs: Vec<String> = Vec::new();
 
@@ -64,8 +68,15 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
             }
         }
 
-        // The replies and instructions the seat has not seen yet.
-        let unshown = tx.messages_to_since(&ctx.project, &seat_id, since)?;
+        // The replies and instructions the seat has not seen yet. A message
+        // the batch above already printed is not printed again.
+        let unshown: Vec<_> = tx
+            .messages_to_since(&ctx.project, &seat_id, 0)?
+            .into_iter()
+            .filter(|message| {
+                !already_shown.contains(&message.id) && !shown_msgs.contains(&message.id)
+            })
+            .collect();
         if !unshown.is_empty() {
             lines.push(String::new());
             lines.push(format!("UNSHOWN ({})", unshown.len()));
