@@ -75,6 +75,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-39 | runtime | `runtime/t39-deliveries` | slice 2: delivery texts, intend, execute (stubs + contract by captain) | done | — |
 | T-41 | runtime | `runtime/t41-lane-view` | slice 2: build the lane view (stub + contract by captain) | verifying | — |
 | T-44 | runtime | `runtime/t44-stale-delivery` | execute: void a stale delivery (from R-35) | verifying | — |
+| T-46 | runtime | `runtime/t46-dispatch-tick` | slice 2: plan + intend dispatch (stubs + contract by captain) | draft | T-41, T-42 |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -222,3 +223,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Captain: `SendArgs.candidate` added (all constructors updated); result-send contract `result_contract.rs` (2 ignored); T-45 drafted (after T-42). CLI `--candidate` mapping is a runtime follow-up once T-45 lands.
 - 2026-10-22 T-41 → R-40.
 - 2026-10-22 T-44 → R-41.
+- 2026-10-22 Dispatch-tick contract on dev (`dispatch_tick_contract.rs`, 3 ignored; packet_ref/task_branch by captain). T-46 drafted (after T-41, T-42).

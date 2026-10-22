@@ -195,6 +195,35 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     todo!("T-41")
 }
 
+/// Where a lane reads a task packet: the CLI shows the rendered packet.
+pub fn packet_ref(task: &str) -> String {
+    format!("`gear --show {task}`")
+}
+
+/// The task branch a lane works on (17 §3): `<lane>/t<n>` (no slug in slice 2).
+pub fn task_branch(lane: &str, task: &str) -> String {
+    format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+}
+
+/// One decision per Lane-role seat of `project` (other roles skipped), in
+/// seat-id order: `lane_view(tx, seat, obs, now)` with that seat's entry from
+/// `observed` (None when absent) → `decide`.
+pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &DispatchCfg, now: Ts) -> GearResult<Vec<(SeatRow, Action)>> {
+    let _ = (tx, project, observed, cfg, now);
+    todo!("T-46")
+}
+
+/// Turn decisions into Deliver ops in the caller's transaction:
+/// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
+///   then a delivery with `assign_text(task, contract_version, task_branch(seat.name, task), packet_ref(task))`;
+/// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
+/// - None / Escalate → nothing.
+/// Returns the Intended ops (via `ops::intend_deliveries`).
+pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)], now: Ts) -> GearResult<Vec<OpRow>> {
+    let _ = (tx, project, actions, now);
+    todo!("T-46")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
