@@ -740,16 +740,19 @@ fn cmd_run() -> GearResult<()> {
     let _lock = take_engine_lock(&dir)?; // held for the life of the loop
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
-    let cfg = engine_cfg();
+    // The agents get the same database as `GEAR_DB` (design/03).
+    let cfg = engine_cfg(&db.to_string_lossy());
     let mut clock = now_ts;
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut std::io::stdout())
 }
 
-/// The engine's configuration: the defaults plus every built-in agent profile.
-/// A kind without a built-in profile is not added, so its seats stay observed
-/// fail-closed (design/04).
-fn engine_cfg() -> gear_engine::EngineCfg {
+/// The engine's configuration: the defaults, every built-in agent profile and
+/// the database path the onboarded agents get as `GEAR_DB`. A kind without a
+/// built-in profile is not added, so its seats stay observed fail-closed
+/// (design/04).
+fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     let mut cfg = gear_engine::EngineCfg::default();
+    cfg.db_path = db_path.to_string();
     for kind in ["opencode"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
@@ -1303,7 +1306,8 @@ mod tests {
 
     #[test]
     fn engine_cfg_carries_the_builtin_profiles() {
-        let cfg = engine_cfg();
+        let cfg = engine_cfg("/state/gear.db");
+        assert_eq!(cfg.db_path, "/state/gear.db", "the agents get GEAR_DB");
         let opencode = cfg.profiles.get("opencode").expect("opencode is built in");
         assert_eq!(opencode.kind, "opencode");
         assert!(opencode.verified);
