@@ -186,18 +186,76 @@ fn not_yet(what: &str) -> GearError {
 }
 
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
+///
+/// An absent `GEAR_CTX` means an anonymous caller (the user's own shell or an
+/// unmanaged agent); a malformed one is an error, never a silent `None`.
 fn env_from_process() -> GearResult<gear_app::Env> {
-    todo!("slice1")
+    env_from(|name| std::env::var(name).ok())
+}
+
+/// [`env_from_process`] over an injected variable lookup (testable).
+fn env_from(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_app::Env> {
+    let ctx = match vars(gear_model::ctx::ENV_CTX) {
+        None => None,
+        Some(raw) => Some(gear_model::GearCtx::parse(&raw)?),
+    };
+    Ok(gear_app::Env {
+        ctx,
+        pane_id: vars("HERDR_PANE_ID"),
+        admin: vars(gear_model::ctx::ENV_ADMIN).as_deref() == Some("1"),
+    })
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).
 fn open_store() -> GearResult<gear_store::Store> {
-    todo!("slice1")
+    open_store_at(|name| std::env::var(name).ok())
+}
+
+/// [`open_store`] over an injected variable lookup (testable).
+fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
+    let Some(path) = vars(gear_model::ctx::ENV_DB) else {
+        // The admin target file (design/14) comes with slice 3.
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!("{} is not set", gear_model::ctx::ENV_DB),
+        ));
+    };
+    gear_store::Store::open(std::path::Path::new(&path))
 }
 
 /// Generate a request id and print `request: <id>` to stderr before any write.
 fn announce_request_id(given: Option<String>) -> String {
-    todo!("slice1")
+    let id = given.unwrap_or_else(new_request_id);
+    // Before any write: a lost receipt is replayed with this id (design/13).
+    eprintln!("request: {id}");
+    id
+}
+
+/// A fresh request id, `r-<unix-ms>-<pid>`.
+fn new_request_id() -> String {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    request_id_at(now_ms, std::process::id())
+}
+
+/// Last millisecond handed out; see [`request_id_at`].
+static LAST_REQUEST_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The request id for the given clock reading: always strictly later than the
+/// previous one, so two calls in the same millisecond still differ.
+fn request_id_at(now_ms: u64, pid: u32) -> String {
+    use std::sync::atomic::Ordering;
+    let mut last = LAST_REQUEST_MS.load(Ordering::Relaxed);
+    let ms = loop {
+        let candidate = if now_ms > last { now_ms } else { last + 1 };
+        match LAST_REQUEST_MS.compare_exchange(last, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break candidate,
+            Err(current) => last = current,
+        }
+    };
+    format!("r-{ms}-{pid}")
 }
 
 fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult<()> {
@@ -238,4 +296,79 @@ fn print_skill(topic: &str) -> GearResult<()> {
     // last line is never lost.
     let _ = std::io::Write::flush(&mut std::io::stdout());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A variable lookup over a fixed map (production reads the process env).
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: BTreeMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |name: &str| map.get(name).cloned()
+    }
+
+    #[test]
+    fn env_without_ctx_is_anonymous() {
+        let env = env_from(vars(&[])).unwrap();
+        assert_eq!(env, gear_app::Env { ctx: None, pane_id: None, admin: false });
+    }
+
+    #[test]
+    fn env_parses_ctx_pane_and_admin() {
+        let env = env_from(vars(&[
+            ("GEAR_CTX", "harbor:heat:7"),
+            ("HERDR_PANE_ID", "w1:p2"),
+            ("GEAR_ADMIN", "1"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            env.ctx,
+            Some(gear_model::GearCtx { project: "harbor".into(), seat: "heat".into(), generation: 7 })
+        );
+        assert_eq!(env.pane_id.as_deref(), Some("w1:p2"));
+        assert!(env.admin);
+    }
+
+    #[test]
+    fn malformed_ctx_is_bad_format() {
+        let err = env_from(vars(&[("GEAR_CTX", "nope")])).unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("GEAR_CTX"), "{}", err.detail);
+    }
+
+    #[test]
+    fn admin_only_when_exactly_1() {
+        for value in ["0", "true", "yes", "", "01", " 1"] {
+            let env = env_from(vars(&[("GEAR_ADMIN", value)])).unwrap();
+            assert!(!env.admin, "GEAR_ADMIN={value:?} is not the admin flag");
+        }
+        assert!(env_from(vars(&[("GEAR_ADMIN", "1")])).unwrap().admin);
+    }
+
+    #[test]
+    fn missing_db_is_no_target() {
+        let err = match open_store_at(vars(&[])) {
+            Ok(_) => panic!("GEAR_DB is not set, so opening the store must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
+        assert!(err.detail.contains("GEAR_DB"), "{}", err.detail);
+    }
+
+    #[test]
+    fn given_request_id_is_kept() {
+        assert_eq!(announce_request_id(Some("r-abc".into())), "r-abc");
+    }
+
+    #[test]
+    fn new_request_ids_differ() {
+        let a = announce_request_id(None);
+        let b = announce_request_id(None);
+        assert_ne!(a, b, "{a} / {b}");
+        assert!(a.starts_with("r-"), "{a}");
+        assert!(b.starts_with("r-"), "{b}");
+    }
 }
