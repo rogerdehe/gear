@@ -45,8 +45,66 @@ pub fn execute_intended(store: &mut Store, herdr: &mut dyn HerdrAct, project: &s
 /// lists every message id in the op's `covers`. Otherwise bump its check
 /// budget; when the budget is exhausted, flag the seat (no resend).
 /// Returns (confirmed op ids, flagged seat ids).
-pub fn confirm_pending(store: &mut Store, project: &str, budget: i64, now: Ts) -> GearResult<(Vec<String>, Vec<String>)> {
-    todo!("slice1")
+pub fn confirm_pending(
+    store: &mut Store,
+    project: &str,
+    budget: i64,
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    store.write(|tx| {
+        let mut confirmed = Vec::new();
+        let mut flagged: Vec<String> = Vec::new();
+        for state in [OpState::Submitted, OpState::Unknown] {
+            for op in tx.ops_in_state(project, state)? {
+                if op.kind != OpKind::Doorbell {
+                    // Slice 1 settles doorbells; the other kinds have their
+                    // own evidence rules.
+                    continue;
+                }
+                if shown_in_a_view(tx, &op)? {
+                    require_transition(
+                        state.can_transition(OpState::Confirmed),
+                        "operation",
+                        state.as_str(),
+                        "confirmed",
+                    )?;
+                    tx.set_op_state(project, &op.id, OpState::Confirmed, None, now)?;
+                    confirmed.push(op.id.clone());
+                    continue;
+                }
+                // No evidence yet: the op waits for the next round. Its budget
+                // counts the checks; when it reaches the limit the seat needs
+                // a human check (the op is not resent).
+                let used = tx.bump_op_check_budget(project, &op.id, now)?;
+                if used == budget && !flagged.contains(&op.seat) {
+                    flagged.push(op.seat.clone());
+                }
+            }
+        }
+        Ok((confirmed, flagged))
+    })
+}
+
+/// Whether a view of the seat's current generation shows every message id the
+/// op covers. The view must be at or after the op's time: a view from before
+/// the doorbell went out proves nothing.
+fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<bool> {
+    let covers: Vec<&str> = op
+        .payload
+        .get("covers")
+        .and_then(|c| c.as_array())
+        .map(|ids| ids.iter().filter_map(|id| id.as_str()).collect())
+        .unwrap_or_default();
+    if covers.is_empty() {
+        // Nothing to show: no view can be linked to this op.
+        return Ok(false);
+    }
+    let views = tx.views_since(&op.seat, op.generation, op.created)?;
+    Ok(views.iter().any(|view| {
+        covers
+            .iter()
+            .all(|id| view.shown_msgs.iter().any(|shown| shown == id))
+    }))
 }
 
 /// On engine start: every Executing op becomes Unknown (the previous process
