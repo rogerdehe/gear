@@ -63,6 +63,7 @@ A step is written so the implementer can write exactly one reasonable thing: a t
 - **Ownership:** each task touches only its lane's owned paths (plus its own packet).
 - **Type consistency:** names and signatures used in later tasks match the Produces blocks of earlier ones.
 - **Contracts:** every cross-lane call has a merged (or first-queued) contract task with tests and a fake.
+- **Reachability:** every Goal item can be done with the packet's Allowed changes and the `pub` API already on `dev`; if not, add the API first (contract-first) or drop the item (lesson L-28). Same for follow-up packets written from review findings.
 - **Proportion:** a packet longer than the code it describes is writing the code; replace bodies with signatures and test names.
 
 ## 5. Using other methods' output
