@@ -280,4 +280,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice 3 starts: admin init contract (`admin_init_contract.rs`, 2 ignored); T-57 ready. gear-data switched back to MiniMax-M3.1-Flash.
 - 2026-10-22 R-52 pass; T-56 merged (`gear run` now has the opencode profile).
 - 2026-10-22 R-53 pass; T-55 merged (Staff park/hold/retire); its two P3s fixed by the captain at merge.
-- 2026-10-22 gear-runtime sat idle with T-54 ready: OpenCode auto-compacted its session and ended the turn, and the captain's watcher was off (not re-armed after the T-55 merge) → L-39; re-armed, lane woken. T-58 (onboarding plan) ready.
+- 2026-10-22 gear-runtime sat idle with T-54 ready: the captain made T-54 ready without waking the lane, and the watcher was off (not re-armed after a foreground merge); the compaction was the user's, not the cause (correction) → L-39; re-armed, lane woken. T-58 (onboarding plan) ready.
