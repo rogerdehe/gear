@@ -8,7 +8,7 @@
 #   2. messages — open captain messages for you
 #   3. next     — first ready task not yet started, if below the in-flight cap
 set -u
-lane=${1:?usage: inbox.sh <lane>   (data | runtime)}
+lane=${1:?usage: inbox.sh <lane>   (data | runtime | review)}
 
 main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
 board="$main/ops/PLAN.md"
@@ -20,9 +20,13 @@ while IFS='|' read -r _ task l branch content state _; do
   task=$(echo $task); l=$(echo $l); state=$(echo $state)
   branch=$(echo $branch | tr -d '`'); content=$(echo $content)
   [ "$l" = "$lane" ] || continue
-  case "$task" in T-[0-9]*) ;; *) continue ;; esac
-  n=${task#T-}
-  pstat=$(git show "origin/$branch:ops/tasks/T-$n.md" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
+  case "$task" in
+    T-[0-9]*) n=${task#T-}; file="ops/tasks/T-$n.md" ;;
+    R-[0-9]*) n=$(sed -n 's#^review/t\([0-9]*\)$#\1#p' <<<"$branch"); file="ops/reviews/T-$n.md" ;;
+    *) continue ;;
+  esac
+  pstat=$(git show "origin/$branch:$file" 2>/dev/null | sed -n 's/^Status: *\([a-z]*\).*/\1/p' | head -1)
+  [ "$pstat" = done ] && continue
   case "$state" in
     done|cancelled|draft) continue ;;
     rework) rework+="  $task  $branch  $content"$'\n'; dev_n=$((dev_n+1)); continue ;;
@@ -33,7 +37,7 @@ while IFS='|' read -r _ task l branch content state _; do
   elif [ "$state" = ready ] && [ -z "$next" ]; then
     next="  $task  $branch  $content"
   fi
-done < <(grep -E '^\| *T-[0-9]' "$board")
+done < <(grep -E '^\| *[TR]-[0-9]' "$board")
 
 echo "== rework (do first)"; printf '%s' "$rework"
 echo "== messages"
