@@ -58,5 +58,101 @@ pub struct TickReport {
 
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
-    todo!("slice1: observe -> ops::confirm_pending -> doorbell::decide -> ops::intend -> ops::execute_intended")
+    let mut report = TickReport::default();
+    let projects = store.read(|tx| tx.project_ids())?;
+
+    // 1. observe: one agents() call for the whole session. If it fails, every
+    //    project is marked and nothing at all is decided this tick.
+    let Ok(agents) = observe::snapshot(herdr) else {
+        report.observe_failed = projects;
+        return Ok(report);
+    };
+
+    for project in projects {
+        // Seat observations (reads screen tails; no write transaction is held).
+        let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+
+        // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+        let (confirmed, flagged) =
+            ops::confirm_pending(store, &project, cfg.doorbell_check_budget, now)?;
+        report.confirmed.extend(confirmed);
+        report.flagged.extend(flagged);
+
+        // 3. decide (pure): who should be rung now.
+        let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
+        let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
+
+        // 4. intend: fix the actions as Intended ops in one transaction.
+        let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
+        report.intended.extend(intended.into_iter().map(|op| op.id));
+
+        // 5. execute: re-check each op, call Herdr, record the outcome.
+        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+    }
+    Ok(report)
+}
+
+/// What the doorbell decision needs to know about one seat (design/07).
+fn doorbell_inputs(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    observed: &[observe::SeatObs],
+    now: Ts,
+) -> GearResult<Vec<doorbell::DoorbellInput>> {
+    use gear_model::{OpKind, OpState};
+    use gear_store::BindingStatus;
+    use std::collections::BTreeSet;
+
+    let mut inputs = Vec::new();
+    for seat_obs in observed {
+        let seat = &seat_obs.seat;
+        // A seat without an active binding has no pane to ring.
+        let Some(binding) = tx
+            .get_binding(&seat.id, seat.generation)?
+            .filter(|b| b.status == BindingStatus::Active)
+        else {
+            continue;
+        };
+
+        let actionable = tx.actionable_for(project, &seat.id, now)?;
+        let urgent = actionable.iter().filter(|m| m.urgent).count();
+        let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
+
+        // Reply/Instruction messages this generation has not shown yet.
+        let shown: BTreeSet<String> = tx
+            .views_since(&seat.id, seat.generation, 0)?
+            .into_iter()
+            .flat_map(|view| view.shown_msgs)
+            .collect();
+        let unshown: Vec<String> = tx
+            .messages_to_since(project, &seat.id, 0)?
+            .into_iter()
+            .filter(|m| !shown.contains(&m.id))
+            .map(|m| m.id)
+            .collect();
+
+        // A delivery/doorbell that still occupies the seat's slot, and when the
+        // previous doorbell was settled (for the cooldown).
+        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let last_settled_at = tx
+            .last_op(&seat.id, OpKind::Doorbell)?
+            .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
+            .map(|op| op.updated);
+
+        inputs.push(doorbell::DoorbellInput {
+            project: project.to_string(),
+            seat: seat.id.clone(),
+            generation: seat.generation,
+            pane_id: binding.pane_id,
+            // Only a seat that may receive work is rung, even if its agent is
+            // idle (a parked/held seat must not be woken by a doorbell).
+            idle: seat_obs.idle && observe::reachable(seat.state),
+            slot_busy,
+            last_settled_at,
+            actionable: actionable_ids,
+            unshown,
+            urgent,
+        });
+    }
+    Ok(inputs)
 }

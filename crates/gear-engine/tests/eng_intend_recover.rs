@@ -147,8 +147,50 @@ fn executing_becomes_unknown() {
 
     let recovered = recover_on_start(&mut store, T0 + 3).unwrap();
 
-    // Every project is covered, not just the first one.
-    assert_eq!(recovered.len(), 2, "{recovered:?}");
+    // Every project is covered, and the pairs say which project each id is in.
+    assert_eq!(
+        recovered,
+        vec![("p".to_string(), "O-1".to_string()), ("q".to_string(), "O-1".to_string())],
+        "op ids are only unique within a project"
+    );
+    let states = store
+        .read(|tx| {
+            Ok((
+                tx.get_op("p", "O-1")?.unwrap().state,
+                tx.get_op("q", "O-1")?.unwrap().state,
+            ))
+        })
+        .unwrap();
+    assert_eq!(states, (OpState::Unknown, OpState::Unknown));
+}
+
+#[test]
+fn two_projects_with_the_same_op_id_are_distinguishable() {
+    let mut store = store_with_projects();
+    store
+        .write(|tx| {
+            intend_doorbells(
+                tx,
+                &[action("p", "p:captain", 1, &["M-1"]), action("q", "q:captain", 1, &["M-2"])],
+                T0 + 1,
+            )
+        })
+        .unwrap();
+    store
+        .write(|tx| {
+            walk_to(tx, "p", "O-1", OpState::Executing, T0 + 2);
+            walk_to(tx, "q", "O-1", OpState::Executing, T0 + 2);
+            Ok(())
+        })
+        .unwrap();
+
+    let recovered = recover_on_start(&mut store, T0 + 3).unwrap();
+
+    // Both projects have an op called O-1; the pairs keep them apart.
+    assert_eq!(
+        recovered,
+        vec![("p".to_string(), "O-1".to_string()), ("q".to_string(), "O-1".to_string())]
+    );
     let states = store
         .read(|tx| {
             Ok((
@@ -188,7 +230,11 @@ fn other_states_untouched() {
         .unwrap();
 
     let recovered = recover_on_start(&mut store, T0 + 3).unwrap();
-    assert_eq!(recovered, vec!["O-1".to_string()], "only the Executing op is recovered");
+    assert_eq!(
+        recovered,
+        vec![("p".to_string(), "O-1".to_string())],
+        "only the Executing op is recovered"
+    );
 
     let states = store
         .read(|tx| {
