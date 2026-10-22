@@ -51,6 +51,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-50 | data | `data/t50-plan-verdicts` | slice 2: `plan apply` settles `# Verdicts` (contract by captain) | done | — |
 | T-51 | data | `data/t51-home-task` | slice 2: home shows and records the current task (contract by captain) | done | — |
 | T-53 | data | `data/t53-task-packet` | slice 2: render the task packet (`gear --show T-n`; contract by captain) | verifying | — |
+| T-55 | data | `data/t55-plan-staff` | slice 2: `plan apply` `# Staff` park/hold/retire (contract by captain) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
@@ -262,3 +263,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-47 pass (stale doc P3s fixed at merge), R-46 round 2 pass. Merged T-50 (verdicts), T-48 (delivery confirmation). T-49 waits only on T-51.
 - 2026-10-22 R-48, R-49 pass. Merged T-51 (home shows current task), T-52 (cli plan apply, --candidate). T-49 ready — the last piece of the slice-2 acceptance.
 - 2026-10-22 T-53 → R-50. merge-task.sh now also parks the reviewer seat.
+- 2026-10-22 Staff (park/hold/retire) contract on dev (`plan_staff_contract.rs`, ignored; `ApplyResult.staffed`); T-55 ready. Temp workers and hold release come later.
