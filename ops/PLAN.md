@@ -42,7 +42,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
 | T-24 | data | `data/t24-send-followups` | send: `--to` means instruction; pin thread ids (from R-11) | done | — |
 | T-26 | data | `data/t26-reply-followups` | reply: dedupe ids, answer every thread, wait needs a time (from R-15) | done | — |
-| T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | verifying | — |
+| T-10 | data | `data/t10-notarget` | store: raw state writes refuse a missing target (from R-1) | done | — |
 | T-22 | data | `data/t22-agentless-pane` | identity: agent-less seat pane rejected (from R-6) | verifying | — |
 | T-11 | data | `data/t11-config-trim` | config: trim before comparing (from R-2) | done | — |
 | T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | done | — |
@@ -80,7 +80,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-17 | r26 | `review/t26` | review T-26 (branch `data/t26-reply-followups`) — temp reviewer gear-r26 on seat (session ses_e9cad4a35ffec27oj5H7Z4AMDZ) | done | — |
 | R-18 | r21 | `review/t21` | review T-21 (branch `runtime/t21-reconcile`) — temp reviewer gear-r21 on seat (session ses_e9cacb72bffe85APn13cVdEnng) | running | — |
 | R-19 | r23 | `review/t23` | review T-23 (branch `runtime/t23-more-refusals`) — temp reviewer gear-r23 on seat (session ses_e9ca9da55ffetpXMr32sRFk5gM) | done | — |
-| R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat | running | — |
+| R-20 | r10 | `review/t10` | review T-10 (branch `data/t10-notarget`) — temp reviewer gear-r10 on seat (session ses_e9ca14555ffeTLHJUTXWF1Xhhb) | done | — |
 | R-21 | r22 | `review/t22` | review T-22 (branch `data/t22-agentless-pane`) — temp reviewer gear-r22 on seat | running | — |
 | R-22 | r25 | `review/t25` | review T-25 (branch `runtime/t25-confirm-evidence`) — temp reviewer gear-r25 on seat | running | — |
 | R-23 | r28 | `review/t28` | review T-28 (branch `runtime/t28-cli-plumbing`) — temp reviewer gear-r28 on seat | running | — |
@@ -148,3 +148,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-21 rework handed in → R-18 round 2; its session's seat is busy → new-session recovery on a free seat (no waiting on the critical path to T-4).
 - 2026-10-22 runtime lowready → T-30 (CLI home).
 - 2026-10-22 T-28 → R-23 on a 5th seat (V4 Pro reviews are slower; review throughput is the bottleneck).
+- 2026-10-22 R-20 pass (P3 wording). T-10 ignore removed; merged T-10 + review; workspace green.
