@@ -42,7 +42,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | done | — |
 | T-12 | runtime | `runtime/t12-herdr-followups` | herdr adapter: refusal codes, strict not-found, reply-mapping tests (from R-3) | done | — |
 | T-18 | runtime | `runtime/t18-intend-recover` | engine: intend doorbells, recover on start | done | — |
-| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | ready | — |
+| T-19 | runtime | `runtime/t19-execute` | engine: execute intended ops | verifying | — |
 | T-20 | runtime | `runtime/t20-confirm` | engine: confirm doorbells from views | ready | — |
 | T-21 | runtime | `runtime/t21-reconcile` | engine: observe and reconcile seats | ready | — |
 | T-23 | runtime | `runtime/t23-more-refusals` | herdr: two more refusal codes (from R-8) | ready | — |
@@ -59,6 +59,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-9 | r16 | `review/t16` | review T-16 (branch `data/t16-select-batch`) — temp reviewer gear-r16 on seat (session ses_e9cd8571bffe30IBlLqfDXjHB4) | done | — |
 | R-10 | r18 | `review/t18` | review T-18 (branch `runtime/t18-intend-recover`) — temp reviewer gear-r18 on seat (session ses_e9cd3146cffepZeSJm2b17P1uR) | done | — |
 | R-11 | r14 | `review/t14` | review T-14 (branch `data/t14-send`) — temp reviewer gear-r14 on seat (session ses_e9cd1de4dffeo36eWpI5Gd6LmK) | done | — |
+| R-12 | r19 | `review/t19` | review T-19 (branch `runtime/t19-execute`) — temp reviewer gear-r19 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -95,3 +96,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 T-14 handed in → R-11.
 - 2026-10-22 R-10 pass (P3 stale diff count only). Merged T-18 + review; workspace green. R-10 question (bare op ids are ambiguous across projects): T-4 changes `recover_on_start` to return (project, id) pairs — noted on the T-4 row for its packet.
 - 2026-10-22 R-11 pass (P3s). Merged T-14 + review; thread doc amended to `<seq>`. Decisions: `--to` ⇒ Instruction only, `needs_ack` false in slice 1 → T-24. T-16 rework will meet T-14 in mail.rs imports; the lane resolves when merging origin/dev (17 §8). Data lane ended its turn after a hand-in instead of re-running its inbox → L-26.
+- 2026-10-22 T-19 handed in → R-12.
