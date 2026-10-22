@@ -17,7 +17,6 @@ fn world() -> Store {
 }
 
 #[test]
-#[ignore = "T-59: un-ignored by the captain when T-59 merges"]
 fn onboard_from_queued_to_active() {
     let mut s = world();
     let gen = s.write(|tx| begin_onboard(tx, "p:heat", "w3:p1", "opencode", T0 + 1)).unwrap();
@@ -33,7 +32,6 @@ fn onboard_from_queued_to_active() {
 }
 
 #[test]
-#[ignore = "T-59: un-ignored by the captain when T-59 merges"]
 fn restart_voids_the_old_binding_and_stale_finish_is_refused() {
     let mut s = world();
     s.write(|tx| { begin_onboard(tx, "p:heat", "w3:p1", "opencode", T0)?; finish_onboard(tx, "p:heat", 1, None, T0) }).unwrap();
