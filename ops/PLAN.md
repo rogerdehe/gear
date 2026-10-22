@@ -66,7 +66,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | done | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | rework | — |
 | T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | verifying | — |
-| T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | ready | — |
+| T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | verifying | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
 | R-2 | review | `review/t7` | review T-7 (branch `data/t7-config`) | done | — |
@@ -98,6 +98,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-28 | r33 | `review/t33` | review T-33 (branch `data/t33-store-tasks`) — temp reviewer gear-r33 on seat (session ses_e9c877257ffeehrl85pVJ8vmd7) | done | — |
 | R-29 | r30 | `review/t30` | review T-30 (branch `runtime/t30-cli-home`) — temp reviewer gear-r30 on seat (session ses_e9c873476ffe0YBhVayZdcwiD9) | done | — |
 | R-30 | r32 | `review/t32` | review T-32 (branch `runtime/t32-gear-run`) — temp reviewer gear-r32 on seat | running | — |
+| R-31 | r35 | `review/t35` | review T-35 (branch `runtime/t35-dispatch`) — temp reviewer gear-r35 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -179,3 +180,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 Slice-2 `plan apply` (queue cut) contract on dev: `plan.rs` stub + `plan_apply_contract.rs` (5 ignored). T-36 draft until T-33 merges.
 - 2026-10-22 R-27 pass (2 P3 strictness gaps → T-37). T-31 ignores removed; merged T-31 + review; workspace green.
 - 2026-10-22 R-28 pass: merged T-33 + review, its slice2 tests un-ignored; T-36 ready. R-29 fail: T-30 merges textually but does not compile with T-29 (duplicate test consts) → rework (runtime M-5); hand-in rule now merges dev and builds (L-33). T-32 → R-30.
+- 2026-10-22 T-35 → R-31.
