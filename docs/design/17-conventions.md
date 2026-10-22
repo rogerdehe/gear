@@ -121,7 +121,7 @@ The captain replies by picking an option (`gear reply <id> --resolve -m "<option
 
 Review is asynchronous: the lane has already moved on. The captain fetches the pushed branch and reviews it; a pass merges it, a fail writes follow-ups into the packet (committed and pushed on that task branch) and marks it for rework.
 
-**Writer ≠ reviewer.** Nobody accepts their own work. The reviewer runs on a different model than the writer: the captain reviews when its model differs from the lane's; otherwise the captain routes the review to a seat of another kind.
+**Writer ≠ reviewer, and the captain does not review.** Acceptance and code review are done by a review seat (a long-lived review lane or a temp worker) running a different model from the writer; it writes `ops/reviews/T-<n>.md` (mechanical acceptance, findings P0–P3, verdict, questions). The captain only decides — pass/merge or fail/rework — from that file, looking at code only where the review raises a question. Reviewing 10+ minutes per task would otherwise block the captain all day.
 
 **Review loop discipline:**
 - Read the findings first, count them, then decide. Never announce "clean" before the review output has been read; output present ≠ review finished — confirm the reviewer actually completed.
