@@ -23,6 +23,9 @@ pub struct ApplyResult {
     /// Verdicts settled by this apply, `<task> attempt <n> pass|fail`, in draft order (T-50).
     #[serde(default)]
     pub settled: Vec<String>,
+    /// Staff targets applied (T-55): `park heat`, `hold wire`, `retire prompts`, in draft order.
+    #[serde(default)]
+    pub staffed: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -30,7 +33,15 @@ pub struct ApplyResult {
 /// 1. identity: captain seat (`require_seat` with role Captain, states Active);
 /// 2. `draft.project` = the caller's project, else `BadFormat`;
 /// 3. `draft.base` ≠ current `plan_version` → `StaleVersion`;
-/// 4. non-empty Staff/Review → `BadFormat` (not in this cut); `# Verdicts` (T-50):
+/// 4. non-empty Review → `BadFormat` (not in this cut). `# Staff` (T-55): `park`,
+///    `hold`, `retire` change the named **Lane** seat of this project directly in
+///    the transaction (design/05 step 5) via `SeatState::can_transition`
+///    (Parked / Held / Retiring); `state_reason` records `until=<value>`,
+///    `until-task=<T-n>`, `hold: <reason>` or `retire`; a target already in that
+///    state is skipped (Staff is a target, not a command); an unknown seat, a
+///    non-lane seat or a forbidden transition → `BadFormat`; `temp` lines →
+///    `BadFormat` "not in this cut"; applied lines are listed in `staffed`.
+///    `# Verdicts` (T-50):
 ///    after the queue writes, each line → `tasks::settle` (by_seat = the caller's
 ///    seat) in draft order, in the same transaction — any error aborts the whole
 ///    apply; settled lines are listed in `settled`;
@@ -383,7 +394,7 @@ fn apply_queue(
         by_gen: Some(by_gen),
     })?;
 
-    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled })
+    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled, staffed: Vec::new() })
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
