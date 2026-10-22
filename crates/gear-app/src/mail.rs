@@ -355,5 +355,133 @@ pub fn reply(
     args: &ReplyArgs,
     now: Ts,
 ) -> GearResult<ReplyResult> {
-    todo!("slice1")
+    store.write(|tx| {
+        // Only the captain answers.
+        let (ctx, seat) = require_seat(
+            tx,
+            env,
+            fp,
+            Some(&[SeatRole::Captain]),
+            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+        )?;
+        let captain_id = seat.id.clone();
+
+        let args_key = format!(
+            "{}|{}:{}|reply|ids={:?}|mode={:?}|text={:?}|wait_on={:?}|wait_until={:?}|downgrade={}",
+            ctx.project,
+            ctx.seat,
+            ctx.generation,
+            args.ids,
+            args.mode,
+            args.text,
+            args.wait_on,
+            args.wait_until,
+            args.downgrade
+        );
+
+        let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            // Check every id before writing anything: a rejected id leaves
+            // the other messages of the same call untouched. The check runs
+            // after the replay check, so a repeated request returns the
+            // stored result instead of meeting a closed message.
+            let mut originals: Vec<MessageRow> = Vec::new();
+            for id in &args.ids {
+                let message = tx.get_message(&ctx.project, id)?.ok_or_else(|| {
+                    GearError::new(
+                        ErrorCode::NoTarget,
+                        format!("no message {id} in project {}", ctx.project),
+                    )
+                })?;
+                if message.recipient != captain_id {
+                    return Err(GearError::new(
+                        ErrorCode::Forbidden,
+                        format!(
+                            "message {id} is addressed to {}, not to the captain",
+                            message.recipient
+                        ),
+                    ));
+                }
+                if message.state != MsgState::Open && message.state != MsgState::Waiting {
+                    return Err(GearError::new(
+                        ErrorCode::BadTransition,
+                        format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
+                    ));
+                }
+                originals.push(message);
+            }
+
+            let mut handled: Vec<(String, String)> = Vec::new();
+            let mut replies: Vec<String> = Vec::new();
+            let mut answered: Vec<String> = Vec::new();
+            for original in &originals {
+                let new_state = match args.mode {
+                    ReplyMode::Resolve => MsgState::Resolved,
+                    ReplyMode::Wait => MsgState::Waiting,
+                    ReplyMode::Note => original.state,
+                };
+                if new_state != original.state {
+                    gear_model::state::require_transition(
+                        MsgState::can_transition(original.state, new_state),
+                        "reply",
+                        original.state.as_str(),
+                        new_state.as_str(),
+                    )?;
+                }
+                if args.mode != ReplyMode::Note {
+                    // A note changes nothing but the answer itself.
+                    tx.update_message_state(
+                        &ctx.project,
+                        &original.id,
+                        new_state,
+                        Some(&args.text),
+                        args.wait_on.as_deref(),
+                        args.wait_until,
+                        now,
+                    )?;
+                }
+                handled.push((original.id.clone(), new_state.as_str().to_string()));
+
+                // One answer per sender, in the thread of the message.
+                if !answered.contains(&original.sender) {
+                    answered.push(original.sender.clone());
+                    let answer = NewMessage {
+                        project: ctx.project.clone(),
+                        thread: original.thread.clone(),
+                        task: original.task.clone(),
+                        attempt: original.attempt,
+                        sender: captain_id.clone(),
+                        sender_gen: ctx.generation,
+                        recipient: original.sender.clone(),
+                        kind: MsgKind::Reply,
+                        urgent: false,
+                        body: args.text.clone(),
+                        reply_to: Some(original.id.clone()),
+                        needs_ack: false,
+                        state: MsgState::Info,
+                        created: now,
+                    };
+                    let stored = tx.insert_message(&answer)?;
+                    replies.push(stored.id);
+                }
+            }
+            Ok(serde_json::json!({
+                "handled": handled,
+                "replies": replies,
+            }))
+        })?;
+
+        let (value, replayed) = match outcome {
+            RequestOutcome::Executed(value) => (value, false),
+            RequestOutcome::Replayed(value) => (value, true),
+        };
+        let handled: Vec<(String, String)> =
+            serde_json::from_value(value["handled"].clone()).map_err(|e| {
+                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+            })?;
+        let replies: Vec<String> =
+            serde_json::from_value(value["replies"].clone()).map_err(|e| {
+                GearError::new(ErrorCode::BadFormat, format!("stored reply result is broken: {e}"))
+            })?;
+        Ok(ReplyResult { handled, replies, replayed })
+    })
 }
