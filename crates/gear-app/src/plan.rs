@@ -6,6 +6,7 @@
 use crate::draft::{Draft, Priority, QueueItem, StaffItem};
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
+use gear_model::state::require_transition;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{ContractRow, PlanRow, RequestOutcome, Store, TaskRow, Tx};
 use std::collections::{BTreeMap, BTreeSet};
@@ -360,6 +361,68 @@ fn apply_queue(
         not_mentioned.push(task.id);
     }
 
+    // Staff (T-55): park/hold/retire move a lane seat of this project in this
+    // transaction; a target already reached is skipped.
+    let mut staffed: Vec<String> = Vec::new();
+    for item in &draft.staff {
+        let (lane, verb, target, reason) = match item {
+            StaffItem::Park { lane, until, until_task, .. } => {
+                let reason = match (until, until_task) {
+                    (Some(until), _) => format!("until={until}"),
+                    (_, Some(task)) => format!("until-task={task}"),
+                    _ => {
+                        return Err(bad(
+                            staff_line(item),
+                            "`park` needs `until=` or `until-task=`",
+                        ))
+                    }
+                };
+                (lane, "park", SeatState::Parked, reason)
+            }
+            StaffItem::Hold { lane, reason, .. } => {
+                (lane, "hold", SeatState::Held, format!("hold: {reason}"))
+            }
+            StaffItem::Retire { lane, .. } => {
+                (lane, "retire", SeatState::Retiring, "retire".to_string())
+            }
+            StaffItem::Temp { .. } => {
+                return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"))
+            }
+        };
+        let seat_id = format!("{project}:{lane}");
+        let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
+            bad(staff_line(item), format!("no seat {seat_id} in this project"))
+        })?;
+        if seat.role != SeatRole::Lane {
+            return Err(bad(
+                staff_line(item),
+                format!("seat {seat_id} is a {} seat, staff lines name lanes", seat.role.as_str()),
+            ));
+        }
+        if seat.state == target {
+            // Staff is a target, not a command: already there, nothing to do.
+            continue;
+        }
+        require_transition(
+            SeatState::can_transition(SeatRole::Lane, seat.state, target),
+            "seat",
+            seat.state.as_str(),
+            target.as_str(),
+        )
+        .map_err(|_| {
+            bad(
+                staff_line(item),
+                format!(
+                    "seat {seat_id} cannot go from {} to {}",
+                    seat.state.as_str(),
+                    target.as_str()
+                ),
+            )
+        })?;
+        tx.set_seat_state(&seat_id, target, Some(&reason), now)?;
+        staffed.push(format!("{verb} {lane}"));
+    }
+
     let version = current + 1;
     // Settle the verdicts, after the queue writes and before the plan row:
     // an error aborts the whole apply, so nothing of it is kept.
@@ -394,7 +457,7 @@ fn apply_queue(
         by_gen: Some(by_gen),
     })?;
 
-    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled, staffed: Vec::new() })
+    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled, staffed })
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
@@ -404,20 +467,26 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
 /// Staff and reviews belong to later cuts; a draft that carries them
 /// is rejected whole.
 fn reject_sections(draft: &Draft) -> GearResult<()> {
-    if let Some(item) = draft.staff.first() {
-        let line = match item {
-            StaffItem::Temp { line, .. }
-            | StaffItem::Park { line, .. }
-            | StaffItem::Hold { line, .. }
-            | StaffItem::Retire { line, .. } => *line,
-        };
-        return Err(bad(line, "the `# Staff` section is not supported in this cut"));
+    // Staff targets park/hold/retire are applied (T-55); temp workers are not
+    // in this cut yet.
+    if let Some(item) = draft.staff.iter().find(|item| matches!(item, StaffItem::Temp { .. })) {
+        return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"));
     }
     if let Some(item) = draft.reviews.first() {
         let line = item.line;
         return Err(bad(line, "the `# Review` section is not supported in this cut"));
     }
     Ok(())
+}
+
+/// The draft line of a staff item.
+fn staff_line(item: &StaffItem) -> usize {
+    match item {
+        StaffItem::Temp { line, .. }
+        | StaffItem::Park { line, .. }
+        | StaffItem::Hold { line, .. }
+        | StaffItem::Retire { line, .. } => *line,
+    }
 }
 
 fn priority_str(priority: Priority) -> &'static str {
