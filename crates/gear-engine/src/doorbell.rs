@@ -35,7 +35,14 @@ pub struct DoorbellAction {
 }
 
 /// Ring when: something to show (actionable or unshown), agent idle, no slot
-/// held, and cooldown elapsed since the last settled doorbell.
+/// held, and cooldown elapsed since the last settled doorbell
+/// (`last_settled_at` is None, or `now - last_settled_at >= cooldown_s`).
+///
+/// One action per ringing input, in input order. `covers` = `actionable` in
+/// order, then the `unshown` ids not already in it. Text, exactly:
+/// `GEAR: <n> item(s) waiting for you. Run `gear` to see them.` where n =
+/// covers.len(); when urgent > 0 the first sentence becomes
+/// `GEAR: <n> item(s) waiting for you (<urgent> urgent).` Never message bodies.
 pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<DoorbellAction> {
     todo!("slice1")
 }

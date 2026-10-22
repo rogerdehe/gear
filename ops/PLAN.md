@@ -7,7 +7,7 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 
 - 2026-10-22 Rust; outside-in slices; the captain builds the skeleton (gear-model fully implemented; store/herdr/app/engine/cli as signatures + contract tests); lanes implement.
 - 2026-10-22 Herdr adapter talks to the socket via vendored board-herdr (MIT, from herdr-board).
-- 2026-10-22 Repo `rogerdehe/gear` (private). Branches per 17-conventions: `main` (release), `dev` (integration), task branches `<lane>/t<n>-<slug>` from `dev`; `staging` not used yet.
+- 2026-10-22 Repo `rogerdehe/gear` (private). Branches per 17-conventions: `main` (release), `dev` (integration), task branches `<lane>/t<n>-<slug>` cut by the lane from `dev`, pushed, deleted after merge; `staging` not used yet.
 - 2026-10-22 Worktrees only through `herdr worktree create`; lanes hold one long-lived worktree each; temp workers get their own. No slot pool, no hand-written paths.
 - 2026-10-22 Lanes named by duty: `gear-data` (storage + business rules), `gear-runtime` (Herdr adapter + engine).
 - 2026-10-22 All repo files in English.
@@ -21,15 +21,18 @@ Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/
 
 ## Board
 
-Single writer: the captain (see `ops/CAPTAIN.md`). States follow GEAR `TaskState`. Rows are in dispatch order per lane.
+Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in order; lanes take the first `ready` row (`ops/bin/inbox.sh`). States: `draft → ready → running → verifying → done`, `rework`, `waiting`, `cancelled`.
 
 | Task | Lane | Branch | Content | State | Depends on |
 |---|---|---|---|---|---|
 | T-1 | data | `data/t1-store` | gear-store implementation | ready | — |
-| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready | — |
+| T-7 | data | `data/t7-config` | project config: parse + validate (pure) | ready | — |
 | T-3 | data | `data/t3-app` | gear-app: identity + mail (send/select_batch/reply) + home | draft | T-1 |
-| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + doorbell + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3 |
-| T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop, `--skill` | draft | T-3, T-4 |
+| T-2 | runtime | `runtime/t2-herdr` | gear-herdr: profile, outcome mapping, SocketHerdr incl. worktree calls | ready | — |
+| T-8 | runtime | `runtime/t8-doorbell` | engine doorbell decision (pure) | ready | — |
+| T-9 | runtime | `runtime/t9-skill` | `gear --skill` printing the embedded skill | ready | — |
+| T-4 | runtime | `runtime/t4-engine` | gear-engine: observe + ops + tick; slice1 tests pass | draft | T-1, T-2, T-3, T-8 |
+| T-5 | runtime | `runtime/t5-cli` | gear-cli: slice-1 commands, `gear run` loop | draft | T-3, T-4 |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions) | draft | — |
 
 ## Done
@@ -43,3 +46,4 @@ Single writer: the captain (see `ops/CAPTAIN.md`). States follow GEAR `TaskState
 - 2026-10-22 lanes gear-data (w7:p1) and gear-runtime (w8:p1) running OpenCode, DeepSeek V4.1 Flash / high. Incident: captain typed `export …` into panes that already hosted agents (submitted as a prompt); interrupted, no changes. Restarted both with `--auto -s <session>`; context kept.
 - 2026-10-22 rule: every agent GEAR starts carries the profile's unattended flags (opencode `--auto`); model/effort switched in-agent via `/model` `/effort`.
 - 2026-10-22 both lanes switched to MiniMax-M3.1-Flash (minimax.cn) via /model; /effort verified on DeepSeek (MiniMax has no variants); both /clear-ed (stale context from the export incident removed).
+- 2026-10-22 practice findings: (1) lanes must not idle waiting for review → non-blocking loop (17 §5–§6), rework at the next checklist boundary; (2) task branches are pushed for review and deleted after merge; (3) the M1 queues forced waiting (T-1→T-3, T-2→T-4→T-5) → added contract-first independent tasks T-7 (config), T-8 (doorbell), T-9 (`--skill`), each with captain-written contract tests validated against a throwaway implementation; (4) decomposition rules in 17 §6a + `gear --skill decompose` (method-neutral; BMAD and superpowers mapped).

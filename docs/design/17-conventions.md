@@ -35,8 +35,9 @@ The same word appears in the Herdr sidebar, the agent name, the branch and the G
 | `<lane>/<task-id>-<slug>` | task branch, cut from `dev`, merged back, then deleted | the lane commits |
 | `home/<lane>` | anchor branch of a lane's long-lived worktree; never committed to | — |
 
-- `home/<lane>` exists because git cannot hold both a branch `data` and a branch `data/t1-…`.
-- Lanes never merge, rebase onto shared branches, push, or delete branches. Merging and cleanup are the captain's job (§8).
+- `home/<lane>` exists because git cannot hold both a branch `data` and a branch `data/t1-…`; it only names the worktree and parks it between tasks.
+- **Task branches are pushed.** The lane cuts its task branch from the latest `dev` when it starts the task (the packet names it), pushes it (`git push -u origin <branch>`) and keeps pushing as it commits. Review reads the pushed branch. After the merge into `dev` the captain deletes the branch on the remote and locally (on GitHub, also enable "automatically delete head branches"). The remote therefore only holds `main`, `dev` (`staging`) and branches currently in development or review.
+- Lanes may create, switch and push **their own task branches** only. They never merge, rebase shared branches, push `dev`/`main`/`staging`, force-push, or delete branches. Merging and cleanup are the captain's job (§8).
 - Merges into `dev` always name the base explicitly; nothing reaches `main` except through the milestone gate.
 
 ## 4. Worktrees — always through Herdr
@@ -52,14 +53,17 @@ Herdr creates and removes every worktree; its config decides the path (`<worktre
 - One agent, one worktree; one writer per worktree at a time. Nobody edits in the main checkout.
 - Closing a session, removing a worktree and deleting a branch are three separate acts; uncommitted changes, unmerged commits and evidence are never lost (PRD §9).
 
-## 5. Claiming work
+## 5. Claiming work and not waiting for review
 
-- Work is visible before it starts: a lane only works on a task that GEAR has assigned to it (an attempt exists). Lanes never pick their own work, and never start a second task while one is open.
-- In-flight cap: one open attempt per lane; at most one more queued behind it. Context drift makes a third unreliable.
+- Work is visible before it starts: a lane only works on tasks queued for it on the board (an attempt exists once it starts). Lanes do not invent work.
+- **A lane never idles waiting for review.** After handing a task in (§6.6) it takes the next `ready` task in its own queue at once, without waiting for the captain.
+- In-flight cap per lane: **one task in development + at most two in review.** At the cap the lane stops taking new work and reports it — review is falling behind.
+- Rework comes first, at a safe point: when a task in review comes back with follow-ups, the lane finishes the checklist item it is on, commits and pushes it, switches to the reworked task's branch, does the follow-ups, pushes, hands it in again, and switches back. It does not switch with uncommitted changes and does not stash. If the captain marks the rework `after-current`, the lane finishes its current task first.
 - A lane that drops a task (blocked, out of scope, lost context) says so with `gear send --kind blocked`; the captain reassigns. No silent abandonment, no zombie branches.
 
 ## 6. The task loop (lane side)
 
+0. **Start.** Cut the task branch named in the packet from the latest `dev` (`git fetch origin && git switch -c <branch> origin/dev`), set the packet's `Status: running`, commit, push.
 1. **Orient.** Read the task packet completely, the files it lists, and recent history of the touched area. If the packet says `confirm: scope`, send a short orient brief (`--kind progress`: what you understood, which approach you chose) and wait for the reply. Otherwise proceed — the captain may still interrupt.
 2. **Reproduce before fixing** any bug-shaped task. If you cannot observe the bug, your model is wrong: stop and ask.
 3. **Implement the minimum.** Only files the packet allows. No side refactors; anything noticed in passing goes into the final brief under "out of scope".
@@ -74,7 +78,7 @@ Herdr creates and removes every worktree; its config decides the path (`<worktre
    | schema / migration | migrate up on a real database + the store contract tests |
 
    Bug fix: show it red before, green after. Same failure three times → stop and send `blocked`; do not grind.
-5. **Commit small.** Each commit builds. Subject `<type>(<task-id>): <slug>` (`feat|fix|refactor|test|docs|chore`), ≤ 70 chars; body says why, plus the verification that ran. No `--no-verify`.
+5. **Commit small, check the inbox.** Each commit builds and is pushed. After every finished checklist item, look at your inbox (GEAR: `gear`; manual scaffold: `ops/bin/inbox.sh <lane>`) for rework, answers and the next task. Subject `<type>(<task-id>): <slug>` (`feat|fix|refactor|test|docs|chore`), ≤ 70 chars; body says why, plus the verification that ran. No `--no-verify`.
 6. **Final brief** (`--kind result`), exact headings, nothing padded:
 
    ```
@@ -87,7 +91,18 @@ Herdr creates and removes every worktree; its config decides the path (`<worktre
    Diff: <+/- lines across N files>
    ```
 
-   Then stop. The result is a handoff, not a self-approval.
+   Set `Status: review`, push, then go straight to your next `ready` task (§5). The result is a handoff, not a self-approval.
+
+## 6a. Decomposing work
+
+GEAR does not prescribe a decomposition method (BMAD, superpowers or anything else may produce the raw material); it prescribes what the resulting tasks must satisfy. Full rules and the self-check: `gear --skill decompose`.
+
+1. **Every task merges into `dev` on its own** and leaves `dev` building and green. New code may be dormant (not yet called); a half-broken state may not land.
+2. **A lane's queue never forces waiting.** The first few tasks queued for a lane are mutually independent and each can start from current `dev`, so the lane moves on while earlier tasks are in review.
+3. **Cross-lane dependencies are cut by contract first.** The captain fixes interfaces, signatures and contract tests and merges them into `dev` before the work that implements and the work that uses them; consumers develop against fakes.
+4. **Changes that must land together** are one task, or are sequenced expand → migrate → contract (add the new path, switch callers, then remove the old one in a separate task).
+5. **Unavoidable dependencies are declared** (`depends on`). A task is `ready` only when everything it depends on is merged into `dev`; until then the lane works its other tasks.
+6. **Re-plan continuously.** A lane with no startable task is a planning failure and a review trigger (11: `idle_lanes`, `low_ready`): pull independent work forward, split a task, or add a contract task.
 
 ## 7. Asking for a decision
 
@@ -104,6 +119,8 @@ The captain replies by picking an option (`gear reply <id> --resolve -m "<option
 
 ## 8. Review and merge (captain side)
 
+Review is asynchronous: the lane has already moved on. The captain fetches the pushed branch and reviews it; a pass merges it, a fail writes follow-ups into the packet (committed and pushed on that task branch) and marks it for rework.
+
 **Writer ≠ reviewer.** Nobody accepts their own work. The reviewer runs on a different model than the writer: the captain reviews when its model differs from the lane's; otherwise the captain routes the review to a seat of another kind.
 
 **Review loop discipline:**
@@ -119,11 +136,11 @@ The captain replies by picking an option (`gear reply <id> --resolve -m "<option
 3. Acceptance commands re-run by the captain on the task branch pass; build has zero warnings.
 4. Review converged per the rules above (or was explicitly waived by the user).
 5. No unanswered question on the task.
-6. The branch is up to date with `dev` (fast-forward or clean merge).
+6. The branch merges cleanly into current `dev`. If not, the captain does not resolve it: it sends the task back for the lane to merge `dev` into its branch and resolve, then reviews the delta.
 
-**Merge as one operation:** merge into `dev` → verify the merge commit is on `dev` → delete the task branch → mark the task DONE in the plan. For a temp worker, also `worktree remove` after the merge. Half-cleanup is worse than none.
+**Merge as one operation:** `git fetch` → on `dev`: `git merge --no-ff origin/<branch>` → re-run acceptance on `dev` → push `dev` → delete the branch on the remote and locally → mark the task DONE → mark tasks whose dependencies are now all merged as `ready`. For a temp worker, also `worktree remove` after the merge. Half-cleanup is worse than none.
 
-**Conflicts:** when a merge makes another in-flight branch conflict, the captain does not rebase someone else's branch; it tells the owning lane exactly what to run, and that lane resolves it in its own worktree.
+**Conflicts:** the captain never rebases or resolves someone else's branch; the owning lane merges `dev` into its branch and resolves in its own worktree.
 
 **Shared append-only files** (registries, route tables, migration lists, the errors table): lanes only append their own line; never reorder. Conflicts there resolve mechanically by keeping both sides.
 

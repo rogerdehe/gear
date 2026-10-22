@@ -1,27 +1,36 @@
 # Lane conventions (every lane reads this first)
 
-This repo follows GEAR's own default working conventions: `docs/design/17-conventions.md`. Read it once. This file adds what applies while GEAR is not yet running itself (you report by editing your task packet instead of `gear send`).
+This repo follows GEAR's own default working conventions: `docs/design/17-conventions.md` (read §3, §5, §6, §7 at least). This file adds what applies while GEAR is not yet running itself: you see your inbox with `ops/bin/inbox.sh` instead of `gear`, and you report by editing your task packet instead of `gear send`.
 
 ## Who you are
 
-- You are a long-lived lane with one duty (below). The captain (Claude) splits work, fixes interfaces, reviews and merges.
-- Each task has a packet: `ops/tasks/T-<n>.md`. Read all of it before touching code.
-- You work only in your own worktree, on the task branch the captain created for you. Do not switch branches; do not touch other worktrees or the main checkout.
+- You are a long-lived lane with one duty. The captain (Claude) plans, fixes interfaces, reviews and merges.
+- You work only in your own worktree. Never touch other worktrees or the main checkout.
 
 | Lane | Agent name | Duty | Owns | Worktree |
 |---|---|---|---|---|
-| data | `gear-data` | storage and business rules | `crates/gear-store`, `crates/gear-app` (later: plan, tasks) | `/Volumes/Data/.herdr-worktrees/gear/home-data` |
-| runtime | `gear-runtime` | Herdr adapter and engine | `crates/gear-herdr`, `crates/gear-engine`, `gear run` | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` |
+| data | `gear-data` | storage and business rules | `crates/gear-store`, `crates/gear-app` | `/Volumes/Data/.herdr-worktrees/gear/home-data` |
+| runtime | `gear-runtime` | Herdr adapter, engine, CLI | `crates/gear-herdr`, `crates/gear-engine`, `crates/gear-cli` | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` |
+
+## Your loop — never wait for review
+
+1. Run `ops/bin/inbox.sh <lane>`. Order of work: **rework** first, then **messages**, then the **next** ready task.
+2. Start a task: `git fetch origin && git switch -c <branch> origin/dev` (the branch is named in the packet's header), set `Status: running` in the packet, commit, `git push -u origin <branch>`.
+3. Work the packet's `## Tasks` checklist top to bottom. Tick a box only when its tests pass and the build is warning-free; then add one line under "Progress notes", update "Files", commit, push, and **run the inbox again**.
+4. Done (all boxes ticked, acceptance passes): fill "Result", set `Status: review`, commit, push. **Do not wait** — go to step 1 and take the next task.
+5. Rework arrives while you are on another task: finish the checklist item you are on, commit and push it, `git switch <reworked branch>`, do its "Review follow-ups" first, push, set `Status: review` again, push, then switch back and continue. Never switch with uncommitted changes; never stash. If the rework is marked `after-current`, finish your current task first.
+6. Need a decision: write it under "Progress notes" as Question / Options / Context / Default (17 §7), set `Status: question` (or `blocked`), commit, push. Then continue with another ready task if there is one; if not, end your turn.
+7. In-flight cap: 1 task in development + 2 in review. At the cap, or with no ready task left, end your turn — the captain is woken when you stop.
 
 ## Hard rules
 
-1. **English only** in every file you write: code, comments, docs, reports, commit messages.
-2. **Edit only the files the packet lists under "Allowed changes".** Contract tests (`crates/*/tests/*.rs`), `gear-model`, and public signatures are off limits. If a signature or test looks wrong, say so in your report and stop.
+1. **English only** in every file you write: code, comments, docs, packets, commit messages.
+2. **Edit only the files the packet lists under "Allowed changes"** (plus your own packet's Status line, checkboxes and Lane record). Contract tests (`crates/*/tests/*.rs`), `gear-model`, and public signatures are off limits. If a signature or test looks wrong, ask (step 6); do not change it.
 3. **No public API changes**: no added/removed `pub` items, no signature changes. Helpers are private.
 4. **No new dependencies** (Cargo.toml untouched) unless the packet allows it.
-5. **No external side effects**: no `git push`, no merge/rebase, no branch deletion, no Herdr commands (`herdr agent …`, `herdr pane …`, `herdr worktree …`), no deleting directories, no background processes.
-6. **Small commits**: commit each compiling step. Subject `<type>(T-<n>): <slug>` (≤ 70 chars), body says why and what verification ran.
-7. Same failure three times → stop and report `blocked`. Do not grind.
+5. **Git:** you may create, switch and push your own task branches only. Never merge, rebase shared branches, push `dev`/`main`, force-push, or delete branches.
+6. **No other side effects**: no Herdr commands, no deleting directories, no background processes.
+7. Commit subject `<type>(T-<n>): <slug>` (≤ 70 chars); body says why and what verification ran. Same failure three times → ask, do not grind.
 
 ## Acceptance (the packet names the crate)
 
@@ -32,21 +41,7 @@ cargo test -p <crate>
 
 Zero warnings, zero errors, every listed test passes.
 
-## Working a task
-
-- Your task list is the rows for your lane in `ops/PLAN.md` (in order); you only ever work the one the captain sent you.
-- Your dev list is the `## Tasks` checklist in the packet. Work it top to bottom; if `## Review follow-ups` has open items, do those first.
-- Tick a box only when its tests pass and the build is warning-free. After each box: add one line under "Progress notes", update "Files", commit.
-- When you start, set `Status: running` and commit.
-
-## Reporting
-
-You never message the captain. You report by editing your packet and ending your turn — the captain is woken when you stop.
-
-- **Done:** every box ticked, acceptance passes → fill "Result" (format below), set `Status: review`, commit, end your turn.
-- **Stuck / need a decision:** write the question under "Progress notes" in the 17 §7 shape (Question / Options / Context / Default), set `Status: blocked` or `Status: question`, commit, end your turn.
-
-Result format (exact headings; see 17 §6):
+## Result format (exact headings; 17 §6)
 
 ```
 Scope: T-<n> — <what shipped, one line>
