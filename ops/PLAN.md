@@ -41,7 +41,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-17 | data | `data/t17-home` | app: home page + view record | done | — |
 | T-31 | data | `data/t31-draft-parse` | slice 2: plan draft parser (pure; types + contract by captain) | done | — |
 | T-33 | data | `data/t33-store-tasks` | slice 2: store plans, tasks, contracts (types + contract by captain) | done | — |
-| T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | ready | — |
+| T-34 | data | `data/t34-store-attempts` | slice 2: store attempts, verdicts (types + contract by captain) | verifying | — |
 | T-36 | data | `data/t36-plan-apply-queue` | slice 2: `plan apply` queue part (stub + contract by captain) | ready | — |
 | T-37 | data | `data/t37-draft-strict` | draft parser: two strictness gaps (from R-27) | ready | — |
 | T-3 | data | — | split into T-13..T-17 | cancelled | — |
@@ -65,7 +65,7 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | T-4 | runtime | `runtime/t4-tick` | engine: tick wiring; slice1_messaging passes; `recover_on_start` returns project-qualified ids (R-10 question) | done | — |
 | T-29 | runtime | `runtime/t29-cli-send-reply` | cli: gear send / gear reply wiring | done | — |
 | T-30 | runtime | `runtime/t30-cli-home` | cli: `gear` home page wiring | verifying | — |
-| T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | verifying | — |
+| T-32 | runtime | `runtime/t32-gear-run` | cli: `gear run` engine loop (lock, recover, tick) | done | — |
 | T-35 | runtime | `runtime/t35-dispatch` | slice 2: engine dispatch decision (pure; types + contract by captain) | verifying | — |
 | T-5 | runtime | — | split into T-28, T-29, T-30, T-32 | cancelled | — |
 | R-1 | review | `review/t1` | review T-1 (branch `data/t1-store`) | done | — |
@@ -97,8 +97,9 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 | R-27 | r31 | `review/t31` | review T-31 (branch `data/t31-draft-parse`) — temp reviewer gear-r31 on seat (session ses_e9c8a6b70ffeh5sqWBqyBMu4L0) | done | — |
 | R-28 | r33 | `review/t33` | review T-33 (branch `data/t33-store-tasks`) — temp reviewer gear-r33 on seat (session ses_e9c877257ffeehrl85pVJ8vmd7) | done | — |
 | R-29 | r30 | `review/t30` | review T-30 (branch `runtime/t30-cli-home`) — temp reviewer gear-r30 on seat (session ses_e9c873476ffe0YBhVayZdcwiD9) | running | — |
-| R-30 | r32 | `review/t32` | review T-32 (branch `runtime/t32-gear-run`) — temp reviewer gear-r32 on seat | running | — |
+| R-30 | r32 | `review/t32` | review T-32 (branch `runtime/t32-gear-run`) — temp reviewer gear-r32 on seat (session ses_e9c7f3958ffeScASFffzXSnlxp) | done | — |
 | R-31 | r35 | `review/t35` | review T-35 (branch `runtime/t35-dispatch`) — temp reviewer gear-r35 on seat | running | — |
+| R-32 | r34 | `review/t34` | review T-34 (branch `data/t34-store-attempts`) — temp reviewer gear-r34 on seat | running | — |
 | T-6 | captain | — | skills/gear/SKILL.md v1 (includes 17-conventions); fix `--skill` help text to served topics (R-5 question) | draft | — |
 
 ## Done
@@ -182,3 +183,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-28 pass: merged T-33 + review, its slice2 tests un-ignored; T-36 ready. R-29 fail: T-30 merges textually but does not compile with T-29 (duplicate test consts) → rework (runtime M-5); hand-in rule now merges dev and builds (L-33). T-32 → R-30.
 - 2026-10-22 T-35 → R-31.
 - 2026-10-22 T-30 rework → R-29 round 2.
+- 2026-10-22 R-30 pass (P3s). Merged T-32 + review; MSRV bumped to 1.89 (File::try_lock; R-30 question). T-34 → R-32.
