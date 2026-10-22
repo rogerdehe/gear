@@ -1,0 +1,23 @@
+# Lessons from running GEAR by hand
+
+While GEAR cannot run itself, its captain (Claude) runs the process manually with real lanes. Every mistake made there is one a future captain — another model, another team — will also make. Each entry names the mistake, why it happens, and the GEAR rule or mechanism that prevents it. A lesson is closed only when that rule/mechanism exists (doc, skill, script now; engine later).
+
+| # | Mistake | Why it happens | Prevention in GEAR |
+|---|---|---|---|
+| L-1 | Typed a shell `export` into panes that already hosted agents; it was submitted as a prompt and both agents started working on it | Assumed a pane's occupant instead of looking | SOP (`agent:<kind>` "Before anything"): read the occupant first. Engine: `pane_run` only into a pane observed as a plain shell (design/03) |
+| L-2 | Started agents without the CLI's auto-approve flag | Did not know the flag was essential | Profile `unattended_args` is mandatory; a profile without it is never verified (design/04) |
+| L-3 | Started an agent and would have dispatched before choosing its model | "Agent started" felt like "agent ready" | Onboarding = start → choose model for the role → `/model` → check status bar → dispatch (SOP, 17 §8 model rule). OpenCode resumes the last-used model, not the config |
+| L-4 | Created worktrees with plain git at invented paths | Did not check what Herdr provides | Worktrees only via Herdr; paths from Herdr config (17 §4) |
+| L-5 | Gave every task its own worktree for long-lived lanes | Did not separate lane vs temp | Lanes hold one worktree for life; only temps get one per task (17 §4) |
+| L-6 | Named lanes `lane-a`/`lane-b` | No naming rule | Duty first; names `<project>-<duty>`; temps `<project>-<task>` (17 §1–§2) |
+| L-7 | Cut tasks of 40–90 min / 1000-line diffs | Planned like BMAD stories | Size rule ≤ 30 min, ≤ ~300 lines, ≤ 3 checklist items (decompose skill) |
+| L-8 | Queues forced lanes to wait for review (T-1 → T-3) | Planned sequential layers | Each lane's first ready tasks independent; contract first across lanes; `lowready` trigger (17 §6a) |
+| L-9 | Captain did acceptance + code review itself | Old rule "captain reviews" | Reviews by temp reviewers; captain only decides (17 §8) |
+| L-10 | Doorbell rang once for an idle lane; captain got pulled into other events and forgot it for ~15 min | Single-shot notification + captain attention | Doorbell re-rings while a lane with work is stopped or its queue is short; silent only on standby. Captain wake checklist: idle/low-ready first, then the triggering event (ops/CAPTAIN.md step 0). Engine: review triggers `idle_lanes`, `low_ready` (design/11) |
+| L-11 | Marked T-3 `ready` without a packet | Board and packets edited separately | `gear plan apply` refuses `ready` without a packet and with an unmet size/dependency rule |
+| L-12 | Made the reviewer a long-lived lane that would need `/clear` before each review | Chose convenience over role fit | Lane vs temp rule: clean-per-task work is temp, pushed to a fresh session; no "clear before dispatch" lanes (17 §8a) |
+| L-13 | Treated Herdr `done` as "agent finished" when the provider quota had run out | Status ≠ outcome | Always read the screen on stop; quota markers in the profile (SOP pitfalls) |
+| L-14 | A watcher event fired on every push of a reviewed branch | Keyed events on commit sha | Events key on status changes (ops/bin/watch.sh) |
+| L-15 | Captain asked the user to approve fixes for problems the user had pointed out | Over-cautious after an earlier rebuke | Captain decides within the conventions; asks only for user-owned decisions (release, money, scope, destructive acts on others' things) — captain skill |
+| L-16 | Reviewer skeleton signature lacked an input it needed (`reconcile` without profiles) | Signatures written before the call sites | Contract-first tasks include a throwaway implementation that exercises the signature before lanes get it |
+| L-17 | Spawned two research subagents for a few files and made the user wait | Delegation reflex | Captain reads small material itself; delegates only large mechanical work |
