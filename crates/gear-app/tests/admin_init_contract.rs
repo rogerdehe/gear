@@ -42,7 +42,6 @@ fn admin() -> Env {
 }
 
 #[test]
-#[ignore = "T-57: un-ignored by the captain when T-57 merges"]
 fn init_registers_project_and_queued_seats() {
     let mut s = Store::open_in_memory().unwrap();
     let r = init(&mut s, &admin(), CONFIG, T0).unwrap();
@@ -60,7 +59,6 @@ fn init_registers_project_and_queued_seats() {
 }
 
 #[test]
-#[ignore = "T-57: un-ignored by the captain when T-57 merges"]
 fn only_the_user_and_only_valid_new_configs() {
     let mut s = Store::open_in_memory().unwrap();
     let agent = Env { ctx: Some(GearCtx { project: "harbor".into(), seat: "heat".into(), generation: 1 }), pane_id: None, admin: true };
