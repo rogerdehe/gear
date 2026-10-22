@@ -259,7 +259,92 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
 }
 
 fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult<()> {
-    todo!("slice1: identity::observe (SocketHerdr) -> home::build -> print -> home::record_view")
+    reject_slice2(show, diff, all)?;
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    // The socket is HERDR_SOCKET_PATH, else the default session socket (04).
+    let socket = match std::env::var_os("HERDR_SOCKET_PATH") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+            home.join(".config/herdr/herdr.sock")
+        }
+    };
+    let mut herdr = gear_herdr::SocketHerdr::connect(&socket).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::NotRegistered,
+            format!("cannot reach herdr at {}: {}", socket.display(), e.0),
+        )
+    })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    run_home(&mut store, &env, &mut herdr, now, json, &mut std::io::stdout())
+}
+
+/// The `--show`/`--diff`/`--all` views are slice 2: reject them by name
+/// instead of printing a page that silently ignores them.
+fn reject_slice2(show: Option<&str>, diff: bool, all: bool) -> GearResult<()> {
+    for (flag, given) in [("--show", show.is_some()), ("--diff", diff), ("--all", all)] {
+        if given {
+            return Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("{flag} is not supported in slice 1"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `gear` home page over injected state: build it, print it, and only
+/// then record the view — a page the caller never saw is not a view
+/// (design/13).
+fn run_home(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    now: i64,
+    json: bool,
+    out: &mut dyn std::io::Write,
+) -> GearResult<()> {
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let home = gear_app::home::build(store, env, fp.as_ref(), now)?;
+    if json {
+        let doc = serde_json::json!({
+            "text": &home.text,
+            "view": {
+                "project": &home.view.project,
+                "seat": &home.view.seat,
+                "generation": home.view.generation,
+                "ts": home.view.ts,
+                "shown_msgs": &home.view.shown_msgs,
+                "shown_ops": &home.view.shown_ops,
+                "shown_task": &home.view.shown_task,
+                "shown_attempt": &home.view.shown_attempt,
+                "shown_contract": &home.view.shown_contract,
+            }
+        });
+        writeln!(out, "{}", serde_json::to_string(&doc).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot serialize the home page: {e}"),
+            )
+        })?)
+        .map_err(output_error)?;
+    } else {
+        writeln!(out, "{}", home.text).map_err(output_error)?;
+    }
+    out.flush().map_err(output_error)?;
+    gear_app::home::record_view(store, &home.view)
+}
+
+/// A page that could not be printed is reported, and records no view.
+fn output_error(e: std::io::Error) -> GearError {
+    GearError::new(
+        gear_model::ErrorCode::BadFormat,
+        format!("cannot write the home page: {e}"),
+    )
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
@@ -301,6 +386,10 @@ fn print_skill(topic: &str) -> GearResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::AgentStatus;
+    use gear_model::{GearCtx, MsgKind, MsgState, SeatRole};
+    use gear_store::{testing, Store};
     use std::collections::BTreeMap;
 
     /// A variable lookup over a fixed map (production reads the process env).
@@ -356,6 +445,117 @@ mod tests {
         };
         assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
         assert!(err.detail.contains("GEAR_DB"), "{}", err.detail);
+    }
+
+    // --- T-30: the home page ---
+
+    const T0: i64 = 1_800_000_000;
+    const CAP_PANE: &str = "w1:p1";
+    const LANE_PANE: &str = "w1:p2";
+
+    /// A writer that always fails, standing in for a broken stdout.
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Project `p` with an active captain and lane `heat` (both in FakeHerdr).
+    fn home_world() -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    fn home_env(seat: &str, pane: &str) -> gear_app::Env {
+        gear_app::Env {
+            ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
+            pane_id: Some(pane.into()),
+            admin: false,
+        }
+    }
+
+    /// An unshown Reply for the lane (`messages_to_since` picks reply/instruction).
+    fn unshown_reply(store: &mut Store) {
+        store
+            .write(|tx| {
+                tx.insert_message(&gear_store::NewMessage {
+                    project: "p".into(),
+                    thread: "T-1:1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "p:captain".into(),
+                    sender_gen: 1,
+                    recipient: "p:heat".into(),
+                    kind: MsgKind::Reply,
+                    urgent: false,
+                    body: "Use v2".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Info,
+                    created: T0 + 1,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn home_prints_and_records_view() {
+        let (mut store, mut herdr) = home_world();
+        unshown_reply(&mut store);
+
+        let mut out: Vec<u8> = Vec::new();
+        run_home(&mut store, &home_env("heat", LANE_PANE), &mut herdr, T0 + 2, false, &mut out).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("seat p:heat"), "{text}");
+        assert!(text.contains("Use v2"), "{text}");
+        let views = store.read(|tx| tx.views_since("p:heat", 1, 0)).unwrap();
+        assert_eq!(views.len(), 1, "the page was printed, so the view is recorded");
+        assert_eq!(views[0].shown_msgs, vec!["M-1".to_string()]);
+    }
+
+    #[test]
+    fn failed_write_records_no_view() {
+        let (mut store, mut herdr) = home_world();
+        unshown_reply(&mut store);
+
+        let result =
+            run_home(&mut store, &home_env("heat", LANE_PANE), &mut herdr, T0 + 2, false, &mut FailingWriter);
+
+        assert!(result.is_err(), "a failed write is reported");
+        let views = store.read(|tx| tx.views_since("p:heat", 1, 0)).unwrap();
+        assert!(views.is_empty(), "a page that was not printed is not a view");
+    }
+
+    #[test]
+    fn slice2_flags_are_bad_format() {
+        for (flag, rejected) in [
+            ("--show", reject_slice2(Some("M-1"), false, false)),
+            ("--diff", reject_slice2(None, true, false)),
+            ("--all", reject_slice2(None, false, true)),
+        ] {
+            let err = rejected.unwrap_err();
+            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
+            assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
+        }
+        assert!(reject_slice2(None, false, false).is_ok());
     }
 
     #[test]
