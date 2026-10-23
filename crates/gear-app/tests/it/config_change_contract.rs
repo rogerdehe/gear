@@ -50,6 +50,7 @@ profile = "codex"
 [models]
 lanes = [{lane_models}]
 review = ["gpt-6.1-sol"]
+on_quota = {{ lanes = "wait", review = "wait" }}
 "#
     )
 }
