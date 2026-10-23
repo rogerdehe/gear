@@ -14,5 +14,7 @@ gear-store = { workspace = true }
 gear-herdr = { workspace = true }
 gear-app = { workspace = true }
 gear-engine = { workspace = true }
+gear-board = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
+libc = { workspace = true }

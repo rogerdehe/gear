@@ -1,102 +1,102 @@
-# Orca 的项目编排能力与可借鉴的故障防护
+# Orca's Project Orchestration Capabilities and Failure Safeguards Worth Borrowing
 
-研究目的：学习 Orca 已经实现的工作组织与故障处理，减少重复踩坑。本文不推荐用户迁移到 Orca，也不把其 GUI、运行时或组织约定直接当成我们的需求。
+Research purpose: learn the work organization and failure handling Orca has already implemented, to avoid repeating the same mistakes. This document does not recommend that the user migrate to Orca, nor does it treat Orca's GUI, runtime, or organizational conventions directly as our requirements.
 
-固定来源：`stablyai/orca@76f9978880752f2b3ed63bb8c2698b8a7236440d`。本次读取官方仓库的协调指南、核心源码、看板源码及回归测试断言；未运行 Orca 应用、未安装其完整工具链、未执行其上游测试。源码版本、已取文件及校验值见 [orca-sources.json](orca-sources.json)。这里的“已确认”指实现/合同存在，不能解读为生产实测通过。此前只看 README 不足以完成用户要求，本次补查的是遗漏的 orchestration 层。
+Pinned source: `stablyai/orca@76f9978880752f2b3ed63bb8c2698b8a7236440d`. This pass read the official repository's coordination guide, core source, kanban source, and regression test assertions; it did not run the Orca application, did not install its full toolchain, and did not execute its upstream tests. The source version, fetched files, and checksums are in [orca-sources.json](orca-sources.json). "Confirmed" here means the implementation/contract exists; it must not be read as having passed production testing. Previously reading only the README was not enough to satisfy the user's request; this pass fills in the orchestration layer that had been missed.
 
-**1. 回答用户的三个直接问题**
+**1. Answers to the user's three direct questions**
 
-| 问题 | 结论 | 实际依据与边界 |
+| Question | Conclusion | Actual basis and limits |
 |---|---|---|
-| Orca 有没有看板？ | 有，而且至少有两类不同看板 | Agent 看板按 Needs You / Working / Done / Idle 展示快照；Workspace 看板支持状态列、移动、排序和可选 Linear 状态同步。不能把这两种 UI 状态当作 Task-DAG 验收结果 |
-| Orca 有没有派活？ | 有结构化编排 | Run、Task、Dispatch、worker-start、依赖、ready 查询、决策 gate、消息与显式结果；并非只向终端发送文字 |
-| 是否处理 Agent 停止、提醒和恢复？ | 有明确的监督/恢复机制 | 分离 PTY/Agent 存活、提示交付、worker_done、失联未知与清理归属；协调 loop 负责持续检查，进程退出可向 Run 收件箱升级并唤醒等待者。没有证据可把它概括为“后台会无条件让任意 Agent 永远继续” |
+| Does Orca have a kanban board? | Yes, and at least two different kinds | The Agent board shows snapshots grouped as Needs You / Working / Done / Idle; the Workspace board supports status columns, moving, ordering, and optional Linear status sync. Neither of these UI states may be treated as a Task-DAG acceptance result |
+| Does Orca dispatch work? | Yes, with structured orchestration | Run, Task, Dispatch, worker-start, dependencies, ready queries, decision gates, messages, and explicit results; it is not just sending text to a terminal |
+| Does it handle Agent stopping, reminders, and recovery? | It has explicit supervision/recovery mechanisms | Separate PTY/Agent liveness, prompt delivery, worker_done, lost-contact-unknown, and cleanup ownership; the coordination loop is responsible for continuous checking, and process exit can be escalated to the Run inbox and wake waiters. There is no evidence that would let it be summarized as "the background will unconditionally make any Agent continue forever" |
 
-**2. 实际组织模型**
+**2. The actual organizational model**
 
-Orca 的编排指南把三个对象分开：Run 是持久命名空间和 coordinator 收件箱；Task 是工作；Dispatch 是一项工作的一次权威执行尝试。Run 本身不负责排程或放置 worker。
+Orca's orchestration guide separates three objects: a Run is a persistent namespace and coordinator inbox; a Task is work; a Dispatch is one authoritative execution attempt of a piece of work. The Run itself is not responsible for scheduling or placing workers.
 
-协调者先创建独立任务波次，记录真实依赖，再启动 worker。支持 `task-list --ready` 找可执行任务，`worker-start --task` 启动已有任务，重试使用同一 Task 和 `--retry-of` 指向原尝试。完成报告必须带当前 Task/Dispatch 身份和明确 succeeded/failed 结果。
+The coordinator first creates an independent wave of tasks, records the real dependencies, then starts workers. It supports `task-list --ready` to find executable tasks and `worker-start --task` to start an existing task; a retry uses the same Task with `--retry-of` pointing at the original attempt. A completion report must carry the current Task/Dispatch identity and an explicit succeeded/failed result.
 
-一个有效 worker_done 会结算 Task 与 Dispatch；因此“结算是由谁报告的”和“是否验证了工作内容”需要分别判断。我们的产品要求在完成声明后有对应验收/审核证据，不能直接把一条成功声明当作最终交付。
+A valid worker_done settles both the Task and the Dispatch; therefore "who reported the settlement" and "whether the work content was verified" must be judged separately. Our product requires corresponding acceptance/review evidence after a completion claim; a single success claim cannot be taken directly as final delivery.
 
-[协调合同](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration.md)、[DAG 与复用](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/coordinator-loop.md)
+[Coordination contract](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration.md), [DAG and reuse](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/coordinator-loop.md)
 
-**3. 看板究竟在管什么**
+**3. What the kanban boards actually manage**
 
-`AgentKanbanBoard.tsx` 从 DashboardSnapshot 分组，包含 attention、working、done、idle 四列，按状态变化时间排序，可以打开对应终端。它表达 Agent 当前状态与需要关注的事项。
+`AgentKanbanBoard.tsx` groups from the DashboardSnapshot into four columns: attention, working, done, idle, sorted by status-change time, and can open the corresponding terminal. It expresses the Agent's current state and items needing attention.
 
-工作区看板是另一个表面。`use-workspace-kanban-status-actions.ts` 管理状态名称、图标、颜色、列顺序，以及删除状态后的工作区归属；更新 worktree 元数据时带 executionHostId。`WorkspaceKanbanDrawer.task-status-sync.test.tsx` 对拖动/菜单变更后的 Linear 同步有断言，同时明确“只改手工顺序、没有改状态”不触发状态同步。
+The workspace board is a different surface. `use-workspace-kanban-status-actions.ts` manages status names, icons, colors, column order, and which workspace items belong to after a status is deleted; it carries executionHostId when updating worktree metadata. `WorkspaceKanbanDrawer.task-status-sync.test.tsx` has assertions on Linear sync after drag/menu changes, and also makes explicit that "only changing manual order, without changing status" does not trigger status sync.
 
-因此可借鉴：从真实快照投影 UI；保留执行主机身份；区分看板操作的含义；同步失败需要显示。**本次没有证明其工作区卡片排序就是 orchestration 的实际任务派发优先级，不能宣称现成功能已经覆盖用户需要的每 Agent 后续任务队列。**
+So what can be borrowed: project the UI from real snapshots; preserve execution host identity; distinguish what a board operation means; make sync failures visible. **This pass did not prove that its workspace card ordering is the actual task dispatch priority for orchestration; we cannot claim that an existing feature already covers the per-Agent follow-up task queue the user needs.**
 
-[Agent 看板源码](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/dashboard-popout/AgentKanbanBoard.tsx)、[工作区动作](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/use-workspace-kanban-status-actions.ts)、[同步测试](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/WorkspaceKanbanDrawer.task-status-sync.test.tsx)
+[Agent kanban source](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/dashboard-popout/AgentKanbanBoard.tsx), [Workspace actions](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/use-workspace-kanban-status-actions.ts), [Sync tests](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/renderer/src/components/sidebar/WorkspaceKanbanDrawer.task-status-sync.test.tsx)
 
-**4. 已编码的故障防护及我们的要求映射**
+**4. Encoded failure safeguards and their mapping to our requirements**
 
-以下是明确可读到的合同、实现或测试场景。有回归测试不代表我们知道每项历史事故的完整经过，因此不把所有防护都编造成“线上发生过的事故”。
+The following are contracts, implementations, or test scenarios that can be read explicitly. Having a regression test does not mean we know the full history of each incident, so we do not fabricate every safeguard into "an incident that happened in production".
 
-| 编号 | 故障模式 | Orca 的处理 | 纳入 PRD |
+| ID | Failure mode | Orca's handling | Into PRD |
 |---|---|---|---|
-| O-01 | 两个派发者同时认领同一任务/终端 | Task/Dispatch 事务和占用检查，败于竞争的操作回滚/拒绝 | FR-02/04：唯一写入尝试，原子派发 |
-| O-02 | 查询依赖时未完成，插入任务时依赖已完成 | 创建与状态核对测试覆盖这个竞态；失败/blocked 的依赖不能解锁下游 | FR-04：真实就绪条件，避免永远卡在 pending |
-| O-03 | 提示已粘贴，但没观察到新回合启动 | 标为 dispatched-unobserved；不重新粘贴、不把任务放回 ready；迟到报告仍可正确结算 | FR-05：交付不确定不等于没交付 |
-| O-04 | 收到消息后处理者崩溃 | 持久 Delivery 按 FIFO 重放，处理后才 ack；类型过滤只决定何时唤醒，不允许跳过旧消息 | FR-07/12：消息不丢，处理可恢复 |
-| O-05 | 旧 worker 恢复，试图确认新 worker 的消息 | 接管增加 consumer generation，旧消费者收到 consumer_fenced，新消费者获得未读消息 | FR-03/12：防止旧会话越权和消息被误吞 |
-| O-06 | 启动失败，每次重试又创建一个活进程 | 跨 retry-of 计算启动失败，第三次熔断并拒绝第四次；worker 自己的业务失败不按同一计数处理 | FR-05：区分启动失败和任务失败，设置恢复预算 |
-| O-07 | PTY 还活着，Agent 实际已死或停住 | fleet liveness 与 worker-show 的 PTY observation 分层，不能以终端存活代替执行者存活 | FR-05/06：多层状态与证据来源 |
-| O-08 | worker 退出，协调者仍在等待 | 退出升级写入所属 Run mailbox，测试覆盖唤醒 check --wait、仅通知正确 Run，以及 coordinator 尚未绑定的情形 | FR-07/12：退出不能只留日志，要有待处理事项 |
-| O-09 | 遥控端失联就开始在本地清理/重启 | execution host 拥有实际事实；失联为 unverifiable；操作按 Dispatch 路由，不推测远端 terminal handle | FR-12：未知不等于死亡，不跨主机误操作 |
-| O-10 | 释放旧任务终端时，它已经被复用或用户接管 | release 检查结算、所有权、进程 incarnation 与归档；不清理 pre-existing、setup、coordinator、active、user-taken-over 终端 | FR-10：清理必须基于资源归属，不按名字匹配 |
-| O-11 | 删除 worktree 顺便删掉未合入 commit | 测试要求安全 branch -d；未合入时保留分支及 head，不升级成 branch -D | FR-02：会话、目录、分支分别回收 |
-| O-12 | 请求超时后再调用，造成重复 mutation | request ID 与 request-show 恢复已完成/pending 状态；absent 也不自动证明从未执行 | FR-05/12：重试必须核对操作回执 |
+| O-01 | Two dispatchers claim the same task/terminal at the same time | Task/Dispatch transactions and occupancy checks; the operation that loses the race is rolled back/rejected | FR-02/04: single write attempt, atomic dispatch |
+| O-02 | Dependency incomplete at query time, but already complete when the task is inserted | Creation and status-reconciliation tests cover this race; failed/blocked dependencies cannot unlock downstream | FR-04: real readiness conditions, avoid being stuck in pending forever |
+| O-03 | Prompt was pasted, but no new turn start was observed | Marked dispatched-unobserved; no re-paste, task not put back to ready; a late report can still settle correctly | FR-05: uncertain delivery is not the same as no delivery |
+| O-04 | Handler crashes after receiving a message | Persistent Delivery replays FIFO, ack only after processing; type filtering only decides when to wake, it does not allow skipping old messages | FR-07/12: messages not lost, processing recoverable |
+| O-05 | Old worker recovers and tries to ack the new worker's messages | Takeover increments consumer generation; old consumer receives consumer_fenced, new consumer gets unread messages | FR-03/12: prevent old sessions overstepping authority and messages being wrongly swallowed |
+| O-06 | Start fails, and each retry creates another live process | Start failures counted across retry-of; circuit breaks on the third and rejects the fourth; the worker's own business failures are not counted the same way | FR-05: distinguish start failure from task failure, set a recovery budget |
+| O-07 | PTY still alive, but the Agent is actually dead or stalled | Fleet liveness and worker-show's PTY observation are layered; terminal liveness cannot substitute for executor liveness | FR-05/06: multi-layer state and evidence sources |
+| O-08 | Worker exits while the coordinator is still waiting | Exit escalation written into the owning Run mailbox; tests cover waking check --wait, notifying only the correct Run, and the case where the coordinator is not yet bound | FR-07/12: an exit cannot just leave a log, it must produce a pending item |
+| O-09 | Remote end loses contact and local cleanup/restart begins | The execution host owns the actual facts; lost contact is unverifiable; operations are routed by Dispatch, no guessing remote terminal handles | FR-12: unknown is not dead, no cross-host misoperation |
+| O-10 | When releasing an old task's terminal, it has already been reused or taken over by the user | Release checks settlement, ownership, process incarnation, and archival; does not clean pre-existing, setup, coordinator, active, or user-taken-over terminals | FR-10: cleanup must be based on resource ownership, not name matching |
+| O-11 | Deleting a worktree also deletes unmerged commits | Tests require safe branch -d; when unmerged, keep the branch and head, do not escalate to branch -D | FR-02: session, directory, and branch reclaimed separately |
+| O-12 | Calling again after a request timeout, causing duplicate mutation | request ID and request-show recover completed/pending state; absent also does not automatically prove it never executed | FR-05/12: retries must reconcile operation receipts |
 
-对应源码与测试：
+Corresponding source and tests:
 
-- O-01：[Task/Dispatch 不变量](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-invariant.test.ts)、[并发竞争](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-races.test.ts)。其中覆盖“旧失败不能覆盖已经完成的 worker 报告”。
-- O-02：[依赖就绪竞态](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-create-readiness.test.ts)。
-- O-03：[派发实现](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-task-dispatch.ts)、[未观察到启动的测试](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-dispatch-unobserved-prompt.test.ts)、[启动记录修正](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-start-unobserved-prompt-settlement.test.ts)。
-- O-04：[持久投递合同](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/messaging-and-gates.md)、[mailbox 实现](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/messages/role-mailbox-delivery.ts)。
-- O-05：[旧消费者撤权测试](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/dispatch-mailbox-consumer-fencing.test.ts)。
-- O-06：[失败启动熔断测试](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-dispatch/failed-start-circuit-breaker.test.ts)。计数语义不能直接拿来作为所有业务修复的上限。
-- O-07：[恢复指南](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/recovery-and-cleanup.md)、[需关注事项分类](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/shared/orchestration-fleet-attention.ts)。
-- O-08：[退出升级测试 STA-4604](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/lightweight-run-worker-exit-escalation.test.ts)。
-- O-09：[远程放置与能力协商](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/placement-and-remote.md)。
-- O-10：[资源归属](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-terminal-ownership.ts)、[release 事务](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-terminal/worker-terminal-release.ts)。
-- O-11：[移除 worktree 与保留分支测试](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/git/worktree-remove-branch-deletion.test.ts)。
-- O-12：[mutation 恢复合同](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/recovery-and-cleanup.md)。另外 `RemoteRuntimeTerminalCreateIdempotency` 只合并进行中的相同创建请求，完成即移除内存项；不能把这一小段代码宣传为跨重启持久幂等。
+- O-01: [Task/Dispatch invariants](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-invariant.test.ts), [Concurrency races](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-dispatch-races.test.ts). These cover "an old failure cannot overwrite an already completed worker report".
+- O-02: [Dependency readiness race](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db-task-create-readiness.test.ts).
+- O-03: [Dispatch implementation](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-task-dispatch.ts), [Unobserved start test](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/coordinator-dispatch-unobserved-prompt.test.ts), [Start record correction](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-start-unobserved-prompt-settlement.test.ts).
+- O-04: [Persistent delivery contract](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/messaging-and-gates.md), [Mailbox implementation](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/messages/role-mailbox-delivery.ts).
+- O-05: [Old consumer revocation test](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/dispatch-mailbox-consumer-fencing.test.ts).
+- O-06: [Failed-start circuit breaker test](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-dispatch/failed-start-circuit-breaker.test.ts). The counting semantics cannot be taken directly as the cap for all business fixes.
+- O-07: [Recovery guide](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/recovery-and-cleanup.md), [Attention item classification](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/shared/orchestration-fleet-attention.ts).
+- O-08: [Exit escalation test STA-4604](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/lightweight-run-worker-exit-escalation.test.ts).
+- O-09: [Remote placement and capability negotiation](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/placement-and-remote.md).
+- O-10: [Resource ownership](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/worker-terminal-ownership.ts), [Release transaction](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/runtime/orchestration/db/worker-terminal/worker-terminal-release.ts).
+- O-11: [Worktree removal and branch preservation test](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/main/git/worktree-remove-branch-deletion.test.ts).
+- O-12: [Mutation recovery contract](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/recovery-and-cleanup.md). Additionally, `RemoteRuntimeTerminalCreateIdempotency` only merges identical in-flight create requests and removes the in-memory entry on completion; this small piece of code cannot be advertised as persistent idempotency across restarts.
 
-**5. 提醒与 keep-live：明确已经有什么，仍需验证什么**
+**5. Reminders and keep-live: what clearly exists, and what still needs verification**
 
-worker 合同要求在自然检查点检查 follow-up，并在 worker_done 前再查一次；完成后结束当前回合，不能自己启动无关工作。coordinator 等待结果和问题、处理后 ack；连续空等待后枚举 worker，依据 liveness、attention 与 nextAction 检查。
+The worker contract requires checking for follow-ups at natural checkpoints and once more before worker_done; after completion it ends the current turn and must not start unrelated work on its own. The coordinator waits for results and questions and acks after processing; after consecutive empty waits it enumerates workers and checks them based on liveness, attention, and nextAction.
 
-消息成功 enqueue 只证明持久入队；唤醒/nudge 是 best-effort，不证明对方读到或执行。`ask` 超时保留原问题，使用原 message ID 恢复。心跳说明存活，不说明完成。
+A successful message enqueue only proves persistent enqueueing; wake/nudge is best-effort and does not prove the other side read or acted on it. An `ask` timeout keeps the original question and recovers using the original message ID. A heartbeat indicates liveness, not completion.
 
-`check-keepalive.ts` 定时向 stderr 输出 `_keepalive`/`_heartbeat`，说明等待命令仍活着；它没有启动新的 Agent 回合。`coordinator-task-dispatch.ts` 有心跳陈旧警告，但警告本身也不是自动恢复。
+`check-keepalive.ts` periodically writes `_keepalive`/`_heartbeat` to stderr, indicating the wait command is still alive; it does not start a new Agent turn. `coordinator-task-dispatch.ts` has a stale-heartbeat warning, but the warning itself is not automatic recovery either.
 
-可借鉴的是：精确定义状态、让异常进入持久收件箱、提供恢复路径，并避免盲目重送。本产品的“未完成而正常停轮自动续做、主控自己停轮也继续受监督”仍须单独做端到端验证，不能从 heartbeat 这个字段推断已经成立。
+What can be borrowed: define states precisely, route anomalies into a persistent inbox, provide recovery paths, and avoid blind resending. This product's "automatically continue when a turn ends normally with work unfinished, and keep supervising even when the controller itself ends its turn" still needs separate end-to-end verification; it cannot be inferred as already working from the heartbeat field.
 
-[worker 合同](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/worker-contract.md)、[等待命令 keepalive](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/cli/handlers/orchestration/check-keepalive.ts)
+[Worker contract](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/skill-guides/orchestration/references/worker-contract.md), [Wait command keepalive](https://github.com/stablyai/orca/blob/76f9978880752f2b3ed63bb8c2698b8a7236440d/src/cli/handlers/orchestration/check-keepalive.ts)
 
-**6. Worktree 经验与 Herdr 复用边界**
+**6. Worktree lessons and the Herdr reuse boundary**
 
-Orca 区分新 Agent 终端、新 worktree、当前/已有工作区、独立顶层 worktree 和叠加子 worktree；仓库 setup 可有 start-immediately 或 wait-for-setup 策略。远程的 current/new-child 因含义不明确而拒绝，需要准确远程选择器。
+Orca distinguishes new Agent terminals, new worktrees, current/existing workspaces, independent top-level worktrees, and stacked child worktrees; repository setup can use a start-immediately or wait-for-setup policy. Remote current/new-child is rejected because its meaning is ambiguous; a precise remote selector is required.
 
-其指南默认可使用现有工作区，不要求每个 worker 都创建 worktree。我们的产品按用户要求更严格：并行写代码默认独立 worktree。借鉴的是创建/setup/归属/回收的完整生命周期，而不是照搬它的共享默认值。
+Its guide defaults to being able to use the existing workspace and does not require every worker to create a worktree. Our product is stricter per the user's requirement: parallel code writing defaults to an independent worktree. What we borrow is the full lifecycle of creation/setup/ownership/reclamation, not its shared default.
 
-Herdr 已有 worktree list/create/open/remove 的 CLI/API，创建参数包含 branch/base/path/cwd/workspace；打开操作校验 checkout 身份、复用已打开 workspace，并返回 workspace/tab/root pane 与 worktree 信息。脏工作树删除有明确处理。应直接评估和复用这些原语，再补业务层的唯一写入权、任务关联、验收与清理策略。
+Herdr already has CLI/API for worktree list/create/open/remove; create parameters include branch/base/path/cwd/workspace; the open operation validates checkout identity, reuses an already-open workspace, and returns workspace/tab/root pane along with worktree info. Deleting a dirty worktree has explicit handling. These primitives should be evaluated and reused directly, then the business layer adds single write authority, task association, acceptance, and cleanup policy.
 
-Herdr 本体能力依据：[worktree schema](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/api/schema/worktrees.rs)、[worktree/workspace 集成](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/app/api/worktrees.rs)、[Git 操作与删除检查](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/worktree.rs)。本次没有操作用户现有 Herdr 会话。
+Basis for Herdr's own capabilities: [worktree schema](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/api/schema/worktrees.rs), [worktree/workspace integration](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/app/api/worktrees.rs), [Git operations and deletion checks](https://github.com/herdrdev/herdr/blob/143bf5fd4781d164260c63fe28e7dc08054ad32f/src/worktree.rs). This pass did not operate on the user's existing Herdr sessions.
 
-**7. 对下一步实施的具体约束**
+**7. Concrete constraints for the next implementation step**
 
-先以 [PRD](../../PRD.md) 为主，不再从“哪个工具看起来不错”反推用户需求。落地讨论必须逐项回答：
+Take the [PRD](../../PRD.md) as primary first; stop reverse-engineering user requirements from "which tool looks nice". Implementation discussions must answer each of the following:
 
-1. Herdr 原语直接复用哪些？业务状态由谁持久维护？
-2. Task、attempt、会话、worktree、消息回执如何一一关联？
-3. 如何避免 stale completion、双派发、丢 ack、失联误杀？
-4. 看板的移动/排序究竟改变哪个事实，是否真的影响队列？
-5. 哪个外部进程在模型停轮后继续负责？如何证明它本身仍活着？
-6. 怎样保留并验证失败产物，而不是靠无限催办维持 busy？
+1. Which Herdr primitives are reused directly? Who persistently maintains business state?
+2. How are Task, attempt, session, worktree, and message receipt associated one-to-one?
+3. How do we avoid stale completion, double dispatch, lost acks, and killing on lost contact?
+4. What fact does moving/ordering on the board actually change, and does it really affect the queue?
+5. Which external process remains responsible after the model ends its turn? How do we prove it is itself still alive?
+6. How do we preserve and verify failure artifacts, rather than maintaining busy through endless nagging?
 
-这些机制有 Orca 的明确实现可参考，应成为我们的故障验收输入。是否直接移植模块、复用另一底座或只借鉴设计，需要下一阶段核对运行依赖与接口；本次不把源码阅读冒充已经完成了可移植性评估。
+These mechanisms have explicit Orca implementations to reference and should become inputs to our failure acceptance. Whether to port modules directly, reuse another base, or only borrow the design requires checking runtime dependencies and interfaces in the next phase; this pass does not pass off source reading as a completed portability assessment.

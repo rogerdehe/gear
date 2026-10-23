@@ -8,5 +8,7 @@ description = "GEAR business rules behind the CLI commands: identity, mail, home
 gear-model = { workspace = true }
 gear-store = { workspace = true }
 gear-herdr = { workspace = true }
+gear-board = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }

@@ -1,359 +1,359 @@
-# GEAR 产品需求：基于 Herdr 的多 Agent 持续协作
+# GEAR Product Requirements: Continuous Multi-Agent Collaboration on Herdr
 
-版本：v0.7；状态：需求基线，实施中根据真实运行证据修订。
+Version: v0.7; status: requirements baseline, to be revised during implementation based on real runtime evidence.
 
-项目名：GEAR（暂定）；Herdr 插件 ID：`herdr-gear`；拟用 CLI：`gear`。 缩写：**G**oals **E**xecuted through **A**gent **R**elay（通过 Agent 接力完成目标）。
+Project name: GEAR (tentative); Herdr plugin ID: `herdr-gear`; proposed CLI: `gear`. Acronym: **G**oals **E**xecuted through **A**gent **R**elay (completing goals through an agent relay).
 
-本文是当前产品需求的主文档。既有调研中的 Firstmate、Herdr Board 等选型是候选实现，不是用户已经确认的产品约束。实现方案不得以某个库的限制替代这里的要求。Orca 作为成熟实践参照，借鉴其机制与已处理的故障，不要求用户迁移到 Orca。
+This document is the primary document for the current product requirements. The Firstmate, Herdr Board, and other selections in prior research are candidate implementations, not product constraints the user has confirmed. An implementation plan must not substitute the limitations of some library for the requirements here. Orca serves as a reference of mature practice: we borrow its mechanisms and the failures it has already handled, without requiring the user to migrate to Orca.
 
-**1. 要解决的问题与成功标准**
+**1. Problem to solve and success criteria**
 
-用户重度使用 Herdr 运行多个异构 Agent，需要让它们持续、有序地协作完成任务。研发方法与 skill 由项目自行选择，可以使用 BMAD、Superpowers、自定义 skill，也可以不使用任何研发框架。主要使用方式包括本地 Herdr 客户端通过 remote 模式连接远端 Herdr，由远端运行项目与多个 Agent。目前依靠项目专用脚本检测 Agent 停轮并催办，存在工作中途停止、队列与实际执行脱节、依赖阻塞、主控消息过载，以及每个项目都要重新写脚本的问题。
+The user is a heavy Herdr user running multiple heterogeneous Agents and needs them to collaborate continuously and in an orderly way to complete tasks. Development methods and skills are chosen per project: BMAD, Superpowers, custom skills, or no development framework at all. The main usage mode is a local Herdr client connecting in remote mode to a remote Herdr, with the remote side running the project and multiple Agents. Today, project-specific scripts detect when an Agent stops its turn and nudge it, which suffers from work stopping midway, the queue drifting out of sync with actual execution, dependency blocking, message overload on the master controller, and having to rewrite the scripts for every project.
 
-产品要保证：任务派出后持续有人或程序负责推进；正常停轮不需要用户手动催；无法继续时有明确原因、负责人和下一步；用户随时能看见实际工作与后续队列。
+The product must guarantee: once a task is dispatched, a person or program is continuously responsible for driving it forward; normal turn stops do not require the user to nudge manually; when work cannot continue there is a clear reason, owner, and next step; the user can see the actual work and the upcoming queue at any time.
 
-成功不以“所有 Agent 都显示 working”衡量。空队列、等待授权、明确暂停可以安静停下；持续输出也不证明任务有进展。目标是持续完成已授权工作，保持记录可信，减少人工催办和总负责人重复判断。
+Success is not measured by "all Agents show working". An empty queue, waiting for authorization, or an explicit pause may stop quietly; continuous output does not prove the task is progressing either. The goal is to continuously complete authorized work, keep records trustworthy, and reduce manual nudging and repeated judgment by the lead.
 
-**2. 已确认的约束**
+**2. Confirmed constraints**
 
-| 编号 | 要求 |
+| ID | Requirement |
 |---|---|
-| C-01 | 继续以 Herdr 为运行与终端交互环境；优先复用其 pane/workspace、Agent 控制、通信与 worktree 集成 |
-| C-02 | CLI/TUI 优先，支持本地 Herdr 客户端连接远端 Herdr 的 remote 使用方式；隐藏/离开看板视图或断开客户端不能使远端任务失去监督 |
-| C-03 | 一名总负责人直接管理执行者，不加入主管汇报层；独立审核属于任务，不新增管理层 |
-| C-04 | 总负责人、执行者、审核者均不绑定某个 Agent 品牌或模型；Codex、Claude Code、OpenCode、Grok、Pi 是首批需要验证的 CLI |
-| C-05 | Git worktree 是并行研发的基础：并行写代码默认使用独立 worktree，不把多个写入者放进同一项目目录 |
-| C-06 | 编排能力独立于研发方法与 skill；不安装 BMAD、Superpowers 或其他框架也能完成核心闭环，切换方法不需要修改编排核心 |
-| C-07 | 日常工作按已批准规则自动推进；依赖、授权、重新拆解、优先级、例外和项目验收由总负责人掌握 |
-| C-08 | 通知可以去重、分组和汇总，原始事实与证据不可丢；不通过隐藏异常降低消息量 |
-| C-09 | 不依赖某个 Agent 的自觉或专属 Stop hook 保持整个系统运行；状态不明必须如实显示 |
-| C-10 | 把项目差异放在配置、通用任务合同和项目提供的上下文中，不再为每个项目复制修改一套 keeper 脚本 |
-| C-11 | 插件只增加一个常驻编排进程，内部提供看板、队列、催办、mailbox 与持久化；不拼接多个插件后台。Agent、构建/测试及短命 CLI 请求进程不属于额外常驻编排服务 |
+| C-01 | Continue to use Herdr as the runtime and terminal interaction environment; prefer reusing its pane/workspace, Agent control, communication, and worktree integration |
+| C-02 | CLI/TUI first, supporting the remote usage mode where a local Herdr client connects to a remote Herdr; hiding/leaving the board view or disconnecting the client must not leave remote tasks unsupervised |
+| C-03 | One lead manages executors directly, with no supervisor reporting layer; independent review is a task, not an added management layer |
+| C-04 | The lead, executors, and reviewers are not bound to any Agent brand or model; Codex, Claude Code, OpenCode, Grok, and Pi are the first CLIs to be validated |
+| C-05 | Git worktrees are the foundation of parallel development: parallel code writing uses separate worktrees by default; multiple writers are not put in the same project directory |
+| C-06 | Orchestration is independent of development methods and skills; the core loop can be completed without installing BMAD, Superpowers, or other frameworks, and switching methods does not require changing the orchestration core |
+| C-07 | Routine work advances automatically per approved rules; dependencies, authorization, re-decomposition, priority, exceptions, and project acceptance are held by the lead |
+| C-08 | Notifications may be deduplicated, grouped, and summarized, but raw facts and evidence must not be lost; message volume is not reduced by hiding anomalies |
+| C-09 | Do not rely on any Agent's self-discipline or a vendor-specific Stop hook to keep the whole system running; unknown state must be shown truthfully |
+| C-10 | Put project differences in configuration, a generic task contract, and project-provided context, instead of copying and modifying a set of keeper scripts for every project |
+| C-11 | The plugin adds only one resident orchestration process, which internally provides the board, queue, nudging, mailbox, and persistence; do not stitch together multiple plugin backends. Agents, build/test, and short-lived CLI request processes are not additional resident orchestration services |
 
-**3. 用户流程**
+**3. User flow**
 
-项目首次启动先完成 FR-13 初始化确认：确定长期线数量、临时并发额度、总控与执行者配置及授权范围，再进入下面的执行流程。已有项目恢复时读取已确认配置，只确认实际变化，不重复询问已批准事项。
+On first start, a project completes the FR-13 initialization confirmation: determine the number of long-lived lanes, the temporary concurrency quota, the master controller and executor configuration, and the authorization scope, and then enter the execution flow below. When an existing project resumes, it reads the confirmed configuration and confirms only actual changes, without re-asking about already approved items.
 
-1. 用户向总负责人描述目标，并可提供已有文档或指定研发 skill；没有标准文档也可以直接建立任务。
-2. 总负责人拆解任务，明确范围、依赖、验收方式、优先级、Agent 选择和授权边界。
-3. 系统创建或确认独立 worktree，准备运行环境，派发已就绪任务。
-4. 执行者工作；程序处理正常停轮、消息交付、验证、队列续派和状态记录。
-5. 执行者可在授权边界内横向澄清接口、索取产物和核实交付；新依赖或全局冲突送总负责人。
-6. 总负责人处理必决策事项，并主动检查拆解、资源利用和后续工作。
-7. 完成声明进入验收；必要时使用新会话进行独立审核；候选代码通过集成检查后才视为相应交付完成。
-8. 更新编排系统的任务状态，保留证据。长期线领下一项或休眠；临时会话受控回收。
+1. The user describes the goal to the lead and may provide existing documents or specify a development skill; tasks can also be created directly without standard documents.
+2. The lead decomposes the work, specifying scope, dependencies, acceptance method, priority, Agent choice, and authorization boundaries.
+3. The system creates or confirms separate worktrees, prepares the runtime environment, and dispatches ready tasks.
+4. Executors work; the program handles normal turn stops, message delivery, verification, queue continuation, and state recording.
+5. Within their authorization boundaries, executors may laterally clarify interfaces, request artifacts, and verify deliveries; new dependencies or global conflicts go to the lead.
+6. The lead handles must-decide items and proactively checks decomposition, resource utilization, and follow-up work.
+7. A completion claim enters acceptance; when needed, an independent review is done in a fresh session; candidate code is considered delivered only after passing integration checks.
+8. Task state in the orchestration system is updated and evidence retained. A long-lived lane picks up the next item or sleeps; temporary sessions are reclaimed in a controlled way.
 
-**4. 核心对象与状态必须分开**
+**4. Core objects and states must be kept separate**
 
-| 对象 | 表达的事实 |
+| Object | Fact it expresses |
 |---|---|
-| 项目/目标 | 用户要什么、约束与最终验收是什么 |
-| 任务 | 一份具体工作；含输入、依赖、范围、验收与结果 |
-| 执行尝试 | 某个 Agent 对任务的一次实际执行；重试/换人生成新尝试或明确交接代次 |
-| 工作线 | 有责任范围、当前任务、后续队列、长期/临时属性的逻辑执行槽位 |
-| Agent 会话 | 某个 CLI 的实际运行状态、上下文与进程；不能等同任务 |
-| worktree/分支 | 代码写入空间、基线、成果与资源归属；不能等同 pane/workspace |
-| 消息/决策 | 进度、协作请求、阻塞、授权、结果与处理回执 |
+| Project/goal | What the user wants, and what the constraints and final acceptance are |
+| Task | A concrete piece of work; includes inputs, dependencies, scope, acceptance, and result |
+| Execution attempt | One actual execution of a task by some Agent; retry/reassignment creates a new attempt or an explicit handoff generation |
+| Work lane | A logical execution slot with a scope of responsibility, current task, follow-up queue, and long-lived/temporary attribute |
+| Agent session | The actual runtime state, context, and process of some CLI; not equivalent to a task |
+| Worktree/branch | Code write space, baseline, output, and resource ownership; not equivalent to a pane/workspace |
+| Message/decision | Progress, collaboration requests, blockers, authorization, results, and handling receipts |
 
-任务至少区分：待准备、就绪、执行中、等待依赖/决策、待验证/审核、完成、失败、取消。Agent 状态至少区分：执行中、可接收输入、等待交互、已退出、未知。工作线暂停/休眠是独立状态。
+Tasks must distinguish at least: to be prepared, ready, executing, waiting on dependency/decision, awaiting verification/review, done, failed, cancelled. Agent state must distinguish at least: executing, can accept input, waiting for interaction, exited, unknown. Work lane paused/sleeping is a separate state.
 
-“Agent done”“进程退出”“CLI 返回成功”“工作区看板移动到 Done”“测试通过”“项目完成”不能互相替代。实现中的命名可以不同，但这些语义必须保持。
+"Agent done", "process exited", "CLI returned success", "workspace board moved to Done", "tests passed", and "project complete" cannot substitute for one another. Names in the implementation may differ, but these semantics must be preserved.
 
-**5. 功能需求**
+**5. Functional requirements**
 
-**FR-01 任务拆解与执行合同（P0）**
+**FR-01 Task decomposition and execution contract (P0)**
 
-每个可派发任务须有稳定 ID、目标、范围、相关文件/模块、必要上下文、依赖、验收标准、期望产物、授权边界与责任工作线。任务输入有版本；变更目标或验收条件必须可追溯。执行者不需要掌握整个项目，但必须拿到足够的局部契约。
+Every dispatchable task must have a stable ID, goal, scope, relevant files/modules, necessary context, dependencies, acceptance criteria, expected artifacts, authorization boundaries, and a responsible work lane. Task inputs are versioned; changes to goals or acceptance conditions must be traceable. Executors do not need to understand the whole project, but they must receive a sufficient local contract.
 
-一个目标或父任务可对应多个执行/审核任务，外部文档仅作为可选来源引用。父项完成需要所有必需子项通过相应验收，不得只统计 Agent 的完成回复。
+One goal or parent task may correspond to multiple execution/review tasks; external documents are referenced only as optional sources. A parent item is complete only when all required child items pass their respective acceptance; Agent completion replies alone must not be counted.
 
-**FR-02 Worktree 隔离与生命周期（P0，基础能力）**
+**FR-02 Worktree isolation and lifecycle (P0, foundational capability)**
 
-- 并行代码写入任务各自使用独立 worktree/分支。多个终端、tab 或 workspace 本身不构成文件隔离。
-- 优先使用 Herdr 已有 worktree 创建、列举、打开与移除能力，不再造终端/工作区管理器。
-- 记录执行主机、仓库身份、worktree 实际路径、分支、基准 commit、当前写入尝试与所有者。路径别名或不同 workspace 指向同一 checkout 时仍按同一写入资源处理。
-- 派发前确认 Agent 的实际 cwd 与登记 worktree 一致；setup 成功/失败必须可见，需要 setup 的任务不能在失败后悄悄开始。
-- 同一任务换 Agent 时可复用原 worktree，但须确认旧写入者结束并完成所有权交接。只读查看可共享，不能把可执行工具的审核者默认为真正只读。
-- 审核必须固定候选 commit；可能运行测试、生成文件或修补代码的审核使用独立 checkout/worktree。审核后的修改触发相应重新验证。
-- 明确独立基线与依赖分支基线。上游改动如何进入下游、何时 rebase/merge/cherry-pick 由既定集成策略决定，不能假设另一个 worktree 的文件会自动出现。
-- 合入采用受控顺序，并验证合并后的结果。机械合并冲突可在授权范围内处理，语义冲突交总负责人。
-- 关闭 Agent 会话、移除 worktree、删除分支是三种不同操作。未提交改动、未交付 commit 和审核证据必须保留；不能因为任务窗口消失就强删分支或目录。
-- worktree 不隔离端口、数据库、外部账户和共享缓存；这些另列资源依赖。
+- Parallel code-writing tasks each use a separate worktree/branch. Multiple terminals, tabs, or workspaces do not by themselves provide file isolation.
+- Prefer Herdr's existing worktree create, list, open, and remove capabilities; do not build another terminal/workspace manager.
+- Record the execution host, repository identity, actual worktree path, branch, base commit, current write attempt, and owner. Path aliases or different workspaces pointing to the same checkout are still treated as the same write resource.
+- Before dispatch, confirm that the Agent's actual cwd matches the registered worktree; setup success/failure must be visible, and a task that requires setup must not silently start after setup failure.
+- When a task switches Agents, the original worktree may be reused, but it must be confirmed that the old writer has ended and ownership handoff is complete. Read-only viewing may be shared, but a reviewer with executable tools must not be assumed to be truly read-only.
+- Review must pin a candidate commit; reviews that may run tests, generate files, or patch code use a separate checkout/worktree. Changes made after review trigger the corresponding re-verification.
+- Make explicit the distinction between independent baselines and dependent-branch baselines. How upstream changes enter downstream, and when to rebase/merge/cherry-pick, is decided by the established integration strategy; do not assume files from another worktree will appear automatically.
+- Merging uses a controlled order, and the merged result is verified. Mechanical merge conflicts may be handled within authorized scope; semantic conflicts go to the lead.
+- Closing an Agent session, removing a worktree, and deleting a branch are three different operations. Uncommitted changes, undelivered commits, and review evidence must be preserved; branches or directories must not be force-deleted just because the task window disappeared.
+- Worktrees do not isolate ports, databases, external accounts, or shared caches; these are listed separately as resource dependencies.
 
-**FR-03 异构 Agent 与角色切换（P0）**
+**FR-03 Heterogeneous Agents and role switching (P0)**
 
-启动、提交输入、观察状态、获取结果、停止/替换构成统一接入合同。首批五种 CLI 都必须验证总负责人、执行和审核角色；模型/effort 由配置指定，并显示实际生效值。
+Start, submit input, observe state, retrieve results, and stop/replace form a unified integration contract. All five initial CLIs must be validated in the lead, execution, and review roles; model/effort is specified by configuration, and the actually effective values are displayed.
 
-没有原生 resume 的 CLI 可以用新会话读取持久任务包与现有成果继续，但界面须明确是新会话。适配不支持的能力明确拒绝，不默默换模型、换主机或降级成另一种行为。
+A CLI without native resume may continue with a fresh session that reads the persistent task packet and existing output, but the interface must clearly state that it is a new session. Capabilities the adapter does not support are explicitly refused; it must not silently switch models, switch hosts, or degrade into a different behavior.
 
-**FR-04 任务队列与动态派发（P0）**
+**FR-04 Task queue and dynamic dispatch (P0)**
 
-支持项目待办与每条工作线的有序队列；用户/总负责人可增加、移除、置顶、调整顺序、转移未开始任务、暂停/恢复。下一项必须同时满足授权、依赖、容量和资源约束。
+Support a project backlog and an ordered queue per work lane; the user/lead can add, remove, pin to top, reorder, transfer not-yet-started tasks, and pause/resume. The next item must simultaneously satisfy authorization, dependency, capacity, and resource constraints.
 
-已批准的下一项可以自动派发；没有合适工作时通知总负责人安排，不能自行制造新需求。总负责人应在队列快耗尽时获得提示。
+An approved next item may be dispatched automatically; when there is no suitable work, notify the lead to arrange it, and do not invent new requirements. The lead should get a prompt when the queue is about to run out.
 
-运行中改派须保留进展并交接写入权；拖动卡片不能悄悄让第二个 Agent 接管仍在写入的工作树。调整显示顺序必须与真实派发顺序一致，否则明确标注仅为展示排序。
+Reassignment while running must preserve progress and hand over write ownership; dragging a card must not silently let a second Agent take over a worktree that is still being written. Display order adjustments must match the real dispatch order, or be explicitly labeled as display-only ordering.
 
-**FR-05 防止中途无人继续（P0，核心闭环）**
+**FR-05 Preventing work from stalling midway with no one continuing (P0, core loop)**
 
-- 外部常驻执行机制检查“任务未完成且可继续”的状态，不要求模型一次生成到项目结束。
-- Agent 在未完成时正常停轮，系统按任务合同续做，并检查新一轮是否实际开始。
-- 输入已接受、开始执行、提交结果、完成验收分别记录；一次 prompt 调用成功不能替代后续证据。
-- 发送结果不明时先核对，不重复粘贴长指令或创建第二份任务。
-- 测试失败可在已授权修复范围内反馈执行者重试；持续无进展有次数/时间/成本预算，达到边界后保留成果并升级。
-- working 但输出静默时检查真实工具/测试活动，不以静默时长单独判定死亡；终端仍活着也不能证明 Agent 正在工作。
-- 权限提示、认证失败、限流、真实依赖、手动暂停和正常停轮采用不同处理，不反复对所有停顿发“继续”。
-- 总负责人自己停轮但仍有待处理决策时，系统也必须唤醒/恢复；总负责人不可恢复时向用户显示未处理事项。
-- 本地/远程状态未知时保留原执行权并核对，不能通过重复启动掩盖未知。
+- An external resident execution mechanism checks for "task incomplete and continuable" state; it does not require the model to generate all the way to project completion in one go.
+- When an Agent stops its turn normally while unfinished, the system continues per the task contract and checks whether the new turn actually started.
+- Input accepted, execution started, results submitted, and acceptance completed are recorded separately; one successful prompt call cannot substitute for subsequent evidence.
+- When the outcome of a send is unclear, verify first; do not re-paste long instructions or create a second copy of the task.
+- Test failures may be fed back to the executor for retry within the authorized fix scope; persistent lack of progress has a count/time/cost budget, and on reaching the boundary the output is preserved and escalated.
+- When working but output is silent, check real tool/test activity; silence duration alone does not determine death; a still-alive terminal does not prove the Agent is working either.
+- Permission prompts, authentication failures, rate limiting, real dependencies, manual pauses, and normal turn stops are handled differently; do not repeatedly send "continue" for every pause.
+- When the lead itself stops its turn but there are still pending decisions, the system must also wake/resume it; when the lead cannot be resumed, show the unhandled items to the user.
+- When local/remote state is unknown, keep the original execution ownership and verify; do not mask the unknown by launching again.
 
-观察来源、稳定窗口、超时和恢复预算按 CLI 与工作类型配置。具体数值通过实测确定，不能把一个固定轮询间隔当成可靠性证明。
+Observation sources, stability windows, timeouts, and recovery budgets are configured per CLI and work type. Concrete values are determined by measurement; a fixed polling interval cannot be taken as proof of reliability.
 
-**FR-06 任务看板与详情（P0）**
+**FR-06 Task board and details (P0)**
 
-提供终端可用的两种视图：任务阶段视图、工作线/Agent 视图。能够看到当前做什么、后续做什么、哪些未完成/已完成/受阻、谁在等谁、最后一次有证据的进展、是否需要总负责人处理。
+Provide two terminal-usable views: a task stage view and a work lane/Agent view. It must be possible to see what is being done now, what comes next, which items are unfinished/finished/blocked, who is waiting on whom, the last evidenced progress, and whether the lead needs to act.
 
-任务详情展示：验收条件、依赖、当前尝试与历史、Agent/模型、主机/worktree/分支、结果与测试证据、未处理消息和下一步。可跳转实际 Herdr pane；即使会话已释放，仍可读归档结果。
+Task details show: acceptance conditions, dependencies, current attempt and history, Agent/model, host/worktree/branch, result and test evidence, unhandled messages, and next step. It can jump to the actual Herdr pane; even after the session is released, archived results remain readable.
 
-优先支持键盘选择、进入详情、排序、改派、暂停/恢复，不要求 Web 服务或桌面客户端。总体进度以任务与验收里程碑表示，无法推断时不伪造百分比。
+Prioritize keyboard selection, entering details, sorting, reassignment, and pause/resume; no web service or desktop client is required. Overall progress is expressed by task and acceptance milestones; when it cannot be inferred, do not fabricate a percentage.
 
-**FR-07 提醒、汇报与持久收件箱（P0）**
+**FR-07 Reminders, reporting, and persistent inbox (P0)**
 
-消息包含任务/尝试关联、发送者、接收者、类型、时间、原始内容/证据与处理状态。持久记录不等于已读，已读不等于处理完成；处理中断后可以恢复未确认事项。
+A message contains task/attempt association, sender, recipient, type, time, raw content/evidence, and handling status. Persistently recorded does not mean read, and read does not mean handled; unacknowledged items can be recovered after handling is interrupted.
 
-正常进展/完成写入看板和汇总，不要求总负责人逐项回复。新阻塞、授权、预算耗尽、队列低水位、监督失效和结果矛盾有明确提醒。同一已确认根因可合并并列出所有受影响任务；不能把未知问题静默归为重复。
+Normal progress/completion is written to the board and summaries, without requiring the lead to reply item by item. New blockers, authorization, budget exhaustion, low queue watermark, supervision failure, and contradictory results get explicit reminders. Items with the same confirmed root cause may be merged, listing all affected tasks; unknown problems must not be silently classified as duplicates.
 
-协商/授权问题超时后仍是同一个待处理问题，不重复创建一串问题。通知是唤醒渠道，数据库中的未处理记录才是持续责任；通知失败须可见和重试。
+A negotiation/authorization question that times out remains the same pending question; do not create a string of duplicate questions. Notifications are a wake-up channel; the unhandled records in the database are the ongoing responsibility; notification failures must be visible and retried.
 
-总控使用项目级持久 mailbox，绑定逻辑角色而不是某个终端或对话；更换总控会话后仍能继续处理同一批事项。具体处理合同如下：
+The master controller uses a project-level persistent mailbox, bound to the logical role rather than to a particular terminal or conversation; after replacing the master controller session, the same set of items can still be handled. The concrete handling contract is as follows:
 
-- 先持久入箱再发送唤醒通知。每条消息有稳定 ID；通知或 prompt 是提醒，不是唯一消息存储。总控通过结构化 CLI/API 拉取待处理项，不依赖终端里最后一段聊天。
-- 分开记录信息事件和需要处理的事项。普通进度/完成事件保留、汇总，按已批准规则更新状态，不要求总控逐条决策；需要决策的事项不能因展示过摘要就自动关闭。系统无法可靠分类时保留为待处理。
-- 待处理项至少区分待领取、处理中、等待外部结果、已处理。领取/已读不能视为已处理；只有记录决策、回复或已接受的操作回执后，才能逐项确认完成。一次批次只允许确认其中实际处理的 ID，不能以“看过这批”批量清空。
-- 有限批量拉取，返回本批 ID、剩余数量和最旧等待时间；同等优先级按入箱顺序处理，紧急事项可优先，但须有等待老化/配额规则防止旧事项永久饥饿。具体阈值可配置。
-- 处理中又来了消息，先入箱，不向正在执行的总控连续塞十个新 prompt。每个总控只允许一个有效处理者，外部程序合并唤醒；当前轮结束后仍有可处理事项，就安排下一批。紧急事项使用受控提醒，不能默认打断正在落地的决策。
-- 处理中的领取有可恢复的所有权与期限；总控退出或替换后核对再恢复，不让一条消息永远停在处理中。旧代次不能确认新总控的事项。操作已执行但确认丢失时，通过稳定操作 ID 和回执核对，不能盲目重做。
-- 等待用户/上游回应的事项记录责任方、关联请求及再次检查条件，暂不反复投喂同一问题；其他可处理事项继续。消息处理完成与对应任务完成分别记录。
-- 看板显示待处理/处理中/等待外部的数量、最旧等待时间、超期事项和最近处理进展。积压持续增长、关键事项超期或总控持续无处理进展时提醒用户；程序不能靠丢弃消息或让另一个 Agent 替总控决定来消除积压。
+- Persist to the inbox first, then send the wake-up notification. Each message has a stable ID; a notification or prompt is a reminder, not the only message store. The master controller pulls pending items via a structured CLI/API, not relying on the last chat segment in the terminal.
+- Record informational events and items that need handling separately. Ordinary progress/completion events are retained, summarized, and update state per approved rules, without requiring the master controller to decide on each one; items that need a decision must not be auto-closed just because a summary was shown. When the system cannot classify reliably, keep the item pending.
+- Pending items distinguish at least: awaiting claim, in progress, waiting on external result, handled. Claimed/read cannot be treated as handled; only after recording a decision, a reply, or an accepted operation receipt can items be acknowledged as done one by one. A batch may acknowledge only the IDs actually handled in it; it must not be bulk-cleared with "looked at this batch".
+- Bounded batch pulls return the IDs in this batch, the remaining count, and the oldest wait time; items of equal priority are handled in inbox order, urgent items may go first, but there must be wait-aging/quota rules to prevent old items from starving forever. Concrete thresholds are configurable.
+- Messages arriving during handling are first put into the inbox; do not stuff ten new prompts in a row into a master controller that is executing. Each master controller allows only one active handler, and the external program coalesces wake-ups; if there are still handleable items after the current turn ends, schedule the next batch. Urgent items use controlled reminders and must not by default interrupt a decision being carried out.
+- An in-progress claim has recoverable ownership and a deadline; after the master controller exits or is replaced, verify before resuming, so that no message stays in progress forever. An old generation cannot acknowledge items of the new master controller. When an operation has executed but the acknowledgment was lost, reconcile via stable operation IDs and receipts; do not blindly redo it.
+- Items waiting on a response from the user/upstream record the responsible party, the associated request, and the condition for re-checking, and the same question is not repeatedly fed in the meantime; other handleable items continue. Message handling completion and corresponding task completion are recorded separately.
+- The board shows the counts of pending/in-progress/waiting-external items, the oldest wait time, overdue items, and recent handling progress. When the backlog keeps growing, critical items are overdue, or the master controller makes no handling progress for a sustained period, remind the user; the program must not eliminate the backlog by dropping messages or having another Agent decide on the master controller's behalf.
 
-例如十个执行者同时提交十个需决策的问题，总控本轮只处理第十个：该项记录处理结果后可关闭，其他九项仍在 mailbox 中，并在后续批次交付。验收要求不是“发出十次通知”，而是十项最终都有可追溯的处理结果或明确的等待原因。
+For example, ten executors simultaneously submit ten questions needing decisions, and the master controller handles only the tenth this turn: that item can be closed after its handling result is recorded, and the other nine remain in the mailbox and are delivered in subsequent batches. The acceptance requirement is not "ten notifications were sent", but that all ten items eventually have a traceable handling result or an explicit reason for waiting.
 
-**FR-08 总负责人的必处理事项（P0）**
+**FR-08 Must-handle items for the lead (P0)**
 
-1. 资源与任务依赖：新增/变化、资源争用、环形等待、依赖方无法履约。
-2. 授权：任务之外的范围/预算/权限；需要用户批准的事项不能由 Agent 代签。
-3. 主动评估拆解：粒度不当、重复工作、持续返工、契约不匹配，重新拆分/合并/编排。
-4. 新工作和容量：队列将空、工作线空闲、没有合适就绪项，需要重新分配或准备新任务。
-5. 目标/范围/优先级：需求变化、资源抢占、验收标准变化、全局架构取舍。
-6. 无法按规则恢复的异常：预算耗尽、持续不收敛、证据矛盾和恢复失败。
-7. 项目级验收：集成结果、遗留问题、是否达到用户目标以及交付/发布决策。
+1. Resource and task dependencies: additions/changes, resource contention, circular waits, a depended-on party unable to deliver.
+2. Authorization: scope/budget/permissions beyond the task; items requiring user approval must not be signed off by an Agent on the user's behalf.
+3. Proactive evaluation of decomposition: inappropriate granularity, duplicated work, persistent rework, contract mismatch; re-split/merge/re-orchestrate.
+4. New work and capacity: queue about to empty, work lanes idle, no suitable ready items; reallocation or preparation of new tasks is needed.
+5. Goal/scope/priority: requirement changes, resource preemption, acceptance criteria changes, global architectural trade-offs.
+6. Exceptions that cannot be recovered by rules: budget exhaustion, persistent non-convergence, contradictory evidence, and recovery failure.
+7. Project-level acceptance: integration results, outstanding issues, whether the user's goal is met, and delivery/release decisions.
 
-总负责人可派调查或审核任务获取证据，决策权不随调查任务转移。主动复查由里程碑、需求变化、阻塞/返工积累、队列低水位及可配置周期触发，不能只等执行者汇报。
+The lead may dispatch investigation or review tasks to obtain evidence; decision authority does not transfer with the investigation task. Proactive re-checks are triggered by milestones, requirement changes, accumulated blockers/rework, low queue watermark, and a configurable period; the lead must not only wait for executor reports.
 
-**FR-09 执行者横向协作（P0）**
+**FR-09 Lateral collaboration among executors (P0)**
 
-执行者可直接与相关任务所有者澄清已批准接口、索取 schema/fixture/测试结果、交接产物，以及修复双方授权范围内的不一致。程序提供持久投递、唤醒、超时和记录，不要求总负责人充当传话筒。
+Executors may directly, with the owners of related tasks, clarify approved interfaces, request schemas/fixtures/test results, hand off artifacts, and fix inconsistencies within both parties' authorized scope. The program provides persistent delivery, wake-up, timeouts, and records, without requiring the lead to act as a messenger.
 
-新增依赖/资源需求、优先级调整、变更公共契约、影响第三方、超出预算/权限、协商不收敛必须送总负责人。双方同意不能代替验收，也不能扩大双方权限。
+New dependency/resource needs, priority adjustments, changes to public contracts, impact on third parties, exceeding budget/permissions, and non-converging negotiation must go to the lead. Mutual agreement cannot replace acceptance, nor expand either party's permissions.
 
-消息优先沿相关任务关系发送，避免全队广播；协议记录请求、回应、承诺、交付和验证，承诺不等于完成。横向沟通是否减少阻塞、是否增加消息风暴，需真实运行验证，不能假设 Agent 具有人的团队默契。
+Messages are preferably sent along related task relationships, avoiding whole-team broadcast; the protocol records requests, responses, commitments, deliveries, and verification; a commitment is not completion. Whether lateral communication reduces blocking or increases message storms must be validated in real runs; do not assume Agents have a human team's tacit understanding.
 
-**FR-10 长期工作线与临时会话（P0）**
+**FR-10 Long-lived work lanes and temporary sessions (P0)**
 
-长期线保留职责、队列和必要上下文，可在无活时休眠；支持指定暂停时长，例如 20–30 分钟，到期重新评估，并明确新任务是否提前唤醒。
+A long-lived lane retains its responsibilities, queue, and necessary context, and may sleep when there is no work; support a specified pause duration, e.g. 20–30 minutes, re-evaluating on expiry, and make explicit whether a new task wakes it early.
 
-临时执行/审核完成后选择复用、保留或释放，必须有明确下一归属。独立审核用新上下文，不继承实现者对话。临时会话释放与成果/worktree/分支回收分开，失败成果也应留存。
+After a temporary execution/review completes, choose to reuse, retain, or release it; there must be an explicit next owner. Independent review uses a fresh context and does not inherit the implementer's conversation. Releasing a temporary session is separate from reclaiming its output/worktree/branch; failed output should also be retained.
 
-**FR-11 可替换的任务指导与上下文（P0，最小边界）**
+**FR-11 Replaceable task guidance and context (P0, minimal boundary)**
 
-任务可以附带文档/产物引用、执行说明，以及可选的 skill 名称或路径。这些内容作为任务输入交给 Agent；核心调度只依赖通用任务合同、依赖、授权和验收条件，不解析特定研发框架的阶段、目录或状态文件。具体 skill 能否使用由所选 Agent 环境确认，缺失时明确报告，不假装已加载。
+A task may carry document/artifact references, execution instructions, and an optional skill name or path. These are passed to the Agent as task input; core scheduling depends only on the generic task contract, dependencies, authorization, and acceptance conditions, and does not parse the phases, directories, or state files of any specific development framework. Whether a specific skill can be used is confirmed by the chosen Agent environment; when missing, report it explicitly and do not pretend it was loaded.
 
-不提供内置研发方法论，不要求配置一套流程引擎。项目可更换任务指导，运行中变更则记录输入版本并明确是否重新验证；不能借切换 skill 绕过授权、隔离或验收要求。
+No built-in development methodology is provided, and configuring a process engine is not required. Projects may change task guidance; a change during a run records the input version and makes explicit whether re-verification is needed; switching skills must not be used to bypass authorization, isolation, or acceptance requirements.
 
-首版不开发 BMAD/Superpowers 专用导入器、版本适配器、阶段映射、状态双向同步或共享 sprint 文件回写。将来有需要可独立扩展，不能成为核心编排的运行依赖。独立审核仍作为通用任务能力，由任务的验收要求决定何时使用。
+The first version does not develop BMAD/Superpowers-specific importers, version adapters, phase mapping, bidirectional state sync, or write-back to shared sprint files. These may be extended independently in the future if needed, but must not become runtime dependencies of core orchestration. Independent review remains a generic task capability, and the task's acceptance requirements decide when to use it.
 
-**FR-12 中断恢复与远程运行（P0）**
+**FR-12 Interruption recovery and remote operation (P0)**
 
-单进程中看板与调度共存：离开/隐藏视图不退出运行循环。真正关闭承载插件的唯一 tab 会终止进程，须与隐藏看板区分；重开入口恢复持久状态。无外部观察者时不能承诺插件意外退出后的即时通知或自动复活。
+The board and scheduler coexist in a single process: leaving/hiding the view does not exit the run loop. Actually closing the only tab hosting the plugin terminates the process, and must be distinguished from hiding the board; reopening the entry point restores persistent state. Without an external observer, we cannot promise immediate notification or automatic revival after the plugin exits unexpectedly.
 
-本地客户端与远端 Herdr 连接断开、隐藏/离开看板视图、显式终止插件进程、总负责人停轮、worker 退出、运行服务重启是不同事件。重启后核对持久记录与实际进程/工作树，恢复未处理消息与任务，不创建重复执行者。
+The local client disconnecting from the remote Herdr, hiding/leaving the board view, explicitly terminating the plugin process, the lead stopping its turn, a worker exiting, and the runtime service restarting are distinct events. After restart, reconcile persistent records against actual processes/worktrees, recover unhandled messages and tasks, and do not create duplicate executors.
 
-远端主机拥有实际进程和文件状态；失联显示未知，不等于已退出。不同主机上相同 pane ID/路径不得混淆。需要的能力不存在时明确报错，不回退到本地执行。
+The remote host owns the actual process and file state; loss of contact shows as unknown, which is not the same as exited. The same pane ID/path on different hosts must not be confused. When a required capability does not exist, report an error explicitly; do not fall back to local execution.
 
-第一阶段必须支持本地 Herdr 客户端通过 remote 模式操作远端 Herdr：用户在本地查看与交互，项目文件、worktree、Agent 会话以及本项目的持续执行服务和持久状态位于目标执行端。用户无需另行登录服务器启动一套独立交互流程；本地客户端断开不能终止远端监督。也支持本地 Herdr 执行。跨多个执行端联合调度可后续扩展，这不影响首版支持 Herdr remote。
+Phase one must support a local Herdr client operating a remote Herdr in remote mode: the user views and interacts locally, while project files, worktrees, Agent sessions, and this project's continuous execution service and persistent state reside on the target execution side. The user does not need to separately log into the server to start an independent interaction flow; disconnecting the local client must not terminate remote supervision. Local Herdr execution is also supported. Joint scheduling across multiple execution sides may be extended later; this does not affect first-version support for Herdr remote.
 
-项目绑定明确的 Herdr 执行端与 session；初始化发现、任务派发、状态查询、消息及 worktree 操作必须始终路由到该绑定。界面上选中的远程机器不能被假定为工具命令的隐含目标：Herdr pane 内 CLI 通常沿用继承的会话上下文，本地转发调用须显式选择对应 machine。切换界面连接不迁移现有项目的执行位置。显示名称和 pane ID 不能单独作为跨执行端资源身份。
+A project is bound to an explicit Herdr execution side and session; initialization discovery, task dispatch, state queries, messages, and worktree operations must always be routed to that binding. The remote machine selected in the interface must not be assumed to be the implicit target of tool commands: a CLI inside a Herdr pane usually inherits the session context, and locally forwarded calls must explicitly select the corresponding machine. Switching the interface connection does not migrate the execution location of existing projects. Display names and pane IDs alone cannot serve as resource identity across execution sides.
 
-实现须区分 Herdr 的交互式 remote 连接与 machine API 转发；只能使用目标版本实际支持的能力。执行端的 CLI 安装/可用性检测若没有现成查询能力，需要在该执行端补充只读探测，不能将本地探测包装成远端结果。远端缺少插件或编排组件时明确报告，不假设本地安装自动复制到远端；具体部署与远程插件显示方式仍需验证。
+The implementation must distinguish Herdr's interactive remote connection from machine API forwarding; only capabilities actually supported by the target version may be used. If there is no existing query capability for detecting CLI installation/availability on the execution side, a read-only probe must be added on that execution side; a local probe must not be dressed up as a remote result. When the remote side lacks the plugin or orchestration components, report it explicitly; do not assume a local install is automatically copied to the remote side; the concrete deployment and how the remote plugin is displayed still need validation.
 
-**FR-13 项目初始化与容量确认（P0）**
+**FR-13 Project initialization and capacity confirmation (P0)**
 
-首次启动时，系统支持总负责人通过对话或 CLI/TUI 向用户展示并确认一份项目运行配置。总负责人可根据初始目标建议配置，但不能把建议默认为用户已经批准。可直接采用用户已给出的配置或模板，避免重复提问。
+On first start, the system lets the lead present and confirm a project runtime configuration with the user through conversation or CLI/TUI. The lead may suggest a configuration based on the initial goal, but must not treat the suggestion as already approved by the user. A configuration or template the user has already given may be adopted directly, to avoid repeated questions.
 
-初始化是可往返调整的对话流程，不要求用户先填完一张配置表：
+Initialization is a conversational flow that can go back and forth, not requiring the user to fill out a configuration form first:
 
-1. **发现可用 Agent。** 先识别并展示项目绑定的 Herdr 执行端（Local 或远端 machine/session），在该执行端查询 Herdr 的 Agent 支持信息，并核对已安装 CLI 与已有配置档。向用户列出可发现的类型、可用性及尚未验证的能力；明确区分“Herdr 支持”“目标执行端已安装”“已验证可启动/接入”。未检测到不等于确定不存在，允许用户补充自定义路径/配置。用户通过本地 Herdr remote 连接远端时，发现与后续启动均针对同一远端 Herdr；不要求用户切换到另一套 SSH 交互，也不拿客户端安装情况代替。基础发现只做必要的只读检查，需启动会话或模型调用的验证应在已授权范围内执行。
-2. **提出可调整的方案。** 总负责人结合项目目标、任务规模、用户偏好和可用 Agent，给出具体队伍草案：总控配置、长期线数量/职责/类型组合、临时额度/用途/类型规则，以及采用该组合的简短理由。未知参数标明默认值或待确认项，不为凑齐配置重复提问，也不因工具已安装就假设它适合所有角色。
-3. **对话修改。** 用户可直接说“开发全部换成 Pi”“留一条 Codex”“临时审核改用 OpenCode”“先少开两条”。系统更新同一份草案，展示变化及最终组合；调整数量、类型或职责不要求从头初始化。此阶段不启动整支队伍，不因每轮修改重复创建资源。
-4. **确认并落地。** 用户确认当前版本方案后，将其保存为项目运行配置，按配置准备 worktree、启动需立即工作的长期线并登记其余长期线；临时额度登记为按需启动规则。展示实际落地结果、未启动项及失败原因。用户已经明确批准的完整方案可直接落地，不机械地再问一遍。若落地时环境发生变化，保留成功部分并处理失败项，不擅自换 Agent 或扩大额度。
+1. **Discover available Agents.** First identify and show the Herdr execution side the project is bound to (Local or a remote machine/session), query Herdr's Agent support information on that execution side, and check installed CLIs and existing configuration profiles. List for the user the discoverable types, availability, and not-yet-validated capabilities; clearly distinguish "supported by Herdr", "installed on the target execution side", and "validated to start/integrate". Not detected does not mean definitely absent; allow the user to supply custom paths/configuration. When the user connects to a remote side through local Herdr remote, discovery and subsequent launches all target the same remote Herdr; the user is not required to switch to a separate SSH interaction, and the client's installation state must not be used as a substitute. Basic discovery does only the necessary read-only checks; validation that requires starting sessions or model calls should be performed within authorized scope.
+2. **Propose an adjustable plan.** Combining the project goal, task scale, user preferences, and available Agents, the lead gives a concrete team draft: master controller configuration, long-lived lane count/responsibilities/type mix, temporary quota/purpose/type rules, and a brief rationale for the mix. Unknown parameters are marked with defaults or as to-be-confirmed; do not ask repeated questions just to complete the configuration, and do not assume a tool suits all roles just because it is installed.
+3. **Modify through conversation.** The user may say directly "switch all development to Pi", "keep one Codex", "use OpenCode for temporary review", "start two fewer for now". The system updates the same draft and shows the changes and the final mix; adjusting count, type, or responsibilities does not require re-initializing from scratch. At this stage the whole team is not launched, and resources are not repeatedly created on each revision.
+4. **Confirm and land.** After the user confirms the current version of the plan, save it as the project runtime configuration, prepare worktrees per the configuration, start the long-lived lanes that need to work immediately and register the rest; the temporary quota is registered as an on-demand launch rule. Show the actual landed result, items not started, and failure reasons. A complete plan the user has already explicitly approved can be landed directly without mechanically asking again. If the environment changes during landing, keep the successful parts and handle the failed items; do not switch Agents or expand quota on your own.
 
-CLI/TUI 可展示发现结果和当前草案；对话负责提出与修改方案，程序负责校验和执行。草案有稳定身份与版本，可恢复；确认只对相应版本生效，确认后的修改不能混入先前批准的启动操作。初始化退出、重试或重新进入时继续已有草案/配置，不重复创建队伍。
+The CLI/TUI may show discovery results and the current draft; conversation is responsible for proposing and modifying the plan, and the program for validating and executing it. The draft has a stable identity and version and is recoverable; confirmation applies only to the corresponding version, and post-confirmation changes must not be mixed into previously approved launch operations. When initialization exits, retries, or is re-entered, it continues the existing draft/configuration and does not create the team again.
 
-| 确认项 | 必须明确的内容 |
+| Item to confirm | What must be made explicit |
 |---|---|
-| 项目与环境 | Herdr 执行端与 session、仓库、执行主机、工作目录、基线、worktree/setup 与成果集成策略 |
-| 总控 | 担任总负责人的 Agent 配置、恢复方式；不固定品牌 |
-| 长期开发线 | 初始数量、每条线职责与 Agent 配置、允许自动增减的范围；无活时的休眠策略 |
-| 临时支持 | 允许同时启动的临时 Agent 上限、用途（如独立审核/调查）、可选 Agent 配置、回收规则 |
-| 资源总额 | 总并发限制及是否包含总控、长期/临时各自额度与预留容量、必要的成本与时间预算 |
-| 自动化授权 | 哪些续做、派发、重试、扩缩容和集成动作已批准，哪些需要总控或用户决定 |
+| Project and environment | Herdr execution side and session, repository, execution host, working directory, baseline, worktree/setup and output integration strategy |
+| Master controller | Agent configuration serving as the lead, recovery method; brand not fixed |
+| Long-lived development lanes | Initial count, each lane's responsibilities and Agent configuration, the range allowed for automatic scaling up/down; sleep policy when idle |
+| Temporary support | Maximum number of temporary Agents allowed to run concurrently, purposes (e.g. independent review/investigation), selectable Agent configurations, reclamation rules |
+| Total resources | Total concurrency limit and whether it includes the master controller, separate long-lived/temporary quotas and reserved capacity, necessary cost and time budgets |
+| Automation authorization | Which continuations, dispatches, retries, scaling, and integration actions are approved, and which require the master controller or user to decide |
 
-初始化必须确认“数量 + Agent 类型组合”，不能只问要开几条线。这里的 Agent 类型指 Pi、Codex、OpenCode 等执行 CLI；职责（开发/审核/调查）、模型与研发 skill 分别配置，不能把它们混成一个固定角色模板。
+Initialization must confirm "count + Agent type mix", not just ask how many lanes to open. Agent type here means an execution CLI such as Pi, Codex, or OpenCode; responsibilities (development/review/investigation), model, and development skill are configured separately and must not be mashed into one fixed role template.
 
-- 先确认本项目执行线的默认 Agent 类型，再确认各条长期线是否覆盖默认值。支持全部同类型，也支持混合组合，例如四条 Pi 加一条 Codex；不能根据总控类型推断执行者类型。
-- 为每条线解析并展示最终配置：线 ID/职责、Agent CLI、模型及适用的运行参数、可选 skill。用户可以引用已有配置档或接受 CLI 默认值，不必重复填写所有参数；默认来源须明确，运行后能核对实际生效值。
-- 临时支持单独确认默认类型、按用途的选择规则，以及允许选择的配置范围。例如开发线主要使用 Pi，独立审核可以配置另一种 Agent，也可以同类型新会话；独立性不强制等同于更换品牌。混合临时类型共享已确认的临时总额度，有需要再设置各类型上限。
-- 配置以项目为作用域。可复用模板，但新项目采用模板时展示并确认本次组合；不能把上个项目主要用 Pi 的偏好静默带到主要用 Codex 或 OpenCode 的项目。
-- 启动前展示最终编排清单，包含总控、每条长期线、临时名额及类型选择规则。用户已经指定的组合直接记入清单，只补问缺失项；未明确的类型不能由系统偷偷决定。
-- 指定 CLI 不可用、模型不可用或接入能力不足时，明确阻塞该配置。只有用户预先批准替代范围时才可按规则切换，并记录实际替代；否则请求确认。新增执行线继承本项目已批准的默认配置，超出批准范围的类型更换需要确认；在途任务更换类型仍须安全交接。
+- First confirm this project's default Agent type for lanes, then confirm whether each long-lived lane overrides the default. Support all-same-type as well as mixed combinations, e.g. four Pi plus one Codex; executor type must not be inferred from the master controller's type.
+- Resolve and show the final configuration for each lane: lane ID/responsibility, Agent CLI, model and applicable runtime parameters, optional skill. The user may reference an existing configuration profile or accept CLI defaults without re-entering all parameters; the source of defaults must be explicit, and the actually effective values must be verifiable after launch.
+- Temporary support separately confirms its default type, per-purpose selection rules, and the range of configurations allowed. For example, development lanes mainly use Pi, while independent review may be configured with another Agent or a fresh session of the same type; independence is not forced to mean switching brands. Mixed temporary types share the confirmed total temporary quota, with per-type caps set if needed.
+- Configuration is project-scoped. Templates may be reused, but when a new project adopts a template, show and confirm this run's mix; a preference for mainly Pi in the last project must not be silently carried into a project that mainly uses Codex or OpenCode.
+- Before launch, show the final orchestration manifest, including the master controller, each long-lived lane, temporary slots, and type selection rules. Combinations the user has already specified go directly into the manifest, asking only about missing items; unspecified types must not be secretly decided by the system.
+- When a specified CLI is unavailable, a model is unavailable, or integration capability is insufficient, explicitly block that configuration. Switching per rules is allowed only when the user has pre-approved a substitution range, and the actual substitution is recorded; otherwise request confirmation. New lanes inherit this project's approved default configuration; type changes beyond the approved range require confirmation; changing the type for an in-flight task still requires a safe handoff.
 
-例如初始化可以确认为：“总控沿用当前配置；长期开发线四条，其中三条 Pi、一条 Codex；临时并发上限二，审核使用 OpenCode，调查沿用 Pi。”这是可选组合示例，不是产品默认值。最终确认的对象是完整的执行队伍配置，而不只是一个 Agent 总数。
+For example, initialization might be confirmed as: "the master controller keeps its current configuration; four long-lived development lanes, three Pi and one Codex; temporary concurrency cap of two, review uses OpenCode, investigation keeps Pi." This is an example of an optional combination, not a product default. The final object of confirmation is the complete execution team configuration, not just a total Agent count.
 
-临时数量表达按需使用的并发额度，不要求开工时启动空闲审核 Agent，也不是项目全程只允许创建那么多次。长期线数量表达持续保留的职责与队列，不要求模型在没活时持续生成。独立审核若被设为完成条件而临时额度为零，初始化必须明确由哪条合适工作线的新会话承担或调整容量，不能偷偷跳过审核。
+The temporary count expresses an on-demand concurrency quota; it does not require launching idle review Agents at kickoff, nor does it mean only that many may be created over the whole project. The long-lived lane count expresses continuously retained responsibilities and queues; it does not require the model to keep generating when there is no work. If independent review is set as a completion condition while the temporary quota is zero, initialization must make explicit which suitable work lane's fresh session will take it on, or adjust capacity; review must not be secretly skipped.
 
-确认后的配置有版本，显示计划数量、实际启动数、空闲/排队数量及启动失败原因。启动前检查所选 CLI、仓库/worktree 能力及必要环境；部分失败不能伪装成全部就绪。重复初始化/恢复不得重复创建工作线或 Agent。
+The confirmed configuration is versioned and shows the planned count, actually launched count, idle/queued count, and launch failure reasons. Before launch, check the selected CLIs, repository/worktree capabilities, and necessary environment; partial failure must not be disguised as all ready. Repeated initialization/recovery must not create duplicate work lanes or Agents.
 
-总负责人可在已批准范围内调整工作线和临时额度；超出范围交用户确认。缩容先停止领新任务，完成或交接在途工作后释放；不能直接杀死有未保存成果的会话。容量不足时明确排队，不能通过另起临时 Agent 绕过限制。
+The lead may adjust work lanes and the temporary quota within the approved range; beyond that range, it goes to the user for confirmation. Scaling down first stops taking new tasks, and releases after in-flight work is completed or handed off; sessions with unsaved output must not be killed directly. When capacity is insufficient, queue explicitly; do not bypass the limit by spinning up additional temporary Agents.
 
-**FR-14 总控的项目状态入口与调整闭环（P0）**
+**FR-14 Master controller's project state entry point and adjustment loop (P0)**
 
-给用户的 TUI 与给总控的结构化 CLI/API 必须读取同一套权威任务记录。不能要求总控“看屏幕猜全局”，也不能只依赖它对历史聊天的记忆。状态查询至少提供：
+The TUI for the user and the structured CLI/API for the master controller must read the same authoritative task records. The master controller must not be required to "look at the screen and guess the global picture", nor rely solely on its memory of chat history. State queries provide at least:
 
-- 项目目标、当前计划版本、任务阶段分布、待验收与集成结果。
-- 每条长期/临时线的当前任务、下一项队列、Agent 状态、worktree、容量占用与最后可证实进展。
-- 依赖关系、受阻原因、等待时长、空闲线、缺工作或资源竞争。
-- mailbox 未处理数量、最旧事项、紧急决策、监督/通信异常。
+- Project goal, current plan version, task stage distribution, items awaiting acceptance, and integration results.
+- For each long-lived/temporary lane: current task, next-item queue, Agent state, worktree, capacity usage, and last verifiable progress.
+- Dependency relationships, blocking reasons, wait durations, idle lanes, lack of work, or resource contention.
+- Mailbox unhandled count, oldest item, urgent decisions, supervision/communication anomalies.
 
-每份快照标注版本、采集时间和各观测来源的新鲜度；未知/过期状态显式标记。支持读取完整快照，以及自上次版本以来的变化；变化记录缺失时要求重取完整快照。总控启动、恢复或更换会话时先取快照与未处理事项。
+Each snapshot is labeled with its version, capture time, and the freshness of each observation source; unknown/stale state is explicitly marked. Support reading a full snapshot, as well as the changes since the last version; when change records are missing, require re-fetching the full snapshot. When the master controller starts, resumes, or switches sessions, it first fetches the snapshot and unhandled items.
 
-关键状态变化通过持久事件触发合并提醒；另按配置周期触发全局复查，避免没有人汇报就无人检查。总控正在忙时积累变化，在下一检查点拉取；“随时可查询”不等于模型持续在思考或能被任意即时打断。
+Key state changes trigger coalesced reminders via persistent events; in addition, a global re-check is triggered on a configured period, so that things are not left unchecked just because no one reported. While the master controller is busy, changes accumulate and are pulled at the next checkpoint; "queryable at any time" does not mean the model is continuously thinking or can be interrupted arbitrarily and instantly.
 
-总控可通过同一控制入口增删/拆分任务、改依赖、重排队列、改派、暂停/恢复及申请扩缩容。变更请求携带所依据的计划/任务版本，落地前校验权限、资源和当前状态；版本冲突返回差异供重新判断，不能用旧快照覆盖新成果。运行中任务须按交接规则操作。
+Through the same control entry point, the master controller can add/remove/split tasks, change dependencies, reorder queues, reassign, pause/resume, and request scaling up/down. Change requests carry the plan/task version they are based on; before landing, permissions, resources, and current state are validated; version conflicts return the diff for re-judgment, and a stale snapshot must not overwrite new results. Running tasks must be operated on per handoff rules.
 
-每项调整返回已生效、等待安全交接或拒绝及原因，并关联操作 ID；看板和总控均能核对实际结果。发出改派指令不能被当作已经改派。此入口执行总控决定及既定规则，不增加一个替总控做决策的 Agent。
+Each adjustment returns applied, waiting for safe handoff, or rejected with reason, associated with an operation ID; both the board and the master controller can verify the actual result. Issuing a reassignment instruction must not be treated as having reassigned. This entry point executes the master controller's decisions and established rules; it does not add an Agent that makes decisions on the master controller's behalf.
 
-**6. 从 Orca 借鉴的具体经验**
+**6. Concrete lessons borrowed from Orca**
 
-本次已核对 Orca 的 orchestration 指南、关键源码和相应测试断言；详见 [Orca 能力与故障经验](research/2026-10-18/orca-lessons.md)。没有安装/运行 Orca，也没有把阅读测试说成测试已经通过。
+This round reviewed Orca's orchestration guide, key source code, and corresponding test assertions; see [Orca capabilities and failure lessons](research/2026-10-18/orca-lessons.md). Orca was not installed or run, and reading the tests is not claimed as the tests having passed.
 
-| Orca 中确认的设计 | 我们采纳的产品要求 |
+| Design confirmed in Orca | Product requirement we adopt |
 |---|---|
-| Task 与 Dispatch 分离，执行结果绑定当前尝试 | FR-01/03/05：任务不因换会话丢失，旧结果不能覆盖新尝试 |
-| ready 查询和依赖完成条件 | FR-04：只派发真正就绪的工作；失败依赖不能误解锁 |
-| Agent 状态看板与工作区看板是不同投影 | FR-06：区分展示状态、Agent 状态和任务验收状态 |
-| 持久投递、Delivery 重放与 ack | FR-07：收到不等于处理，消费中断不能丢消息 |
-| 提示已发但启动未观察到，不重复粘贴 | FR-05： uncertain 必须核对，不双开执行者 |
-| 接管后旧 consumer 被撤权 | FR-03/12：旧会话不能确认新会话的邮件或结算新任务 |
-| 启动失败计数与熔断 | FR-05：持续启动失败不无限创建终端；业务失败与启动失败分开计数 |
-| 远程 live/unverifiable/exited 区分 | FR-12：断连不能被当作可回收/重试证明 |
-| release、retain、reuse 与 stop 分离 | FR-10：完成后资源有归属，取消与回收语义分开 |
-| 移除 worktree 后仍保留未合入分支 | FR-02：目录回收不等于丢弃代码成果 |
+| Task separated from Dispatch; execution results bound to the current attempt | FR-01/03/05: tasks are not lost when sessions change; old results cannot overwrite a new attempt |
+| ready queries and dependency completion conditions | FR-04: only dispatch truly ready work; a failed dependency must not mistakenly unlock |
+| Agent status board and workspace board are different projections | FR-06: distinguish display state, Agent state, and task acceptance state |
+| Persistent delivery, Delivery replay, and ack | FR-07: received does not mean handled; interrupted consumption must not lose messages |
+| Prompt sent but start not observed: do not re-paste | FR-05: uncertain must be verified; do not run two executors |
+| After takeover, the old consumer's authority is revoked | FR-03/12: an old session cannot acknowledge the new session's mail or settle a new task |
+| Launch failure counting and circuit breaking | FR-05: persistent launch failures do not create terminals endlessly; business failures and launch failures are counted separately |
+| Remote live/unverifiable/exited distinction | FR-12: disconnection cannot be taken as proof that something can be reclaimed/retried |
+| release, retain, reuse, and stop separated | FR-10: resources have an owner after completion; cancellation and reclamation semantics are separate |
+| Unmerged branches retained after removing a worktree | FR-02: directory reclamation does not mean discarding code output |
 
-不机械照搬两点：Orca 指南允许默认使用现有工作区，而本产品按用户要求，**并行写任务默认独立 worktree**；Orca 的成功 worker_done 会推进任务记录，而本产品还要求与验收/审核证据匹配，不能只信成功声明。
+Two points are not copied mechanically: Orca's guide allows using the existing workspace by default, whereas this product, per the user's requirement, uses **separate worktrees by default for parallel write tasks**; Orca's successful worker_done advances the task record, whereas this product additionally requires a match with acceptance/review evidence and does not trust a success claim alone.
 
-Orca 的协调 loop 仍包含 coordinator 主动等待、检查和恢复选择；其 keepalive 输出本身不是自动催办 Agent。本次证据不能推出“装 Orca 就能保证任意 Agent 一直干到底”。我们需要验证和补齐自己的持续执行目标。
+Orca's coordination loop still includes the coordinator actively waiting, checking, and choosing recovery; its keepalive output is not by itself automatic nudging of Agents. This round's evidence cannot support the conclusion that "installing Orca guarantees any Agent will keep working to the end". We need to validate and fill in our own continuous execution goals.
 
-**7. 首个可用版本与暂不做的范围**
+**7. First usable version and out-of-scope items for now**
 
-产品只提供多 Agent 编排与协作所需的六组能力：
+The product provides only the six groups of capabilities needed for multi-Agent orchestration and collaboration:
 
-1. 通用任务与队列：记录目标、局部上下文、依赖、验收，支持动态调整。
-2. 执行环境与隔离：调用 Herdr，管理异构会话与 worktree 写入归属。
-3. 持续执行与恢复：停轮续做、失败有界重试、未知状态核对、主控自监督。
-4. 协作与决策：横向消息、产物交接、阻塞与授权升级，减少无效汇报。
-5. 状态与证据：终端看板、当前/后续工作、验收结果和可追溯记录。
-6. 生命周期：长期线休眠与补活、临时任务回收、重启恢复与成果保留。
+1. Generic tasks and queues: record goals, local context, dependencies, acceptance; support dynamic adjustment.
+2. Execution environment and isolation: call Herdr; manage heterogeneous sessions and worktree write ownership.
+3. Continuous execution and recovery: continuation after turn stops, bounded retry on failure, verification of unknown state, master controller self-supervision.
+4. Collaboration and decisions: lateral messages, artifact handoff, escalation of blockers and authorization, reducing ineffective reporting.
+5. State and evidence: terminal board, current/upcoming work, acceptance results, and traceable records.
+6. Lifecycle: long-lived lane sleep and refill, temporary task reclamation, restart recovery, and output retention.
 
-需求怎么写、设计怎么做、采用什么开发步骤，由用户选择的 Agent 指导或 skill 决定；这些不是编排系统必须内置的功能。
+How requirements are written, how design is done, and what development steps are used are decided by the Agent guidance or skill the user chooses; these are not functions the orchestration system must build in.
 
-首个版本交付 FR-01 至 FR-14 的基础闭环：单项目、一个总负责人、多个异构执行者、独立 worktree、持久任务/消息、CLI/TUI、停轮自动续做、异常升级、队列调整、独立审核与恢复。先用小规模证明机制，再验证十条线；不以先做漂亮界面替代执行可靠性。
+The first version delivers the basic loop of FR-01 through FR-14: single project, one lead, multiple heterogeneous executors, separate worktrees, persistent tasks/messages, CLI/TUI, automatic continuation after turn stops, exception escalation, queue adjustment, independent review, and recovery. First prove the mechanisms at small scale, then validate ten lanes; a pretty interface first is no substitute for execution reliability.
 
-暂不要求多层主管、模型自动选型、Jev 必经判断层、Web/移动客户端、跨多主机统一资源调度、替换 Herdr、重新实现 Git/worktree 底层、专用研发框架接入或通用工作流引擎，或承诺任何模型能完成任意任务。
+Not required for now: multi-level supervisors, automatic model selection, a mandatory Jev judgment layer, web/mobile clients, unified resource scheduling across multiple hosts, replacing Herdr, reimplementing Git/worktree internals, integration with specific development frameworks or a generic workflow engine, or promising that any model can complete any task.
 
-插件、skill、后台服务如何组合，以及是否扩展 Herdr Board，属于下一阶段落地设计。只采用能满足产品合同且经实际验证的能力。
+How plugins, skills, and background services are combined, and whether to extend Herdr Board, belong to the next phase of implementation design. Only capabilities that satisfy the product contract and have been actually validated are adopted.
 
-**8. 验收场景**
+**8. Acceptance scenarios**
 
-| 编号 | 场景 | 必须观察到的结果 |
+| ID | Scenario | Result that must be observed |
 |---|---|---|
-| AC-01 | 两个 Agent 同时修改同一仓库同名文件 | 实际 cwd 位于两个独立 worktree；改动不互相覆盖，后续集成独立验证 |
-| AC-02 | 不同 workspace 指向同一 checkout | 系统识别同一写入资源，拒绝两个并行写入者 |
-| AC-03 | worker 写两行后结束一轮 | 任务仍未完成；无需用户催办即可续做，或形成明确的不能续做原因 |
-| AC-04 | 提示已接受但响应/启动观察丢失 | 不重复粘贴、不重复创建任务/worker；核对后恢复 |
-| AC-05 | Agent 一直输出但测试反复失败 | 不被当作有效完成；有界修复后升级，并保留证据 |
-| AC-06 | 长测试没有终端输出 | 依据实际活动判定，不误杀活跃工具 |
-| AC-07 | 权限/认证/限流阻塞 | 有针对性的状态与提醒，不无限发继续 |
-| AC-08 | 上游完成/失败/取消 | 仅满足依赖条件才解锁下游；失败不伪装为已完成 |
-| AC-09 | 执行者横向协商产物 | 请求、回应、交付可追溯；越界冲突送总负责人 |
-| AC-10 | 修改队列顺序、暂停/恢复、改派 | 实际下一次执行遵守新安排；运行中不双重持有写入权 |
-| AC-11 | 总负责人停轮或退出 | 待决策事项不丢；系统唤醒/恢复，失败则提醒用户 |
-| AC-12 | 通知丢失、处理后 ack 前崩溃 | 未确认消息可恢复/重放，已完成动作不重复生效 |
-| AC-13 | 本地 Herdr remote 客户端断开或远端服务短时不可达 | 客户端断开不停止远端监督；不可达状态显示未知，重连核对，不因失联双开或回收 |
-| AC-14 | worker 更换后旧会话迟到回复 | 旧代次无权改变新尝试结果或确认其消息 |
-| AC-15 | 临时审核完成并释放会话 | 报告、候选 commit、验证结果仍可查；未落地成果不被删除 |
-| AC-16 | worktree 中有 dirty 文件或未合入 commit | 清理明确保留/拒绝，不能强删；终端释放与目录/分支处理分离 |
-| AC-17 | worktree setup 失败或基线漂移 | 不悄悄开工；显示失败原因与可采取的恢复动作 |
-| AC-18 | 长期线队列空、暂停到期、新任务到达 | 无无意义模型轮次；按配置重新唤醒 |
-| AC-19 | 十条线混合完成、阻塞和失败 | 看板与真实状态一致，普通事件汇总，必决策事项完整可见 |
-| AC-20 | 交换不同 CLI 担任总负责人/执行/审核 | 支持的角色行为一致；能力差异明确呈现，不固定某品牌 |
-| AC-21 | 所有子任务显示完成但集成失败 | 项目仍未完成，产生集成修复/决策项 |
-| AC-22 | 同一任务请求重试提交或需求中途修订 | 不重复派发；版本和重新验收要求可追溯 |
-| AC-23 | 不安装任何研发框架，只提供目标与验收条件 | 可完成派发、续做、协作、验证、交付与回收完整闭环 |
-| AC-24 | 不同任务使用不同可用 skill，或项目更换研发方法 | 无需修改编排核心；既有队列、依赖、成果与历史保留，输入变更可追溯 |
-| AC-25 | 首次确认三条长期线、临时并发上限二，随后重复初始化 | 创建/登记三条长期线；临时任务按需启动且同时不超过二；重复初始化不双开 |
-| AC-26 | 临时任务超过额度或运行中缩容 | 超额任务明确排队；缩容完成或交接在途工作后释放，不丢成果；越权扩容需要确认 |
-| AC-27 | 总控恢复或更换会话，项目状态已改变 | 从快照与 mailbox 恢复；可见队列、依赖、容量和未知状态，不依赖旧聊天 |
-| AC-28 | 总控基于旧快照调整任务，而该任务刚完成/已被改派 | 返回版本冲突及新事实，不覆盖完成结果、不产生双写；合法调整有实际生效回执 |
-| AC-29 | 十个 Agent 同时提交十个需决策事项，总控只处理其中一个 | 只关闭已处理项；另外九项仍待处理，后续批次可取，不被最后一条消息覆盖 |
-| AC-30 | 总控处理一批消息中途退出，或动作完成后确认前退出 | 未处理项重新可领取；已生效操作核对回执后确认，不重复改派/扩容；旧总控不能越权确认 |
-| AC-31 | 总控忙时连续收到消息，且其中一项等待用户答复 | 不逐条强塞 prompt；等待项保留责任与唤醒条件，其他事项继续；旧项不会被新消息永久挤走 |
-| AC-32 | 没有新汇报但队列将空，或 mailbox 长期积压 | 周期复查/低水位提醒触发全局评估；积压与最旧等待可见，超期提醒用户，不静默停摆 |
-| AC-33 | 项目确认三条 Pi、一条 Codex 长期线，临时审核用 OpenCode | 初始化清单逐线列出类型和配置；按确认组合启动，临时任务遵守用途规则与总额度，不随总控类型变化 |
-| AC-34 | 新项目改用另一默认类型，或指定 CLI 不可用 | 不继承其他项目的隐含偏好；不可用时明确阻塞，未授权不替换；已授权替代保留记录 |
-| AC-35 | 本地 Herdr 通过 remote 连接远端，两端安装的 Agent 不同 | 在现有 Herdr 使用流程内展示目标远端的发现结果，并向同一端派发；区分支持/安装/验证状态，不误用本地安装或继承的其他 session |
-| AC-36 | 用户连续调整数量和类型，随后确认并在部分启动失败后重试 | 修改同一版本化草案，确认前不启动队伍；确认后按最终方案落地，重试不重复创建成功项，不静默替换失败类型 |
-| AC-37 | 界面切换机器，两端存在相同 pane ID；远端缺少所需能力 | 项目操作仍使用已绑定执行端与 session，不因界面切换误投；缺能力明确报错，不回退本地 |
-| AC-38 | 反复打开插件、停留详情、隐藏视图并模拟慢任务调用 | 仅一个插件常驻进程；视图与调度互不阻塞；Agent/短命命令单独列出，不能用隐藏子 daemon 满足验收 |
+| AC-01 | Two Agents simultaneously modify a same-named file in the same repository | Actual cwd is in two separate worktrees; changes do not overwrite each other; subsequent integration is verified independently |
+| AC-02 | Different workspaces point to the same checkout | The system recognizes the same write resource and rejects two parallel writers |
+| AC-03 | A worker writes two lines and then ends a turn | The task is still incomplete; it continues without the user nudging, or a clear reason it cannot continue is produced |
+| AC-04 | Prompt accepted but response/start observation is lost | No re-paste, no duplicate task/worker creation; recover after verification |
+| AC-05 | An Agent keeps producing output but tests keep failing | Not treated as valid completion; escalate after bounded fixing, with evidence retained |
+| AC-06 | A long test has no terminal output | Judged by actual activity; active tools are not mistakenly killed |
+| AC-07 | Permission/authentication/rate-limit blocking | Targeted state and reminders; no endless "continue" |
+| AC-08 | Upstream completes/fails/is cancelled | Downstream is unlocked only when dependency conditions are met; failure is not disguised as completion |
+| AC-09 | Executors negotiate artifacts laterally | Requests, responses, and deliveries are traceable; out-of-bounds conflicts go to the lead |
+| AC-10 | Change queue order, pause/resume, reassign | The actual next execution follows the new arrangement; no double holding of write ownership while running |
+| AC-11 | The lead stops its turn or exits | Pending decisions are not lost; the system wakes/resumes it, and reminds the user on failure |
+| AC-12 | Notification lost; crash after handling but before ack | Unacknowledged messages can be recovered/replayed; completed actions do not take effect twice |
+| AC-13 | Local Herdr remote client disconnects or the remote service is briefly unreachable | Client disconnect does not stop remote supervision; unreachable state shows as unknown, verified on reconnect; no double launch or reclamation due to lost contact |
+| AC-14 | A late reply from the old session after the worker is replaced | The old generation has no authority to change the new attempt's result or acknowledge its messages |
+| AC-15 | Temporary review completes and the session is released | Report, candidate commit, and verification results remain queryable; unlanded output is not deleted |
+| AC-16 | A worktree has dirty files or unmerged commits | Cleanup explicitly retains/refuses and cannot force-delete; terminal release is separate from directory/branch handling |
+| AC-17 | Worktree setup fails or the baseline drifts | Work does not start silently; the failure reason and available recovery actions are shown |
+| AC-18 | Long-lived lane queue is empty, a pause expires, a new task arrives | No meaningless model turns; re-woken per configuration |
+| AC-19 | Ten lanes with a mix of completion, blocking, and failure | Board matches real state; ordinary events are summarized; must-decide items are fully visible |
+| AC-20 | Swap different CLIs into the lead/execution/review roles | Supported role behavior is consistent; capability differences are explicitly presented; no fixed brand |
+| AC-21 | All subtasks show complete but integration fails | The project is still incomplete; an integration fix/decision item is produced |
+| AC-22 | The same task requests a retried submission, or requirements are revised midway | No duplicate dispatch; versions and re-acceptance requirements are traceable |
+| AC-23 | No development framework installed; only goals and acceptance conditions provided | The complete loop of dispatch, continuation, collaboration, verification, delivery, and reclamation can be completed |
+| AC-24 | Different tasks use different available skills, or the project changes development method | No change to the orchestration core is needed; existing queues, dependencies, output, and history are retained; input changes are traceable |
+| AC-25 | First confirm three long-lived lanes and a temporary concurrency cap of two, then re-run initialization | Three long-lived lanes are created/registered; temporary tasks launch on demand with no more than two concurrently; re-initialization does not double-launch |
+| AC-26 | Temporary tasks exceed the quota, or scale-down during a run | Over-quota tasks are explicitly queued; scale-down releases after in-flight work completes or is handed off, without losing output; unauthorized scale-up requires confirmation |
+| AC-27 | Master controller resumes or switches sessions, and project state has changed | Recovers from snapshot and mailbox; queues, dependencies, capacity, and unknown states are visible; no reliance on old chat |
+| AC-28 | Master controller adjusts a task based on a stale snapshot, while that task has just completed/been reassigned | Returns a version conflict and the new facts; does not overwrite the completion result or produce double writes; legitimate adjustments get an actually-applied receipt |
+| AC-29 | Ten Agents simultaneously submit ten items needing decisions, and the master controller handles only one | Only the handled item is closed; the other nine remain pending and can be fetched in later batches, not overwritten by the last message |
+| AC-30 | Master controller exits midway through handling a batch, or after an action completes but before acknowledgment | Unhandled items become claimable again; applied operations are acknowledged after verifying receipts, with no duplicate reassignment/scaling; the old master controller cannot acknowledge beyond its authority |
+| AC-31 | Master controller receives messages continuously while busy, and one item is waiting for a user reply | Prompts are not force-fed one by one; the waiting item keeps its responsible party and wake condition; other items continue; old items are not permanently crowded out by new messages |
+| AC-32 | No new reports but the queue is about to empty, or the mailbox has a long-standing backlog | Periodic re-check/low-watermark reminder triggers a global evaluation; backlog and oldest wait are visible; overdue items remind the user; no silent stall |
+| AC-33 | Project confirms three Pi and one Codex long-lived lanes, with OpenCode for temporary review | The initialization manifest lists type and configuration per lane; launches per the confirmed mix; temporary tasks follow purpose rules and the total quota, not changing with the master controller's type |
+| AC-34 | A new project switches to a different default type, or a specified CLI is unavailable | Does not inherit other projects' implicit preferences; explicitly blocks when unavailable, no substitution without authorization; authorized substitutions are recorded |
+| AC-35 | Local Herdr connects to a remote via remote, and the two sides have different Agents installed | Within the existing Herdr usage flow, shows discovery results for the target remote and dispatches to the same side; distinguishes supported/installed/validated status; does not misuse local installs or an inherited other session |
+| AC-36 | The user adjusts count and type repeatedly, then confirms, and retries after partial launch failure | Modifies the same versioned draft; the team is not launched before confirmation; after confirmation lands per the final plan; retries do not re-create successful items and do not silently substitute failed types |
+| AC-37 | The interface switches machines, both sides have the same pane ID; the remote lacks a required capability | Project operations still use the bound execution side and session, not misdelivered due to the interface switch; missing capability is explicitly reported, with no fallback to local |
+| AC-38 | Repeatedly open the plugin, stay in details, hide the view, and simulate slow task calls | Only one resident plugin process; view and scheduler do not block each other; Agents/short-lived commands are listed separately; a hidden child daemon cannot be used to satisfy acceptance |
 
-指标：人工催“继续”的次数、未受监督的未完成任务数、重复派发数、误回收数、错误依赖解锁数、恢复延迟、总负责人重复决策次数、单位交付的总 token/时间。目标数值与场景基线在小规模验证后确定；明显不变量如不能双写、不能丢成果、不能把未知当成功必须始终成立。
+Metrics: number of manual "continue" nudges, number of unsupervised incomplete tasks, number of duplicate dispatches, number of erroneous reclamations, number of erroneous dependency unlocks, recovery latency, number of repeated decisions by the lead, total tokens/time per unit of delivery. Target values and scenario baselines are determined after small-scale validation; obvious invariants such as no double writes, no lost output, and never treating unknown as success must always hold.
 
-**9. 进入实施讨论前必须确定的事项**
+**9. Items that must be settled before entering implementation discussion**
 
-| 问题 | 当前要求/边界 |
+| Question | Current requirement/boundary |
 |---|---|
-| 哪些能力直接复用 Herdr | 先查目标服务器实际 CLI/协议；worktree、pane、Agent 控制不重复造 |
-| 采用哪套任务/看板代码 | Herdr Board 是候选，Orca 是已补查的设计参照；需要按本 PRD 做接口与成本对照后确认 |
-| Agent 状态证据怎么取得 | 分 CLI 验证原生事件、Herdr 状态、进程与产物信号；不假设统一 Stop hook |
-| 什么算任务完成 | 每项合同明确测试/产物/审核；项目完成还需集成与目标验收 |
-| 谁维护 worktree 的唯一写入权 | 明确一个生命周期所有者，不能多个后台各自创建和清理 |
-| 合入策略与分支基线 | 按项目配置确认，不能擅自把现有工作方式改成固定 PR 或固定直合 |
-| 续做、重试和升级预算 | 分开设置启动失败、无进展、业务修复与通知重试，按实测校准 |
-| 消息和模型成本 | 先用规则处理明确事件，避免全队广播、重复长上下文和多层汇报 |
+| Which capabilities reuse Herdr directly | First check the actual CLI/protocol on the target server; do not rebuild worktree, pane, or Agent control |
+| Which task/board code to adopt | Herdr Board is a candidate, and Orca is a design reference already reviewed; confirm after an interface and cost comparison against this PRD |
+| How to obtain Agent state evidence | Validate native events, Herdr state, process, and artifact signals per CLI; do not assume a unified Stop hook |
+| What counts as task completion | Each contract specifies tests/artifacts/review; project completion additionally requires integration and goal acceptance |
+| Who maintains exclusive write ownership of a worktree | Specify a single lifecycle owner; multiple backends must not each create and clean up |
+| Merge strategy and branch baselines | Confirm per project configuration; do not unilaterally change the existing way of working into fixed PRs or fixed direct merges |
+| Continuation, retry, and escalation budgets | Set separately for launch failures, no progress, business fixes, and notification retries; calibrate by measurement |
+| Message and model cost | First handle clear events with rules; avoid whole-team broadcast, repeated long context, and multi-level reporting |
 
-上述属于落地设计议题，不影响本需求文档先作为共同基线。实施发现机制不成立时，补充实际复现、影响的需求编号、修改建议与验收变化，再更新文档；不能只改实现而保留不成立的产品承诺。
+The above are implementation design topics and do not prevent this requirements document from serving first as a shared baseline. When implementation finds a mechanism does not hold, add the actual reproduction, the affected requirement IDs, the proposed change, and the acceptance changes, then update the document; do not change only the implementation while keeping a product promise that does not hold.
 
-**10. 文档与证据**
+**10. Documents and evidence**
 
-- [Herdr 插件机制核查](research/2026-10-18/plugin-feasibility.md)：原生接口、现成插件先例与 MVP 生命周期边界。
+- [Herdr plugin mechanism review](research/2026-10-18/plugin-feasibility.md): native interfaces, existing plugin precedents, and MVP lifecycle boundaries.
 
-- [最小落地技术方案](TECH-MVP.md)：首个可运行切片、实现选择与三步实机验收。
+- [Minimal implementation technical plan](TECH-MVP.md): first runnable slice, implementation choices, and three-step on-machine acceptance.
 
-- [Orca 实现与故障经验](research/2026-10-18/orca-lessons.md)：固定源码、具体能力、测试断言、哪些经验采纳/不照搬。
-- [已有技术候选研究](research/2026-10-18/decision.md)：仅供落地讨论，不覆盖本 PRD。
-- [已有验证结果](research/2026-10-18/validation.json)：注明通过、失败、中止和未验证范围。
-- v0.7：确认单常驻编排进程，看板与催办同进程；Board/Dispatch 仅作参考，明确隐藏视图与终止插件 tab 的区别。
-- v0.6：纠正远程使用模型，以本地 Herdr remote 客户端连接远端 Herdr 为首版场景；补齐执行端/session 绑定、显式路由与两端能力边界。
-- v0.5：明确初始化的发现、提案、对话修改、确认落地四步流程；区分执行主机与客户端，补充草案恢复和部分启动失败验收。
-- v0.4：细化 FR-13 的项目默认 Agent 类型、逐线覆盖、临时用途选择、最终配置确认与禁止静默替换；新增类型组合验收。
-- v0.3：补齐初始化容量确认（FR-13）、总控状态与调整入口（FR-14），细化 mailbox 逐项处理与恢复合同（FR-07）；新增八项验收场景。
-- v0.2：移除 BMAD 强绑定与专用接入工作；明确六组通用编排能力，将研发 skill 作为可替换的任务指导；新增无框架运行与更换 skill 的验收场景。
-- v0.1：worktree 为 P0 基础；补齐 Orca 参照；明确持续执行与验收要求；技术选型与产品需求分离。
+- [Orca implementation and failure lessons](research/2026-10-18/orca-lessons.md): pinned source, concrete capabilities, test assertions, and which lessons are adopted/not copied.
+- [Prior technical candidate research](research/2026-10-18/decision.md): for implementation discussion only; does not override this PRD.
+- [Existing validation results](research/2026-10-18/validation.json): notes passed, failed, aborted, and unvalidated scope.
+- v0.7: confirmed a single resident orchestration process, with board and nudging in the same process; Board/Dispatch are reference only; clarified the difference between hiding the view and terminating the plugin tab.
+- v0.6: corrected the remote usage model, making a local Herdr remote client connecting to a remote Herdr the first-version scenario; added execution side/session binding, explicit routing, and capability boundaries on both sides.
+- v0.5: clarified the four-step initialization flow of discovery, proposal, conversational modification, and confirm-and-land; distinguished execution host from client; added acceptance for draft recovery and partial launch failure.
+- v0.4: refined FR-13 with project default Agent type, per-lane overrides, temporary purpose selection, final configuration confirmation, and prohibition of silent substitution; added type-mix acceptance.
+- v0.3: added initialization capacity confirmation (FR-13) and the master controller state and adjustment entry point (FR-14); refined the mailbox per-item handling and recovery contract (FR-07); added eight acceptance scenarios.
+- v0.2: removed the hard binding to BMAD and the dedicated integration work; clarified six groups of generic orchestration capabilities, treating development skills as replaceable task guidance; added acceptance scenarios for framework-free runs and switching skills.
+- v0.1: worktrees as a P0 foundation; added the Orca reference; clarified continuous execution and acceptance requirements; separated technology selection from product requirements.

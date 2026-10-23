@@ -1,111 +1,111 @@
-# GEAR 最小落地技术方案
+# GEAR Minimal Implementation Technical Plan
 
-依据：[PRD v0.7](PRD.md)。状态：待实现；本文决定首个可运行切片，不宣称已经通过实机验证。
+Basis: [PRD v0.7](PRD.md). Status: to be implemented; this document decides the first runnable slice and does not claim hands-on validation has passed.
 
-项目名：GEAR；插件 ID：`herdr-gear`；CLI：`gear`。这些是拟实现的名称，当前尚未安装对应命令。 缩写：**G**oals **E**xecuted through **A**gent **R**elay（通过 Agent 接力完成目标）。
+Project name: GEAR; plugin ID: `herdr-gear`; CLI: `gear`. These are proposed names; the corresponding commands are not installed yet. Acronym: **G**oals **E**xecuted through **A**gent **R**elay (completing goals through Agent relay).
 
-**1. 先交付什么**
+**1. What to deliver first**
 
-一个项目、一个 Herdr 执行端、一个总控、两条异构长期执行线、一个按需临时审核名额。类型由初始化对话确认，不固定角色品牌。跑通：确认队伍 → 独立 worktree 派活 → 中途停轮续做 → mailbox 处理问题 → 验证 → 下一任务/回收。
+One project, one Herdr execution host, one controller, two heterogeneous long-lived lanes, and one on-demand temporary reviewer slot. Types are confirmed in the initialization conversation; role brands are not fixed. Get this working end to end: confirm the team → dispatch work into isolated worktrees → continue after a mid-run stop → handle issues through the mailbox → verify → next task/reclaim.
 
-首个切片通过后再扩到 PRD 的五种 CLI、十条线和完整交互看板。首版先有终端表格、详情和调整命令；不把完整 PRD 都塞进第一次实现。
+After the first slice passes, expand to the PRD's five CLIs, ten lanes, and the full interactive board. The first version has a terminal table, details, and adjustment commands first; do not cram the entire PRD into the first implementation.
 
-**2. 明确实现选择**
+**2. Explicit implementation choices**
 
-做一个 Herdr 插件，核心是一个 `gear` 常驻进程：Python 3 标准库、SQLite、Unix socket。看板渲染、队列调度、自动续做、mailbox 和状态持久化全部在同一进程内；不拆 board/controller/daemon/watchdog，不启动另一个插件充当后台。首个切片只管理一个项目。
+Build a Herdr plugin whose core is one resident `gear` process: Python 3 standard library, SQLite, Unix socket. Board rendering, queue scheduling, automatic continuation, mailbox, and state persistence all live in the same process; do not split into board/controller/daemon/watchdog, and do not start another plugin to act as a background process. The first slice manages only one project.
 
-Herdr Board 和 Herdr Dispatch 仅作为实现参考，不安装为依赖、不串接它们的数据库或后台。具体参考及限制见 [插件机制核查](research/2026-10-18/plugin-feasibility.md)。
+Herdr Board and Herdr Dispatch serve only as implementation references; they are not installed as dependencies, and their databases or background processes are not chained in. Specific references and limits are in [Plugin mechanism verification](research/2026-10-18/plugin-feasibility.md).
 
-| 直接复用 | 自己补的最小部分 |
+| Reuse directly | Minimal parts we add ourselves |
 |---|---|
-| Herdr remote、session、pane、Agent start/get/prompt/read | 任务队列、执行尝试、续做规则 |
-| Herdr worktree create/open/remove | 写入归属、验证、保留成果 |
-| Herdr 插件 pane 入口 | 同一 `gear run` 进程内的终端表格 |
-| Orca 的 Task/Dispatch、持久 mailbox、未知状态防重派设计 | 具体表、事务与故障测试；不移植 Orca GUI/运行时 |
+| Herdr remote, session, pane, Agent start/get/prompt/read | Task queue, execution attempts, continuation rules |
+| Herdr worktree create/open/remove | Write ownership, verification, preserving output |
+| Herdr plugin pane entry point | Terminal table inside the same `gear run` process |
+| Orca's Task/Dispatch, persistent mailbox, and unknown-state anti-redispatch designs | Concrete tables, transactions, and failure tests; do not port Orca's GUI/runtime |
 
-skill 只教 Agent 使用 `gear` 命令、提交结果和处理收件箱；后台程序承担持续执行。BMAD/Superpowers 均无运行依赖。
+The skill only teaches Agents to use `gear` commands, submit results, and handle the inbox; the background program carries continuous execution. Neither BMAD nor Superpowers is a runtime dependency.
 
-**3. 放在哪里，remote 怎么用**
+**3. Where it lives, how remote is used**
 
 ```text
-本地 Herdr 客户端 ── Herdr remote ── 目标 Herdr session
-                                      ├─ 总控 / 执行者 / 临时审核
-                                      └─ 插件 tab：一个 gear run 进程
-                                          ├─ 看板与键盘输入
-                                          ├─ 队列 / 催办 / mailbox
-                                          └─ SQLite / 本地请求入口
+Local Herdr client ── Herdr remote ── Target Herdr session
+                                      ├─ Controller / executors / temporary reviewer
+                                      └─ Plugin tab: one gear run process
+                                          ├─ Board and keyboard input
+                                          ├─ Queue / nudging / mailbox
+                                          └─ SQLite / local request entry point
 ```
 
-`gear` 安装在项目执行端；SQLite 放在 `HERDR_PLUGIN_STATE_DIR` 下按项目分隔，配置放 CONFIG_DIR。常驻进程是唯一写入者。Agent 调用的 `gear` CLI 是短命请求客户端：向 Unix socket 发送请求后退出，不带常驻循环。Herdr CLI、Git、测试命令可以是受限并发的工作子进程；实际执行 Agent 仍由 Herdr 管理。这里的“一进程”约束是插件只增加一个常驻编排进程，不是整个研发环境只有一个操作系统进程。
+`gear` is installed on the project execution host; SQLite lives under `HERDR_PLUGIN_STATE_DIR`, separated per project, and configuration goes in CONFIG_DIR. The resident process is the sole writer. The `gear` CLI that Agents call is a short-lived request client: it sends a request to the Unix socket and exits, with no resident loop. Herdr CLI, Git, and test commands may be worker subprocesses with bounded concurrency; the actual executing Agents are still managed by Herdr. The "one process" constraint here means the plugin adds only one resident orchestration process, not that the whole development environment has only one OS process.
 
-用一个事件循环复用终端输入、socket 请求、周期检查与界面刷新。键盘无输入、用户停留在详情页或界面暂不渲染，都不能阻塞调度；耗时 Herdr/Git/验证调用异步等待、有超时，不在绘制路径中同步执行。数据库事务短小且集中执行。socket 限同一系统用户访问，不提供对恶意同账户 Agent 的安全隔离。
+Use one event loop to multiplex terminal input, socket requests, periodic checks, and UI refresh. No keyboard input, the user sitting on a detail page, or the UI temporarily not rendering must not block scheduling; long-running Herdr/Git/verification calls are awaited asynchronously with timeouts and are never executed synchronously in the draw path. Database transactions are short and executed centrally. The socket is restricted to the same OS user; it does not provide security isolation against a malicious Agent running under the same account.
 
-插件 action 只启动或聚焦已有 `gear run` tab，单实例锁阻止重复启动，不常驻第二个 launcher。显式绑定执行端与 session，持久保存资源身份。不要求 systemd/launchd、HTTP 服务或额外网络协议；安装在目标端后通过本地 Herdr remote 查看同一 tab。
+The plugin action only starts or focuses the existing `gear run` tab; a single-instance lock prevents duplicate launches, and no second launcher stays resident. Explicitly bind the execution host and session, and persist resource identities. No systemd/launchd, HTTP service, or extra network protocol is required; once installed on the target host, the same tab is viewed via local Herdr remote.
 
-**生命周期边界：**用户切走 tab、插件内隐藏看板或断开本地客户端时，远端 `gear run` 继续；不另开一个长期运行的看板客户端。真正关闭这个唯一的插件 tab 就会终止控制进程，不能同时承诺“关掉承载进程的 tab 还能继续”。插件提供明确的停止操作，普通退出看板只退出视图、不退出进程。Herdr 原生强制关 tab 无法靠插件拦截保证；意外终止后由下一次打开入口检查并恢复，记录不丢，但不承诺无外部观察者时自行重启/主动报警。
+**Lifecycle boundary:** when the user switches away from the tab, hides the board within the plugin, or disconnects the local client, the remote `gear run` continues; no separate long-running board client is opened. Actually closing this single plugin tab terminates the control process; we cannot also promise that "closing the tab hosting the process still continues". The plugin provides an explicit stop operation; an ordinary exit from the board only exits the view, not the process. A native Herdr forced tab close cannot be guaranteed to be intercepted by the plugin; after an unexpected termination, the next open entry point checks and recovers, records are not lost, but there is no promise of self-restart or proactive alerting without an external observer.
 
-先做最小插件承载探针，再做任务功能；不能用拆出第二个后台进程解决单进程探针失败。
+Do the minimal plugin hosting probe first, then the task features; a failed single-process probe must not be solved by splitting out a second background process.
 
-**4. 初始化只做四步**
+**4. Initialization has only four steps**
 
-1. 在目标执行端读取 Herdr 支持信息，检测 CLI 路径与配置；分别标记支持、已安装、已验证。Herdr 没有现成安装清单时用只读探测补齐。
-2. 总控提出队伍草案：长期线数量/类型/职责、临时额度与类型规则、模型配置、worktree 基线及预算。
-3. 用户对话调整；`gear init` 保存版本化草案，不提前开队伍。
-4. 确认该版本后 `gear apply` 幂等落地。总控可登记已有会话；长期线有任务才执行，临时审核按需启动。失败项保留原因，重试不重复创建成功项。
+1. On the target execution host, read Herdr's support information and detect CLI paths and configuration; mark supported, installed, and verified separately. When Herdr has no ready-made install list, fill in with read-only probing.
+2. The controller proposes a team draft: number/types/responsibilities of long-lived lanes, temporary quota and type rules, model configuration, worktree baseline, and budget.
+3. The user adjusts it in conversation; `gear init` saves a versioned draft and does not spin up the team early.
+4. After that version is confirmed, `gear apply` lands it idempotently. The controller may register existing sessions; long-lived lanes execute only when they have tasks, and temporary reviewers start on demand. Failed items keep their reasons, and retries do not re-create items that succeeded.
 
-**5. 最小数据与命令**
+**5. Minimal data and commands**
 
-SQLite 只存六组记录：`project`（配置/版本）、`lanes`（类型/容量/会话）、`tasks`（合同/队列/依赖/验收）、`attempts`（代次/worktree/状态/证据）、`messages`（收件人/处理状态/期限）、`operations`（副作用意图/回执）。依赖用任务 ID 列表，所有变更经常驻进程 事务校验无环。worktree 写入权和活跃 attempt 唯一约束；实际路径规范化后检查别名。
+SQLite stores only six groups of records: `project` (config/version), `lanes` (type/capacity/session), `tasks` (contract/queue/dependencies/acceptance), `attempts` (generation/worktree/status/evidence), `messages` (recipient/handling status/deadline), `operations` (side-effect intent/receipt). Dependencies are lists of task IDs, and every change is validated as acyclic in a transaction by the resident process. Worktree write rights and active attempts have uniqueness constraints; actual paths are normalized before checking for aliases.
 
-最少命令面如下，均为拟实现接口，不是现有 Herdr 命令：
+The minimal command surface is below; all are proposed interfaces, not existing Herdr commands:
 
-| 命令 | 用途 |
+| Command | Purpose |
 |---|---|
-| `gear init / apply` | 队伍草案、确认配置与落地 |
-| `gear task add / show / move / pause / resume` | 建任务、查看、排序或改派、暂停恢复 |
-| `gear status --json`、`gear run` 内置看板 | 同一份状态快照；表格展示当前/下一任务、阻塞和收件箱积压 |
-| `gear inbox pull / resolve / defer`、`gear send` | 有限批量领取、逐项记录结果或等待条件、横向通信 |
-| `gear report progress / blocked / result` | 执行者上报；必须携带 task、attempt 和代次 |
+| `gear init / apply` | Team draft, confirm configuration, and land it |
+| `gear task add / show / move / pause / resume` | Create tasks, view, reorder or reassign, pause and resume |
+| `gear status --json`, built-in board in `gear run` | The same state snapshot; the table shows current/next task, blocks, and inbox backlog |
+| `gear inbox pull / resolve / defer`, `gear send` | Bounded batch claim, record outcome or wait condition per item, lateral communication |
+| `gear report progress / blocked / result` | Executor reports; must carry task, attempt, and generation |
 
-修改命令携带请求 ID 与预期版本。先落副作用意图，再调用 Herdr，再保存回执；常驻进程崩溃或调用超时后核对实际资源，不能靠重发假装“恰好一次”。无法确认时冻结该尝试并升级，不阻塞无关任务。
+Mutating commands carry a request ID and expected version. Write the side-effect intent first, then call Herdr, then save the receipt; after a resident-process crash or call timeout, reconcile against actual resources, and do not pretend to be "exactly once" by resending. When it cannot be confirmed, freeze that attempt and escalate, without blocking unrelated tasks.
 
-**6. 核心循环：真正保证有人接着管**
+**6. Core loop: truly guaranteeing someone keeps managing it**
 
-初始每 5 秒核对一次，小规模先用轮询；间隔可配置，不构成时效保证。Herdr 调用有超时，有限并发执行，不能让一个阻塞的 prompt/wait 卡住全项目。
+Reconcile every 5 seconds initially, using polling at small scale first; the interval is configurable and does not constitute a timeliness guarantee. Herdr calls have timeouts and run with bounded concurrency; one blocked prompt/wait must not stall the whole project.
 
-| 观察结果 | 程序动作 |
+| Observation | Program action |
 |---|---|
-| 就绪任务、空闲线、依赖和容量满足 | 原子领取 → 准备独立 worktree → 启动/绑定会话 → 发任务包 |
-| 未完成，已证实上一轮结束，当前 idle/done | 续做同一任务，保留成果；一个尝试同一时刻只有一个待确认 prompt |
-| working | 不催；记录证据。持续无进展达到预算时提交诊断事项，不凭静默时长杀进程 |
-| blocked / 等授权 / 限流 / 明确暂停 | 保留原因；等待对应条件，不循环发送“继续” |
-| 输入结果不明、prompt_stalled、断连或 unknown | 先核对 Herdr 状态与当前尝试报告，不立即重发或双开 |
-| 执行者提交 result | 固定候选 commit → 执行合同中的验证命令 → 必要时启动新会话审核 |
-| 验证通过且审核条件满足 | 标记任务完成，解锁下游；长期线领下一项，临时会话按归属回收 |
-| 修复失败达到预算 | 保留成果与证据，向总控 mailbox 提交一个持续跟踪的问题 |
+| Ready task, idle lane, dependencies and capacity satisfied | Claim atomically → prepare an isolated worktree → start/bind a session → send the task packet |
+| Not finished, previous turn confirmed ended, currently idle/done | Continue the same task, preserving output; an attempt has only one pending-confirmation prompt at a time |
+| working | Do not nudge; record evidence. When no progress persists until the budget is reached, file a diagnostic item; do not kill processes based on silence duration |
+| blocked / awaiting authorization / rate-limited / explicitly paused | Keep the reason; wait for the corresponding condition, do not loop sending "continue" |
+| Input result unclear, prompt_stalled, disconnected, or unknown | First reconcile Herdr state with the current attempt's report; do not immediately resend or double-launch |
+| Executor submits result | Pin the candidate commit → run the verification commands in the contract → start a new session to review when needed |
+| Verification passes and review conditions are met | Mark the task done and unlock downstream; long-lived lanes take the next item, temporary sessions are reclaimed per ownership |
+| Fix failures reach the budget | Preserve output and evidence, and file one continuously tracked issue into the controller's mailbox |
 
-Herdr 的 idle/done 不是完成证明；`prompt --wait` 也不标识独立任务回合。适配层必须区分已提交、已观察到启动、已停轮、交付不明。初始状态与旧快照不能触发续做。首个实机门槛就是证明这一点；观察不可靠的 CLI 暂标未通过接入，不能宣传为已支持。
+Herdr's idle/done is not proof of completion; `prompt --wait` also does not mark an independent task turn. The adapter layer must distinguish submitted, observed started, turn stopped, and delivery unclear. Initial state and stale snapshots must not trigger continuation. The first hands-on gate is proving exactly this; a CLI whose observation is unreliable is provisionally marked as not passing integration and must not be advertised as supported.
 
-默认同一问题自动修复最多 3 次，另设可配置时间上限；续做上限与修复计数分开。进展证据包括新产物/commit、验证结果、具体进度报告，单纯终端有输出不重置无进展预算。自动动作均在初始化批准范围内。
+By default the same problem is auto-fixed at most 3 times, with a separate configurable time limit; the continuation limit and the fix count are separate. Progress evidence includes new artifacts/commits, verification results, and concrete progress reports; mere terminal output does not reset the no-progress budget. All automatic actions stay within the scope approved at initialization.
 
-验证期间冻结候选代码；最小版将通过的候选按单一顺序集成，并验证集成结果。冲突交总控。只在没有活跃写入者时回收会话；首版不自动删除 worktree 或分支，保留成果优先。
+Freeze the candidate code during verification; the minimal version integrates passing candidates in a single order and verifies the integrated result. Conflicts go to the controller. Reclaim sessions only when there is no active writer; the first version does not automatically delete worktrees or branches, and preserving output takes priority.
 
-**7. 总控不靠聊天记住十条消息**
+**7. The controller does not rely on chat to remember ten messages**
 
-所有需决策事项先进入持久 mailbox，再合并唤醒总控。一次拉取最多 5 项，同优先级 FIFO，等待过久的事项提升优先级。每项单独 `resolve`，必须附处理结果/操作回执；看到或领取都不算处理。处理一个，另外九个仍保留。
+Every item requiring a decision first enters the persistent mailbox, then wakes the controller in a merged fashion. One pull takes at most 5 items, FIFO within the same priority, and items that have waited too long are raised in priority. Each item is individually `resolve`d and must carry a handling result/operation receipt; seeing or claiming does not count as handling. Handle one, and the other nine remain.
 
-总控忙时不连续注入新 prompt；停轮且还有可处理事项时再唤醒。领取过期或会话替换后核对并恢复，旧代次不能确认新事项；`defer` 必须带等待对象与唤醒条件。普通进度写看板，不强迫总控逐条回复。
+While the controller is busy, do not inject new prompts back to back; wake it again when its turn has stopped and there are still items to handle. After a claim expires or a session is replaced, reconcile and recover; an old generation cannot acknowledge new items; `defer` must carry the awaited object and wake condition. Ordinary progress is written to the board, without forcing the controller to reply item by item.
 
-总控每轮先读快照与 inbox。初始每 5 分钟生成一个可合并的全局复查事项；队列将空或关键阻塞立即入箱。配置阈值监控最旧等待时间与处理进展，持续积压向用户显示告警。用户可随时查询，模型不需要一直思考。
+Each turn, the controller first reads the snapshot and inbox. Initially, every 5 minutes a mergeable global review item is generated; when the queue is about to empty or there is a critical block, an item is put in the box immediately. Configured thresholds monitor the oldest wait time and handling progress, and a persistent backlog shows an alert to the user. The user can query at any time; the model does not need to think continuously.
 
-**8. 按这个顺序写，按这个结果验收**
+**8. Write in this order, accept by these results**
 
-| 顺序 | 最小交付 | 过关条件 |
+| Order | Minimal delivery | Pass condition |
 |---|---|---|
-| 1：Herdr 实机探针 | remote 绑定、worktree、两种用户选择的 CLI 启动/输入/观察 | 两条线改同名文件不冲突；故意停轮后外部程序能再次启动工作；不把启动不明当可重派 |
-| 2：执行闭环 | SQLite、单进程循环、队列、验证、恢复 | 两个真实小任务无需人工催办交付；终止插件进程后恢复不双开；断开本地客户端不停止远端推进 |
-| 3：协作闭环 | 总控 mailbox、初始化对话、临时审核、终端表格 | 十条决策消息只处理一条后仍有九条；中途重启不丢；临时审核按需创建、结果保留；换总控 CLI 后闭环仍成立 |
+| 1: Herdr hands-on probe | remote binding, worktree, start/input/observe for two user-chosen CLIs | Two lanes editing a same-named file do not conflict; after a deliberately stopped turn, the external program can start work again; a start of unclear outcome is not treated as redispatchable |
+| 2: Execution loop | SQLite, single-process loop, queue, verification, recovery | Two real small tasks delivered without manual nudging; after killing the plugin process, recovery does not double-launch; disconnecting the local client does not stop remote progress |
+| 3: Collaboration loop | Controller mailbox, initialization conversation, temporary reviewer, terminal table | After handling only one of ten decision messages, nine remain; nothing lost on a mid-run restart; temporary reviewer created on demand with results preserved; the loop still holds after switching the controller's CLI |
 
-先通过 [插件机制核查中的四项承载探针](research/2026-10-18/plugin-feasibility.md)，再执行上表。步骤 1 失败就修接入，不先做完整 TUI。步骤 3 通过才完善完整键盘看板和扩到十条线。完整 PRD 仍是后续验收基线，以上缩减是首个切片范围，不删除原要求。
+First pass the [four hosting probes in the plugin mechanism verification](research/2026-10-18/plugin-feasibility.md), then execute the table above. If step 1 fails, fix the integration; do not build the full TUI first. Only after step 3 passes, refine the full keyboard board and expand to ten lanes. The full PRD remains the subsequent acceptance baseline; the reductions above are the first slice's scope and do not delete the original requirements.
 
-依据：[Herdr 已核对版本与源码](research/2026-10-18/sources.lock.json)、[Orca 具体故障防护](research/2026-10-18/orca-lessons.md)。目标执行端的实际 Herdr/CLI 版本、状态观察和插件部署仍需步骤 1 实机核对；本文未执行部署或接管现有 Agent。
+Basis: [Herdr verified version and source](research/2026-10-18/sources.lock.json), [Orca concrete failure safeguards](research/2026-10-18/orca-lessons.md). The target execution host's actual Herdr/CLI versions, state observation, and plugin deployment still need hands-on verification in step 1; this document did not perform deployment or take over existing Agents.

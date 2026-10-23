@@ -15,6 +15,25 @@ CREATE TABLE IF NOT EXISTS id_seq (project TEXT NOT NULL, kind TEXT NOT NULL, ne
 CREATE TABLE IF NOT EXISTS milestones (project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
   scope TEXT, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
+-- The findings of a review that block (T-23): the ids the reviewer named
+-- with `--blocking`. The findings themselves stay in the review record; this
+-- says which of them go back to the lane as rework.
+CREATE TABLE IF NOT EXISTS review_blocks (project TEXT NOT NULL, task TEXT NOT NULL,
+  attempt INTEGER NOT NULL, ids TEXT NOT NULL, created INTEGER NOT NULL,
+  PRIMARY KEY (project, task, attempt));
+
+-- A milestone as a voyage (T-22): the one-sentence `done` it is judged by, the
+-- quality `bar` of its phase, the planned `eta`, and where it departed from —
+-- the time its first task was created and the tasks it had then. `milestones`
+-- above is the old (unused) shape; a store without migrations gets a new table.
+CREATE TABLE IF NOT EXISTS voyages (project TEXT NOT NULL, milestone TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  -- NULL until the plan describes the voyage: a milestone whose tasks predate
+  -- its first `# Milestone` block still has a departure (T-22, review R1/R2).
+  done TEXT, bar TEXT, eta TEXT,
+  departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
+  PRIMARY KEY (project, milestone));
+
 CREATE TABLE IF NOT EXISTS seats (
   id TEXT PRIMARY KEY,                 -- '<project>:<name>'
   project TEXT NOT NULL, role TEXT NOT NULL, name TEXT NOT NULL, profile TEXT NOT NULL,
@@ -22,7 +41,7 @@ CREATE TABLE IF NOT EXISTS seats (
   state TEXT NOT NULL, state_since INTEGER NOT NULL, state_reason TEXT,
   park_until INTEGER, park_task TEXT, hold_reason TEXT,
   task_id TEXT,                        -- temp: the one task it is bound to for life
-  slot TEXT);
+  worktree TEXT);                      -- resources.path of the worktree Herdr created for it
 
 CREATE TABLE IF NOT EXISTS bindings (
   seat TEXT NOT NULL, generation INTEGER NOT NULL, session TEXT NOT NULL, pane_id TEXT NOT NULL,
@@ -31,11 +50,10 @@ CREATE TABLE IF NOT EXISTS bindings (
   handover_id TEXT, created INTEGER NOT NULL,
   PRIMARY KEY (seat, generation));
 
+-- Worktrees created through Herdr (conventions 17 §4); path is what Herdr returned.
 CREATE TABLE IF NOT EXISTS resources (path TEXT PRIMARY KEY, project TEXT NOT NULL,
+  branch TEXT NOT NULL, workspace_id TEXT,  -- NULL while not open in Herdr
   holder_seat TEXT, state TEXT NOT NULL, last_task TEXT, note TEXT, updated INTEGER NOT NULL);
-
-CREATE TABLE IF NOT EXISTS slots (project TEXT NOT NULL, id TEXT NOT NULL, pane_id TEXT NOT NULL,
-  worktree TEXT NOT NULL, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
 CREATE TABLE IF NOT EXISTS plans (project TEXT NOT NULL, version INTEGER NOT NULL, draft TEXT NOT NULL,
   applied INTEGER NOT NULL, by_seat TEXT, by_gen INTEGER, PRIMARY KEY (project, version));
@@ -85,6 +103,13 @@ CREATE INDEX IF NOT EXISTS operations_seat ON operations (seat, state);
 CREATE TABLE IF NOT EXISTS verdicts (project TEXT NOT NULL, task TEXT NOT NULL, attempt INTEGER NOT NULL,
   contract_version INTEGER NOT NULL, candidate TEXT NOT NULL, passed INTEGER NOT NULL,
   evidence TEXT, by_seat TEXT NOT NULL, created INTEGER NOT NULL);
+
+-- The verdict a temp reviewer handed in for one attempt (T-2). One record per
+-- attempt; the findings hold a path or the text itself.
+CREATE TABLE IF NOT EXISTS review_verdicts (project TEXT NOT NULL, task TEXT NOT NULL,
+  attempt INTEGER NOT NULL, passed INTEGER NOT NULL, findings TEXT NOT NULL,
+  by_seat TEXT NOT NULL, created INTEGER NOT NULL,
+  PRIMARY KEY (project, task, attempt));
 
 CREATE TABLE IF NOT EXISTS reviews (project TEXT NOT NULL, id TEXT NOT NULL, cause TEXT NOT NULL,
   state TEXT NOT NULL, detail TEXT, decided TEXT, plan_version INTEGER, checkpoint INTEGER,

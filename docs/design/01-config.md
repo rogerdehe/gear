@@ -1,13 +1,13 @@
-# 01 配置与项目登记
+# 01 Config and Project Registration
 
-文件：`gear/config.py`、`gear/cli/admin.py`（init）。预算 100–130 行。
+Files: `gear/config.py`, `gear/cli/admin.py` (init). Budget 100–130 lines.
 
-## 项目配置（用户写，`gear admin init` 登记，库里存版本）
+## Project config (written by the user, registered by `gear admin init`, versioned in the database)
 
 ```toml
 [project]
-id = "harbor"
-herdr_session = "marina"          # 必填，显式绑定
+id = "harbor"                       # a new product, or the short name of one requirement iterated inside an existing repo (17 §0)
+herdr_session = "marina"          # required, explicit binding
 repo = "/path/to/repo"
 
 [quota]
@@ -20,44 +20,54 @@ pane = "w2:pM"
 kind = "codex"
 profile = "codex"
 
-[[lanes]]
-name = "heat"
-pane = "w2:p3"
+[[lanes]]                          # long-lived lane: duty required (17 §1); worktree/pane created by GEAR via Herdr (17 §4), no hand-written paths
+name = "heat"                      # → Agent name harbor-heat, branches home/heat, heat/<task>
+duty = "Thermal calculation and thermal-related interfaces"
+owns = ["src/heat/", "tests/heat/"]
+not = ["UI"]
 kind = "opencode"
 profile = "opencode"
-worktree = "/path/to/wt-heat"
 
-[[temp_slots]]                     # 每个槽位 = 一个空 shell pane + 一个隔离 worktree
-id = "s1"
-pane = "w4:p1"
-worktree = "/path/to/wt-temp1"
+[models]                           # agreed with the user at kickoff (17 §0); ordered: primary, then fallbacks
+lanes   = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4.1-flash"]
+review  = ["deepseek/deepseek-v4.1-flash", "minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-v4-pro"]
+captain = []                       # empty = whatever the captain's CLI runs; not switched by GEAR
+on_quota = { lanes = "fallback", review = "fallback" }   # or "wait": park until reset, then wake on the same model
+quota_reset_h = 5                  # provider plan window, used when the error states no reset time
+# a lane may override with its own `models = [...]`
 
-[[temp_slots]]
-id = "s2"
-pane = "w4:p2"
-worktree = "/path/to/wt-temp2"
+[temps]                            # temp workers: worktree + pane created via Herdr when needed, nothing pre-registered
+kind = "opencode"
+profile = "opencode"
 
-[timing]                           # 全部可省，用默认
+[conventions]                      # optional, defaults in 17 §11
+integration = "dev"
+release = "main"
+staging = ""
+
+[timing]                           # all optional, defaults used
 tick_s = 4
 cooldown_s = 90
 sample_min = 20
 review_timer_min = 45
 
-[profiles.opencode]                # 可覆盖内置 profile（04）
+[profiles.opencode]                # may override a built-in profile (04)
 busy_markers = ["esc interrupt"]
 ```
 
-## 校验（init 时，失败整份拒绝）
+## Validation (at init; any failure rejects the whole config)
 
-- session、pane、worktree 存在（只读查询 Herdr / 文件系统）。新接入目标须是可用 shell pane；pane 里若仍有旧 Agent 在跑，先由用户停止并核对资源，init 不向运行中的 Agent 输入命令。重复 init 时已接入的座位只核对当前绑定。
-- 每条线 kind 对应的 profile 已验证（04 `verified=true`），否则拒绝。
-- 线数 ≤ quota.lanes；槽位数 ≥ quota.temps（不足则警告：同时运行的临时工实际受槽位数限制）；槽位 pane 当前是空 shell 且 cwd 等于其 worktree。
-- 舰长与长期线：init 只登记座位，**由 GEAR 重新启动接入**（03），支持 resume 的 CLI 可带 `resume_ref` 保留原会话上下文。
-- cooldown_s > tick_s。
-- 同一规范化 worktree 不能被两个座位或槽位登记（写入 02 resources，跨项目唯一）。
-- 显示**实际生效值**（含默认值来源）。
-- 重复 init：只应用变化；不重复创建座位；改动已有座位的 pane/kind 视为换人，走 03 的重新登记（NEEDS_CHECK）。
+- The session and repo exist, and the `integration` branch exists (read-only queries to Herdr / git). The captain pane must be a usable shell pane; if an old Agent is still running in the pane, the user stops it first — init never types commands into a running Agent. On repeated init, already-onboarded seats only have their current binding checked.
+- Long-lived lanes: `duty` and `owns` are required; `owns` must not overlap pairwise; `name` conforms to 17 §2 and `<project>-<name>` ≤ 32 characters. A lane's worktree and pane are not written in config; the engine creates them via `worktree.create` at onboarding (10).
+- The profile for each lane's kind is verified (04 `verified=true`); otherwise rejected.
+- Number of lanes ≤ quota.lanes.
+- `[models]`: every listed model is reachable by the role's agent kind (profile `list_models`, e.g. `opencode models`); `review` holds at least one model that differs from each lane's primary. Engine use: start/onboard on the chain's first entry; on a quota stop move to the next and log it; probe the earlier entry again after `timing.quota_retry_min` (default 60); with `on_quota = "wait"` the seat goes PARKED `until=` the reset time (10) instead and is woken then; reviewers take the first entry ≠ the writer's current model.
+- Captain and long-lived lanes: init only registers the seats; **they are restarted and onboarded by GEAR** (03); CLIs that support resume may carry a `resume_ref` to keep the original session context.
+- cooldown_s > tick_s.
+- The same worktree cannot be held by two seats (after the engine creates it, it is written to 02 resources, keyed by the path Herdr returns, unique across projects).
+- Display the **effective values** (including the source of defaults).
+- Repeated init: apply only changes; do not recreate seats; changing an existing seat's pane/kind counts as a replacement and goes through 03's re-registration (NEEDS_CHECK).
 
-## 不做
+## Not done
 
-不自动发现 Agent、不推断队伍组合（初始化对话是最终形态功能）；缺失项报错让用户补，不按 pane 名猜。
+No silent discovery: the kickoff (17 §0) inventories installed agents and models only to *propose* a config, which the user confirms; init itself never infers team composition, and missing items are reported as errors for the user to fill in, never guessed from pane names.

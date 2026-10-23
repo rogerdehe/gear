@@ -1,0 +1,918 @@
+//! Plan draft format (design/05 "Draft format"). Pure: text in, `Draft` out.
+//! Strict: any unknown section, field or value rejects the whole draft with
+//! `ErrorCode::BadFormat` and a detail starting `line <n>: `. Semantic checks
+//! that need the store (deps exist, acyclic, verdict matches the attempt) are
+//! `plan apply`'s job, not this parser's.
+
+use gear_model::{ErrorCode, GearError, GearResult};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    Now,
+    Must,
+    Should,
+    Could,
+    Wont,
+}
+
+/// `## T-31 [now] lane=heat milestone=M2 required` — `id` is None for `## NEW`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueItem {
+    pub line: usize,
+    pub id: Option<String>,
+    pub priority: Priority,
+    pub lane: Option<String>,
+    pub milestone: Option<String>,
+    pub required: bool,
+    pub goal: Option<String>,
+    pub accept: Option<String>,
+    pub evidence_files: Vec<String>,
+    /// minutes
+    pub evidence_due: Option<u32>,
+    /// `deps: -` → empty
+    pub deps: Vec<String>,
+    /// only `ready` or `cancelled`
+    pub state: Option<String>,
+    pub followup_of: Option<String>,
+    pub reopen: Option<String>,
+}
+
+/// One `# Staff` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaffItem {
+    /// `- temp R-4 task=T-45 profile=opencode-review [resume]`
+    Temp { line: usize, id: String, task: String, profile: Option<String>, resume: bool },
+    /// `- park heat until=<RFC3339>` | `- park media until-task=T-12`
+    Park { line: usize, lane: String, until: Option<String>, until_task: Option<String> },
+    /// `- hold wire reason=<text>`
+    Hold { line: usize, lane: String, reason: String },
+    /// `- retire prompts`
+    Retire { line: usize, lane: String },
+}
+
+/// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
+/// `- T-33 attempt=1 contract=1 candidate=def5678 fail rework="<text>"`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictLine {
+    pub line: usize,
+    pub task: String,
+    pub attempt: i64,
+    pub contract: i64,
+    pub candidate: String,
+    pub pass: bool,
+    /// required for pass, absent for fail
+    pub evidence: Option<String>,
+    /// required for fail, absent for pass
+    pub rework: Option<String>,
+}
+
+/// `V-9 keep plan=12: <text>; next=<RFC3339>`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewLine {
+    pub line: usize,
+    pub id: String,
+    pub plan: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Draft {
+    pub project: String,
+    pub base: i64,
+    pub goal: String,
+    /// (title line after `# Milestone `, body)
+    pub milestones: Vec<(String, String)>,
+    pub decisions: Vec<String>,
+    /// in rank order
+    pub queue: Vec<QueueItem>,
+    pub staff: Vec<StaffItem>,
+    pub verdicts: Vec<VerdictLine>,
+    pub reviews: Vec<ReviewLine>,
+}
+
+/// The id and title of a `# Milestone <id>: <title>` block, from the header
+/// text (the part after `# Milestone `). The id is the first word without its
+/// trailing colon, as [`parse`] reads it.
+pub fn milestone_parts(header: &str) -> (&str, &str) {
+    let id = header
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(':');
+    let title = header[id.len()..].trim_start_matches(':').trim();
+    (id, title)
+}
+
+/// The fields a milestone block must carry (T-22), read from its body: `done:`
+/// (the one checkable sentence), `bar:` (the quality line of this phase) and
+/// `eta:` (the planned duration), one line each. Absent ones are None.
+pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut done = None;
+    let mut bar = None;
+    let mut eta = None;
+    for line in body.lines() {
+        let line = line.trim();
+        let (name, value) = match line.split_once(':') {
+            Some((name, value)) => (name.trim(), value.trim()),
+            None => continue,
+        };
+        let value = value.to_string();
+        match name {
+            "done" => done = Some(value),
+            "bar" => bar = Some(value),
+            "eta" => eta = Some(value),
+            _ => {}
+        }
+    }
+    (done, bar, eta)
+}
+
+/// Parse a draft. Header `<!-- gear-plan project=<id> base=<n> -->` on the
+/// first non-empty line is required. Sections may be absent; known sections
+/// only (`Goal`, `Milestone …`, `Decisions`, `Queue`, `Staff`, `Verdicts`,
+/// `Review`). Queue field lines are `<name>: <value>`; a value runs to the end
+/// of the line.
+pub fn parse(text: &str) -> GearResult<Draft> {
+    let lines: Vec<&str> = text.lines().collect();
+
+    // The header is the first non-empty line; nothing precedes it.
+    let first = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .ok_or_else(|| bad(1, "the draft is empty; the `<!-- gear-plan … -->` header is missing"))?;
+    let (project, base) = parse_header(lines[first].trim()).ok_or_else(|| {
+        bad(
+            first + 1,
+            "the first line must be `<!-- gear-plan project=<id> base=<n> -->`",
+        )
+    })?;
+
+    let mut draft = Draft {
+        project,
+        base,
+        goal: String::new(),
+        milestones: Vec::new(),
+        decisions: Vec::new(),
+        queue: Vec::new(),
+        staff: Vec::new(),
+        verdicts: Vec::new(),
+        reviews: Vec::new(),
+    };
+
+    let mut index = first + 1;
+    let mut seen_sections: Vec<String> = Vec::new();
+    let mut seen_milestones: Vec<String> = Vec::new();
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        let line_no = index + 1;
+        let section = trimmed.strip_prefix("# ").ok_or_else(|| {
+            bad(
+                line_no,
+                format!("expected a section header, got {trimmed:?}"),
+            )
+        })?;
+        let (name, rest) = match section.split_once(char::is_whitespace) {
+            Some((name, rest)) => (name, rest.trim()),
+            None => (section, ""),
+        };
+        match name {
+            "Goal" => {
+                check_once(&mut seen_sections, "Goal", line_no)?;
+                index += 1;
+                draft.goal = collect_body(&lines, &mut index);
+            }
+            "Milestone" => {
+                let id = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(':')
+                    .to_string();
+                if id.is_empty() {
+                    return Err(bad(line_no, "a milestone header needs an id, e.g. `# Milestone M2: …`"));
+                }
+                if seen_milestones.contains(&id) {
+                    return Err(bad(line_no, format!("milestone {id} appears twice")));
+                }
+                seen_milestones.push(id);
+                index += 1;
+                let body = collect_body(&lines, &mut index);
+                draft.milestones.push((rest.to_string(), body));
+            }
+            "Decisions" => {
+                check_once(&mut seen_sections, "Decisions", line_no)?;
+                index += 1;
+                loop {
+                    match section_line(&lines, &mut index) {
+                        Some((text, line_no)) => {
+                            let entry = text.strip_prefix("- ").ok_or_else(|| {
+                                bad(line_no, format!("a decision line starts with `- `, got {text:?}"))
+                            })?;
+                            draft.decisions.push(entry.trim().to_string());
+                        }
+                        None => break,
+                    }
+                }
+            }
+            "Queue" => {
+                check_once(&mut seen_sections, "Queue", line_no)?;
+                index += 1;
+                parse_queue(&lines, &mut index, &mut draft.queue)?;
+            }
+            "Staff" => {
+                check_once(&mut seen_sections, "Staff", line_no)?;
+                index += 1;
+                loop {
+                    match section_line(&lines, &mut index) {
+                        Some((text, line_no)) => draft.staff.push(parse_staff(text, line_no)?),
+                        None => break,
+                    }
+                }
+            }
+            "Verdicts" => {
+                check_once(&mut seen_sections, "Verdicts", line_no)?;
+                index += 1;
+                loop {
+                    match section_line(&lines, &mut index) {
+                        Some((text, line_no)) => draft.verdicts.push(parse_verdict(text, line_no)?),
+                        None => break,
+                    }
+                }
+            }
+            "Review" => {
+                check_once(&mut seen_sections, "Review", line_no)?;
+                index += 1;
+                loop {
+                    match section_line(&lines, &mut index) {
+                        Some((text, line_no)) => draft.reviews.push(parse_review(text, line_no)?),
+                        None => break,
+                    }
+                }
+            }
+            other => {
+                return Err(bad(
+                    index + 1,
+                    format!("unknown section `# {other}`"),
+                ))
+            }
+        }
+    }
+
+    Ok(draft)
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
+    GearError::new(ErrorCode::BadFormat, format!("line {line}: {detail}"))
+}
+
+/// `<!-- gear-plan project=<id> base=<n> -->`.
+fn parse_header(line: &str) -> Option<(String, i64)> {
+    let inner = line.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let mut tokens = inner.split_whitespace();
+    if tokens.next()? != "gear-plan" {
+        return None;
+    }
+    let mut project = None;
+    let mut base = None;
+    for token in tokens {
+        if let Some(value) = token.strip_prefix("project=") {
+            if project.is_some() {
+                return None;
+            }
+            project = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("base=") {
+            if base.is_some() {
+                return None;
+            }
+            base = Some(value.parse::<i64>().ok()?);
+        } else {
+            return None;
+        }
+    }
+    Some((project?, base?))
+}
+
+/// The lines of a free-text section (Goal, Milestone), joined and trimmed.
+fn collect_body(lines: &[&str], index: &mut usize) -> String {
+    let mut body: Vec<&str> = Vec::new();
+    while *index < lines.len() && !is_section(lines[*index]) {
+        let line = lines[*index].trim();
+        if !line.is_empty() {
+            body.push(line);
+        }
+        *index += 1;
+    }
+    body.join("\n").trim().to_string()
+}
+
+/// The next non-empty line of the current section with its 1-based line
+/// number, if the section has not ended; `*index` then points at the next
+/// line to read.
+fn section_line<'a>(lines: &'a [&'a str], index: &mut usize) -> Option<(&'a str, usize)> {
+    while *index < lines.len() {
+        if is_section(lines[*index]) {
+            return None;
+        }
+        let line_no = *index + 1;
+        let line = lines[*index].trim();
+        *index += 1;
+        if !line.is_empty() {
+            return Some((line, line_no));
+        }
+    }
+    None
+}
+
+fn is_section(line: &str) -> bool {
+    line.trim().starts_with("# ")
+}
+
+/// A known section may appear only once in a draft.
+fn check_once(seen: &mut Vec<String>, name: &str, line: usize) -> GearResult<()> {
+    if seen.iter().any(|known| known == name) {
+        return Err(bad(line, format!("the `# {name}` section appears twice")));
+    }
+    seen.push(name.to_string());
+    Ok(())
+}
+
+fn parse_priority(token: &str) -> Option<Priority> {
+    match token.strip_prefix('[')?.strip_suffix(']')? {
+        "now" => Some(Priority::Now),
+        "must" => Some(Priority::Must),
+        "should" => Some(Priority::Should),
+        "could" => Some(Priority::Could),
+        "wont" => Some(Priority::Wont),
+        _ => None,
+    }
+}
+
+fn is_task_id(token: &str) -> bool {
+    match token.strip_prefix("T-") {
+        Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+fn parse_queue(lines: &[&str], index: &mut usize, queue: &mut Vec<QueueItem>) -> GearResult<()> {
+    let mut current: Option<QueueItem> = None;
+    let mut seen: Vec<&'static str> = Vec::new();
+    loop {
+        let (text, line_no) = match section_line(lines, index) {
+            Some(found) => found,
+            None => break,
+        };
+        if let Some(header) = text.strip_prefix("## ") {
+            if let Some(item) = current.take() {
+                queue.push(item);
+            }
+            seen.clear();
+            current = Some(parse_block_header(header, line_no)?);
+            continue;
+        }
+        let item = current
+            .as_mut()
+            .ok_or_else(|| bad(line_no, "a queue field appears before any queue block"))?;
+        parse_queue_field(item, text, line_no, &mut seen)?;
+    }
+    if let Some(item) = current.take() {
+        queue.push(item);
+    }
+    Ok(())
+}
+
+/// `## T-31 [now] lane=heat milestone=M2 required` or `## NEW [should] lane=heat`.
+fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
+    let mut tokens = header.split_whitespace();
+    let id = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a queue block header needs `T-<n>` or `NEW`"))?;
+    let id = if id == "NEW" {
+        None
+    } else if is_task_id(id) {
+        Some(id.to_string())
+    } else {
+        return Err(bad(line, format!("a queue block header needs `T-<n>` or `NEW`, got {id:?}")));
+    };
+    let priority_token = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a queue block header needs a priority in brackets"))?;
+    let priority = parse_priority(priority_token).ok_or_else(|| {
+        bad(line, format!("unknown priority {priority_token:?}, expected [now|must|should|could|wont]"))
+    })?;
+    let mut lane = None;
+    let mut milestone = None;
+    let mut required = false;
+    for token in tokens {
+        if token == "required" {
+            if required {
+                return Err(bad(line, "repeated `required` in one queue block header"));
+            }
+            required = true;
+        } else if let Some(value) = token.strip_prefix("lane=") {
+            if lane.replace(value.to_string()).is_some() {
+                return Err(bad(line, "repeated `lane=` in one queue block header"));
+            }
+        } else if let Some(value) = token.strip_prefix("milestone=") {
+            if milestone.replace(value.to_string()).is_some() {
+                return Err(bad(line, "repeated `milestone=` in one queue block header"));
+            }
+        } else {
+            return Err(bad(line, format!("unknown queue block header field {token:?}")));
+        }
+    }
+    Ok(QueueItem {
+        line,
+        id,
+        priority,
+        lane,
+        milestone,
+        required,
+        goal: None,
+        accept: None,
+        evidence_files: Vec::new(),
+        evidence_due: None,
+        deps: Vec::new(),
+        state: None,
+        followup_of: None,
+        reopen: None,
+    })
+}
+
+/// One `<name>: <value>` line inside a queue block.
+fn parse_queue_field(
+    item: &mut QueueItem,
+    text: &str,
+    line: usize,
+    seen: &mut Vec<&'static str>,
+) -> GearResult<()> {
+    let (name, value) = text
+        .split_once(':')
+        .ok_or_else(|| bad(line, format!("a queue field is `<name>: <value>`, got {text:?}")))?;
+    let name = name.trim();
+    let value = value.trim();
+    let field: &'static str = match name {
+        "goal" => "goal",
+        "accept" => "accept",
+        "evidence-files" => "evidence-files",
+        "evidence-due" => "evidence-due",
+        "deps" => "deps",
+        "state" => "state",
+        "followup-of" => "followup-of",
+        "reopen" => "reopen",
+        other => return Err(bad(line, format!("unknown queue field {other:?}"))),
+    };
+    if seen.contains(&field) {
+        return Err(bad(line, format!("repeated queue field `{field}` in one block")));
+    }
+    seen.push(field);
+    match field {
+        "goal" => item.goal = Some(value.to_string()),
+        "accept" => item.accept = Some(value.to_string()),
+        "evidence-files" => item.evidence_files = comma_list(value),
+        "evidence-due" => {
+            item.evidence_due = Some(value.parse::<u32>().map_err(|_| {
+                bad(line, format!("`evidence-due` is a number of minutes, got {value:?}"))
+            })?)
+        }
+        "deps" => {
+            item.deps = if value == "-" { Vec::new() } else { comma_list(value) }
+        }
+        "state" => {
+            if value != "ready" && value != "cancelled" {
+                return Err(bad(
+                    line,
+                    format!("`state` is `ready` or `cancelled`, got {value:?}"),
+                ));
+            }
+            item.state = Some(value.to_string());
+        }
+        "followup-of" => {
+            if !is_task_id(value) {
+                return Err(bad(line, format!("`followup-of` needs a task id, got {value:?}")));
+            }
+            item.followup_of = Some(value.to_string());
+        }
+        "reopen" => item.reopen = Some(value.to_string()),
+        _ => unreachable!("the field was matched above"),
+    }
+    Ok(())
+}
+
+fn comma_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| entry.to_string())
+        .collect()
+}
+
+/// `- temp …`, `- park …`, `- hold …`, `- retire …`.
+fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
+    let rest = text
+        .strip_prefix("- ")
+        .ok_or_else(|| bad(line, format!("a staff line starts with `- `, got {text:?}")))?;
+    let mut tokens = rest.split_whitespace();
+    let verb = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a staff line needs a verb"))?;
+    match verb {
+        "temp" => {
+            let id = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`temp` needs a worker id such as `R-4`"))?;
+            let mut task = None;
+            let mut profile = None;
+            let mut resume = false;
+            for token in tokens {
+                if token == "resume" {
+                    if resume {
+                        return Err(bad(line, "repeated `resume` in one `temp` line"));
+                    }
+                    resume = true;
+                } else if let Some(value) = token.strip_prefix("task=") {
+                    if !is_task_id(value) {
+                        return Err(bad(line, format!("`task=` needs a task id, got {value:?}")));
+                    }
+                    if task.replace(value.to_string()).is_some() {
+                        return Err(bad(line, "repeated `task=` in one `temp` line"));
+                    }
+                } else if let Some(value) = token.strip_prefix("profile=") {
+                    if profile.replace(value.to_string()).is_some() {
+                        return Err(bad(line, "repeated `profile=` in one `temp` line"));
+                    }
+                } else {
+                    return Err(bad(line, format!("unknown `temp` field {token:?}")));
+                }
+            }
+            let task = task.ok_or_else(|| bad(line, "`temp` needs `task=`"))?;
+            Ok(StaffItem::Temp { line, id: id.to_string(), task, profile, resume })
+        }
+        "park" => {
+            let lane = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`park` needs a lane"))?;
+            let mut until = None;
+            let mut until_task = None;
+            for token in tokens {
+                if let Some(value) = token.strip_prefix("until=") {
+                    if until.is_some() || until_task.is_some() {
+                        return Err(bad(line, "`park` takes exactly one of `until=` and `until-task=`"));
+                    }
+                    until = Some(value.to_string());
+                } else if let Some(value) = token.strip_prefix("until-task=") {
+                    if !is_task_id(value) {
+                        return Err(bad(line, format!("`until-task=` needs a task id, got {value:?}")));
+                    }
+                    if until.is_some() || until_task.is_some() {
+                        return Err(bad(line, "`park` takes exactly one of `until=` and `until-task=`"));
+                    }
+                    until_task = Some(value.to_string());
+                } else {
+                    return Err(bad(line, format!("unknown `park` field {token:?}")));
+                }
+            }
+            if until.is_none() && until_task.is_none() {
+                return Err(bad(line, "`park` needs `until=` or `until-task=`"));
+            }
+            Ok(StaffItem::Park { line, lane: lane.to_string(), until, until_task })
+        }
+        "hold" => {
+            // `hold <lane> reason=<text to the end of the line>`.
+            let after = rest["hold".len()..].trim_start();
+            let (lane, tail) = after
+                .split_once(char::is_whitespace)
+                .ok_or_else(|| bad(line, "`hold` needs a lane and `reason=`"))?;
+            let reason = tail
+                .trim_start()
+                .strip_prefix("reason=")
+                .ok_or_else(|| bad(line, "`hold` needs `reason=<text>`"))?;
+            if reason.trim().is_empty() {
+                return Err(bad(line, "`hold` needs a non-empty `reason=`"));
+            }
+            Ok(StaffItem::Hold {
+                line,
+                lane: lane.to_string(),
+                reason: reason.trim().to_string(),
+            })
+        }
+        "retire" => {
+            let lane = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`retire` needs a lane"))?;
+            if tokens.next().is_some() {
+                return Err(bad(line, "`retire` takes only a lane"));
+            }
+            Ok(StaffItem::Retire { line, lane: lane.to_string() })
+        }
+        other => Err(bad(
+            line,
+            format!("unknown staff verb {other:?}, expected temp, park, hold or retire"),
+        )),
+    }
+}
+
+/// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
+fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
+    let rest = text
+        .strip_prefix("- ")
+        .ok_or_else(|| bad(line, format!("a verdict line starts with `- `, got {text:?}")))?;
+    let mut tokens = rest.split_whitespace();
+    let task = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a verdict line needs a task id"))?;
+    if !is_task_id(task) {
+        return Err(bad(line, format!("a verdict line needs a task id, got {task:?}")));
+    }
+    let attempt = number_field(tokens.next(), "attempt", line)?;
+    let contract = number_field(tokens.next(), "contract", line)?;
+    let candidate = tokens
+        .next()
+        .and_then(|token| token.strip_prefix("candidate="))
+        .ok_or_else(|| bad(line, "a verdict line needs `candidate=<commit>`"))?;
+    if candidate.is_empty() {
+        return Err(bad(line, "a verdict line needs a non-empty `candidate=`"));
+    }
+    let outcome = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a verdict line ends with `pass …` or `fail …`"))?;
+    let pass = match outcome {
+        "pass" => true,
+        "fail" => false,
+        other => {
+            return Err(bad(
+                line,
+                format!("a verdict is `pass` or `fail`, got {other:?}"),
+            ))
+        }
+    };
+
+    // The tail runs to the end of the line: `evidence=<path>` or `rework="<text>"`.
+    let tail = rest
+        .splitn(6, char::is_whitespace)
+        .nth(5)
+        .unwrap_or("")
+        .trim();
+    let mut evidence = None;
+    let mut rework = None;
+    if let Some(value) = tail.strip_prefix("evidence=") {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
+        }
+        // A pass verdict carries exactly one `evidence=<path>`: a second field
+        // after it (or a path with a space) is a different tail.
+        if pass && value.chars().any(char::is_whitespace) {
+            return Err(bad(
+                line,
+                "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
+            ));
+        }
+        evidence = Some(value.to_string());
+    } else if let Some(value) = tail.strip_prefix("rework=") {
+        let quoted = value.trim();
+        let inner = quoted
+            .strip_prefix('"')
+            .and_then(|text| text.strip_suffix('"'))
+            .ok_or_else(|| bad(line, "a `fail` verdict needs `rework=\"<text>\"`"))?;
+        if inner.trim().is_empty() {
+            return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
+        }
+        rework = Some(inner.to_string());
+    } else if !tail.is_empty() {
+        return Err(bad(line, format!("unexpected verdict text {tail:?}")));
+    }
+
+    if pass && evidence.is_none() {
+        return Err(bad(line, "a `pass` verdict needs `evidence=<path>`"));
+    }
+    if pass && rework.is_some() {
+        return Err(bad(line, "a `pass` verdict must not carry `rework=`"));
+    }
+    if !pass && rework.is_none() {
+        return Err(bad(line, "a `fail` verdict needs `rework=\"<text>\"`"));
+    }
+    if !pass && evidence.is_some() {
+        return Err(bad(line, "a `fail` verdict must not carry `evidence=`"));
+    }
+
+    Ok(VerdictLine {
+        line,
+        task: task.to_string(),
+        attempt,
+        contract,
+        candidate: candidate.to_string(),
+        pass,
+        evidence,
+        rework,
+    })
+}
+
+fn number_field(token: Option<&str>, name: &str, line: usize) -> GearResult<i64> {
+    let token = token.ok_or_else(|| bad(line, format!("a verdict line needs `{name}=<n>`")))?;
+    let value = token
+        .strip_prefix(&format!("{name}="))
+        .ok_or_else(|| bad(line, format!("a verdict line needs `{name}=<n>`, got {token:?}")))?;
+    value
+        .parse::<i64>()
+        .map_err(|_| bad(line, format!("`{name}=` takes a number, got {value:?}")))
+}
+
+/// `V-9 keep plan=12: <text>` (design/11: `keep` or `change`).
+fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
+    let (head, rest) = text
+        .split_once(':')
+        .ok_or_else(|| bad(line, "a review line is `<id> keep|change plan=<n>: <text>`"))?;
+    let mut tokens = head.split_whitespace();
+    let id = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a review line needs a review id such as `V-9`"))?;
+    let decision = tokens
+        .next()
+        .ok_or_else(|| bad(line, "a review line needs `keep` or `change`"))?;
+    if decision != "keep" && decision != "change" {
+        return Err(bad(
+            line,
+            format!("a review decision is `keep` or `change`, got {decision:?}"),
+        ));
+    }
+    let plan = tokens
+        .next()
+        .and_then(|token| token.strip_prefix("plan="))
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| bad(line, "a review line needs `plan=<n>`"))?;
+    if tokens.next().is_some() {
+        return Err(bad(line, "unexpected text before the `:` of a review line"));
+    }
+    Ok(ReviewLine {
+        line,
+        id: id.to_string(),
+        plan,
+        text: rest.trim().to_string(),
+    })
+}
+
+
+/// Rewrite a draft after a successful apply, so the file stays the current
+/// plan of its voyage (T-34):
+///
+/// - the header's `base=` becomes the applied version;
+/// - every `## NEW` block header becomes `## T-<id>`, in draft order (the ids
+///   the apply assigned);
+/// - the `# Verdicts` section is dropped: verdicts live in the store, and a
+///   re-applied file must settle nothing.
+///
+/// Everything else — comments, sections, field lines, spacing — is kept as the
+/// captain wrote it, so the file is edited in place and re-applied as is.
+pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut ids = created.iter();
+    let mut dropping = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if dropping {
+            // The section ends at the next `# ` header (which is kept) or at
+            // the end of the file.
+            if trimmed.starts_with("# ") {
+                dropping = false;
+            } else {
+                continue;
+            }
+        }
+        if is_section_named(trimmed, "Verdicts") {
+            dropping = true;
+            continue;
+        }
+        if trimmed
+            .strip_prefix("## ")
+            .and_then(|rest| rest.split_whitespace().next())
+            == Some("NEW")
+        {
+            if let Some(id) = ids.next() {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let rest = trimmed["## NEW".len()..].trim_start();
+                let header = if rest.is_empty() {
+                    format!("{indent}## {id}")
+                } else {
+                    format!("{indent}## {id} {rest}")
+                };
+                lines.push(header);
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+    // The dropped section may have been the last one: do not leave the blank
+    // lines that separated it behind.
+    if dropping {
+        while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+    }
+    // The header is the first non-empty line; its `base=` is the version just
+    // applied.
+    if let Some(header) = lines.iter_mut().find(|line| !line.trim().is_empty()) {
+        let trimmed = header.trim();
+        if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
+            let parts: Vec<String> = trimmed
+                .split_whitespace()
+                .map(|token| {
+                    if token.starts_with("base=") {
+                        format!("base={version}")
+                    } else {
+                        token.to_string()
+                    }
+                })
+                .collect();
+            *header = parts.join(" ");
+        }
+    }
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Is this line the `# <name>` section header (not `# <name>s`, not a
+/// value line)?
+fn is_section_named(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix("# ") else { return false };
+    rest == name || rest.starts_with(&format!("{name} "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER: &str = "<!-- gear-plan project=p base=0 -->\n";
+
+    fn detail_of(text: &str) -> String {
+        let err = parse(text).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat);
+        err.detail
+    }
+
+
+    #[test]
+    fn an_applied_draft_is_rewritten_in_place() {
+        let text = format!(
+            "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
+        );
+        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()]);
+        assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
+        assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
+        assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
+        assert!(!rewritten.contains("NEW"), "{rewritten}");
+        assert!(!rewritten.contains("# Verdicts"), "{rewritten}");
+        assert!(!rewritten.contains("T-9 attempt"), "{rewritten}");
+        // Everything else is untouched, including the sections after the
+        // dropped one.
+        assert!(rewritten.contains("# Goal\nthe goal"), "{rewritten}");
+        assert!(rewritten.contains("goal: A\naccept: a\ndeps: -"), "{rewritten}");
+        assert!(rewritten.contains("# Staff\n- hold heat reason=test"), "{rewritten}");
+        // And the result still parses as a draft with those ids.
+        let again = parse(&rewritten).unwrap();
+        assert_eq!(again.base, 7);
+        assert_eq!(again.queue.iter().map(|item| item.id.clone()).collect::<Vec<_>>(), vec![Some("T-1".into()), Some("T-2".into())]);
+        assert!(again.verdicts.is_empty(), "the verdicts are gone");
+    }
+
+    #[test]
+    fn a_verdicts_section_at_the_end_leaves_no_tail() {
+        let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()]);
+        assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
+        assert!(!rewritten.contains("Verdicts"), "{rewritten}");
+    }
+
+    #[test]
+    fn pass_with_rework_after_evidence_is_rejected() {
+        let text = format!(
+            "{HEADER}# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc pass evidence=x rework=\"y\"\n"
+        );
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 3: "), "{detail}");
+    }
+
+    #[test]
+    fn repeated_section_is_rejected() {
+        let text = format!("{HEADER}# Goal\none\n\n# Goal\ntwo\n");
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 5: "), "{detail}");
+    }
+
+    #[test]
+    fn repeated_milestone_id_is_rejected() {
+        let text = format!("{HEADER}# Milestone M2: A\na\n\n# Milestone M2: B\nb\n");
+        let detail = detail_of(&text);
+        assert!(detail.starts_with("line 5: "), "{detail}");
+    }
+}

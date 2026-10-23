@@ -1,0 +1,32 @@
+#!/bin/sh
+# gear — the wrapper the plugin puts on PATH (design/14).
+#
+# It runs the binary the build step produced, from any working directory:
+# the plugin root is the directory above this one. Agents find `gear`
+# through this wrapper, so it has to work wherever they are started.
+set -eu
+
+# The wrapper may be linked onto PATH. Follow the link, so the plugin root
+# is the real one and not the directory of the link (the review of T-4).
+self="$0"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+done
+root="$(cd "$(dirname "$self")/.." && pwd)"
+binary="$root/target/release/gear"
+
+# The store the board reads. GEAR_DB wins; the default is where the
+# project's own install keeps it.
+: "${GEAR_DB:=$HOME/.local/state/gear/gear.db}"
+export GEAR_DB
+
+if [ ! -x "$binary" ]; then
+  echo "gear: $binary is missing — build it with 'cargo build --release' in $root" >&2
+  exit 1
+fi
+
+exec "$binary" "$@"
