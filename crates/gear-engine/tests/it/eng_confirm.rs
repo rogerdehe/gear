@@ -84,19 +84,18 @@ fn matching_view_confirms() {
     assert_eq!(op(&mut store, &id).check_budget, 0, "a confirmed op needs no further checks");
 }
 
+/// L-69: any view after the doorbell answers it, even one that did not list
+/// every covered id (the inbox batch caps what one view shows).
 #[test]
-fn partial_view_does_not_confirm() {
+fn a_partial_view_confirms() {
     let mut store = store_with_project();
     let id = submitted_op(&mut store, &["M-1", "M-2"], T0 + 1);
-    // The seat showed one of the two ids: that is not the whole doorbell.
     view(&mut store, 1, T0 + 5, &["M-1"]);
 
-    let (confirmed, flagged) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
 
-    assert!(confirmed.is_empty());
-    assert!(flagged.is_empty());
-    assert_eq!(op(&mut store, &id).state, OpState::Submitted);
-    assert_eq!(op(&mut store, &id).check_budget, 1, "an unconfirmed check costs budget");
+    assert_eq!(confirmed, vec![id.clone()]);
+    assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
 }
 
 #[test]
@@ -286,4 +285,20 @@ fn a_view_of_the_still_open_items_confirms_a_doorbell() {
     let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
 
     assert_eq!(confirmed, vec![id]);
+}
+
+/// L-69 liveness: a doorbell nobody answered expires after
+/// DOORBELL_EXPIRY_S, so it can never hold the captain's slot for good.
+#[test]
+fn an_unanswered_doorbell_expires() {
+    let mut store = store_with_project();
+    let id = submitted_op(&mut store, &["M-404"], T0);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 1000, T0 + 60).unwrap();
+    assert!(confirmed.is_empty(), "still within its time");
+
+    let (confirmed, _) =
+        confirm_pending(&mut store, "p", 1000, T0 + gear_engine::ops::DOORBELL_EXPIRY_S).unwrap();
+    assert_eq!(confirmed, vec![id.clone()]);
+    assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
 }
