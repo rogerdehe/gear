@@ -1598,8 +1598,10 @@ impl<'s> Tx<'s> {
     }
 
     /// The review verdicts of a project whose attempt is still handed in
-    /// (Submitted): the ones a settle call still has to act on (T-13), oldest
-    /// first. A verdict whose attempt was already settled is not listed again.
+    /// (Submitted) — the ones a settle call still has to act on (T-13), oldest
+    /// first. A verdict whose attempt was already settled is not listed again;
+    /// one whose task finished meanwhile is consumed once (the attempt is
+    /// closed there) and then drops out too (review R-67, P1).
     pub fn reviews_to_settle(&self, project: &str) -> GearResult<Vec<ReviewVerdictRow>> {
         let mut stmt = self
             .tx
