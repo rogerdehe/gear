@@ -880,7 +880,6 @@ quota_reset_h = 5
         // continues on the new model.
         assert_eq!(starts(&herdr), vec![vec![
             "--auto".to_string(),
-            "--standalone".to_string(),
             "-s".to_string(),
             "ses_lane".to_string(),
         ]]);
