@@ -80,8 +80,10 @@ fn a_changed_models_chain_is_the_next_config_version() {
 
     // And it hands the new models to whoever reads the config.
     let current = config::latest(&mut s, "harbor").unwrap();
-    assert_eq!(current.models.lanes, vec!["deepseek/deepseek-flash".to_string()]);
-    assert_eq!(current.models.review, vec!["gpt-6.1-sol".to_string()]);
+    let lanes: Vec<&str> = current.models.lanes.iter().map(|entry| entry.model()).collect();
+    assert_eq!(lanes, vec!["deepseek/deepseek-flash"]);
+    let review: Vec<&str> = current.models.review.iter().map(|entry| entry.model()).collect();
+    assert_eq!(review, vec!["gpt-6.1-sol"]);
 }
 
 #[test]
