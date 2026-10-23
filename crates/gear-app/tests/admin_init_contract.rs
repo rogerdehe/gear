@@ -72,5 +72,8 @@ fn only_the_user_and_only_valid_new_configs() {
     assert!(e.detail.contains("lanes[1].owns"), "{}", e.detail);
     assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
     init(&mut s, &admin(), CONFIG, T0).unwrap();
-    assert_eq!(init(&mut s, &admin(), CONFIG, T0 + 1).unwrap_err().code, ErrorCode::BadFormat, "already registered");
+    // T-6: a re-init is a config change, not a second registration: the new
+    // config is the next config version.
+    let again = init(&mut s, &admin(), CONFIG, T0 + 1).unwrap();
+    assert_eq!(again.config_version, 2);
 }

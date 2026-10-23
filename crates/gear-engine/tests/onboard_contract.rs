@@ -7,7 +7,7 @@ use gear_store::SeatRow;
 
 fn seat(name: &str, role: SeatRole) -> SeatRow {
     SeatRow { id: format!("harbor:{name}"), project: "harbor".into(), role, name: name.into(), profile: "opencode".into(),
-        generation: 0, state: SeatState::Queued, state_since: 0, state_reason: None }
+        generation: 0, state: SeatState::Queued, state_since: 0, state_reason: None, task_id: None }
 }
 
 #[test]

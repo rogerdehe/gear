@@ -108,6 +108,7 @@ fn register(
             state: SeatState::Queued,
             state_since: now,
             state_reason: Some("registered".to_string()),
+            task_id: None,
         })?;
         seats.push(seat_id);
         Ok(())
@@ -241,6 +242,17 @@ fn re_register(
             // A registered lane keeps its seat; only its profile follows the
             // config (the kind is read from the config when it is onboarded).
             Some(seat) => {
+                if seat.role != SeatRole::Lane {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "the lane {} would take the seat id of the {} seat {}",
+                            lane.name,
+                            seat.role.as_str(),
+                            seat.id
+                        ),
+                    ));
+                }
                 if seat.profile != lane.profile {
                     tx.set_seat_profile(&seat_id, &lane.profile)?;
                 }
@@ -257,6 +269,7 @@ fn re_register(
                     state: SeatState::Queued,
                     state_since: now,
                     state_reason: Some("registered".to_string()),
+                    task_id: None,
                 })?;
             }
         }

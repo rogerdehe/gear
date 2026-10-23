@@ -472,6 +472,7 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
                     state: SeatState::Queued,
                     state_since: T0,
                     state_reason: Some("registered".into()),
+                    task_id: None,
                 })?;
                 Ok(())
             })
