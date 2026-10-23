@@ -97,7 +97,17 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
             }
             continue;
         }
-        let severity = if ready == 0 && !working { 3 } else if ready == 0 { 2 } else { 1 };
+        let severity = if ready == 0 && !working {
+            3
+        } else if let (Some(left), Some(average)) = (horizon, average) {
+            // Taking the final queued task does not itself shorten the
+            // forecast. Escalate when runway halves, then when actually idle.
+            if left <= average / 2 { 2 } else { 1 }
+        } else if ready == 0 {
+            2
+        } else {
+            1
+        };
         let previous = tx.get_meta(&state_key)?.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
         // The captain may resolve an alert without refilling immediately. The
         // same condition stays acknowledged until it worsens or recovers.
