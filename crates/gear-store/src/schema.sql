@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS voyages (project TEXT NOT NULL, milestone TEXT NOT NU
   -- NULL until the plan describes the voyage: a milestone whose tasks predate
   -- its first `# Milestone` block still has a departure (T-22, review R1/R2).
   done TEXT, bar TEXT, eta TEXT,
-  departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
+  departure INTEGER, departure_tasks INTEGER, departure_estimate_min INTEGER, updated INTEGER NOT NULL,
   PRIMARY KEY (project, milestone));
 
 CREATE TABLE IF NOT EXISTS seats (
