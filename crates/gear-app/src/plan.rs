@@ -717,6 +717,21 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     text.push_str(&format!(
         "gear send --kind result --task {task} --attempt {attempt_arg} --contract {adopted} --candidate <commit> \"Report: <path>\"\n"
     ));
+    // The review records of the task: what a temp reviewer already handed in
+    // (T-2). The captain decides on them; they settle nothing by themselves.
+    let reviews = tx.review_verdicts_of_task(project, task)?;
+    if !reviews.is_empty() {
+        text.push_str("\n## Review\n");
+        for review in &reviews {
+            text.push_str(&format!(
+                "attempt {} · {} · {}\n",
+                review.attempt,
+                if review.passed { "pass" } else { "fail" },
+                review.by_seat
+            ));
+            text.push_str(&format!("{}\n", review.findings));
+        }
+    }
     if row.contract_version > adopted {
         text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
     }

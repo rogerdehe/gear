@@ -91,6 +91,7 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 state: SeatState::Queued,
                 state_since: now,
                 state_reason: Some("registered".to_string()),
+                task_id: None,
             })?;
             seats.push(seat_id);
             Ok(())

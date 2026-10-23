@@ -11,7 +11,8 @@ fn world() -> Store {
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
         tx.insert_seat(&SeatRow { id: "p:heat".into(), project: "p".into(), role: SeatRole::Lane, name: "heat".into(),
-            profile: "opencode".into(), generation: 0, state: SeatState::Queued, state_since: T0, state_reason: Some("registered".into()) })
+            profile: "opencode".into(), generation: 0, state: SeatState::Queued, state_since: T0, state_reason: Some("registered".into()),
+            task_id: None })
     }).unwrap();
     s
 }
