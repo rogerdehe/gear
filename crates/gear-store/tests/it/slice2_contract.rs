@@ -17,7 +17,7 @@ fn task(id: &str, rank: i64) -> TaskRow {
         project: "p".into(), id: id.into(), rank, state: TaskState::Ready, priority: "must".into(),
         lane: Some("heat".into()), milestone: None, required: true, contract_version: 1,
         deps: vec!["T-0".into()], followup_of: None, wait_on: None, wait_cond: None,
-        rework_note: None, updated: NOW,
+        rework_note: None, estimate_min: None, updated: NOW,
     }
 }
 

@@ -112,11 +112,13 @@ eta: 16h
 ## NEW [must] lane=engine milestone=M1 required
 goal: The login form posts to the auth endpoint and shows the error.
 accept: A wrong password shows the error, a good one opens the home page, tests cover both.
+estimate: 90
 deps: -
 
 ## NEW [should] lane=engine milestone=M1
 goal: A logged-in session survives a page reload.
 accept: The session is read at start-up, and the home page stays after a reload.
+estimate: 60
 deps: T-1
 ```
 
@@ -134,7 +136,8 @@ deps: T-1
 - `# Queue` — the order of the blocks is the order the lanes work in. A header is
   `## <T-<n>|NEW> [now|must|should|could|wont] lane=<lane> milestone=<M> required`
   (`required` optional). Fields, one line each:
-  `goal`, `accept`, `evidence-files`, `evidence-due` (minutes), `deps` (`-` = none, comma-separated otherwise), `state` (`ready` or `cancelled`), `followup-of`, `reopen`. Nothing else — an unknown field rejects the draft.
+  `goal`, `accept`, `estimate` (the planned time in minutes), `evidence-files`, `evidence-due` (minutes), `deps` (`-` = none, comma-separated otherwise), `state` (`ready` or `cancelled`), `followup-of`, `reopen`. Nothing else — an unknown field rejects the draft.
+  A `NEW` block needs `estimate:` — the time you expect the task to take; without it the draft is rejected. An existing task may keep the estimate it has (or get a new one).
   A task you do not mention keeps its state and its place (it comes after the ones you list). Rewriting a task's `goal` or `accept` gives it the next contract version; a lane that is mid-task is told to rework to it.
 - `# Verdicts` and `# Review` — the two separate forms below.
 
@@ -176,8 +179,9 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 3. **Plan the next steps.** Write the draft, `gear plan apply`. Keep **2–3 valuable steps queued per lane** — enough to fill it, not a backlog nobody can check. A lane with nothing to start is a planning failure, not the lane's fault.
 4. **Watch the lanes.** A lane that stops with work left is asked to continue (`herdr agent prompt <agent> "run \`gear\` first"`); a lane that ran dry gets work in the next plan; a quota stop is a model switch or a park, never a finished task (read the screen first — `gear --skill agent:<kind>` says what a quota screen looks like).
 5. **Hold the course.** The milestone's `done:` and `bar:` decide what is good enough. A reviewer judges against them, not against perfection (`gear --skill review`). Do not widen the scope in the middle of a milestone: new work goes into the next milestone, and the plan says so in `# Decisions`.
-6. **Merge and close.** A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
-7. **The user** is asked only about what is theirs.
+6. **Look at the time.** `gear report time` says where the time went: per task and per voyage the estimate, the dev time, the review time, the wait for you, the merge time, the rework rounds and the ratio actual/estimate. Read it when the pace looks off; a task that always takes twice its estimate wants a smaller plan, not a faster lane.
+7. **Merge and close.** A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
+8. **The user** is asked only about what is theirs.
 
 ## 4. What you never do
 
