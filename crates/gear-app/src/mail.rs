@@ -25,6 +25,8 @@ pub struct SendArgs {
     pub candidate: Option<String>,
     /// Review only (T-2): the verdict a temp reviewer hands in.
     pub verdict: Option<crate::review::Outcome>,
+    /// Review only (T-23): the ids of the findings that block.
+    pub blocking: Option<String>,
     /// Result only (T-19): the hand-in gate — the candidate must contain the
     /// project's current integration branch. `None` skips the check (tests and
     /// callers that are not a lane hand-in).
@@ -225,6 +227,7 @@ pub fn send(
                 attempt: args.attempt.unwrap_or_default(),
                 outcome: verdict,
                 findings: args.body.clone(),
+                blocking: args.blocking.clone().unwrap_or_default(),
                 by_seat: seat.id.clone(),
             }),
             _ => None,
