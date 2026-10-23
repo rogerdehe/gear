@@ -26,7 +26,7 @@ Reconciliation rules:
 | seat pane gone / Agent exited | lane (ACTIVE/STANDBY/PARKED/HELD/RETIRING) → `MISSING` (handled by 10); **captain → `UNAVAILABLE`** (03, relevant permissions frozen); expected changes in QUEUED, RELEASED, STARTING/RELEASING are checked against the corresponding operation and do not count as missing |
 | occupant fingerprint changed | first check whether there is an onboard/release/handover operation for it: an expected start or exit is checked against that operation; only an unexpected change with no corresponding operation revokes the binding and sets `NEEDS_CHECK`, no dispatch, notify |
 | status idle/done | read the screen once (tail N lines) to confirm no busy signature, then hand to 09 as "idle" |
-| ratelimit/quota/auth matched | confirmed only after `confirm_rounds` consecutive rounds; captain matching quota/auth → 03's UNAVAILABLE |
+| ratelimit/quota/auth matched | confirmed only after `confirm_rounds` consecutive rounds; captain auth → 03's UNAVAILABLE; captain quota uses only its configured footer status bar (T-37): pause new assignments, continue current work/reviews/merges, wake at reset and resume after a new view |
 
 ## Side effects
 
@@ -41,3 +41,13 @@ Side-effect intent, execution and confirmation are recorded in the database.
 ## Test points
 
 Fake Herdr: killed during execution and restarted does not resend; observation failure does not trigger MISSING; RELEASED is not judged missing; an occupant change is not inherited; working does not confirm a delivery; one slow project does not block another; failing to take the single-instance lock exits.
+
+### Busy lane without development work (T-46)
+
+After reconciliation, the engine times present active/standby lane agents whose
+Herdr status is `Working`, whose development attempts are empty, and whose
+eligible unclaimed ready queue is nonempty. Submitted attempts are review work.
+After `timing.lane_busy_idle_min` (default 10, positive), one urgent captain item
+opens. Timer/generation/incident state is stored in `meta`; intent and the latch
+are atomic. Recovery closes an outstanding item and resets the clock. Failed
+observations interrupt the timing evidence without silently resolving an alert.

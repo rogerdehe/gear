@@ -462,6 +462,31 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
 }
 
 #[test]
+fn the_captain_quota_pause_and_view_wait_are_shown() {
+    let mut store = world();
+    let mut state = gear_store::CaptainQuota {
+        generation: 1, detected_at: T0, reset_at: T0 + 3600, bar: "5h 100%".into(),
+        wake_op: None, views_before_wake: 0, resumed: false,
+    };
+    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    for mode in [View::Lanes, View::Deps] {
+        let text = render(&board, mode);
+        assert!(text.contains("Captain quota: out — reset in 59 min"), "{text}");
+        assert!(text.contains("new tasks paused"), "{text}");
+    }
+    let json: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
+    assert_eq!(json["projects"][0]["captain_quota"]["reset_at"], T0 + 3600);
+    state.wake_op = Some("O-1".into());
+    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    let board = build(&mut store, &options(), T0 + 3601).unwrap();
+    assert!(render(&board, View::Lanes).contains("waiting for the captain to run gear"));
+    state.resumed = true;
+    store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    assert!(build(&mut store, &options(), T0 + 3602).unwrap().projects[0].captain_quota.is_none());
+}
+
+#[test]
 fn a_retired_lane_is_not_reintroduced_by_its_tasks() {
     let mut store = world();
     store.write(|tx| tx.set_seat_state("p:runtime", gear_model::SeatState::Retired, None, T0)).unwrap();

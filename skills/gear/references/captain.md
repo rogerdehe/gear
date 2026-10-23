@@ -249,3 +249,20 @@ choice; include any resulting queue/estimate/scope edits in the same plan.
 ETA checkpoints accept relative durations such as `20h`, `2.5 hours`, `90m` or
 `1h30m`. An unknown ETA skips time checkpoints while task-count stations still
 work; unknown measured values remain `-` rather than invented measurements.
+
+### Working lane without its own task (T-46)
+
+`[timing].lane_busy_idle_min` defaults to 10 (minimum 1). A present active/standby
+lane observed as Herdr `Working`, with no attempt in development and eligible
+ready work waiting, raises one urgent item after more than that many minutes:
+`lane X is busy with no task; ready work waits`. Submitted attempts belong to
+review and do not count as development work.
+
+The timer and incident survive engine restarts. Acknowledging the item does not
+recreate the same alert each tick; recovery closes it and resets monitoring.
+Idle/missing/changed/non-working observations, owned development work, an
+ineligible/empty queue or a new generation reset the incident. A failed Herdr
+snapshot interrupts the timer without claiming recovery. Doorbell delivery
+retains its normal safety guards. This is a blocked-work alert; tail declarations
+suppress feed/idle warnings, while ready work stuck behind a working agent still
+needs attention.

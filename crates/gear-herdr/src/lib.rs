@@ -15,6 +15,8 @@
 pub mod fake;
 pub mod profile;
 pub mod opencode;
+pub mod quota_bar;
+pub use quota_bar::{QuotaBar, QuotaReading};
 
 use serde_json::{json, Value};
 

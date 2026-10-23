@@ -8,6 +8,7 @@ fn opencode() -> Profile {
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["Error: Rate limit exceeded".into()],
         quota_markers: vec!["insufficient_quota".into()],
+        quota_bar: None,
         auth_markers: vec!["Unauthorized".into()],
         tail_lines: 3,
         confirm_rounds: 2,

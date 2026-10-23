@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use gear_model::{GearError, GearResult};
 
 #[derive(Parser, Debug)]
-#[command(name = "gear", about = "GEAR: keep an agent fleet working under one captain")]
+#[command(name = "gear", about = "GEAR: keep an agent fleet working under one captain", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -196,8 +196,11 @@ enum CaptainOp {
 }
 
 fn main() {
-    default_store_path();
+    // The store path is set after the parse: `--help` and `--version` answer
+    // without touching the user's home (design/13: a read-only command writes
+    // nothing).
     let cli = Cli::parse();
+    default_store_path();
     let code = match run(cli) {
         Ok(()) => 0,
         Err(e) => {

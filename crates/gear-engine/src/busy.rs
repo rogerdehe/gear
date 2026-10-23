@@ -1,0 +1,89 @@
+//! T-46: a Working lane with no development attempt cannot take ready work.
+//! Persist the continuous-condition timer and one alert per incident. Submitted
+//! attempts belong to review, so they do not count as lane development work.
+
+use crate::{dispatch, observe::{Presence, SeatObs}};
+use gear_herdr::AgentStatus;
+use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
+use gear_store::{NewMessage, Tx};
+
+fn key(seat: &str) -> String { format!("lane-busy-idle:{seat}") }
+
+/// Unknown observation interrupts the timer without claiming recovery or
+/// forgetting an already-issued alert. The next known idle/task/queue state
+/// decides whether that incident has actually ended.
+pub fn observation_lost(tx: &Tx<'_>, project: &str) -> GearResult<()> {
+    for seat in tx.seats_of_project(project)?.iter().filter(|s| s.role == SeatRole::Lane) {
+        tx.set_meta(&format!("{}:since", key(&seat.id)), "")?;
+    }
+    Ok(())
+}
+
+pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<Vec<String>> {
+    let config = tx.get_project(project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok());
+    let threshold = i64::from(config.map(|c| c.timing.lane_busy_idle_min).unwrap_or(10).max(1)) * 60;
+    let mut alerted = Vec::new();
+    for obs in observed.iter().filter(|o| o.seat.role == SeatRole::Lane) {
+        let Some(seat) = tx.get_seat(&obs.seat.id)? else { continue; };
+        let key = key(&seat.id);
+        let generation = seat.generation.to_string();
+        if tx.get_meta(&format!("{key}:generation"))?.as_deref() != Some(&generation) {
+            recover(tx, project, &key, now)?;
+            tx.set_meta(&format!("{key}:generation"), &generation)?;
+        }
+        let mut qualifies = obs.presence == Presence::Present
+            && obs.status == Some(AgentStatus::Working)
+            && matches!(seat.state, SeatState::Active | SeatState::Standby)
+            && obs.seat.generation == seat.generation
+            && tx.in_progress_attempts_of_seat(&seat.id)?.is_empty();
+        if qualifies {
+            qualifies = false;
+            for task in dispatch::ready_tasks_of(tx, &seat)? {
+                if !tx.attempts_of_task(project, &task.id)?.iter().any(|a| a.state.occupies_seat()) {
+                    qualifies = true;
+                    break;
+                }
+            }
+        }
+        if !qualifies {
+            recover(tx, project, &key, now)?;
+            continue;
+        }
+        let since_key = format!("{key}:since");
+        let since = tx.get_meta(&since_key)?.and_then(|s| s.parse::<Ts>().ok());
+        let since = match since {
+            Some(since) if since <= now => since,
+            _ => { tx.set_meta(&since_key, &now.to_string())?; now }
+        };
+        if now - since <= threshold { continue; }
+        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
+            continue; // acknowledged or still open: the incident is unchanged
+        }
+        let Some(captain) = tx.captain_of(project)? else { continue; };
+        let message = tx.insert_message(&NewMessage {
+            project: project.into(), thread: format!("lane-busy:{}", seat.id),
+            task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
+            recipient: captain.id, kind: MsgKind::System, urgent: true,
+            body: format!("lane {} is busy with no task; ready work waits", seat.name),
+            reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+        })?;
+        tx.set_meta(&format!("{key}:alert"), &message.id)?;
+        alerted.push(seat.id);
+    }
+    Ok(alerted)
+}
+
+fn recover(tx: &Tx<'_>, project: &str, key: &str, now: Ts) -> GearResult<()> {
+    if let Some(id) = tx.get_meta(&format!("{key}:alert"))?.filter(|s| !s.is_empty()) {
+        if let Some(message) = tx.get_message(project, &id)? {
+            if matches!(message.state, MsgState::Open | MsgState::Waiting) {
+                tx.update_message_state(project, &id, MsgState::Resolved,
+                    Some("lane no longer busy without a development attempt while ready work waits"),
+                    None, None, now)?;
+            }
+        }
+    }
+    tx.set_meta(&format!("{key}:since"), "")?;
+    tx.set_meta(&format!("{key}:alert"), "")?;
+    Ok(())
+}
