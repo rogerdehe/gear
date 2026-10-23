@@ -36,14 +36,18 @@ owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; fallback Claude Code claude-sonnet-5-5 --effort high (cross-CLI, steady S1)
-kind = "codex"
-profile = "codex"
+[temps]                  # reviewers. 2026-10-23 16:00 Plan B by hand: the lanes run on Codex gpt-6.1-sol (MiniMax quota), so reviews go to Claude Code claude-sonnet-5-5, effort high (a reviewer never runs the writer's model). Back to Codex sol high when the lanes return to MiniMax (steady T-35 automates this).
+kind = "claude"
+profile = "claude"
+
+[profiles.claude]
+kind = "claude"
+unattended_args = ["--dangerously-skip-permissions", "--effort", "high"]
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash"]   # M2: official MiniMax; fallback Codex gpt-6.1-sol reasoning medium (cross-CLI, steady S1)
-review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane model
-on_quota = { lanes = "fallback", review = "fallback" }
+review = ["claude-sonnet-5-5"]   # Codex, reasoning high; differs from every lane model
+on_quota = { lanes = "wait", review = "wait" }   # one-model chains: a quota stop parks and rings the captain, who switches by hand (cross-CLI fallback is steady T-35; L-74)
 quota_reset_h = 5
 # Until steady S1 lands a chain cannot cross CLIs: a lane out of MiniMax quota parks and the captain switches it by hand (ops/STOPGAPS.md).
 

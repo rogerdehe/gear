@@ -11,7 +11,7 @@ Everything here is for the binary you are running. `gear --skill <topic>` prints
    - the goal, and the **first milestone**: its `done:` sentence (the one checkable thing that must be true when it is done), its `bar:` (the quality line: what blocks a task and what is only logged) and its `eta:` (the planned duration);
    - the lanes: name, duty, the paths each owns, the agent kind that runs it;
    - the **model chain per role** (`lanes`, `review`, `captain`): a reviewer must run a model no lane runs as its primary;
-   - the **quota policy** per role: `fallback` (switch to the next model of the chain and back after the reset) or `wait` (park until the provider resets);
+   - the **quota policy** per role: `fallback` (switch to the next model of the chain and back after the reset) or `wait` (park until the provider resets). It must be executable by the engine **today**: a fallback needs a next model the engine can start (`init` refuses one without). A fallback the engine cannot do yet is `wait` until the work that adds it lands;
    - how the user wants to be involved (release gate, questions).
 
    **The bar is the user's choice, not yours.** Offer the three ready-made bars at kickoff and write the chosen one into the milestone's `bar:` line:
