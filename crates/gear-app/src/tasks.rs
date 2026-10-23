@@ -351,13 +351,19 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
 /// - **fail**: attempt Rejected, task Ready with `rework_note` = the review's
 ///   findings, ranked one before the other ready tasks of its lane, so the
 ///   rework comes before new work (design/06);
-/// - either way the review item in the captain's inbox is resolved and one
-///   **information line** (a Reply, state Info) says what happened; the
-///   captain does not have to decide anything.
+/// - a **pass whose contract moved on** (the attempt worked to an older
+///   contract than the task carries now) cannot complete the current contract
+///   (design/06): it settles as a rework on the current contract, with the
+///   move spelled out in the rework note;
+/// - either way every review item of that attempt in the captain's inbox is
+///   resolved and one **information line** (a Reply, state Info) says what
+///   happened; the captain does not have to decide anything.
 ///
 /// The verdict must exist (`NoTarget`) and the attempt must be handed in:
-/// a verdict that already settled its attempt (Accepted/Rejected) is a no-op
-/// (`Ok`, nothing written), so a second call — or a replayed tick — is safe.
+/// a verdict that already settled its attempt (Accepted/Rejected), or one
+/// whose task is already finished (done, failed, cancelled), is obsolete and a
+/// no-op (`Ok`, nothing written) — a second call, a replayed tick or a review
+/// that arrives after a cancellation is safe (review R-67).
 pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: Ts) -> GearResult<()> {
     // The verdict is the whole point: without one there is nothing to settle.
     let review = tx
@@ -384,8 +390,33 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             format!("no task {task} in project {project}"),
         )
     })?;
+    // A review of a task that is already finished (cancelled, failed, or done
+    // by another path) is obsolete: the task keeps its state, the attempt is
+    // closed so the lane is not blocked by it, and the review items are
+    // resolved. It is never an error — one obsolete review must not stop the
+    // engine's tick (R-67 P1).
+    if task_row.state.is_terminal() {
+        if attempt_row.state == AttemptState::Submitted {
+            attempt_row.state = AttemptState::Rejected;
+            attempt_row.updated = now;
+            tx.update_attempt(&attempt_row)?;
+        }
+        let line = format!(
+            "{task}: review arrived on a {} task — attempt {attempt} closed, nothing settled",
+            task_row.state.as_str()
+        );
+        resolve_review_items(tx, project, task, attempt, &line, now)?;
+        return Ok(());
+    }
 
-    let (attempt_state, attempt_name, task_state, task_name) = if review.passed {
+    // A pass accepts the candidate for the contract the attempt worked to; it
+    // cannot complete a contract the task has moved on to (design/06: an
+    // old-version result cannot complete a new contract). Such a pass settles
+    // as a rework on the current contract.
+    let stale = review.passed && attempt_row.adopted_version != task_row.contract_version;
+    let accepted = review.passed && !stale;
+
+    let (attempt_state, attempt_name, task_state, task_name) = if accepted {
         (AttemptState::Accepted, "accepted", TaskState::Done, "done")
     } else {
         (AttemptState::Rejected, "rejected", TaskState::Ready, "ready")
@@ -411,25 +442,37 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
 
     // The acceptance verdict is the task's history (design/06 `settle`): the
     // reviewer's verdict is recorded like any other, so a later captain
-    // `settle` of the same attempt meets it and changes nothing.
+    // `settle` of the same attempt meets it and changes nothing. A stale pass
+    // is recorded as what it settled to — a rejection of that attempt.
     tx.insert_verdict(&VerdictRow {
         project: project.to_string(),
         task: task.to_string(),
         attempt,
         contract_version: attempt_row.adopted_version,
         candidate: attempt_row.candidate.clone().unwrap_or_default(),
-        passed: review.passed,
-        evidence: review.passed.then(|| review.findings.clone()),
+        passed: accepted,
+        evidence: accepted.then(|| review.findings.clone()),
         by_seat: review.by_seat.clone(),
         created: now,
     })?;
 
     task_row.state = task_state;
     task_row.updated = now;
-    if review.passed {
+    if accepted {
         task_row.rework_note = None;
     } else {
-        task_row.rework_note = Some(review.findings.clone());
+        task_row.rework_note = Some(if stale {
+            format!(
+                "the review passed attempt {attempt} on contract v{}, but the task moved to v{}: an old-version result cannot complete the current contract. Rework the candidate to v{} and hand it in again. Reviewer: {} — {}",
+                attempt_row.adopted_version,
+                task_row.contract_version,
+                task_row.contract_version,
+                review.by_seat,
+                review.findings
+            )
+        } else {
+            review.findings.clone()
+        });
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
         task_row.rank = rework_rank(tx, &task_row)?;
@@ -440,7 +483,7 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     // merge op's executor knows how to run it. Booked to the lane's seat (the
     // branch is the lane's), or to the captain for a task without a lane seat.
     let mut merge_op = None;
-    if review.passed {
+    if accepted {
         let anchor = match task_row.lane.as_deref() {
             Some(lane) => tx.get_seat(&format!("{project}:{lane}"))?,
             None => None,
@@ -476,18 +519,22 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
         merge_op = Some(op.id);
     }
 
-    // The captain is told, not asked: the review item stops being an action
-    // item and one information line says what the verdict did.
-    let line = match &merge_op {
-        Some(op) => format!(
+    // The captain is told, not asked: every review item of this attempt stops
+    // being an action item and one information line says what happened.
+    let lane = task_row.lane.as_deref().unwrap_or("its lane");
+    let line = match (&merge_op, stale) {
+        (Some(op), _) => format!(
             "{task}: review pass — attempt {attempt} accepted, task done, merge queued ({op})"
         ),
-        None => format!(
-            "{task}: review fail — attempt {attempt} rejected, task ready at the head of {lane}'s queue with the findings",
-            lane = task_row.lane.as_deref().unwrap_or("its lane")
+        (None, true) => format!(
+            "{task}: review passed attempt {attempt} on contract v{}, but the task is on v{} — attempt rejected, rework on the current contract, task ready at the head of {lane}'s queue",
+            attempt_row.adopted_version, task_row.contract_version
+        ),
+        (None, false) => format!(
+            "{task}: review fail — attempt {attempt} rejected, task ready at the head of {lane}'s queue with the findings"
         ),
     };
-    resolve_review_item(tx, project, task, attempt, &line, now)?;
+    resolve_review_items(tx, project, task, attempt, &line, now)?;
     Ok(())
 }
 
@@ -509,10 +556,11 @@ fn rework_rank(tx: &Tx<'_>, task: &gear_store::TaskRow) -> GearResult<i64> {
     Ok(head.map(|rank| rank - 1).unwrap_or(task.rank))
 }
 
-/// Close the review item of `task`/`attempt` in the captain's inbox (it is
+/// Close **every** review item of `task`/`attempt` in the captain's inbox (it is
 /// handled now) and leave one information line for the captain: a Reply in the
-/// item's thread, or a fresh line when the item is not there any more.
-fn resolve_review_item(
+/// first item's thread, or a fresh line when no item is there any more. A
+/// duplicate review submission must not survive as an action item (R-67 P1).
+fn resolve_review_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
@@ -524,27 +572,28 @@ fn resolve_review_item(
         // No captain, nothing to tell; the settlement itself stands.
         return Ok(());
     };
-    let item = tx
+    let items: Vec<gear_store::MessageRow> = tx
         .actionable_for(project, &captain.id, now)?
         .into_iter()
-        .find(|message| {
+        .filter(|message| {
             message.kind == MsgKind::Review
                 && message.task.as_deref() == Some(task)
                 && message.attempt == Some(attempt)
-        });
-    let (thread, reply_to) = match &item {
-        Some(message) => {
-            tx.update_message_state(
-                project,
-                &message.id,
-                MsgState::Resolved,
-                Some(line),
-                None,
-                None,
-                now,
-            )?;
-            (message.thread.clone(), Some(message.id.clone()))
-        }
+        })
+        .collect();
+    for message in &items {
+        tx.update_message_state(
+            project,
+            &message.id,
+            MsgState::Resolved,
+            Some(line),
+            None,
+            None,
+            now,
+        )?;
+    }
+    let (thread, reply_to) = match items.first() {
+        Some(message) => (message.thread.clone(), Some(message.id.clone())),
         None => (format!("{task}:review"), None),
     };
     tx.insert_message(&NewMessage {

@@ -64,6 +64,9 @@ pub struct TickReport {
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
+    /// `project:task/attempt: CODE: detail` of the review verdicts whose
+    /// settlement failed this tick. Reported, never fatal (review R-67).
+    pub settle_failed: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -79,7 +82,9 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     //     task's dependants and a fail puts the rework at the head of the
     //     lane's queue in this same tick. It needs no Herdr, so it runs even
     //     when the observation fails.
-    report.settled = settle_reviews(store, now)?;
+    let (settled, settle_failed) = settle_reviews(store, now)?;
+    report.settled = settled;
+    report.settle_failed = settle_failed;
 
     let projects = store.read(|tx| tx.project_ids())?;
 
@@ -136,18 +141,27 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
 /// Settle every review verdict whose attempt is still handed in (T-13), in
 /// every project. One `settle_review` call per verdict; a verdict that already
-/// settled its attempt is not listed (and would be a no-op anyway).
-fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
+/// settled its attempt, or whose task is finished, is not listed.
+///
+/// A settlement that fails is reported with its verdict (`settle_failed`) and
+/// does **not** abort the tick: one obsolete or malformed review must never
+/// stop the dispatch of unrelated work (review R-67, P1).
+fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<String>)> {
     let mut settled = Vec::new();
+    let mut failed = Vec::new();
     for project in store.read(|tx| tx.project_ids())? {
         for review in store.read(|tx| tx.reviews_to_settle(&project))? {
-            store.write(|tx| {
+            let label = format!("{project}:{}/{}", review.task, review.attempt);
+            match store.write(|tx| {
                 gear_app::tasks::settle_review(tx, &project, &review.task, review.attempt, now)
-            })?;
-            settled.push(format!("{project}:{}/{}", review.task, review.attempt));
+            }) {
+                Ok(()) => settled.push(label),
+                // Logged in the tick report; the rest of the tick goes on.
+                Err(e) => failed.push(format!("{label}: {}: {}", e.code, e.detail)),
+            }
         }
     }
-    Ok(settled)
+    Ok((settled, failed))
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
