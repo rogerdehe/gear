@@ -252,7 +252,7 @@ There are also install/ops entry points (`gear admin init`, `gear admin stop`; `
 
 ## 16. Runtime form
 
-- The engine is a **background process with no pane**: any `gear` call starts it when its lock is free; tabs, panes and clients do not affect it; `gear admin stop` stops it (upgrade, uninstall). If it dies, the next `gear` call restarts it and the recovery checks run. While it is down, `gear send` still writes to inboxes and doorbells follow after recovery. The user never runs or watches it.
+- The engine is a **background process with no pane**: any `gear` call starts it when its lock is free; tabs, panes and clients do not affect it; `gear admin stop` stops it (upgrade, uninstall). If it dies, the next `gear` call restarts it and the recovery checks run. While it is down, `gear send` still writes to inboxes and doorbells follow after recovery. The user never runs or watches it. The one exception is `gear board`: it is read-only and does not start the engine, so it can show that the engine is down.
 - A project is bound to an execution host and session; running code and configuration versions are queryable, and changes are switched explicitly; changing a file does not mean it is in effect.
 - Initialization: the kickoff of §8a.
 
