@@ -127,43 +127,55 @@ pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now
     Ok(())
 }
 
-/// The lane's view adopts the contract update of its attempt (T-8, design/06
-/// `adopt_contract`): the attempt's `adopted_version` moves to the pending
-/// version and the pending marker is cleared, so the lane works to the version
-/// it was just told about. Returns the version adopted, or `None` when there is
-/// nothing to adopt (no pending update, or one that is not newer).
+/// The lane's view adopts the contract update it **showed** (T-8, design/06
+/// `adopt_contract`, review R1/R2): `shown` is the version the page displayed
+/// (`ViewRecord.shown_contract`). The attempt moves to exactly that version —
+/// never a newer one the lane did not see — and a newer pending update stays
+/// pending for its own notice. Returns the version adopted, or `None`.
 ///
-/// The pending update is set by `plan apply` when it bumps the contract of a
-/// task whose attempt is in progress (design/06); an attempt that was already
-/// handed in gets none — its review and verdict follow the version rule.
-pub fn adopt_contract(tx: &Tx<'_>, project: &str, task: &str, n: i64, now: Ts) -> GearResult<Option<i64>> {
+/// A handed-in (Submitted) or finished attempt never changes its adopted
+/// contract: its candidate is bound to the version it was submitted under, and
+/// the verdict follows that version (R2). A page that was built before a
+/// submission and recorded after it adopts nothing.
+pub fn adopt_contract(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+    shown: i64,
+    now: Ts,
+) -> GearResult<Option<i64>> {
     let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
             format!("no attempt {n} of task {task} in project {project}"),
         )
     })?;
+    // A handed-in or finished attempt keeps the version it was submitted under.
+    if attempt.state == AttemptState::Submitted || attempt.state.is_terminal() {
+        return Ok(None);
+    }
     let Some(pending) = attempt.pending_update else {
         return Ok(None);
     };
-    // Never lower the adopted version; a pending marker that is not newer is
-    // simply cleared.
-    attempt.pending_update = None;
-    if pending <= attempt.adopted_version {
-        attempt.updated = now;
-        tx.update_attempt(&attempt)?;
+    // Only a version the page actually showed can be adopted, and never one
+    // older than what the attempt already works to.
+    if shown <= attempt.adopted_version {
         return Ok(None);
     }
-    attempt.adopted_version = pending;
+    attempt.adopted_version = shown;
+    // A newer update the lane has not seen yet stays pending for its notice.
+    attempt.pending_update = (pending > shown).then_some(pending);
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
-    Ok(Some(pending))
+    Ok(Some(shown))
 }
 
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
-pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_version: i64, candidate: &str, report: &str, now: Ts) -> GearResult<()> {    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
+pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_version: i64, candidate: &str, report: &str, now: Ts) -> GearResult<()> {
+    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
             format!("no attempt {n} of task {task} in project {project}"),
@@ -200,6 +212,9 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     attempt.state = AttemptState::Submitted;
     attempt.candidate = Some(candidate.to_string());
     attempt.report = Some(report.to_string());
+    // The candidate is bound to the contract it was submitted under: a pending
+    // update is not adopted any more (R2), so it must not stay pending either.
+    attempt.pending_update = None;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
     task_row.state = TaskState::Verifying;

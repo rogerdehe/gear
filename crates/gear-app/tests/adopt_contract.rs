@@ -88,12 +88,24 @@ fn lane() -> (Env, Fingerprint) {
     )
 }
 
+/// Apply a draft that changes T-1's goal and acceptance (a contract bump).
+fn bump_at(
+    s: &mut Store,
+    base: i64,
+    goal: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let text = format!(
+        "<!-- gear-plan project=p base={base} -->\n# Queue\n## T-1 [must] lane=heat\ngoal: {goal}\naccept: a2\ndeps: -\n"
+    );
+    let draft: Draft = parse(&text).unwrap();
+    let (env, fp) = cap();
+    apply(s, &env, Some(&fp), &draft, &text, rid, NOW + 10)
+}
+
 /// Apply a draft that changes T-1's goal and acceptance (contract v2).
 fn bump(s: &mut Store, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g2\naccept: a2\ndeps: -\n";
-    let draft: Draft = parse(text).unwrap();
-    let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &draft, text, rid, NOW + 10)
+    bump_at(s, 0, "g2", rid)
 }
 
 #[test]
@@ -140,6 +152,78 @@ fn the_view_adopts_the_pending_version_once() {
     assert_eq!((a.adopted_version, a.pending_update), (2, None));
 
     // A second call has nothing left to adopt.
-    let adopted = s.read(|tx| adopt_contract(tx, "p", "T-1", 1, NOW + 30)).unwrap();
+    let adopted = s.read(|tx| adopt_contract(tx, "p", "T-1", 1, 2, NOW + 30)).unwrap();
     assert_eq!(adopted, None);
+}
+
+/// R1 (review): a page adopts exactly the version it showed. A newer update
+/// that landed while the page was being printed stays pending for its own
+/// notice — it is never acknowledged unseen.
+#[test]
+fn a_page_adopts_only_the_version_it_showed() {
+    let mut s = working();
+    bump(&mut s, "r1").unwrap();
+    let (env, fp) = lane();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
+    assert_eq!(page.view.shown_contract, Some(2));
+
+    // The captain bumps again before the page is recorded.
+    bump_at(&mut s, 1, "g3", "r2").unwrap();
+
+    home::record_view(&mut s, &page.view).unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(
+        (a.adopted_version, a.pending_update),
+        (2, Some(3)),
+        "the lane saw v2; v3 is still waiting for its own notice"
+    );
+
+    // The next page shows v3 and adopts it.
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 30).unwrap();
+    assert_eq!(page.view.shown_contract, Some(3));
+    home::record_view(&mut s, &page.view).unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((a.adopted_version, a.pending_update), (3, None));
+}
+
+/// R2 (review): a handed-in attempt keeps the contract it was submitted under,
+/// whatever the home page does afterwards.
+#[test]
+fn a_handed_in_attempt_keeps_its_submitted_contract() {
+    let mut s = working();
+    bump(&mut s, "r1").unwrap();
+    // The lane hands in under v1 before it reads the update (the submission is
+    // valid: v1 is what the attempt worked to).
+    s.write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 15))
+        .unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Submitted, 1, None));
+
+    let (env, fp) = lane();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
+    assert_eq!(page.view.shown_contract, Some(1), "the page shows the submitted contract");
+    home::record_view(&mut s, &page.view).unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((a.adopted_version, a.pending_update), (1, None), "the candidate stays bound to v1");
+}
+
+/// R2 (review): a page built before the hand-in and recorded after it adopts
+/// nothing either.
+#[test]
+fn a_page_built_before_the_hand_in_adopts_nothing_after_it() {
+    let mut s = working();
+    bump(&mut s, "r1").unwrap();
+    let (env, fp) = lane();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
+    assert_eq!(page.view.shown_contract, Some(2));
+
+    s.write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 21))
+        .unwrap();
+    home::record_view(&mut s, &page.view).unwrap();
+
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(
+        (a.state, a.adopted_version, a.pending_update),
+        (AttemptState::Submitted, 1, None)
+    );
 }
