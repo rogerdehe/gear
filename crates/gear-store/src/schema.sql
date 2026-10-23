@@ -62,8 +62,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   project TEXT NOT NULL, id TEXT NOT NULL, rank INTEGER NOT NULL, state TEXT NOT NULL,
   priority TEXT NOT NULL, lane TEXT, milestone TEXT, required INTEGER NOT NULL DEFAULT 0,
   contract_version INTEGER NOT NULL, deps TEXT NOT NULL DEFAULT '[]', followup_of TEXT,
-  wait_on TEXT, wait_cond TEXT, rework_note TEXT, updated INTEGER NOT NULL,
-  PRIMARY KEY (project, id));
+  wait_on TEXT, wait_cond TEXT, rework_note TEXT,
+  -- The planned time of the task in minutes (T-38): the plan's `estimate:`
+  -- field. NULL for a task that has none (an older task may lack it).
+  estimate_min INTEGER,
+  updated INTEGER NOT NULL, PRIMARY KEY (project, id));
 
 CREATE TABLE IF NOT EXISTS contracts (project TEXT NOT NULL, task TEXT NOT NULL, version INTEGER NOT NULL,
   goal TEXT NOT NULL, accept TEXT NOT NULL, evidence_files TEXT NOT NULL DEFAULT '[]',
@@ -74,7 +77,18 @@ CREATE TABLE IF NOT EXISTS attempts (
   project TEXT NOT NULL, task TEXT NOT NULL, n INTEGER NOT NULL, seat TEXT NOT NULL,
   generation INTEGER NOT NULL, contract_version INTEGER NOT NULL, adopted_version INTEGER NOT NULL,
   pending_update INTEGER, state TEXT NOT NULL, candidate TEXT, report TEXT, safe_point TEXT,
-  started INTEGER NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY (project, task, n));
+  -- The moment the attempt row was created (its old name); the delivery time
+  -- is `delivered_at` below.
+  started INTEGER NOT NULL, updated INTEGER NOT NULL,
+  -- The time of every step of the attempt (T-38). `updated` is overwritten at
+  -- every step, so it cannot say when a step happened; these six columns can.
+  -- Each step writes its own column and never another's: a step that has not
+  -- happened yet is NULL. A database from before this change gains the
+  -- columns through the store's migration (they are nullable, so an older
+  -- binary keeps working on it).
+  delivered_at INTEGER, started_at INTEGER, handed_in_at INTEGER,
+  verdict_at INTEGER, settled_at INTEGER, merged_at INTEGER,
+  PRIMARY KEY (project, task, n));
 
 CREATE TABLE IF NOT EXISTS messages (
   project TEXT NOT NULL, id TEXT NOT NULL, thread TEXT NOT NULL, task TEXT, attempt INTEGER,

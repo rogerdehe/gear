@@ -7,7 +7,7 @@
 //! The verdict reaches the captain as an action item in their inbox.
 
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, Ts};
-use gear_store::{ReviewVerdictRow, Tx};
+use gear_store::{AttemptStep, ReviewVerdictRow, Tx};
 
 /// The two verdicts a reviewer may hand in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,6 +161,15 @@ pub fn submit_review(tx: &Tx<'_>, review: &Review, now: Ts) -> GearResult<()> {
         created: now,
     };
     tx.insert_review_verdict(&row)?;
+    // The verdict has its own time (T-38): the review time ends here, the
+    // wait for the captain begins.
+    tx.set_attempt_time(
+        &review.project,
+        &review.task,
+        review.attempt,
+        AttemptStep::Verdict,
+        now,
+    )?;
     // The findings that block go back to the lane as rework; the rest are
     // information for the captain (T-23).
     if !review.blocking.trim().is_empty() {

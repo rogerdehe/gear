@@ -40,7 +40,7 @@ fn run(s: &mut Store, d: &(Draft, String), rid: &str) -> gear_model::GearResult<
     apply(s, &env, Some(&fp), &d.0, &d.1, rid, NOW)
 }
 
-const TWO_NEW: &str = "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\ndeps: T-1\n";
+const TWO_NEW: &str = "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n";
 
 #[test]
 fn new_tasks_get_ids_rank_and_contract_v1() {
@@ -67,7 +67,7 @@ fn stale_base_and_replay() {
 #[test]
 fn reorder_change_contract_and_unmentioned_keep_order() {
     let mut s = world();
-    run(&mut s, &draft(0, &format!("{TWO_NEW}\n## NEW [could] lane=heat\ngoal: C\naccept: c\ndeps: -\n")), "r1").unwrap();
+    run(&mut s, &draft(0, &format!("{TWO_NEW}\n## NEW [could] lane=heat\ngoal: C\naccept: c\nestimate: 30\ndeps: -\n")), "r1").unwrap();
     // v1 → v2: mention only T-3 (first) and T-1 (goal changed); T-2 not mentioned
     let r = run(&mut s, &draft(1, "## T-3 [now] lane=heat\ngoal: C\naccept: c\ndeps: -\n\n## T-1 [must] lane=heat\ngoal: A2\naccept: a\ndeps: -\n"), "r2").unwrap();
     assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
@@ -84,7 +84,7 @@ fn invalid_drafts_write_nothing() {
     run(&mut s, &draft(0, TWO_NEW), "r1").unwrap();
     for (rid, q) in [
         ("a", "## T-9 [must] lane=heat\ngoal: x\naccept: x\ndeps: -\n"),                 // unknown task
-        ("b", "## NEW [must]\ngoal: x\naccept: x\ndeps: -\n"),                              // NEW without lane
+        ("b", "## NEW [must]\ngoal: x\naccept: x\nestimate: 30\ndeps: -\n"),                              // NEW without lane
         ("c", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: T-2\n"),                 // cycle T-1 ↔ T-2
         ("d", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: T-7\n"),                 // unknown dep
         ("e", "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\nstate: ready\n"),     // Ready → ready not allowed
