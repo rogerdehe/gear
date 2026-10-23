@@ -167,9 +167,10 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
 
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Ready);
-    // The findings are the rework note.
+    // The rework note points the lane at the findings on the review branch.
     let row = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
-    assert_eq!(row.rework_note.as_deref(), Some(FINDINGS));
+    let note = row.rework_note.unwrap_or_default();
+    assert!(note.contains(FINDINGS), "{note}");
     // The rework comes before the lane's other ready tasks.
     let ready: Vec<TaskRow> = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     let other_heat: Vec<i64> = ready
