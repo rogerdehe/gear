@@ -2399,6 +2399,23 @@ const REVIEW_NUDGE_BUDGET: i64 = 3;
 /// the captain's stall item.
 ///
 /// Returns (seats nudged, seats flagged).
+/// The review packet first sent to this seat for `task`/`attempt` (the
+/// delivery that is not a nudge), so a nudge can carry it again.
+fn packet_text(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<String> {
+    let first = tx
+        .ops_of_seat_kind(seat, OpKind::Deliver)?
+        .into_iter()
+        .filter(|op| {
+            op.task.as_deref() == Some(task)
+                && op.attempt == Some(attempt)
+                && op.payload.get("nudge").is_none()
+        })
+        .last();
+    Ok(first
+        .and_then(|op| op.payload.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_default())
+}
+
 pub fn nudge_stopped_reviewers(
     store: &mut Store,
     project: &str,
@@ -2429,14 +2446,22 @@ pub fn nudge_stopped_reviewers(
             {
                 return Ok(None);
             }
-            // Never two deliveries in flight; wait out the cooldown.
-            if !tx.slot_ops(&seat.id)?.is_empty() {
-                return Ok(None);
-            }
             let Some(last) = tx.last_op(&seat.id, OpKind::Deliver)? else {
                 return Ok(None); // the packet itself is not sent yet
             };
             if now - last.created < cooldown_s {
+                return Ok(None);
+            }
+            // Never two deliveries in flight — but a review packet stays
+            // "submitted" until the verdict, so a submitted delivery older than
+            // the cooldown on an idle reviewer does not block: it is exactly
+            // the case the nudge is for (the packet or its Enter was lost,
+            // L-76). Anything not yet submitted still waits.
+            let blocking = tx
+                .slot_ops(&seat.id)?
+                .into_iter()
+                .any(|op| !(op.state == gear_model::OpState::Submitted && now - op.created >= cooldown_s));
+            if blocking {
                 return Ok(None);
             }
             let used = last.payload.get("nudge").and_then(|n| n.as_i64()).unwrap_or(0);
@@ -2454,7 +2479,8 @@ pub fn nudge_stopped_reviewers(
                 plan_version: None,
                 payload: serde_json::json!({
                     "text": format!(
-                        "You stopped before handing in your verdict on {task} (a server error such as \"model at capacity\", or a pause). Continue the review where you stopped, then hand in the verdict with the `gear send --kind review` command from your packet."
+                        "You are idle and your verdict on {task} is not in. If you never got your review packet (it can be lost right after a start), here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in the verdict with the `gear send --kind review` command from the packet.\n\n{}",
+                        packet_text(tx, &seat.id, &task, attempt.n)?
                     ),
                     "nudge": used + 1,
                 }),
