@@ -249,3 +249,17 @@ choice; include any resulting queue/estimate/scope edits in the same plan.
 ETA checkpoints accept relative durations such as `20h`, `2.5 hours`, `90m` or
 `1h30m`. An unknown ETA skips time checkpoints while task-count stations still
 work; unknown measured values remain `-` rather than invented measurements.
+
+### Parallel-change warnings (T-51)
+
+On hand-in and every ten minutes, the engine compares committed changes on open
+task branches across lanes. It also checks each branch against integration-side
+changes since its fork. An item names both tasks (or the task and integration
+branch) and their shared files, so you can order or merge the work. File overlap
+is a warning, not a prediction that Git will conflict or a merge gate.
+
+The same pair and file set stays quiet after you acknowledge or resolve it,
+including after a restart. A changed set produces a fresh item; an overlap that
+disappears closes automatically. The check uses local and known origin tracking
+refs without fetching, so uncommitted edits and unfetched remote changes are
+not included.
