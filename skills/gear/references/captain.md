@@ -203,7 +203,10 @@ A lane's remaining ready/current work is forecast using its measured average
 start-to-hand-in duration (rework attempts are samples too). At about one average
 task left, one `lane X runs dry in ~N min` item opens. With no measured history,
 the ready-count fallback remains. Acknowledgment does not recreate the same
-shortage every tick. A worsening shortage is a new fact; refilling closes it.
+shortage every tick. A measured warning escalates when its remaining time halves,
+then at actual idle; starting the last queued task with the same remaining time
+is silent. Without measurements, losing the last queued task is the next stage.
+Refilling closes the warning.
 Stale open shortage items still follow the captain reminder period above.
 
 Declare intentional finishing work in the plan:

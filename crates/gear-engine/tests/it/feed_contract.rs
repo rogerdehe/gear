@@ -429,6 +429,25 @@ fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
     assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 29 * 60).unwrap().is_empty());
     feed::keep_lanes_fed(&mut w.store, "p", T0 + 30 * 60).unwrap();
     assert_eq!(items(&mut w.store, "heat")[0].body, "lane heat runs dry in ~30 min");
+    // Starting the queued task keeps the same runway, so it is not another
+    // warning. Only a shorter measured runway is a worsening condition.
+    w.store.write(|tx| {
+        let mut previous = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        previous.state = AttemptState::Submitted;
+        tx.update_attempt(&previous)?;
+        let mut next = previous;
+        next.task = "T-2".into();
+        next.state = AttemptState::Started;
+        tx.insert_attempt(&next)?;
+        tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, T0 + 30 * 60)
+    }).unwrap();
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 30 * 60).unwrap().is_empty());
+    assert_eq!(items(&mut w.store, "heat").len(), 1);
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 45 * 60).unwrap();
+    let all = items(&mut w.store, "heat");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].state, MsgState::Resolved);
+    assert_eq!(all[1].body, "lane heat runs dry in ~15 min");
 }
 
 #[test]
