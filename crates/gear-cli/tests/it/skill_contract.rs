@@ -15,6 +15,9 @@ fn gear(args: &[&str]) -> Output {
         // Never the real store: lanes run tests with GEAR_DB set, and a
         // `gear` call starts an engine on it (design/14).
         .env_remove("GEAR_DB")
+        // … and no default store under the real HOME either.
+        .env("HOME", std::env::temp_dir().join("gear-skill-contract-home"))
+        .env_remove("HERDR_SOCKET_PATH")
         .output()
         .expect("run gear")
 }

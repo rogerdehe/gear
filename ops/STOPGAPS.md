@@ -4,11 +4,12 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
-| `ops/bin/merge-task.sh`, `ops/bin/switch-model.sh`, `ops/bin/timer.sh` | manual captain operations | the engine performs merge gate / model fallback / quota wait | captain |
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| GEAR state at `~/.local/state/gear/gear.db` (GEAR_DB exported by hand in the captain's commands) | no plugin install yet, so no `HERDR_PLUGIN_STATE_DIR` | the plugin install (gear T-4) | captain |
 
 ## Removed
+
+- 2026-10-23 `merge-task.sh`, `switch-model.sh`, `timer.sh`: the engine merges (T-12), switches models in place (T-33) and waits for quota (T-15).
+- 2026-10-23 GEAR_DB exported by hand: `gear` defaults to `~/.local/state/gear/gear.db`.
 
 - 2026-10-22 Stop hook + `watch-guard.sh`, pause switch, `watch.sh`: the engine's captain doorbell is verified (it rang the captain for every hand-in today).
 - 2026-10-23 `ops/bin/codex-review.sh`: the engine starts reviewers (T-5).

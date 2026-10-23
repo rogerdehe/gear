@@ -178,6 +178,7 @@ enum CaptainOp {
 }
 
 fn main() {
+    default_store_path();
     let cli = Cli::parse();
     let code = match run(cli) {
         Ok(()) => 0,
@@ -187,6 +188,28 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Where GEAR keeps its store when `GEAR_DB` is not set: one place for every
+/// project on this machine, `~/.local/state/gear/gear.db`. Set once, before
+/// anything reads it, so this process, the engine it starts and the agents
+/// the engine starts all agree.
+fn default_store_path() {
+    if std::env::var_os(gear_model::ctx::ENV_DB).is_some() {
+        return;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let db = default_store_in(std::path::Path::new(&home));
+        if let Some(dir) = db.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::env::set_var(gear_model::ctx::ENV_DB, db);
+    }
+}
+
+/// The default store under `home`.
+fn default_store_in(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".local/state/gear/gear.db")
 }
 
 fn run(cli: Cli) -> GearResult<()> {
@@ -1120,6 +1143,9 @@ fn cmd_admin_stop() -> GearResult<()> {
 fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     let mut cfg = gear_engine::EngineCfg::default();
     cfg.db_path = db_path.to_string();
+    // A passing review merges without the captain; a failing one waits for
+    // the captain's judgement (the engine settles passes only).
+    cfg.auto_settle = true;
     for kind in ["opencode", "claude", "codex"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
