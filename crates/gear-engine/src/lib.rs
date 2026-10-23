@@ -167,6 +167,16 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
 
+        // 7b. a reviewer that stopped before its verdict is told to go on
+        //     (L-53); past its nudge budget it is flagged for the captain.
+        let (_nudged, stuck) =
+            review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
+        for seat in stuck {
+            if !report.flagged.contains(&seat) {
+                report.flagged.push(seat);
+            }
+        }
+
         // 8. release: a reviewer whose task left review frees its slot (T-17).
         let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
         report.released.extend(releases.released);
