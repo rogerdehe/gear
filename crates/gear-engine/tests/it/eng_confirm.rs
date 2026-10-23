@@ -273,3 +273,17 @@ fn a_doorbell_with_an_open_item_waits_for_a_view() {
     assert!(confirmed.is_empty());
     assert_eq!(op(&mut store, &id).state, OpState::Submitted);
 }
+
+#[test]
+fn a_view_of_the_still_open_items_confirms_a_doorbell() {
+    let mut store = store_with_project();
+    let closed = message(&mut store, gear_model::MsgState::Resolved);
+    let open = message(&mut store, gear_model::MsgState::Open);
+    let id = submitted_op(&mut store, &[closed.as_str(), open.as_str()], T0 + 1);
+    // The closed item is no longer shown; the open one is.
+    view(&mut store, 1, T0 + 5, &[open.as_str()]);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
+
+    assert_eq!(confirmed, vec![id]);
+}
