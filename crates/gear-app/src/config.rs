@@ -183,8 +183,11 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 /// **latest** config version, parsed. A project that is not registered →
 /// `NoTarget`; stored text that does not parse → `BadFormat`.
 ///
-/// Everyone reads the config through this, so a config change (T-6) is what
-/// the next reader sees — there is no second copy anywhere.
+/// The config is read from the store every time, so a config change (T-6) is
+/// what the next reader sees — there is no second copy anywhere. A caller that
+/// also needs the seats the config is read against (the engine's onboarding)
+/// reads both in **one** transaction and parses outside it, so a config change
+/// can never be seen half-applied (review R-63).
 pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
     let row = store
         .read(|tx| tx.get_project(project))?
