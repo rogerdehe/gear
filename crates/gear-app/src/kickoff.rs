@@ -324,7 +324,7 @@ pub fn skeleton(inventory: &Inventory) -> String {
 
     let mut lines = vec![
         "# gear.toml — fill in the TODOs, then register it:".to_string(),
-        "#   GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear.toml".to_string(),
+        "#   GEAR_ADMIN=1 gear admin init gear/gear.toml".to_string(),
         String::new(),
         "[project]".to_string(),
         "id = \"TODO\"                  # [a-z][a-z0-9-]*: the project's short name".to_string(),

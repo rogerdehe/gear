@@ -120,6 +120,7 @@ Reload Herdr’s configuration with `herdr server reload-config` after saving th
 | `gear report time` | captain | where the time went: per task and per voyage |
 | `gear board` | you | the plan, full screen |
 | `gear admin kickoff / init / install-skill / stop` | you | set up, register, install the skill, stop |
+| `gear --version` | everyone | which version of GEAR this is |
 
 The v0.1.0 install and first plan apply were exercised on macOS arm64 with Herdr 0.9.1, in an isolated configuration without Rust on PATH. The step outputs and limits are recorded in [the install report](ops/reports/T-48.md).
 
