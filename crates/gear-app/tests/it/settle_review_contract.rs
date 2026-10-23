@@ -385,6 +385,61 @@ fn a_fail_without_a_blocking_finding_goes_to_the_captain() {
     assert_eq!(captain_inbox(&mut s).len(), 1, "one action item, not one per tick");
 }
 
+/// T-23 F1 (the rework of attempt 1): a fail whose findings report a failed
+/// mechanical fact is never converted into a pass, even with no blocking ids:
+/// the attempt stays handed in, the task stays Verifying, no merge is queued,
+/// and the captain gets the item.
+#[test]
+fn a_fail_reporting_a_failed_mechanical_fact_is_never_a_pass() {
+    let findings = "Mechanical acceptance: `cargo test --workspace` FAILED: a contract test fails";
+    let mut s = world_with(false, findings, "");
+
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+
+    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
+    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying, "the task stays Verifying");
+    assert!(ops(&mut s).is_empty(), "no merge for a candidate known to fail");
+    let inbox = captain_inbox(&mut s);
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert!(inbox[0].body.contains("fail without blocking findings"), "{}", inbox[0].body);
+}
+
+/// T-23 F2 (the rework of attempt 1): a fail on an attempt that adopted an
+/// older contract is not accepted either — the contract freshness applies to
+/// every acceptance path, and here there is no acceptance at all: the task
+/// stays Verifying and nothing merges the old candidate.
+#[test]
+fn a_fail_on_an_older_contract_is_never_a_pass() {
+    let mut s = world_with(false, FINDINGS_WITH_IDS, "");
+    // The captain moved the contract to v2 after the attempt was submitted.
+    s.write(|tx| {
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            version: 2,
+            goal: "g2".into(),
+            accept: "a2".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0 + 3,
+        })?;
+        let mut row = tx.get_task("p", "T-1")?.unwrap();
+        row.contract_version = 2;
+        row.updated = T0 + 3;
+        tx.update_task(&row)
+    })
+    .unwrap();
+
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
+
+    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
+    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying);
+    assert!(ops(&mut s).is_empty(), "the old candidate is not merged");
+    let inbox = captain_inbox(&mut s);
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+}
+
 /// T-23: the rework rounds are capped — past the cap the captain decides and
 /// the task stays Verifying.
 #[test]
