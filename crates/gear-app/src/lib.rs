@@ -14,6 +14,7 @@ pub mod config;
 pub mod draft;
 pub mod home;
 pub mod identity;
+pub mod kickoff;
 pub mod mail;
 pub mod plan;
 pub mod review;
