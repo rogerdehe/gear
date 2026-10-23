@@ -18,7 +18,9 @@ GEAR is for work that is **all** of:
 
 For anything else, talk to an agent directly; GEAR adds nothing.
 
-**The soul: lanes never stop.** Parallel work is the default, not an option. A lane hands in a result and immediately takes its next task; review and merge run beside development, never in front of it. And never-stop means valuable work — every queued task moves the goal forward, no busywork. Every wait in the flow must answer: who is idle while this waits, and does it have to be?
+**The soul: lanes never stop — within a voyage.** A voyage is one milestone: it has a done-sentence and a planned duration, and it must land. Never-stop means the crew works without pause until this voyage lands as fast as it can; then the crew rests, the voyage is reviewed, and the next voyage is planned. It does not mean a voyage that never ends.
+
+**Within a voyage:** Parallel work is the default, not an option. A lane hands in a result and immediately takes its next task; review and merge run beside development, never in front of it. And never-stop means valuable work — every queued task moves the goal forward, no busywork. Every wait in the flow must answer: who is idle while this waits, and does it have to be?
 
 Why it works where a long chat does not: the plan, the task states and the messages live in GEAR's store, not in anyone's conversation. The captain reads `gear` (a bounded page) when woken, so it can re-plan without its context filling up, getting compacted and forgetting.
 
@@ -131,6 +133,7 @@ The task, attempt, and session generation come from the registered context; `--a
   - The captain must submit a structured conclusion: keep the plan with a reason, or specific changes and the next checkpoint (via `gear plan apply`).
   - When the previous turn is confirmed to have ended normally, there is still a handleable review item, and there is no delivery that needs check, remind within budget, initially at most twice; do not force it in on schedule when working, waiting for authorization, or the send result is unclear. If there is still no progress, show it persistently and notify the user; a review must not be marked complete because the reminder count ran out.
 - **The captain is also supervised by the engine**: if it has pending items but is stopped, it gets woken.
+- **Holding the direction is GEAR's job, not the captain's discipline** (user, 2026-10-23). Workers and reviewers each mind their own piece — a screw minds its own tightness; the captain minds whether the ship floats. GEAR holds every captain to that: each milestone has a checkable `done:` sentence and a quality `bar:` (agreed at kickoff, required by `plan apply`); review packets carry them and reviewers fail only what breaks them; findings outside the bar are logged, not reworked; review rounds are capped and then go to the captain; drift (milestone age, rounds, size per hand-in) opens a direction review the captain must conclude. The captain's home page opens with the **voyage report** every time it is read — elapsed vs planned, scope at departure vs now (new requirements added, changes added by reviews, cancelled), done vs left to land, code added this voyage (product / tests / docs), rework rounds, crew idle time and rework rate. Past the planned duration or a scope growth threshold the engine opens a **land-or-extend** decision: cut scope to land, or extend with a reason (beyond its authority: ask the user). When the done-sentence holds the voyage lands: no new dispatch for it, a retrospective, then the next kickoff.
 
 ## 8a. Kickoff (the only alignment with the user)
 

@@ -263,7 +263,7 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
 }
 
 /// This lane's Ready tasks in rank order: not `wont`, every dependency Done.
-fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
+pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
     use std::collections::BTreeSet;
     let tasks = tx.tasks_of_project(&seat.project)?;
     let done: BTreeSet<String> = tasks
