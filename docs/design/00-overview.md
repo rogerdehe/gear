@@ -1,5 +1,7 @@
 # GEAR MVP Technical Design: Overview
 
+> **Status 2026-10-22.** Implemented in Rust (`crates/`), not the Python layout below; budgets are Python-era. Where a design doc disagrees with [PRD v0.9](../PRD.md), the PRD wins. Superseded so far: the engine-in-a-tab and engine-pane manifest (now a background process, 14), the board's content (13 → PRD §15), the code review loop (PRD §10; 11 covers only the captain's plan reviews), kickoff (PRD §8a). Docs are corrected as each part is rebuilt.
+
 Basis: [PRD v0.8](../PRD.md), [TECH-MVP](../TECH-MVP.md). This directory breaks the MVP into a module skeleton; each module is reviewed before code is written. Signatures are design conventions and may be renamed during implementation, but responsibility boundaries and contracts must not drift.
 
 ## 0. Scope (2026-10-22, user)
