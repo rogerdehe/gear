@@ -180,7 +180,7 @@ fn models_parse_with_defaults() {
     assert_eq!(cfg.models, Models::default());
     assert_eq!(cfg.models.quota_reset_h, 5);
     let cfg = parse(&format!("{MINIMAL}{MODELS}")).unwrap();
-    assert_eq!(cfg.models.lanes[0], "minimax-cn/MiniMax-M3.1-Flash");
+    assert_eq!(cfg.models.lanes[0].model(), "minimax-cn/MiniMax-M3.1-Flash");
     assert_eq!(cfg.models.on_quota.lanes, QuotaPolicy::Wait);
     assert_eq!(cfg.models.on_quota.review, QuotaPolicy::Fallback);
     assert_eq!(cfg.models.quota_reset_h, 4);
@@ -190,11 +190,15 @@ fn models_parse_with_defaults() {
 
 #[test]
 fn models_rules() {
+    // L-74: fallback with no next model is refused (it would only park)
+    let single = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["deepseek/deepseek-v4.1-flash"]"#);
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{single}")).unwrap())), vec!["models.review"]);
     // valid as given
     assert!(validate(&parse(&format!("{MINIMAL}{MODELS}")).unwrap()).is_empty());
     // review must hold a model different from every lane's primary
     let same = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["minimax-cn/MiniMax-M3.1-Flash"]"#);
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review"]);
+    // (a one-model review chain with fallback is also refused: L-74)
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review", "models.review"]);
     // no blank or repeated entries in a chain (after trim)
     let blank = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""  ""#);
     assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{blank}")).unwrap())), vec!["models.review"]);
@@ -205,4 +209,67 @@ fn models_rules() {
     assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{zero}")).unwrap())), vec!["models.quota_reset_h"]);
     // empty chains = models not managed by GEAR: valid
     assert!(validate(&parse(MINIMAL).unwrap()).is_empty());
+}
+
+// ---- the two forms of a chain entry (T-35)
+
+/// T-35: a chain entry may name the CLI that runs the model and the
+/// arguments that CLI starts with.
+#[test]
+fn a_model_entry_names_its_cli_and_its_arguments() {
+    let text = format!(
+        "{MINIMAL}\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \
+         {{ model = \"gpt-6.1-sol\", cli = \"codex\", args = [\"-c\", \"model_reasoning_effort=medium\"] }}]\n"
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.models.lanes.len(), 2);
+    // The plain form: the model id alone, the seat's own CLI runs it.
+    assert_eq!(cfg.models.lanes[0].model(), "minimax-cn/MiniMax-M3.1-Flash");
+    assert_eq!(cfg.models.lanes[0].cli(), None);
+    assert!(cfg.models.lanes[0].args().is_empty());
+    // The entry form: the model, the CLI and the arguments.
+    assert_eq!(cfg.models.lanes[1].model(), "gpt-6.1-sol");
+    assert_eq!(cfg.models.lanes[1].cli(), Some("codex"));
+    assert_eq!(cfg.models.lanes[1].args(), ["-c", "model_reasoning_effort=medium"]);
+    // It is valid: the review chain still holds a model no lane runs.
+    assert!(validate(&cfg).is_empty());
+}
+
+/// The old plain form still parses: a chain of model ids.
+#[test]
+fn the_plain_model_chain_still_parses() {
+    let cfg = parse(&format!("{MINIMAL}{MODELS}")).unwrap();
+    assert_eq!(cfg.models.lanes.len(), 2);
+    assert_eq!(cfg.models.lanes[0].model(), "minimax-cn/MiniMax-M3.1-Flash");
+    assert_eq!(cfg.models.lanes[1].model(), "deepseek/deepseek-v4.1-flash");
+    assert!(cfg.models.lanes.iter().all(|entry| entry.cli().is_none()));
+    assert!(cfg.models.lanes.iter().all(|entry| entry.args().is_empty()));
+    // A lane's own chain is a chain of entries too.
+    let own = MINIMAL.replace(
+        "profile = \"opencode\"\n\n[[lanes]]",
+        "profile = \"opencode\"\nmodels = [{ model = \"gpt-6.1-sol\", cli = \"codex\" }]\n\n[[lanes]]",
+    );
+    let cfg = parse(&own).unwrap();
+    assert_eq!(cfg.lanes[0].models.len(), 1);
+    assert_eq!(cfg.lanes[0].models[0].cli(), Some("codex"));
+}
+
+/// A broken entry is a bad format, and the detail says where.
+#[test]
+fn a_broken_model_entry_is_bad_format() {
+    for bad in [
+        // no model
+        "{ cli = \"codex\" }",
+        // an unknown field
+        "{ model = \"gpt-6.1-sol\", cli = \"codex\", effort = \"high\" }",
+        // a wrong type
+        "{ model = 7 }",
+        // not an entry at all
+        "7",
+    ] {
+        let text = format!("{MINIMAL}\n[models]\nlanes = [{bad}]\n");
+        let err = parse(&text).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{bad}");
+        assert!(!err.detail.is_empty(), "{bad}");
+    }
 }
