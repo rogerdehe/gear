@@ -57,11 +57,13 @@ pub struct EngineCfg {
     /// a task done that is not merged, and an automatic fail sends back every
     /// finding round after round. With it off verdicts remain stored without automatic settlement.
     pub auto_settle: bool,
+    /// Background merge jobs shared across ticks and configuration clones.
+    pub merges: merge::MergeWorkers,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default() }
     }
 }
 
@@ -96,6 +98,8 @@ pub struct TickReport {
     /// Lane items for the captain opened, updated or closed this tick
     /// (`lane:action`), from the keep-lanes-fed watch.
     pub feed: Vec<String>,
+    /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
+    pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
 }
@@ -120,6 +124,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
 
     let projects = store.read(|tx| tx.project_ids())?;
+    // Station facts need no Herdr observation. Enqueue them before deciding
+    // doorbells, including when a previous outage delayed a checkpoint.
+    for project in &projects {
+        let ids = store.write(|tx| gear_app::station::checkpoints(tx, project, now))?;
+        report.stations.extend(ids.into_iter().map(|id| format!("{project}:{id}")));
+    }
 
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
@@ -227,13 +237,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
 
-        // 7. execute: re-check each op, call Herdr, record the outcome. Before
-        //    the merge: a merge runs the gate (minutes), and the deliveries of
-        //    this tick must not wait for it.
+        // 7. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
 
-        // 7c. merge: a passed task goes into the integration branch, after the
-        //     gate and before the branches are closed (T-12).
+        // 7c. merge: collect a finished background merge or launch the next
+        //     one. Git and the gate run beside the tick (T-36).
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
         }
