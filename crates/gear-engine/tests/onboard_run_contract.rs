@@ -72,3 +72,32 @@ fn a_failed_step_parks_the_seat_in_needs_check() {
     assert_eq!(seat.state, SeatState::NeedsCheck);
     assert!(seat.state_reason.unwrap_or_default().contains("worktree"));
 }
+
+/// T-6: a lane that a config change adds is a queued seat, and the engine
+/// onboards it with the **latest** config (the repo it names now).
+#[test]
+fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
+    let mut s = Store::open_in_memory().unwrap();
+    let admin_env = Env { ctx: None, pane_id: None, admin: true };
+    admin::init(&mut s, &admin_env, CONFIG, T0).unwrap();
+    let mut herdr = FakeHerdr::new();
+    assert_eq!(
+        onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap(),
+        vec!["toy:heat".to_string()]
+    );
+
+    // The config changes: a second lane, another repo, a bigger quota.
+    let changed = CONFIG
+        .replace("lanes = 1", "lanes = 2")
+        .replace(r#"repo = "/repo""#, r#"repo = "/repo2""#)
+        + "\n[[lanes]]\nname = \"pricing\"\nduty = \"prices\"\nowns = [\"lib/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n";
+    admin::init(&mut s, &admin_env, &changed, T0 + 2).unwrap();
+
+    // The new lane is onboarded; the lane that was there is not touched.
+    let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap();
+    assert_eq!(active, vec!["toy:pricing".to_string()]);
+    assert!(herdr.calls.iter().any(|c| matches!(c, Call::WorktreeCreate { repo, branch, .. }
+        if repo == "/repo2" && branch == "home/pricing")), "{:?}", herdr.calls);
+    let seat = s.read(|tx| tx.get_seat("toy:pricing")).unwrap().unwrap();
+    assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
+}
