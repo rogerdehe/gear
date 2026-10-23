@@ -134,6 +134,8 @@ enum PlanOp {
 #[derive(Subcommand, Debug)]
 enum AdminOp {
     Init { config: std::path::PathBuf },
+    /// Print what this machine offers, for the captain's kickoff proposal.
+    Kickoff,
     /// Stop the background engine (it starts again on the next `gear` call).
     Stop,
     Seat {
@@ -203,6 +205,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
+        Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
         Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
@@ -231,6 +234,20 @@ fn env_from(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_app::Env> 
         pane_id: vars("HERDR_PANE_ID"),
         admin: vars(gear_model::ctx::ENV_ADMIN).as_deref() == Some("1"),
     })
+}
+
+/// `gear admin kickoff` (PRD §8a): the inventory the captain turns into a
+/// proposal. Read-only, so it needs no store, no seat and no GEAR_ADMIN: the
+/// kickoff comes *before* the project is registered, and the captain's agent
+/// has no GEAR_CTX yet.
+fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
+    let inventory = gear_app::kickoff::Inventory::probe();
+    if json {
+        println!("{}", gear_app::kickoff::to_json(&inventory)?);
+    } else {
+        println!("{}", gear_app::kickoff::render(&inventory));
+    }
+    Ok(())
 }
 
 /// `gear admin init <config>`: the user registers a project (design/01). The
