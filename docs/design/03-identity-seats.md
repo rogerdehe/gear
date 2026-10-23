@@ -73,7 +73,9 @@ User: `gear admin captain replace --project oxford --pane w5:p2 --kind codex [--
 
 ## Captain unavailable (engine-detected, no automatic replacement)
 
-Detection: Herdr reports exit/close; the screen repeatedly matches quota/auth signatures; there are pending items and, after the last doorbell was confirmed started, there is still no provable handling. Result: seat `UNAVAILABLE`, captain-side writes and derived operations frozen, doorbell stopped, shown on the board, `notify` the user. Temporary rate-limit states are only annotated, generation not frozen (04 classification). Recovery only by explicit user re-onboarding (resume of the original session or a new session), through the same checks.
+Quota (T-37): read only the captain CLI's configured footer status bar. A confirmed limit pauses new lane assignments while current tasks, reviews and passing merges continue. Persist the reset and wake intent; at the local HH:MM reset (or `quota_reset_h` when the bar gives no exact time), ring once with “Your quota is back — run gear.” New assignments resume after a new view from that captain generation. Show both the outage and the wait for that view on the board. Conversation quota words never trigger this policy; a quota episode does not replace the captain or revoke its generation.
+
+Other unavailability: Herdr reports exit/close; the screen repeatedly matches auth signatures; there are pending items and, after the last doorbell was confirmed started, there is still no provable handling. Result: seat `UNAVAILABLE`, captain-side writes and derived operations frozen, doorbell stopped, shown on the board, `notify` the user. Temporary rate-limit states are only annotated, generation not frozen (04 classification). Recovery only by explicit user re-onboarding (resume of the original session or a new session), through the same checks.
 
 ## Test points
 

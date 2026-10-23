@@ -3,3 +3,4 @@ mod install_skill_contract;
 mod readonly_no_engine;
 mod scratch;
 mod skill_contract;
+mod version_contract;
