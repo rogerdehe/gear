@@ -84,6 +84,8 @@ fn world() -> Store {
 fn a_review_verdict_settles_the_task_in_the_tick() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
+    // The lane's agent is in its pane (a missing agent alerts the captain, L-56).
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
 
     let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 10).unwrap();
     assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
@@ -97,10 +99,13 @@ fn a_review_verdict_settles_the_task_in_the_tick() {
     assert_eq!(ops.len(), 1, "{ops:?}");
     assert_eq!((ops[0].kind, ops[0].task.as_deref()), (OpKind::Merge, Some("T-1")));
 
-    // The captain was not asked: the review item is closed, one line tells it.
+    // The captain was not asked to settle anything: the review item is
+    // closed, one line tells it. The keep-lanes-fed watch may still ask for
+    // work — that is the never-stop warning, not a review item.
+    let actionable = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 20)).unwrap();
     assert!(
-        s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 20)).unwrap().is_empty(),
-        "no action item is left for the captain"
+        actionable.iter().all(|message| message.thread.starts_with("lane:")),
+        "no review item is left for the captain: {actionable:?}"
     );
     let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
     assert_eq!(info.len(), 1, "{info:?}");
