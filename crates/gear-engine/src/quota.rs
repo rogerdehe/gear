@@ -25,7 +25,7 @@
 //! exposes no setter for it yet, and a store API is the follow-up.
 
 use gear_app::config::{ProjectConfig, QuotaPolicy};
-use gear_herdr::{HerdrAct, Outcome, Profile, ScreenFlag};
+use gear_herdr::{HerdrAct, Profile, ScreenFlag};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts,
 };
@@ -37,8 +37,6 @@ use crate::EngineCfg;
 /// The restart phases of a lane that is switching models (F3 of the T-15
 /// review): after the exit keys the engine waits for the pane to show a
 /// **shell**; only then is the start attempted.
-const RESTART_EXIT: &str = "exit";
-const RESTART_START: &str = "start";
 
 /// What the quota step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -51,7 +49,7 @@ pub struct QuotaReport {
 pub fn apply_quota_policy(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    cfg: &EngineCfg,
+    _cfg: &EngineCfg,
     profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     observed: &[SeatObs],
@@ -75,24 +73,38 @@ pub fn apply_quota_policy(
         let Some(profile) = profiles.get(&seat.profile) else {
             continue;
         };
-        // A restart that is already on its way finishes before anything else.
-        if restart_model(store, &seat.id)?.is_some() {
+        // A switch already on its way finishes before anything else (F6): the
+        // plan is durable, so it resumes whatever the screen says now — the
+        // quota line may have cleared, the engine may have restarted mid-switch.
+        if crate::switch::pending(store, &seat.id)?.is_some() {
             if let Some(line) =
-                finish_restart(store, herdr, cfg, project, &config, seat, profile, now)?
+                resume_switch(store, herdr, project, &config, seat, profile, Some(obs), now)?
             {
                 report.events.push(line);
             }
             continue;
         }
-        // A seat parked on quota wakes up when the provider resets.
+        // A seat parked on quota wakes up when the provider resets: it is
+        // switched back in place, never closed and restarted (F4).
         if seat.state == SeatState::Parked {
             if parked_until(store, &seat.id)?.is_some_and(|until| until <= now) {
                 let chain = lane_chain(&config, &seat.name);
-                let model = chain.first().map(|model| (*model).to_string());
-                if let Some(line) =
-                    begin_restart(store, herdr, seat, profile, model.as_deref(), now)?
-                {
-                    report.events.push(line);
+                match chain.first().map(|model| (*model).to_string()) {
+                    Some(model) => {
+                        if let Some(line) = start_switch(
+                            store, herdr, project, &config, seat, profile, Some(obs), &model, now,
+                        )? {
+                            report.events.push(line);
+                        }
+                    }
+                    None => {
+                        flag_needs_check(
+                            store,
+                            seat,
+                            "quota: the lane's chain is empty; no model to switch back to",
+                            now,
+                        )?;
+                    }
                 }
             }
             continue;
@@ -104,8 +116,11 @@ pub fn apply_quota_policy(
         ) {
             continue;
         }
-        // 1. count the consecutive quota ticks.
-        let quota = obs.flags.contains(&ScreenFlag::Quota);
+        // 1. count the consecutive quota ticks. A marker left on the screen
+        //    from before (after a model switch the old limit line stays in the
+        //    tail) is not a new fact, and a working agent is never parked on
+        //    screen text (M-266): only a stopped agent counts.
+        let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;
         let ticks = count_quota_tick(store, &seat.id, quota)?;
         if !quota || ticks < i64::from(profile.confirm_rounds) {
             continue;
@@ -120,8 +135,12 @@ pub fn apply_quota_policy(
         };
         match next {
             Some(next) => {
+                // T-33: switch the model in place — no exit, no restart, the
+                // conversation stays. Without labels the seat is flagged, never
+                // closed (F4): a restart cannot carry a model through the
+                // shared OpenCode service.
                 if let Some(line) =
-                    begin_restart(store, herdr, seat, profile, Some(&next), now)?
+                    start_switch(store, herdr, project, &config, seat, profile, Some(obs), &next, now)?
                 {
                     report.events.push(line);
                 }
@@ -188,211 +207,119 @@ fn next_model(chain: &[&str], current: Option<&str>) -> Option<String> {
     }
 }
 
-// ---------------------------------------------------------------- the restart
+// ------------------------------------------------------------- the in-place switch
 
-/// Take the lane off its current model: send the profile's exit keys and
-/// remember which model to start on. The next tick starts the agent, when the
-/// pane is a shell again.
-fn begin_restart(
+/// Start (or continue) an in-place switch to `model`, one UI step per tick.
+///
+/// No labels for the model: the seat is flagged (`NeedsCheck`) and nothing is
+/// typed — a restart cannot carry the model through OpenCode's shared service
+/// (review F4).
+fn start_switch(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    seat: &SeatRow,
-    profile: &Profile,
-    model: Option<&str>,
-    now: Ts,
-) -> GearResult<Option<String>> {
-    let _ = now;
-    let Some(binding) = active_binding(store, seat)? else {
-        return Ok(None);
-    };
-    // The CLI leaves: by its exit command (grok: `/exit`) or, when it has
-    // keys, one press per entry — never the same key twice by accident, a
-    // second `ctrl+c` would land in the shell.
-    if let Some(command) = &profile.exit_command {
-        match herdr.prompt(&binding.pane_id, command) {
-            Outcome::Ok(()) => {}
-            _ => return Ok(None),
-        }
-    } else {
-        for key in &profile.exit_keys {
-            match herdr.send_keys(&binding.pane_id, &[key.clone(), ]) {
-                Outcome::Ok(()) => {}
-                _ => return Ok(None),
-            }
-        }
-    }
-    meta_set(store, &meta_key("restart", &seat.id), model.unwrap_or("-"))?;
-    // Phase 1: waiting for the pane to become a shell. The switch completes
-    // only after the OLD agent is gone (F3 of the T-15 review): an agent that
-    // is still there is the old one, never a replacement.
-    meta_set(store, &meta_key("restart_phase", &seat.id), RESTART_EXIT)?;
-    // The counter is not reset here: the old agent's screen still shows the
-    // limit, and while it does the seat must not be flagged (F2 of the T-15
-    // review). It goes back to zero when the screen does.
-    let from = current_model(store, &seat.id, &[]).unwrap_or_else(|| "-".to_string());
-    Ok(Some(format!(
-        "{}: quota limit, restarting on {} (was {from})",
-        seat.id,
-        model.unwrap_or("the first model")
-    )))
-}
-
-/// The model a restart in progress starts on, if there is one. The meta has no
-/// delete, so the empty value means "no restart"; `-` means "start on the
-/// CLI's own default" (no model in the environment line).
-fn restart_model(store: &mut Store, seat: &str) -> GearResult<Option<String>> {
-    Ok(match meta_get(store, &meta_key("restart", seat))? {
-        Some(model) if model == "-" => Some(String::new()),
-        Some(model) if !model.is_empty() => Some(model),
-        _ => None,
-    })
-}
-
-/// Start the agent again on the model the restart fixed: the environment line
-/// carries it, the args carry the profile's unattended and resume args with the
-/// binding's session reference, and the lane gets "Continue T-<n>".
-fn finish_restart(
-    store: &mut Store,
-    herdr: &mut dyn HerdrAct,
-    cfg: &EngineCfg,
     project: &str,
     config: &ProjectConfig,
     seat: &SeatRow,
     profile: &Profile,
+    obs: Option<&SeatObs>,
+    model: &str,
     now: Ts,
 ) -> GearResult<Option<String>> {
-    let Some(binding) = active_binding(store, seat)? else {
-        // No pane to start in: forget the restart rather than spin.
-        meta_set(store, &meta_key("restart", &seat.id), "")?;
-        meta_set(store, &meta_key("restart_phase", &seat.id), "")?;
+    let Some(labels) = config.models.switch.get(model) else {
+        let line = format!(
+            "{}: no [models.switch.\"{model}\"] labels (picker, bar) — needs check, not restarted",
+            seat.id
+        );
+        flag_needs_check(store, seat, &line, now)?;
+        return Ok(Some(line));
+    };
+    let outcome = crate::switch::switch_in_place(store, herdr, &seat.id, profile, obs, labels, now)?;
+    settle_switch(store, project, seat, model, outcome, now)
+}
+
+/// Continue the switch a seat has on its way, whatever the screen says now
+/// (review F6): the plan carries the target, so a cleared quota line, an open
+/// dialog or an engine restart does not lose it.
+fn resume_switch(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    profile: &Profile,
+    obs: Option<&SeatObs>,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let Some(plan) = crate::switch::pending(store, &seat.id)? else {
         return Ok(None);
     };
-    let raw = restart_model(store, &seat.id)?.unwrap_or_default();
-    let model = if raw.is_empty() { None } else { Some(raw) };
-
-    // 1. the pane, in two phases (F3 of the T-15 review): after the exit keys,
-    //    the switch waits for a **shell** — an agent of this seat's kind that
-    //    is still there is the OLD one, not a replacement. Only once the pane
-    //    is a shell is the start attempted, and only then may a live agent of
-    //    the kind be adopted (the start was attempted after seeing the shell).
-    let phase = match meta_get(store, &meta_key("restart_phase", &seat.id))? {
-        Some(phase) if phase == RESTART_START => RESTART_START,
-        _ => RESTART_EXIT,
+    // The plan keeps the bar text; the config gives back the model id and its
+    // picker filter.
+    let model = config
+        .models
+        .switch
+        .iter()
+        .find(|(_, labels)| labels.bar == plan.to)
+        .map(|(model, _)| model.clone());
+    let Some(model) = model else {
+        crate::switch::clear_pending(store, &seat.id)?;
+        let line = format!(
+            "{}: the switch target {:?} has no [models.switch] labels any more — needs check",
+            seat.id, plan.to
+        );
+        flag_needs_check(store, seat, &line, now)?;
+        return Ok(Some(line));
     };
-    let holder = match herdr.agent_get(&binding.pane_id) {
-        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str()) => {
-            if phase == RESTART_EXIT {
-                // The old agent has not exited yet: keep the restart pending,
-                // type nothing and record nothing.
-                return Ok(None);
-            }
-            // The start was attempted after the shell was seen: this agent is
-            // the replacement.
-            Some(info)
-        }
-        Ok(Some(_)) => {
-            park_for_human(store, seat, "another agent holds the lane's pane", now)?;
-            return Ok(None);
-        }
-        Ok(None) => None,
-        Err(error) => {
-            park_for_human(store, seat, &format!("agent_get: {}", error.0), now)?;
-            return Ok(None);
-        }
-    };
-    if holder.is_none() {
-        // The shell is there: from now on a start may have happened, so a live
-        // agent met on a later tick is the replacement.
-        meta_set(store, &meta_key("restart_phase", &seat.id), RESTART_START)?;
-    }
+    let labels = config.models.switch.get(&model).cloned().expect("just found");
+    let outcome = crate::switch::switch_in_place(store, herdr, &seat.id, profile, obs, &labels, now)?;
+    settle_switch(store, project, seat, &model, outcome, now)
+}
 
-    let _started = match holder {
-        Some(info) => info,
-        None => {
-            // 2. the session id: without it the restart would begin a new
-            //    conversation, which is not a restart. Take the binding's, or
-            //    the one the CLI printed on exit (the SOP's exit line), and
-            //    park when there is none (F1).
-            let session = match binding.session_ref.clone() {
-                Some(session) if !session.is_empty() => session,
-                _ => match session_from_pane(herdr, &binding.pane_id) {
-                    Some(session) => {
-                        store.write(|tx| {
-                            tx.set_binding_session_ref(&seat.id, seat.generation, &session)
-                        })?;
-                        session
-                    }
-                    None => {
-                        park_for_human(
-                            store,
-                            seat,
-                            "quota: no session id to resume; not restarting blind",
-                            now,
-                        )?;
-                        return Ok(None);
-                    }
-                },
-            };
-
-            // 3. the environment line: the call context and the model.
-            let mut env_command = format!(
-                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                project, seat.name, seat.generation, cfg.db_path
+/// What a switch step means for the lane: `Done`/`Already` finish it, `Waiting`
+/// is silence (the next tick continues), `Failed` flags the seat.
+fn settle_switch(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    model: &str,
+    outcome: crate::switch::SwitchOutcome,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    match outcome {
+        crate::switch::SwitchOutcome::Done | crate::switch::SwitchOutcome::Already => {
+            Ok(Some(finish_switch(store, project, seat, model, now)?))
+        }
+        crate::switch::SwitchOutcome::Waiting => Ok(None),
+        crate::switch::SwitchOutcome::Failed => {
+            let line = format!(
+                "{}: the model switch to {model} did not confirm twice — needs check",
+                seat.id
             );
-            let mut args = profile.unattended_args.clone();
-            if let Some(model) = model.as_deref() {
-                if let Some(start) = crate::model::model_start(&binding.kind, model) {
-                    if !start.env.is_empty() {
-                        env_command = format!("{env_command}; {}", start.env);
-                    }
-                    args.extend(start.args);
-                }
-            }
-            // 4. the same conversation: the profile's resume args and the id.
-            if let Some(resume) = profile.resume_args.as_ref() {
-                args.extend(resume.iter().map(|arg| arg.replace("{session}", &session)));
-            }
-            if let Outcome::Ok(()) = herdr.pane_run(&binding.pane_id, &env_command) {
-                // the environment is set
-            } else {
-                return Ok(None);
-            }
-            match herdr.agent_start(&agent_name(config, seat), &binding.kind, &binding.pane_id, &args) {
-                Outcome::Ok(info) => info,
-                // The pane may still be exiting: the next tick tries again.
-                _ => return Ok(None),
-            }
+            flag_needs_check(store, seat, &line, now)?;
+            Ok(Some(line))
         }
-    };
-
-    // 4. the seat is working again, on the new model.
-    store.write(|tx| {
-        let seat = tx.get_seat(&seat.id)?.ok_or_else(|| {
-            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
-        })?;
-        if seat.state == SeatState::Parked {
-            gear_model::state::require_transition(
-                SeatState::can_transition(seat.role, seat.state, SeatState::Active),
-                "seat",
-                seat.state.as_str(),
-                SeatState::Active.as_str(),
-            )?;
-            tx.set_seat_state(&seat.id, SeatState::Active, Some("quota switch"), now)?;
-        }
-        Ok(())
-    })?;
-    meta_set(store, &meta_key("restart", &seat.id), "")?;
-    meta_set(store, &meta_key("restart_phase", &seat.id), "")?;
-    meta_set(store, &meta_key("quota", &seat.id), "0")?;
-    meta_set(store, &meta_key("resume", &seat.id), "")?;
-    if let Some(model) = model.as_deref() {
-        meta_set(store, &meta_key("model", &seat.id), model)?;
     }
+}
 
-    // 5. the lane continues its open task on the new model.
+/// A confirmed in-place switch (T-33): the new model, the reset quota counter,
+/// the cleared plan, the resumed seat state and the one "Continue" op land in a
+/// single transaction (review F7) — an engine restart sees either none of it
+/// (the plan resumes) or all of it (the op exists). The captain's line follows.
+fn finish_switch(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    model: &str,
+    now: Ts,
+) -> GearResult<String> {
     let text = continue_text(store, &seat.id)?;
-    if let Some((task, attempt)) = open_attempt(store, &seat.id)? {
-        store.write(|tx| {
+    let open = open_attempt(store, &seat.id)?;
+    store.write(|tx| {
+        tx.set_meta(&meta_key("model", &seat.id), model)?;
+        tx.set_meta(&meta_key("quota", &seat.id), "0")?;
+        tx.set_meta(&meta_key("resume", &seat.id), "")?;
+        tx.set_meta(&crate::switch::pending_meta_key(&seat.id), "")?;
+        if let Some((task, attempt)) = open.clone() {
             tx.insert_op(&NewOp {
                 project: project.to_string(),
                 seat: seat.id.clone(),
@@ -405,16 +332,24 @@ fn finish_restart(
                 payload: serde_json::json!({ "text": text }),
                 created: now,
             })?;
-            Ok(())
+        }
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
         })?;
-    }
-    let line = format!(
-        "{}: restarted on {} (provider limit)",
-        seat.id,
-        model.as_deref().unwrap_or("its first model")
-    );
+        if row.state == SeatState::Parked {
+            gear_model::state::require_transition(
+                SeatState::can_transition(row.role, row.state, SeatState::Active),
+                "seat",
+                row.state.as_str(),
+                SeatState::Active.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Active, Some("quota switch"), now)?;
+        }
+        Ok(())
+    })?;
+    let line = format!("{}: switched to {model} in place (provider limit)", seat.id);
     tell_captain(store, project, seat, &line, now)?;
-    Ok(Some(line))
+    Ok(line)
 }
 
 /// `Continue T-<n>: run `gear` first` for the lane's open attempt.
@@ -433,16 +368,6 @@ fn open_attempt(store: &mut Store, seat: &str) -> GearResult<Option<(String, i64
             .into_iter()
             .next()
             .map(|attempt| (attempt.task, attempt.n)))
-    })
-}
-
-/// The seat's active binding: the pane the agent runs in.
-fn active_binding(store: &mut Store, seat: &SeatRow) -> GearResult<Option<gear_store::BindingRow>> {
-    let (id, generation) = (seat.id.clone(), seat.generation);
-    store.read(|tx| {
-        Ok(tx
-            .get_binding(&id, generation)?
-            .filter(|binding| binding.status == gear_store::BindingStatus::Active))
     })
 }
 
@@ -474,27 +399,8 @@ fn park(
     meta_set(store, &meta_key("resume", &seat.id), &until.to_string())
 }
 
-/// The session id an OpenCode agent prints on exit (`Continue  opencode -s
-/// <id>`, see `skills/gear/references/agents/opencode.md`): the last `-s` token
-/// of the pane's tail.
-fn session_from_pane(herdr: &mut dyn HerdrAct, pane: &str) -> Option<String> {
-    let tail = herdr.read_tail(pane, 40).ok()?;
-    let mut found = None;
-    for line in tail.lines() {
-        let mut parts = line.split_whitespace();
-        while let Some(word) = parts.next() {
-            if word == "-s" {
-                if let Some(id) = parts.next() {
-                    found = Some(id.trim_matches(|c: char| c == '`' || c == ',' || c == ';').to_string());
-                }
-            }
-        }
-    }
-    found.filter(|id| !id.is_empty())
-}
-
-/// A restart that cannot continue safely: the seat waits for a human.
-fn park_for_human(
+/// Flag the seat for a human (`NeedsCheck`): the engine must not guess.
+fn flag_needs_check(
     store: &mut Store,
     seat: &SeatRow,
     reason: &str,
@@ -539,11 +445,6 @@ pub fn seats_on_quota(store: &mut Store, project: &str) -> GearResult<Vec<String
         }
     }
     Ok(on_quota)
-}
-
-/// The Herdr agent name of a lane: `<project>-<lane>` (17 §2).
-fn agent_name(config: &ProjectConfig, seat: &SeatRow) -> String {
-    format!("{}-{}", config.project.id, seat.name)
 }
 
 /// Count this tick's quota observation: `previous + 1` while the screen shows
@@ -776,28 +677,10 @@ quota_reset_h = 5
         }]
     }
 
-    /// The lane's observation when its agent has exited.
-    fn gone(seat: &SeatRow) -> Vec<SeatObs> {
-        vec![SeatObs {
-            seat: seat.clone(),
-            presence: Presence::Missing,
-            status: None,
-            flags: BTreeSet::new(),
-            idle: false,
-        }]
-    }
-
     /// One quota tick of the policy, with the lane's observation this tick.
     fn tick_quota(store: &mut Store, herdr: &mut FakeHerdr, quota: bool, now: Ts) -> QuotaReport {
         let seat = lane_seat(store);
         let obs = observed(&seat, quota);
-        apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
-    }
-
-    /// One tick with the agent gone (the restart continues).
-    fn tick_gone(store: &mut Store, herdr: &mut FakeHerdr, now: Ts) -> QuotaReport {
-        let seat = lane_seat(store);
-        let obs = gone(&seat);
         apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
     }
 
@@ -815,17 +698,6 @@ quota_reset_h = 5
             .iter()
             .filter_map(|call| match call {
                 Call::SendKeys { keys, .. } => Some(keys.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn env_lines(herdr: &FakeHerdr) -> Vec<String> {
-        herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::PaneRun { command, .. } => Some(command.clone()),
                 _ => None,
             })
             .collect()
@@ -858,51 +730,6 @@ quota_reset_h = 5
     }
 
     #[test]
-    fn a_quota_limit_restarts_the_lane_on_the_next_model() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = herdr_with_quota();
-
-        // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
-        let report = tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        assert!(report.events.is_empty(), "{:?}", report.events);
-        assert!(exits(&herdr).is_empty());
-
-        // Tick 2: the limit is confirmed — the agent is taken off the model.
-        let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert!(report.events[0].contains("restarting on deepseek/deepseek-flash"), "{:?}", report.events);
-        assert_eq!(exits(&herdr), vec![vec!["ctrl+c".to_string()]]);
-
-        // The agent exits; the next tick starts it on the next model.
-        herdr.exit_agent(PANE);
-        let report = tick_gone(&mut store, &mut herdr, T0 + 30);
-        assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert_eq!(
-            env_lines(&herdr),
-            vec![
-                "export GEAR_CTX=p:heat:1; export GEAR_DB=/state/gear.db; \
-                 export OPENCODE_CONFIG_CONTENT='{\"model\":\"deepseek/deepseek-flash\"}'"
-                    .to_string()
-            ]
-        );
-        // … with the resume args and the session reference: the conversation
-        // continues on the new model.
-        assert_eq!(starts(&herdr), vec![vec![
-            "--auto".to_string(),
-            "-s".to_string(),
-            "ses_lane".to_string(),
-        ]]);
-        // … and one continue delivery.
-        assert_eq!(deliveries(&mut store), vec!["Continue T-1: run `gear` first".to_string()]);
-        // The switch reached the captain as one information line (Info: it
-        // does not ring the doorbell, it is read on the home page).
-        let thread = store.read(|tx| tx.thread_messages("p", "heat:1")).unwrap();
-        assert_eq!(thread.len(), 1, "{thread:?}");
-        assert!(thread[0].body.contains("restarted on deepseek/deepseek-flash"), "{:?}", thread[0].body);
-        assert_eq!(thread[0].recipient, "p:captain");
-    }
-
-    #[test]
     fn an_exhausted_chain_parks_until_the_reset() {
         let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback"));
         let mut herdr = herdr_with_quota();
@@ -923,11 +750,14 @@ quota_reset_h = 5
         assert!(report.events.is_empty());
         assert!(exits(&herdr).is_empty());
 
-        // At the reset: the lane comes back on the first model.
+        // At the reset: no `[models.switch]` labels in this config, so the
+        // lane is flagged for a human — never closed and restarted (T-33, F4).
         let report = tick_quota(&mut store, &mut herdr, false, until);
         assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert!(report.events[0].contains("restarting on minimax-cn/MiniMax-M3.1-Flash"), "{:?}", report.events);
-        assert_eq!(exits(&herdr), vec![vec!["ctrl+c".to_string()]]);
+        assert!(report.events[0].contains("models.switch"), "{:?}", report.events);
+        assert!(exits(&herdr).is_empty(), "no exit keys: {:?}", herdr.calls);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck);
     }
 
     #[test]
@@ -982,275 +812,205 @@ quota_reset_h = 5
         assert_eq!(op.check_budget, 0);
     }
 
-    /// F1: OpenCode reports no session reference, so the restart took a fresh
-    /// conversation. The id OpenCode prints on exit is used instead, and the
-    /// binding keeps it for the next time.
+    /// T-33: the quota fallback switches the model in place — no exit keys, no
+    /// agent start — and delivers one Continue once the status bar confirms.
+    /// The switch takes several ticks: one UI submission per tick.
     #[test]
-    fn an_opencode_restart_resumes_the_same_conversation() {
-        let seat_row = |store: &mut Store| -> SeatRow {
-            store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap()
-        };
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        // OpenCode reports no session reference: the binding has none.
-        store
-            .write(|tx| tx.set_binding_session_ref("p:heat", 1, ""))
-            .unwrap();
+    fn the_quota_fallback_switches_the_model_in_place() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
         let mut herdr = FakeHerdr::new();
         herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
         herdr.set_screen(PANE, QUOTA_SCREEN);
+        // The screens one switch produces: the toast cleared, the picker, the
+        // bar.
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
+            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
+        ];
 
-        // Two quota ticks: the exit keys.
+        // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        // The agent exits and prints its session id (the SOP's exit line).
-        herdr.exit_agent(PANE);
-        herdr.set_screen(PANE, "  Session  T-1 work\n  Continue  opencode -s ses_from_pane\n");
-        let seat = seat_row(&mut store);
+        assert!(texts(&herdr).is_empty(), "nothing typed on the first tick");
+        // Tick 2: the limit is confirmed — the switch starts (esc this tick).
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert!(texts(&herdr).is_empty(), "only the escape so far");
+        assert!(deliveries(&mut store).is_empty(), "no continue before the bar confirms");
 
-        // The pane is a shell: the restart types the environment there and
-        // resumes that conversation.
-        let seat_obs = gone(&seat);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &seat_obs, T0 + 30).unwrap();
+        // Ticks 3..6: /model, the filter, then the bar check.
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
+        }
 
-        let starts: Vec<Vec<String>> = herdr
+        // In place: no exit keys (the profile's ctrl+c), no agent start.
+        let exit_keys = gear_herdr::builtin("opencode").unwrap().exit_keys;
+        let sent: Vec<Vec<String>> = herdr
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::AgentStart { args, .. } => Some(args.clone()),
+                Call::SendKeys { keys, .. } => Some(keys.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(starts.len(), 1, "{starts:?}");
-        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
-        assert!(starts[0].contains(&"ses_from_pane".to_string()), "{:?}", starts[0]);
-        // … and the binding keeps it for the next restart.
-        let binding = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
-        assert_eq!(binding.session_ref.as_deref(), Some("ses_from_pane"));
-    }
-
-    /// F1, the other side: no id anywhere → the lane is not restarted blind,
-    /// it waits for a human.
-    #[test]
-    fn without_a_session_id_the_lane_is_not_restarted() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        // OpenCode reports no session reference: the binding has none.
-        store
-            .write(|tx| tx.set_binding_session_ref("p:heat", 1, ""))
-            .unwrap();
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        herdr.set_screen(PANE, QUOTA_SCREEN);
-        tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        herdr.exit_agent(PANE);
-        // A shell with no exit line in its tail.
-        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 30).unwrap();
-
-        let starts = herdr
-            .calls
-            .iter()
-            .filter(|call| matches!(call, Call::AgentStart { .. }))
-            .count();
-        assert_eq!(starts, 0, "no blind start");
-        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::NeedsCheck, "a human decides");
-        assert!(seat.state_reason.unwrap_or_default().contains("session id"));
-    }
-
-    /// F2: the tick that takes the lane off its model must not flag it: the
-    /// quota counter is still the reason its delivery gets no budget.
-    #[test]
-    fn the_restart_tick_does_not_flag_the_lane() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        herdr.set_screen(PANE, QUOTA_SCREEN);
-        store
-            .write(|tx| {
-                let op = tx
-                    .insert_op(&NewOp {
-                        project: "p".into(),
-                        seat: "p:heat".into(),
-                        generation: 1,
-                        kind: OpKind::Doorbell,
-                        task: None,
-                        attempt: None,
-                        ref_msg: None,
-                        plan_version: None,
-                        payload: serde_json::json!({ "text": "x", "covers": ["M-404"] }),
-                        created: T0,
-                    })
-                    .unwrap();
-                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
-                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
-                Ok(())
-            })
-            .unwrap();
-
-        tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-
-        let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
-        assert!(flagged.is_empty(), "the restart tick is not 'no progress'");
-    }
-
-    /// F3: the environment line is never typed into an agent, and a delayed
-    /// exit is not mistaken for a replacement. While the old agent is still in
-    /// the pane the restart stays pending: nothing is typed, started, adopted
-    /// or recorded.
-    #[test]
-    fn the_environment_line_is_not_typed_into_an_agent() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-        herdr.set_screen(PANE, QUOTA_SCREEN);
-        tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert_eq!(exits(&herdr).len(), 1, "the exit keys are sent once");
-
-        // The exit has not happened yet: the old agent is still in the pane.
-        for tick in 0..3 {
-            let seat = lane_seat(&mut store);
-            apply_quota_policy(
-                &mut store,
-                &mut herdr,
-                &cfg(),
-                &cfg().profiles,
-                "p",
-                &observed(&seat, true),
-                T0 + 30 + tick,
-            )
-            .unwrap();
-        }
-        assert!(env_lines(&herdr).is_empty(), "nothing was typed into the agent");
-        assert!(starts(&herdr).is_empty(), "the old agent is not started again");
-        // The restart is still waiting for the shell, and no model was recorded.
-        assert_eq!(restart_model(&mut store, "p:heat").unwrap(), Some("deepseek/deepseek-flash".into()));
-        assert_eq!(meta_get(&mut store, &meta_key("restart_phase", "p:heat")).unwrap().as_deref(), Some(RESTART_EXIT));
-        assert_eq!(meta_get(&mut store, &meta_key("model", "p:heat")).unwrap(), None);
-        assert!(deliveries(&mut store).is_empty(), "no continue into the old agent");
-    }
-
-    /// F3 (acceptance): the switch completes only when the pane shows a shell —
-    /// then the environment line, the resume start and exactly one Continue.
-    #[test]
-    fn the_switch_waits_for_the_shell_then_starts_with_resume_args() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = herdr_with_quota();
-        // The attempt the lane continues after the switch.
-        let attempt = open_attempt_for(&mut store);
-        tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        // The old agent is delayed: nothing happens.
-        let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 25).unwrap();
-        assert!(starts(&herdr).is_empty());
-
-        // The old agent is gone; the pane is a shell.
-        herdr.exit_agent(PANE);
-        herdr.set_screen(PANE, "  Session  T-1 work\n  Continue  opencode -s ses_keep\n");
-        let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 30).unwrap();
-
-        let env = env_lines(&herdr);
-        assert_eq!(env.len(), 1, "{env:?}");
-        assert!(env[0].contains("deepseek/deepseek-flash"), "{}", env[0]);
-        let starts = starts(&herdr);
-        assert_eq!(starts.len(), 1, "{starts:?}");
-        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
-        assert!(starts[0].contains(&"ses_lane".to_string()), "{:?}", starts[0]);
-        // Exactly one Continue, for the open attempt.
+        assert!(
+            sent.iter().flatten().all(|key| !exit_keys.contains(key)),
+            "no exit keys: {sent:?}"
+        );
+        assert!(starts(&herdr).is_empty(), "no restart: {:?}", starts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "/model"), "{:?}", texts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "DeepSeek V4.1 Flash"), "{:?}", texts(&herdr));
+        // Exactly one Continue, on the new model.
         let delivered = deliveries(&mut store);
         assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert!(delivered[0].contains(&attempt.0), "{}", delivered[0]);
+        assert_eq!(meta_get(&mut store, &meta_key("model", "p:heat")).unwrap().as_deref(), Some("deepseek/deepseek-flash"));
+        // More quota ticks add no second Continue.
+        tick_quota(&mut store, &mut herdr, true, T0 + 60);
+        assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
     }
 
-    /// F3 (acceptance): an engine restart between the exit and the start must
-    /// not adopt the old agent; the start happens only after the shell is seen.
+    /// T-33 (F6): the quota line clears while the switch is under way (a toast
+    /// closes, a dialog opens, the engine restarts): the plan is durable, so
+    /// the next tick continues it — no retyping, one Continue.
     #[test]
-    fn a_restart_between_exit_and_start_does_not_adopt_the_old_agent() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = herdr_with_quota();
+    fn a_switch_survives_a_cleared_quota_marker() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
+            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
+        ];
+
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        // The engine restarts (recovery) while the old agent is still there.
-        crate::ops::recover_on_start(&mut store, T0 + 25).unwrap();
-        let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 30).unwrap();
-        assert!(starts(&herdr).is_empty(), "the old agent is not adopted");
-        assert!(env_lines(&herdr).is_empty());
-        assert_eq!(restart_model(&mut store, "p:heat").unwrap(), Some("deepseek/deepseek-flash".into()));
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_some());
 
-        // Then the shell appears: one start with the resume args.
-        herdr.exit_agent(PANE);
-        herdr.set_screen(PANE, "  Continue  opencode -s ses_after\n");
-        let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 40).unwrap();
-        let starts = starts(&herdr);
-        assert_eq!(starts.len(), 1, "{starts:?}");
-        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
-        assert!(starts[0].contains(&"ses_lane".to_string()), "{:?}", starts[0]);
-    }
-
-    /// F3 (acceptance): a pending delivery is not flagged while the restart
-    /// waits for the old agent to exit — a quota turn is not "no progress".
-    #[test]
-    fn waiting_for_the_exit_does_not_flag_the_seat() {
-        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
-        let mut herdr = herdr_with_quota();
-        let op = pending_delivery(&mut store);
-        // The edge the review reproduced: two checks already spent.
-        store.write(|tx| {
-            tx.bump_op_check_budget("p", &op, T0)?;
-            tx.bump_op_check_budget("p", &op, T0)?;
-            Ok(())
-        })
-        .unwrap();
-        tick_quota(&mut store, &mut herdr, true, T0 + 10);
-        tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        // The exit is delayed: the quota counter is still the reason the
-        // delivery gets no budget.
-        let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 30).unwrap();
+        // The marker is gone from the screen from now on: the switch goes on.
         for tick in 0..4 {
-            let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 2, T0 + 40 + tick).unwrap();
-            assert!(flagged.is_empty(), "a quota turn never flags the seat");
+            tick_quota(&mut store, &mut herdr, false, T0 + 30 + tick);
         }
-        let stored = store.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
-        assert_eq!(stored.check_budget, 2, "the waiting tick spends no budget");
-        assert_eq!(stored.state, OpState::Submitted);
+
+        let sent = texts(&herdr);
+        assert_eq!(sent.iter().filter(|t| *t == "/model").count(), 1, "typed once: {sent:?}");
+        assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
+        assert_eq!(
+            meta_get(&mut store, &meta_key("model", "p:heat")).unwrap().as_deref(),
+            Some("deepseek/deepseek-flash")
+        );
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_none(), "the plan is cleared");
+        assert!(starts(&herdr).is_empty(), "no restart: {:?}", starts(&herdr));
     }
 
-    /// Give the lane an open attempt to continue after a restart. The world
-    /// already starts T-1 attempt 1.
-    fn open_attempt_for(_store: &mut Store) -> (String, i64) {
-        ("T-1".to_string(), 1)
+    /// T-33 (F4): no labels for the next model — the seat is flagged, never
+    /// closed: zero exit keys, zero starts.
+    #[test]
+    fn a_missing_switch_label_flags_the_seat_without_closing_it() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = herdr_with_quota();
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", report.events);
+        assert!(seat.state_reason.unwrap_or_default().contains("models.switch"), "{report:?}");
+        assert!(exits(&herdr).is_empty(), "no exit keys: {:?}", herdr.calls);
+        assert!(starts(&herdr).is_empty(), "no agent start: {:?}", herdr.calls);
+        assert!(texts(&herdr).is_empty(), "nothing typed");
     }
 
-    /// A Submitted delivery at the edge of the check budget.
-    fn pending_delivery(store: &mut Store) -> String {
-        store
-            .write(|tx| {
-                let op = tx
-                    .insert_op(&NewOp {
-                        project: "p".into(),
-                        seat: "p:heat".into(),
-                        generation: 1,
-                        kind: OpKind::Doorbell,
-                        task: None,
-                        attempt: None,
-                        ref_msg: None,
-                        plan_version: None,
-                        payload: serde_json::json!({ "text": "x", "covers": ["M-404"] }),
-                        created: T0,
-                    })
-                    .unwrap();
-                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
-                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
-                Ok(op.id)
+    /// T-33 (F4): a parked lane waking at the provider reset is switched back
+    /// in place, never restarted.
+    #[test]
+    fn a_parked_lane_wakes_up_in_place() {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        text.push_str(
+            "\n[models.switch.\"minimax-cn/MiniMax-M3.1-Flash\"]\npicker = \"MiniMax-M3.1-Flash\"\nbar = \"MiniMax-M3.1-Flash\"\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+
+        // The chain is exhausted: the lane parks until the reset.
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        let calls_before = herdr.calls.len();
+
+        // The provider has reset: the wake-up switches in place.
+        herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        let mut events = Vec::new();
+        for tick in 0..6 {
+            // The screen no longer shows the limit: the wake-up tick.
+            events.extend(tick_quota(&mut store, &mut herdr, false, T0 + 3600 * 6 + tick).events);
+        }
+        let after: Vec<&Call> = herdr.calls[calls_before..].iter().collect();
+        assert!(
+            after.iter().all(|call| !matches!(call, Call::AgentStart { .. })),
+            "no restart: {after:?}"
+        );
+        assert!(
+            after.iter().all(|call| !matches!(call, Call::SendKeys { keys, .. } if keys.iter().any(|k| k == "ctrl+c"))),
+            "no exit keys: {after:?}"
+        );
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active, "the lane is back: {events:?}");
+    }
+
+    /// M-266: a stale limit line on a **working** agent is not a quota turn: it
+    /// is never parked (or switched) on screen text alone.
+    #[test]
+    fn a_working_lane_with_a_stale_limit_line_is_not_parked() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        let seat = lane_seat(&mut store);
+        let mut busy = observed(&seat, true);
+        busy[0].idle = false;
+        busy[0].status = Some(gear_herdr::AgentStatus::Working);
+
+        for tick in 0..5 {
+            apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &busy, T0 + 10 + tick).unwrap();
+        }
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active, "a working lane is not parked");
+        assert!(exits(&herdr).is_empty(), "and not taken off its model");
+    }
+
+    fn texts(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
             })
-            .unwrap()
+            .collect()
     }
+
 }

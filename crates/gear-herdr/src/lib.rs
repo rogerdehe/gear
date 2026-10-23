@@ -58,6 +58,10 @@ pub trait HerdrRead {
     fn agent_get(&mut self, pane_id: &str) -> Result<Option<AgentInfo>, ObserveError>;
     /// Last `lines` lines of the pane (recent-unwrapped), for screen flags.
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError>;
+    /// The whole **visible** screen, for the model switch (T-33): the picker,
+    /// the "Select variant" dialog and the status bar are drawn in the visible
+    /// pane, and a dialog can sit far above the last 16 lines.
+    fn read_screen(&mut self, pane_id: &str) -> Result<String, ObserveError>;
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -133,6 +137,14 @@ impl HerdrRead for SocketHerdr {
             .client
             .pane_read(pane_id, board_herdr::ReadSource::RecentUnwrapped, Some(lines))
             .map_err(|e| ObserveError(format!("pane.read failed: {e}")))?;
+        Ok(read.text)
+    }
+
+    fn read_screen(&mut self, pane_id: &str) -> Result<String, ObserveError> {
+        let read = self
+            .client
+            .pane_read(pane_id, board_herdr::ReadSource::Visible, None)
+            .map_err(|e| ObserveError(format!("pane.read (visible) failed: {e}")))?;
         Ok(read.text)
     }
 }

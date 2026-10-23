@@ -84,6 +84,9 @@ struct SendCmd {
     /// Review only: the verdict a temp reviewer hands in (pass|fail).
     #[arg(long)]
     verdict: Option<String>,
+    /// Review only: the ids of the findings that block (T-23), comma separated.
+    #[arg(long)]
+    blocking: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -728,6 +731,8 @@ fn run_send(
             .as_deref()
             .map(gear_app::review::Outcome::parse)
             .transpose()?,
+        // A review's blocking findings (T-23).
+        blocking: c.blocking.clone(),
         // A hand-in's gate (T-19): set by the caller for a result.
         base,
         about: c.about.clone(),
@@ -1312,6 +1317,7 @@ mod tests {
             urgent: false,
             candidate: None,
             verdict: None,
+            blocking: None,
             preempted: None,
             saved: None,
             request_id: Some("r-1".into()),
