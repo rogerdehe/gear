@@ -1,0 +1,3 @@
+<!-- gear-plan project=gear base=12 -->
+# Verdicts
+- T-6 attempt=1 contract=1 candidate=8cd5e63 fail rework="Review: git show origin/review/t6:ops/reviews/T-6.md. P1: onboarding reads the config (crates/gear-app/src/config.rs:190, used at crates/gear-engine/src/onboard.rs:167) and the queued-seat roster (onboard.rs:182) in two transactions; a re-init committing a new lane between them gives old config + new seat, and onboard.rs:192 parks the valid lane in NeedsCheck forever. Fix: read the config row and the roster in one read transaction (parse and do Herdr work outside it), and never park a seat just because the config read predates it (skip it this tick). Add a regression test for an update landing between the two reads."
