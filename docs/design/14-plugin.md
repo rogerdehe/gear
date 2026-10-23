@@ -36,7 +36,7 @@ command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entry
 ## Lifecycle boundaries
 
 - The engine keeps running regardless of tabs, panes or clients; if it dies, the next `gear` call starts it again and the recovery checks run (08).
-- Upgrade: `gear admin stop`, replace the binary; the next `gear` call starts the new one. The schema only migrates up, never down.
+- Upgrade: `gear admin stop`, replace the binary; the next `gear` call starts the new one. The schema only migrates up, never down: the new binary migrates an older store up when it opens it, and refuses a store of a newer version (`SCHEMA_TOO_NEW`) without writing anything.
 - Uninstall: `gear admin stop` first (Herdr does not stop processes a plugin started).
 
 ## Pending probes
