@@ -360,25 +360,24 @@ fn an_obsolete_review_closes_the_attempt_and_settles_nothing() {
     assert!(info[0].body.contains("cancelled"), "{}", info[0].body);
 }
 
-/// T-23: a fail without a blocking finding is not justified — it settles as a
-/// pass, and the findings become one information item for the captain.
+/// T-23 (M-295): a fail that names no blocking finding is never converted
+/// into a pass — the captain decides and the task stays Verifying.
 #[test]
-fn a_fail_without_a_blocking_finding_settles_as_a_pass() {
+fn a_fail_without_a_blocking_finding_goes_to_the_captain() {
     let mut s = world_with(false, FINDINGS_WITH_IDS, "");
 
     s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
 
-    assert_eq!(attempt_state(&mut s), AttemptState::Accepted);
-    assert_eq!(task_state(&mut s, "T-1"), TaskState::Done);
-    assert_eq!(ops(&mut s).len(), 1, "the merge is queued");
-    assert_eq!(ops(&mut s)[0].kind, OpKind::Merge);
-    // The findings are information for the captain, in one item.
-    assert!(captain_inbox(&mut s).is_empty(), "no action item");
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
-    assert_eq!(info.len(), 1, "{info:?}");
-    assert!(info[0].body.contains("without a blocking finding"), "{}", info[0].body);
-    assert!(info[0].body.contains("F1: the store forgets the verdict"), "{}", info[0].body);
-    assert!(info[0].body.contains("F2: the wording of a comment"), "{}", info[0].body);
+    assert_eq!(attempt_state(&mut s), AttemptState::Submitted, "nothing is settled");
+    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying, "the task stays Verifying");
+    assert!(ops(&mut s).is_empty(), "no merge, no rework");
+    // One action item for the captain.
+    let inbox = captain_inbox(&mut s);
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert!(inbox[0].body.contains("fail without blocking findings"), "{}", inbox[0].body);
+    // A second settlement adds none.
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4)).unwrap();
+    assert_eq!(captain_inbox(&mut s).len(), 1, "one action item, not one per tick");
 }
 
 /// T-23: the rework rounds are capped — past the cap the captain decides and

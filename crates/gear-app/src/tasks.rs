@@ -461,15 +461,23 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     let blocking_ids = blocking_ids(tx, project, task, attempt)?;
     let (blocking, logged) = split_findings(&review.findings, &blocking_ids);
 
+    // (2) A fail that names no blocking finding is never converted into a
+    // pass: the captain decides, and the task stays Verifying (M-295).
+    if !review.passed && blocking.is_empty() {
+        let line = format!(
+            "{task}: fail without blocking findings — the captain decides (the task stays Verifying)"
+        );
+        resolve_review_items(tx, project, task, attempt, &line, now)?;
+        tell_captain_cap(tx, project, task, attempt, &line, now)?;
+        return Ok(());
+    }
+
     // A pass accepts the candidate for the contract the attempt worked to; it
     // cannot complete a contract the task has moved on to (design/06: an
     // old-version result cannot complete a new contract). Such a pass settles
     // as a rework on the current contract.
     let stale = review.passed && attempt_row.adopted_version != task_row.contract_version;
-    // A fail without a blocking finding is not justified: it settles as a pass
-    // (the findings are information for the captain) — T-23.
-    let unjustified_fail = !review.passed && blocking.is_empty();
-    let accepted = (review.passed && !stale) || unjustified_fail;
+    let accepted = review.passed && !stale;
     let rework = !accepted;
 
     // The rework rounds are capped (T-23): past the cap the captain decides.
@@ -592,18 +600,15 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     // The captain is told, not asked: every review item of this attempt stops
     // being an action item and one information line says what happened.
     let lane = task_row.lane.as_deref().unwrap_or("its lane");
-    let mut line = match (&merge_op, stale, unjustified_fail) {
-        (Some(op), _, true) => format!(
-            "{task}: review fail without a blocking finding — settled as a pass: attempt {attempt} accepted, task done, merge queued ({op})"
-        ),
-        (Some(op), _, false) => format!(
+    let mut line = match (&merge_op, stale) {
+        (Some(op), _) => format!(
             "{task}: review pass — attempt {attempt} accepted, task done, merge queued ({op})"
         ),
-        (None, true, _) => format!(
+        (None, true) => format!(
             "{task}: review passed attempt {attempt} on contract v{}, but the task is on v{} — attempt rejected, rework on the current contract, task ready at the head of {lane}'s queue",
             attempt_row.adopted_version, task_row.contract_version
         ),
-        (None, false, _) => format!(
+        (None, false) => format!(
             "{task}: review fail — attempt {attempt} rejected, task ready at the head of {lane}'s queue with the blocking findings"
         ),
     };
