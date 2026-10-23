@@ -9,3 +9,5 @@
 - T-7 review R1 (lane runs dry again: alert waits for the 10-minute window), R2 (deferring an alert creates another item).
 - Hand-in check: `gear send --kind result` refuses a candidate that does not contain current origin/dev (lanes skip the rule under rework: T-13, T-15).
 - T-17 review R5: cancel during a reviewer's start keeps its slot (Starting seats skipped by release).
+- Captain can scope an automatic rework (today the engine hands the lane every finding, including ones the captain would log).
+- T-18 review #4 (restart adoption types shell text into a running reviewer), #5 (re-review does not resume the reviewer's session).

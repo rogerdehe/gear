@@ -336,6 +336,22 @@ fn apply_queue(
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
                         contract_changed.push((id.clone(), version));
+
+                        // An attempt that is working on the task hears about the
+                        // update at its next idle point (T-8): the marker holds
+                        // the newest version, so two bumps before the lane looks
+                        // still give one delivery. A handed-in attempt gets
+                        // none — its review and verdict follow the version rule.
+                        if let Some(mut attempt) = tx
+                            .attempts_of_task(project, id)?
+                            .into_iter()
+                            .rev()
+                            .find(|attempt| attempt.state.occupies_seat())
+                        {
+                            attempt.pending_update = Some(version);
+                            attempt.updated = now;
+                            tx.update_attempt(&attempt)?;
+                        }
                     }
                 }
                 tx.update_task(&task)?;

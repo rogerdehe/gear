@@ -45,6 +45,8 @@ pub enum Action {
     Continue { task: String },
     /// First ready task.
     Assign { task: String },
+    /// The task's contract moved on; the lane adopts it at its next view.
+    Adopt { task: String, version: i64 },
     /// Tell the captain; stop nudging.
     Escalate { task: String, reason: String },
 }
@@ -105,6 +107,17 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
             // delivery was confirmed but the agent never started (R-31) — it
             // is nudged the same way instead of waiting forever.
             AttemptState::Started | AttemptState::Stopped | AttemptState::Delivered => {
+                // A contract update the lane has not adopted yet is named once,
+                // before any continue (T-8, design/06). The marker holds the
+                // newest version, so two bumps still give one delivery.
+                if let Some(version) = attempt.pending_update {
+                    if version > attempt.adopted_version {
+                        return Action::Adopt {
+                            task: attempt.task.clone(),
+                            version,
+                        };
+                    }
+                }
                 if v.nudges_since_progress >= cfg.nudge_budget {
                     Action::Escalate {
                         task: attempt.task.clone(),
@@ -178,6 +191,12 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
     format!(
         "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send."
     )
+}
+
+/// The one line of a contract update (T-8), exactly as the contract puts it:
+/// `T-<n> contract changed to v<k>: run `gear` and `gear --show T-<n>``.
+pub fn contract_changed_text(task: &str, version: i64) -> String {
+    format!("{task} contract changed to v{version}: run `gear` and `gear --show {task}`")
 }
 
 /// Build the [`LaneView`] of one lane seat from the store (read-only `tx`):
@@ -334,6 +353,25 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                     task: task.clone(),
                     attempt: attempt.n,
                     text: continue_text(task, attempt.adopted_version, &packet_ref(task)),
+                });
+            }
+            Action::Adopt { task, version } => {
+                // One line for the contract update; the lane's next view adopts
+                // it (T-8). The attempt is the open one, never a guess.
+                let Some(attempt) = tx
+                    .open_attempts_of_seat(&seat.id)?
+                    .into_iter()
+                    .find(|attempt| attempt.task == *task)
+                else {
+                    continue;
+                };
+                deliveries.push(DeliverAction {
+                    project: project.to_string(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    task: task.clone(),
+                    attempt: attempt.n,
+                    text: contract_changed_text(task, *version),
                 });
             }
             // A seat that must wait, or one handed to the captain: no delivery.
