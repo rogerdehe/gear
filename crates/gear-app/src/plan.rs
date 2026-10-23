@@ -779,16 +779,27 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
         }
     }
     for (milestone, tasks) in counts {
-        // Already departed: never moved.
-        if tx
-            .get_voyage(project, &milestone)?
-            .is_some_and(|voyage| voyage.departure.is_some())
-        {
+        let voyage = tx.get_voyage(project, &milestone)?;
+        if voyage.as_ref().is_some_and(|v| v.departure.is_some() && v.departure_estimate_min.is_some()) {
             continue;
         }
-        let (departure, at_departure) = departure_from_history(tx, project, &milestone)?
-            .unwrap_or((now, tasks));
+        let history = departure_from_history(tx, project, &milestone)?;
+        let already_departed = voyage.as_ref().is_some_and(|v| v.departure.is_some());
+        let (departure, at_departure, estimate) = match history {
+            Some(found) => found,
+            None if !already_departed => {
+                let estimates = tx.tasks_of_project(project)?.iter()
+                    .filter(|task| task.milestone.as_deref() == Some(&milestone))
+                    .map(|task| gear_board::voyage::estimate_of(tx, project, task))
+                    .collect::<GearResult<Vec<_>>>()?;
+                (now, tasks, estimates.into_iter().sum())
+            }
+            None => continue, // No historical evidence: do not invent a baseline.
+        };
         tx.set_voyage_departure(project, &milestone, departure, at_departure, now)?;
+        if let Some(estimate) = estimate {
+            tx.set_voyage_departure_estimate(project, &milestone, estimate)?;
+        }
     }
     Ok(())
 }
@@ -800,7 +811,7 @@ fn departure_from_history(
     tx: &Tx<'_>,
     project: &str,
     milestone: &str,
-) -> GearResult<Option<(Ts, i64)>> {
+) -> GearResult<Option<(Ts, i64, Option<i64>)>> {
     let newest = tx.plan_version(project)?;
     for version in 1..=newest {
         let Some(plan) = tx.get_plan(project, version)? else {
@@ -809,13 +820,14 @@ fn departure_from_history(
         let Ok(draft) = crate::draft::parse(&plan.draft) else {
             continue;
         };
-        let tasks = draft
-            .queue
-            .iter()
-            .filter(|item| item.milestone.as_deref() == Some(milestone))
-            .count() as i64;
-        if tasks > 0 {
-            return Ok(Some((plan.applied, tasks)));
+        let items: Vec<_> = draft.queue.iter()
+            .filter(|item| item.milestone.as_deref() == Some(milestone)).collect();
+        if !items.is_empty() {
+            let estimate = items.iter().map(|item| {
+                item.estimate.map(i64::from).or_else(|| item.goal.as_deref()
+                    .and_then(gear_board::voyage::estimate_from_goal))
+            }).sum();
+            return Ok(Some((plan.applied, items.len() as i64, estimate)));
         }
     }
     Ok(None)
@@ -857,6 +869,7 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
             eta,
             departure: None,
             departure_tasks: None,
+            departure_estimate_min: None,
             updated: now,
         })?;
     }
