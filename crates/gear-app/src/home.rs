@@ -144,14 +144,18 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
 /// Persist the view. The CLI calls this **after** printing succeeded; if
 /// printing fails the view is not recorded (design/13).
 ///
-/// Recording a lane's view also **adopts** the contract update the page showed
-/// (T-8, design/06): the attempt works to the version the lane just read. A
-/// page that was never printed adopts nothing.
+/// Recording a lane's view also **adopts** the contract version that page
+/// showed, and only that one (T-8, design/06; review R1): a page read as v2
+/// adopts v2 even when a newer update landed while it was being printed. A
+/// page that was never printed adopts nothing, and a view of a handed-in
+/// attempt adopts nothing (R2).
 pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
     store.write(|tx| {
         tx.insert_view(view)?;
-        if let (Some(task), Some(attempt)) = (&view.shown_task, view.shown_attempt) {
-            crate::tasks::adopt_contract(tx, &view.project, task, attempt, view.ts)?;
+        if let (Some(task), Some(attempt), Some(shown)) =
+            (&view.shown_task, view.shown_attempt, view.shown_contract)
+        {
+            crate::tasks::adopt_contract(tx, &view.project, task, attempt, shown, view.ts)?;
         }
         Ok(())
     })
