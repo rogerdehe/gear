@@ -45,15 +45,12 @@ pub fn release_finished_reviews(
         let Some(task) = seat.task_id.clone() else {
             continue;
         };
-        // A reviewer that is done, or one a human has to look at, is left alone.
-        if matches!(
-            seat.state,
-            SeatState::Released
-                | SeatState::Retired
-                | SeatState::NeedsCheck
-                | SeatState::Missing
-                | SeatState::Unknown
-        ) {
+        // Only a reviewer that is up, or one already on its way out, is
+        // released. A Queued or Starting reviewer has no slot and no worktree
+        // yet — releasing it would throw away the review it is waiting to do
+        // (R1 of the T-17 review) — and a seat a human has to look at is left
+        // alone.
+        if !matches!(seat.state, SeatState::Active | SeatState::Releasing) {
             continue;
         }
         // Still doing its job: nothing to release.
@@ -140,7 +137,10 @@ fn release_one(
             match herdr.worktree_remove(&workspace) {
                 // Already gone (a retry, or a manual removal) is fine.
                 Outcome::Ok(()) => {}
-                Outcome::Refused { code, .. } if code == "not_found" || code == "worktree_not_found" => {}
+                Outcome::Refused { code, .. }
+                    if code == "not_found"
+                        || code == "worktree_not_found"
+                        || code == "workspace_not_found" => {}
                 Outcome::Refused { code, message } => {
                     return Err(format!("worktree_remove: refused ({code}): {message}"))
                 }
@@ -151,17 +151,7 @@ fn release_one(
     store
         .write(|tx| {
             let from = tx.get_seat(&seat.id)?.map(|seat| seat.state).unwrap_or(SeatState::Queued);
-            if from != SeatState::Releasing {
-                // A reviewer that never had an agent goes straight to Released.
-                if from == SeatState::Queued || from == SeatState::Starting {
-                    return tx.set_seat_state(
-                        &seat.id,
-                        SeatState::Released,
-                        Some("review done before it started"),
-                        now,
-                    );
-                }
-            }
+            let _ = from;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -404,6 +394,28 @@ profile = "codex"
         assert_eq!(failed.state, SeatState::Releasing, "the next tick tries again");
         let released = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(released.state, SeatState::Released);
+    }
+
+    #[test]
+    fn a_queued_or_starting_reviewer_is_never_released() {
+        // R1 of the review: a reviewer waiting for a slot (Queued) or one that
+        // is starting holds no worktree, and releasing it would throw away the
+        // review it is about to do — even when its task is already cancelled.
+        let mut herdr = FakeHerdr::new();
+        let mut store = world(TaskState::Cancelled, "w1:p1");
+        for state in [SeatState::Queued, SeatState::Starting] {
+            store
+                .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
+                .unwrap();
+            let report =
+                release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+            assert!(report.released.is_empty(), "{state:?}: {report:?}");
+            assert!(report.failed.is_empty(), "{state:?}: {report:?}");
+            assert_eq!(exits(&herdr), 0, "{state:?}: no exit");
+            assert!(removes(&herdr).is_empty(), "{state:?}: no removal");
+            let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+            assert_eq!(seat.state, state, "left exactly as it was");
+        }
     }
 
     #[test]
