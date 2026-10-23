@@ -1596,6 +1596,30 @@ impl<'s> Tx<'s> {
         }
         Ok(verdicts)
     }
+
+    /// The review verdicts of a project whose attempt is still handed in
+    /// (Submitted): the ones a settle call still has to act on (T-13), oldest
+    /// first. A verdict whose attempt was already settled is not listed again.
+    pub fn reviews_to_settle(&self, project: &str) -> GearResult<Vec<ReviewVerdictRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT r.project, r.task, r.attempt, r.passed, r.findings, r.by_seat, r.created
+                 FROM review_verdicts r
+                 JOIN attempts a ON a.project=r.project AND a.task=r.task AND a.n=r.attempt
+                 WHERE r.project=?1 AND a.state='submitted'
+                 ORDER BY r.created, r.task, r.attempt",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], review_verdict_from_row)
+            .map_err(map_sqlite)?;
+        let mut verdicts = Vec::new();
+        for row in rows {
+            verdicts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(verdicts)
+    }
 }
 
 /// Test helpers (enable with feature-less `cfg(test)` in this crate or via
