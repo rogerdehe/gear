@@ -28,21 +28,31 @@ pub fn trust_worktree(kind: &str, path: &str, now: i64) -> Result<(), String> {
 /// grok.
 pub fn trust_grok_worktree_in(home: &Path, path: &str, now: i64) -> Result<(), String> {
     let file = home.join(".grok").join("trusted_folders.toml");
-    let existing = std::fs::read_to_string(&file).unwrap_or_default();
     let header = format!("[folders.\"{path}\"]");
+    // (a) the file as it is, read only: it is never rewritten.
+    let existing = match std::fs::read(&file) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("{}: {e}", file.display())),
+    };
     if existing.lines().any(|line| line.trim() == header) {
         // Already trusted: append nothing.
         return Ok(());
     }
+    // (b) the parent directory.
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    let mut body = existing;
-    if !body.is_empty() && !body.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str(&format!("{header}\ntrusted = true\ndecided_at = {now}\n"));
-    std::fs::write(&file, body).map_err(|e| format!("{}: {e}", file.display()))
+    // (c) append only: the bytes that are already there are never rewritten.
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    // (d) one write.
+    use std::io::Write;
+    f.write_all(format!("\n{header}\ntrusted = true\ndecided_at = {now}\n").as_bytes())
+        .map_err(|e| format!("{}: {e}", file.display()))
 }
 
 #[cfg(test)]
@@ -83,6 +93,25 @@ mod tests {
         assert!(two.contains("[folders.\"/worktrees/gear-t33\"]"), "{two}");
         assert!(two.starts_with(&once), "append only: {two}");
 
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_store_is_never_rewritten() {
+        let home = home("bytes");
+        let file = home.join(".grok/trusted_folders.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Existing content with a byte that is not valid UTF-8.
+        let original: Vec<u8> = b"[folders.\"/old\"]\ntrusted = true\n\xff a note".to_vec();
+        std::fs::write(&file, &original).unwrap();
+
+        trust_grok_worktree_in(&home, "/worktrees/gear-t32", 1_800_000_000).unwrap();
+
+        let after = std::fs::read(&file).unwrap();
+        assert!(after.starts_with(&original), "every original byte is kept");
+        assert!(after.len() > original.len());
+        let text = String::from_utf8_lossy(&after);
+        assert!(text.contains("[folders.\"/worktrees/gear-t32\"]"), "{text}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
