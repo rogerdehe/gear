@@ -30,3 +30,11 @@
 - T-21 round 2 (captain passed): a missing findings path with spaces is stored as text instead of BAD_FORMAT (reviewer said P0; two coincidences, no data loss).
 - Review text in the store is a WORKING copy for the rework loop; git (ops/reviews/T-n.md merged with the task, earlier rounds in its history) is the long-term record. After a task is done and merged, drop the store's copy and keep only the path (sizes 2026-10-23: 20 reviews = 121 KB, store 1.4 MB).
 - T-23 review logged: F3 cap escalation durable + keep logged info; F4 blocking ids in duplicate checks.
+- **Voyage time accounting (user, M2).** Per task and per voyage: dev time (attempt start→hand-in), review time (hand-in→verdict), settlement wait (verdict→captain decision), rework rounds and their time, merge time — from attempts, review_verdicts, operations. Shown in the voyage report and used in the retrospective (e.g. T-12 took 5 attempts).
+  Needs explicit timestamps per attempt (delivered, started, handed in, verdict, settled, merged): today `updated` is overwritten at settlement, so review time cannot be computed.
+
+## Added 2026-10-23 (user)
+- M2 starts as a new voyage: every agent (lanes and reviewers) starts fresh, through the skill's kickoff (captain, lanes, models, quota, bar) — an iteration, not a continuation.
+- Voyage end: one popup asks the user whether to reclaim the long-lived lanes (end is a boundary like kickoff, not mid-run).
+- One canonical plan file: the captain edits a single plan file in place (the CLI default `plan.draft.md`); history lives in git and the store's plan versions; no numbered `plan-vN.md` copies. Delete ops/plan/plan-v*.md at M1 close and say so in the skill.
+- T-26 review R2-R4 (cut under FASTEST): the skill-install label, "own checks" wording, init's engine-start timing.

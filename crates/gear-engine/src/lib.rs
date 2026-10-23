@@ -202,7 +202,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
-        let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
+        let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
 
         // 6b. merge: a passed task goes into the integration branch, after the
