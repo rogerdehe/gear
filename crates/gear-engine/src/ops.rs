@@ -13,6 +13,7 @@ const RECOVERED_REASON: &str = "engine restarted before the call finished";
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
     let mut ops = Vec::with_capacity(actions.len());
     for action in actions {
+        crate::attention::record(tx, action, now)?;
         let payload = serde_json::json!({ "text": action.text, "covers": action.covers });
         ops.push(tx.insert_op(&NewOp {
             project: action.project.clone(),

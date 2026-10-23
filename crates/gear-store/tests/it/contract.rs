@@ -2,7 +2,7 @@
 //! Do not edit these tests to make them pass; report back if one looks wrong.
 
 use gear_model::{ErrorCode, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState};
-use gear_store::{testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord};
+use gear_store::{testing, BindingStatus, NewMessage, NewOp, RequestOutcome, Store, ViewRecord, SCHEMA_VERSION};
 use serde_json::json;
 
 const NOW: i64 = 1_800_000_000;
@@ -42,7 +42,8 @@ fn open_file_applies_schema_and_reopens() {
     let v = s.read(|tx| tx.get_meta("k")).unwrap();
     assert_eq!(v.as_deref(), Some("v"));
     let ver = s.read(|tx| tx.get_meta("schema_version")).unwrap();
-    assert_eq!(ver.as_deref(), Some("1"));
+    // T-41: the store stamps its version; it is the current one.
+    assert_eq!(ver.as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
 }
 
 #[test]
@@ -53,8 +54,10 @@ fn refuses_newer_schema() {
         let mut s = Store::open(&path).unwrap();
         s.write(|tx| tx.set_meta("schema_version", "999")).unwrap();
     }
+    // T-41: a store of a newer version is refused for writing, with its own
+    // error code: the schema only migrates up.
     let err = Store::open(&path).err().expect("must refuse");
-    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert_eq!(err.code, ErrorCode::SchemaTooNew);
 }
 
 #[test]

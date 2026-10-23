@@ -179,7 +179,7 @@ impl SeatState {
 impl MsgState {
     pub fn can_transition(self, to: MsgState) -> bool {
         use MsgState::*;
-        matches!((self, to), (Open, Waiting | Resolved) | (Waiting, Open | Resolved))
+        matches!((self, to), (Open, Waiting | Resolved) | (Waiting, Open | Resolved) | (Info, Resolved))
     }
 }
 
