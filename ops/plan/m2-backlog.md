@@ -23,3 +23,10 @@
 - T-18 round 3 (logged, not reworked): restart between checkout intent and submit strands a review; re-review does not resume the reviewer's session; a start intent may adopt a wrong-kind occupant; the warm-build proof in the report can pass without a cache.
 - Snapshot wording: `runtime · idle` means "no task in progress", not "agent idle" (the agent was working) — show the agent's Herdr state and the task state separately.
 - Stale captain items re-alert (from T-23 v2): an open captain action item older than captain_item_stale_min becomes urgent and rings again once per period; snapshot shows count and oldest age.
+- T-22 bug: a task added to an old milestone without a voyage row fails with NOT NULL voyages.done instead of being grandfathered.
+- **Store schema version (M2, high).** Stamp the schema version in meta; a binary with another version refuses to write (or migrates up, never down). Needed for users upgrading too. Lanes run their builds/tests with GEAR_DB unset (a lane's dev build created an old table in the production store, L-59).
+- T-30 review logged: F3 complete plan example + review-conclusion reference, F4 keep bar separate from done in the verdict rule, F5 review branch delivery convention in review.md.
+- Quota detection reads stale lines: after a switch the old 2056 errors stay on screen and the engine parks working lanes. Match only output newer than the last switch, or only while the agent is idle after the error (fix with T-33).
+- T-21 round 2 (captain passed): a missing findings path with spaces is stored as text instead of BAD_FORMAT (reviewer said P0; two coincidences, no data loss).
+- Review text in the store is a WORKING copy for the rework loop; git (ops/reviews/T-n.md merged with the task, earlier rounds in its history) is the long-term record. After a task is done and merged, drop the store's copy and keep only the path (sizes 2026-10-23: 20 reviews = 121 KB, store 1.4 MB).
+- T-23 review logged: F3 cap escalation durable + keep logged info; F4 blocking ids in duplicate checks.

@@ -15,7 +15,7 @@ use gear_store::{testing, ContractRow, NewMessage, ReviewVerdictRow, Store, Task
 
 const T0: i64 = 1_800_000_000;
 const CANDIDATE: &str = "abc1234";
-const FINDINGS: &str = "ops/reviews/T-1.md";
+const FINDINGS: &str = "P1: the rows drift right on narrow screens\nP2: the header keeps a stale count";
 
 fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
     TaskRow {
@@ -167,10 +167,15 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
 
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Ready);
-    // The rework note points the lane at the findings on the review branch.
+    // The rework note carries the findings text the reviewer handed in, not a
+    // path: the lane reads it from GEAR (T-21).
     let row = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     let note = row.rework_note.unwrap_or_default();
-    assert!(note.contains(FINDINGS), "{note}");
+    assert_eq!(note, FINDINGS, "the note is the findings text");
+    // The task packet shows the findings of the latest review.
+    let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
+    assert!(packet.contains(FINDINGS), "the packet carries the findings:\n{packet}");
+    assert!(!packet.contains("git show origin/review"), "no pointer at a review branch:\n{packet}");
     // The rework comes before the lane's other ready tasks.
     let ready: Vec<TaskRow> = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     let other_heat: Vec<i64> = ready
