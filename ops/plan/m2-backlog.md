@@ -38,3 +38,4 @@
 - Voyage end: one popup asks the user whether to reclaim the long-lived lanes (end is a boundary like kickoff, not mid-run).
 - One canonical plan file: the captain edits a single plan file in place (the CLI default `plan.draft.md`); history lives in git and the store's plan versions; no numbered `plan-vN.md` copies. Delete ops/plan/plan-v*.md at M1 close and say so in the skill.
 - T-26 review R2-R4 (cut under FASTEST): the skill-install label, "own checks" wording, init's engine-start timing.
+- The engine's merge step (T-12) runs git and the build gate inside the tick: while it merges, no lane is fed and no reviewer starts. Run it beside the tick.

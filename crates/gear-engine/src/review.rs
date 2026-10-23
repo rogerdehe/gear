@@ -380,7 +380,19 @@ fn start_reviewer(
     let pane = match live.map(|binding| binding.pane_id.clone()) {
         Some(pane) => pane,
         None => {
-            let worktree = match herdr.worktree_open(repo, &seat_branch, &seat_label) {
+            // A warm seat is reopened by its path: its checkout is on the last
+            // job's review branch, not on the seat's own branch.
+            let by_path = match worktree_path(store, &seat.id)? {
+                Some(path) => herdr.worktree_open_path(repo, &path, &seat_label),
+                None => Outcome::Refused { code: "worktree_not_found".into(), message: String::new() },
+            };
+            let opened = match by_path {
+                Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+                    herdr.worktree_open(repo, &seat_branch, &seat_label)
+                }
+                other => other,
+            };
+            let worktree = match opened {
                 Outcome::Ok(worktree) => worktree,
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
                     match herdr.worktree_create(
@@ -1112,7 +1124,9 @@ fn park(store: &mut Store, seat_id: &str, reason: &str, now: Ts) -> GearResult<(
         let seat = tx.get_seat(seat_id)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id}"))
         })?;
-        let from = if seat.state == SeatState::Queued {
+        // A queued or freed (warm) seat that fails to start passes through
+        // Starting, so its failure is recorded instead of failing the tick.
+        let from = if matches!(seat.state, SeatState::Queued | SeatState::Released) {
             gear_model::state::require_transition(
                 SeatState::can_transition(seat.role, seat.state, SeatState::Starting),
                 "seat",
@@ -1918,8 +1932,15 @@ review = ["gpt-6.1-sol"]
         store
             .write(|tx| tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + 20))
             .unwrap();
-        // The release exited the job's agent; the worktree and cache stay.
-        herdr.exit_agent("wt1:p1");
+        // The release closed the job's pane and ended its binding (L-64); the
+        // worktree and cache stay.
+        let _ = herdr.pane_close("wt1:p1");
+        store
+            .write(|tx| {
+                let generation = tx.get_seat("p:review-1")?.unwrap().generation;
+                tx.set_binding_status("p:review-1", generation, BindingStatus::Void)
+            })
+            .unwrap();
         store
             .write(|tx| {
                 // The first review passed: its task is settled.
@@ -1967,8 +1988,14 @@ review = ["gpt-6.1-sol"]
         let second = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
         assert_eq!(second.started, vec!["p:review-1".to_string()], "the warm seat took the job");
-        // No second worktree: the seat's own is reused.
+        // No second worktree: the seat's own is reopened by its path (its
+        // checkout is on the last job's review branch, not on the seat's).
         assert_eq!(worktrees(&herdr), worktrees_after_first, "one worktree in total");
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("home-review-1"))),
+            "reopened by path: {:?}",
+            herdr.calls
+        );
         // The second job's agent is named after the second task.
         let names: Vec<String> = herdr
             .calls

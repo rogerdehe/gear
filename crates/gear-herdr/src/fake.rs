@@ -17,6 +17,7 @@ pub enum Call {
     Notify { title: String, body: String },
     WorktreeCreate { repo: String, branch: String, base: String, label: String },
     WorktreeOpen { repo: String, branch: String, label: String },
+    WorktreeOpenPath { repo: String, path: String, label: String },
     WorktreeRemove { workspace: String },
 }
 
@@ -265,6 +266,13 @@ impl HerdrAct for FakeHerdr {
         let pane = pane_id.to_string();
         self.act(Call::PaneClose { pane: pane_id.into() }, move |s| {
             s.panes.remove(&pane);
+            // A worktree's only pane closed: its workspace is gone too.
+            for entry in s.worktrees.values_mut() {
+                if entry.1.as_deref() == Some(pane.as_str()) {
+                    entry.0 = None;
+                    entry.1 = None;
+                }
+            }
             Outcome::Ok(())
         })
     }
@@ -297,6 +305,22 @@ impl HerdrAct for FakeHerdr {
                 Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
             }
             Some(_) => Outcome::Ok(s.open_worktree(&branch)),
+        })
+    }
+
+    fn worktree_open_path(&mut self, repo: &str, path: &str, label: &str) -> Outcome<Worktree> {
+        let call = Call::WorktreeOpenPath { repo: repo.into(), path: path.into(), label: label.into() };
+        let path = path.to_string();
+        self.act(call, move |s| {
+            let Some(branch) = s.worktrees.iter().find(|(_, v)| v.2 == path).map(|(k, _)| k.clone()) else {
+                return Outcome::Refused { code: "worktree_not_found".into(), message: "no worktree at that path".into() };
+            };
+            match s.worktrees.get(&branch).cloned() {
+                Some((Some(ws), Some(pane), path)) if s.panes.contains_key(&pane) => {
+                    Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
+                }
+                _ => Outcome::Ok(s.open_worktree(&branch)),
+            }
         })
     }
 
