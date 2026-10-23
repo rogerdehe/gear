@@ -1,0 +1,3 @@
+<!-- gear-plan project=gear base=62 -->
+# Verdicts
+- T-30 attempt=1 contract=1 candidate=ce619f79e696b64c19f1a6a20a56f1f1db411ee8 fail rework="Review: `git show origin/review/t30:ops/reviews/T-30.md`. Fix ONLY the two blocking findings: F1 — describe what the shipped binary does today (findings live on the review branch; the rework note gives the `git show origin/review/t<n>:<path>` command); do not claim the store keeps the text (that is T-21, M2). F2 — the captain guide's plan format and kickoff use the milestone fields dev requires now: `done:`, `bar:`, `eta:` lines in every `# Milestone` block (T-22), with one example that `gear plan apply` accepts on a scratch store. F3–F5 are logged. One review round."
