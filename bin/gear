@@ -6,7 +6,17 @@
 # through this wrapper, so it has to work wherever they are started.
 set -eu
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
+# The wrapper may be linked onto PATH. Follow the link, so the plugin root
+# is the real one and not the directory of the link (the review of T-4).
+self="$0"
+while [ -L "$self" ]; do
+  target="$(readlink "$self")"
+  case "$target" in
+    /*) self="$target" ;;
+    *) self="$(dirname "$self")/$target" ;;
+  esac
+done
+root="$(cd "$(dirname "$self")/.." && pwd)"
 binary="$root/target/release/gear"
 
 # The store the board reads. GEAR_DB wins; the default is where the
