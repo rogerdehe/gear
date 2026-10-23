@@ -17,12 +17,15 @@
 
 pub mod dispatch;
 pub mod doorbell;
+pub mod feed;
 pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod quota;
 pub mod release;
 pub mod review;
+pub mod stall;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -64,6 +67,8 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
+    pub quota: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -74,6 +79,9 @@ pub struct TickReport {
     pub reviewers: Vec<String>,
     /// Reviewer seats released this tick (their task left review).
     pub released: Vec<String>,
+    /// Lane items for the captain opened, updated or closed this tick
+    /// (`lane:action`), from the keep-lanes-fed watch.
+    pub feed: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -105,6 +113,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+
+        // 1b. quota: a lane on a provider limit switches model or parks
+        //     (design/01 `[models].on_quota`). It runs before the confirm, so a
+        //     lane that is on quota does not have its delivery budget spent.
+        let quota = quota::apply_quota_policy(store, herdr, cfg, &project, &observed, now)?;
+        report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let (confirmed, flagged) =
@@ -140,17 +154,33 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
-        // 6. review: a lane handed a result in → a temp reviewer starts. The
+        // 6. feed: a lane running dry gets one item in the captain's inbox,
+        //    before it stops (never-stop). Idempotent per lane and tick.
+        report.feed.extend(
+            feed::keep_lanes_fed(store, &project, now)?
+                .into_iter()
+                .map(|change| format!("{}:{}", change.lane, change.action)),
+        );
+
+        // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
 
-        // 6c. release: a reviewer whose task left review frees its slot (T-17).
+        // 8. release: a reviewer whose task left review frees its slot (T-17).
         let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
         report.released.extend(releases.released);
 
-        // 7. execute: re-check each op, call Herdr, record the outcome.
+        // 9. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+    }
+    // 10. every flagged seat reaches its captain (L-52): a flag that only goes
+    //     to the log leaves a lane standing still with nobody knowing.
+    for seat in report.flagged.clone() {
+        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+            // One seat's alert failing never stops the tick.
+            report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
+        }
     }
     Ok(report)
 }

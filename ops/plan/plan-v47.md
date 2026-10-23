@@ -1,0 +1,17 @@
+<!-- gear-plan project=gear base=46 -->
+# Milestone M1: Self-hosting loop, delivered as v0.1.0
+Done when: (1) a task a lane hands in is reviewed and then merged into dev or sent back without the captain's hands, reviewers on warm seats (T-12, T-18); (2) a new user without Rust installs GEAR from a GitHub release, follows the README quickstart and runs a captain + lanes + reviewers project (T-26, T-27); (3) dev is merged into main and tagged v0.1.0 (captain, user approved).
+
+# Decisions
+- 2026-10-23 USER: M1 is a delivery — to ourselves and to other users; merge into main and publish a release they can install without Rust. T-26 (README) and T-27 (release packaging) join M1 at the head of board's and data's queues, ahead of their M2 work. Same closing rules: one review round, only P0 or a break of the done-sentence sends work back.
+
+# Queue
+## NEW [must] lane=board milestone=M1 required
+goal: A user-facing README.md that gets a new user from nothing to a running project. Sections, short and true (every command run once by you on this machine where it can be, and marked if it cannot): what GEAR is and when to use it (PRD §0: big, long, multi-agent, re-planned work; otherwise talk to an agent directly); requirements (Herdr >= 0.9.1, at least one agent CLI: opencode / codex / claude; git); install (`herdr plugin install <owner>/<repo>` — the build step fetches the prebuilt binary, T-27; `bin/gear` on PATH); kickoff (`gear admin kickoff` -> edit the printed gear.toml -> `GEAR_ADMIN=1 gear admin init gear.toml`; the captain installs the skill: `gear --skill` content as a skill file for its agent); daily use (the engine starts itself; the board on a key `[[keys.command]]`; captain loop: `gear`, `gear reply`, `gear plan apply`); stop and upgrade (`gear admin stop`); troubleshooting (`engine.log` next to the store). The design/dev material moves under a short "Developing GEAR" section at the end. Purpose: other users try M1 without help.
+accept: README.md reads top to bottom as the quickstart; every command block marked verified or not-verifiable-here; links to PRD/conventions only at the end. No code changes.
+deps: -
+
+## NEW [must] lane=data milestone=M1 required
+goal: A release users install without Rust. (1) `.github/workflows/release.yml`: on a `v*` tag, build `gear` (release) for aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu, package `gear-<version>-<target>.tar.gz` with a `.sha256`, and upload them to the GitHub release of that tag. (2) `scripts/fetch-or-build.sh` (the plugin's `[[build]]` in herdr-plugin.toml): detect the target, download the archive for the plugin's version from the repo's release, verify the sha256, unpack the binary to `target/release/gear` (so bin/gear finds it); on any miss (no release, offline, bad checksum, unknown platform) fall back to `cargo build --release` and say so. Model it on the herdr-file-viewer plugin's fetch-or-build script (~/.config/herdr/plugins/github/*/scripts/fetch-or-build.sh). Purpose: no Rust toolchain for users. Environment: the script runs in the plugin root at install time; curl/shasum may be missing -> fall back to building.
+accept: workflow passes `actionlint` if available (else yaml parses) and its build matrix and archive names match the script; the script, run here with a fake release URL pointing at a local archive (file://), installs and verifies the binary; with a bad checksum it falls back; cargo test --workspace green.
+deps: -
