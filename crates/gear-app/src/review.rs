@@ -55,7 +55,9 @@ pub struct Review {
 ///
 /// Checks, in this order:
 /// - the task exists (`NoTarget`);
-/// - the attempt exists (`NoTarget`);
+/// - the attempt exists (`NoTarget`), and its outcome is still open
+///   (`BadTransition`): a review of an attempt that is already settled is late
+///   and must not create captain work (R-67 P1);
 /// - the seat is a **temp** seat (`Forbidden`): a lane or the captain may not
 ///   hand in a verdict;
 /// - the temp seat is bound to **that** task (`NoTarget`): a reviewer bound to
@@ -70,12 +72,27 @@ pub fn submit_review(tx: &Tx<'_>, review: &Review, now: Ts) -> GearResult<()> {
             format!("no task {} in project {}", review.task, review.project),
         ));
     }
-    if tx.get_attempt(&review.project, &review.task, review.attempt)?.is_none() {
+    let attempt = tx
+        .get_attempt(&review.project, &review.task, review.attempt)?
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!(
+                    "no attempt {} of task {} in project {}",
+                    review.attempt, review.task, review.project
+                ),
+            )
+        })?;
+    // The settlement already happened: a late review changes nothing and
+    // leaves no action item for the captain.
+    if attempt.state.is_terminal() {
         return Err(GearError::new(
-            ErrorCode::NoTarget,
+            ErrorCode::BadTransition,
             format!(
-                "no attempt {} of task {} in project {}",
-                review.attempt, review.task, review.project
+                "attempt {} of task {} is {}: its review is settled, a late verdict changes nothing",
+                review.attempt,
+                review.task,
+                attempt.state.as_str()
             ),
         ));
     }

@@ -225,7 +225,7 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
                 .find(|verdict| {
                     verdict.passed
                         && verdict.attempt == latest.n
-                        && verdict.contract_version == latest.contract_version
+                        && verdict.contract_version == task.contract_version
                         && Some(&verdict.candidate) == latest.candidate.as_ref()
                 })
             else {
@@ -325,7 +325,7 @@ fn merge_one(
 
     // 1. a clean base: the remote integration branch, whatever an interrupted
     //    earlier run left behind.
-    git(dir, &["fetch", "origin"])?;
+    git(dir, &["fetch", "--prune", "origin"])?;
     git(dir, &["reset", "--hard", &format!("origin/{integration}")])?;
 
     // P0: the approved candidate, never whatever the branch points at now.
@@ -337,11 +337,16 @@ fn merge_one(
     // new verdict, not a merge.
     match git(dir, &["rev-parse", "--verify", &format!("origin/{branch}")]) {
         Ok(head) => {
-            if head.trim() != candidate {
+            let head = git(dir, &["rev-parse", &head.trim().to_string()])
+                .unwrap_or_else(|_| head.trim().to_string());
+            let candidate_sha = git(dir, &["rev-parse", &candidate])
+                .unwrap_or_else(|_| candidate.clone());
+            if head.trim() != candidate_sha.trim() {
                 return Err(format!(
-                    "{task}: origin/{branch} is at {} but the approved candidate is {candidate}\n\
+                    "{task}: origin/{branch} is at {} but the approved candidate is {}\n\
                      the branch moved after the review: a new verdict is needed",
-                    head.trim()
+                    head.trim(),
+                    candidate_sha.trim()
                 ));
             }
         }
