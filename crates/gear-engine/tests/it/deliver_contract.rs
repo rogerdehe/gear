@@ -27,7 +27,7 @@ fn texts_match_design_09() {
     assert_eq!(continue_text("T-17", 4, "ops/tasks/T-17.md"),
         "Continue T-17 (contract v4). Run `gear` first (it records that you got this). Task packet: ops/tasks/T-17.md. Report progress/blocked/done with gear send.");
     assert_eq!(assign_text("T-31", 1, "heat/t31-login", "ops/tasks/T-31.md"),
-        "New task T-31 (contract v1). Branch: heat/t31-login (in your worktree). Run `gear` first (it records that you got this). Task packet: ops/tasks/T-31.md. Read it before starting; report with gear send.");
+        "New task T-31 (contract v1). Branch: heat/t31-login (in your worktree). Run `gear` first (it records that you got this). Task packet: ops/tasks/T-31.md. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle.");
 }
 
 #[test]
