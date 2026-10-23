@@ -15,6 +15,7 @@ fn opencode() -> Profile {
         session_ref: false,
         resume_args: None,
         exit_keys: vec!["ctrl+c".into()],
+        exit_command: None,
         verified: false,
     }
 }

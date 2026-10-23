@@ -95,13 +95,15 @@ fn a_partial_block_overrides_only_the_given_fields() {
 fn a_profile_without_unattended_args_is_refused_at_init() {
     let mut s = world();
     // A lane whose profile has no unattended args cannot run unattended.
+    // A kind with no built-in profile: the block is the whole profile.
     let text = config_with("").replace(
         r#"[profiles.grok]
 kind = "grok"
-unattended_args = ["--yolo"]"#,
-        r#"[profiles.grok]
-kind = "grok""#,
-    ).replace(r#"profile = "opencode""#, r#"profile = "grok""#);
+unattended_args = ["--yolo"]
+exit_keys = ["ctrl+c", "ctrl+d"]"#,
+        r#"[profiles.pi]
+kind = "pi""#,
+    ).replace(r#"profile = "opencode""#, r#"profile = "pi""#);
 
     let err = admin::init(&mut s, &admin_env(), &text, NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
@@ -133,16 +135,16 @@ fn a_configured_profile_is_accepted_at_init() {
 fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
     let inventory = kickoff::Inventory {
         installed: vec![kickoff::Installed {
-            kind: "grok".into(),
-            executable: "/usr/local/bin/grok".into(),
-            models: vec!["grok-1".into()],
+            kind: "pi".into(),
+            executable: "/usr/local/bin/pi".into(),
+            models: vec!["pi-1".into()],
             note: None,
         }],
         missing: vec![],
     };
     let text = kickoff::skeleton(&inventory);
-    assert!(text.contains("[profiles.grok]"), "{text}");
-    assert!(text.contains("# kind = \"grok\""), "{text}");
+    assert!(text.contains("[profiles.pi]"), "{text}");
+    assert!(text.contains("# kind = \"pi\""), "{text}");
     assert!(text.contains("# unattended_args"), "{text}");
     // A kind with a built-in profile needs no block.
     let known = kickoff::Inventory {

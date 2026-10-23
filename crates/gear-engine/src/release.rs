@@ -121,6 +121,9 @@ fn release_one(
     //    job reopens it. A pane already gone is fine.
     if seat.state == SeatState::Active {
         if let Some(pane) = pane.as_deref() {
+            // A finished reviewer's pane is always closed (herdr `pane_close`),
+            // grok included: a reviewer lives for one job, there is no session
+            // to resume, and a closed pane cannot leave a stuck slot.
             match herdr.pane_close(pane) {
                 Outcome::Ok(()) => {}
                 Outcome::Refused { code, .. } if code == "pane_not_found" => {}
@@ -252,7 +255,7 @@ profile = "codex"
 "#;
 
     /// A project with one task in `state` and a reviewer bound to it on `pane`.
-    fn world(state: TaskState, pane: &str) -> Store {
+    fn world(state: TaskState, pane: &str, profile: &str) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -284,7 +287,7 @@ profile = "codex"
                     rework_note: None,
                     updated: T0,
                 })?;
-                testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, profile, T0)?;
                 Ok(())
             })
             .unwrap();
@@ -319,7 +322,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
 
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
@@ -354,7 +357,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         // The engine died right after the exit keys were sent.
         store
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
@@ -388,7 +391,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         store
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
@@ -414,7 +417,7 @@ profile = "codex"
         };
         herdr.add_agent(&first.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         herdr.add_agent(&second.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &first.pane_id);
+        let mut store = world(TaskState::Cancelled, &first.pane_id, "codex");
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
@@ -462,12 +465,38 @@ profile = "codex"
     }
 
     #[test]
+    fn a_grok_reviewers_pane_is_closed() {
+        // T-32 rework: a finished reviewer's pane is closed whatever its CLI
+        // is — grok included. A reviewer lives for one job, there is no session
+        // to resume, and a closed pane cannot leave a stuck slot.
+        let mut herdr = FakeHerdr::new();
+        let worktree = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
+            Outcome::Ok(worktree) => worktree,
+            other => panic!("{other:?}"),
+        };
+        herdr.add_agent(&worktree.pane_id, "grok", gear_herdr::AgentStatus::Idle);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "grok");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call, Call::PaneClose { pane } if pane == &worktree.pane_id)),
+            "the pane is closed: {:?}",
+            herdr.calls
+        );
+        assert!(herdr.prompts_to(&worktree.pane_id).is_empty(), "no exit command is sent");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing);
+    }
+
+    #[test]
     fn a_queued_or_starting_reviewer_is_never_released() {
         // R1 of the review: a reviewer waiting for a slot (Queued) or one that
         // is starting holds no worktree, and releasing it would throw away the
         // review it is about to do — even when its task is already cancelled.
         let mut herdr = FakeHerdr::new();
-        let mut store = world(TaskState::Cancelled, "w1:p1");
+        let mut store = world(TaskState::Cancelled, "w1:p1", "codex");
         for state in [SeatState::Queued, SeatState::Starting] {
             store
                 .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
@@ -492,7 +521,7 @@ profile = "codex"
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         // The task is Verifying with a submitted attempt: the reviewer works.
-        let mut store = world(TaskState::Verifying, &worktree.pane_id);
+        let mut store = world(TaskState::Verifying, &worktree.pane_id, "codex");
         store
             .write(|tx| {
                 let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap_or(gear_store::AttemptRow {
