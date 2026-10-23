@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
+    OpenCodeApi { args: Vec<String> },
     Prompt { pane: String, text: String },
     PaneRun { pane: String, command: String },
     AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
@@ -38,6 +39,8 @@ struct FakePane {
 
 #[derive(Debug, Default)]
 pub struct FakeHerdr {
+    /// Ordered service replies, independent of terminal failure injection.
+    pub api_replies: std::collections::VecDeque<Result<serde_json::Value, String>>,
     panes: BTreeMap<String, FakePane>,
     /// When true every read returns ObserveError.
     pub observe_fails: bool,
@@ -223,6 +226,10 @@ impl HerdrRead for FakeHerdr {
 }
 
 impl HerdrAct for FakeHerdr {
+    fn opencode_api(&mut self, args: &[String]) -> Result<serde_json::Value, String> {
+        self.calls.push(Call::OpenCodeApi { args: args.to_vec() });
+        self.api_replies.pop_front().unwrap_or_else(|| Err("fake API unavailable".into()))
+    }
     fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
         let call = Call::Prompt { pane: pane_id.into(), text: text.into() };
         let pane = pane_id.to_string();
