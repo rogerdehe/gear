@@ -1,6 +1,6 @@
 # 06 Tasks and Attempts
 
-File: `gear/work/tasks.py`. Budget 130–160 lines.
+Implementation: [tasks.rs](../../crates/gear-app/src/tasks.rs).
 Invariants upheld: one writer per write resource (together with 10 and the resources table); completion is bound to a contract and an output version; an old attempt cannot complete a new contract.
 
 ## Responsibilities
@@ -12,27 +12,6 @@ Invariants upheld: one writer per write resource (together with 10 and the resou
 ## Not done
 
 Does not judge when to continue (09); does not parse plan drafts (05); does not run verification (12).
-
-## External interface
-
-```python
-def current_attempt(conn, project, task) -> Attempt | None
-def start_attempt(conn, project, task, seat_id, generation) -> Attempt
-    # preconditions (re-read inside the transaction): task READY; dependencies satisfied by version; seat ACTIVE/STANDBY with matching generation;
-    # seat has no in-progress attempt; the lane's worktree is held by this seat and has no unsaved changes from another task (see below)
-def on_delivery_confirmed(conn, attempt) -> None        # task READY→RUNNING, attempt →STARTED
-def on_stopped / on_started(conn, attempt) -> None
-def submit_result(conn, project, task, attempt_n, contract_version, candidate, report, safe_point) -> None
-    # gear send --kind result; must reference the exact task/attempt/contract; attempt→SUBMITTED, task→VERIFYING
-def adopt_contract(conn, project, task, attempt_n, update_msg_id, version) -> None
-    # only accepts an explicit receipt for a contract update item already sent, with a version matching that item; must not lower the adopted version;
-    # if another update arrives meanwhile, the newer update stays pending adoption
-def preempt_request(conn, project, task, reason) -> str  # generates a "stop at safe point" instruction message (needs_ack)
-def preempt_ack(conn, project, task, attempt_n, instruction_id, saved_ref) -> None
-    # the receipt must reference the exact instruction, task, attempt, version, and give a reference to where the work is saved (a commit or a registered persistent copy);
-    # after checking: attempt→ABANDONED, task→READY (owning lane unchanged)
-def settle(conn, verdict: Verdict) -> None               # called only by acceptance verdicts from 05 plan apply
-```
 
 ## Key rules
 

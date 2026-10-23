@@ -7,8 +7,6 @@
 //! `ERROR <CODE>: <detail>` on stderr with `ErrorCode::exit_code()`.
 //! Every write command prints `request: <id>` to stderr **before** committing.
 
-#![allow(unused_variables, dead_code)] // skeleton
-
 use clap::{Args, Parser, Subcommand};
 use gear_model::{GearError, GearResult};
 
@@ -237,7 +235,7 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
-        Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
+        Some(Cmd::Admin { .. }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
 }
 
@@ -1299,7 +1297,6 @@ mod tests {
     use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
     use gear_store::{testing, ContractRow, Store, TaskRow};
     use std::collections::BTreeMap;
-
 
     const T0: i64 = 1_800_000_000;
     const CAP_PANE: &str = "w1:p1";

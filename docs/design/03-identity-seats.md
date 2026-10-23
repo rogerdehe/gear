@@ -1,6 +1,6 @@
 # 03 Identity, Seats, Generations, Manual Captain Replacement
 
-Files: `gear/core/identity.py` (+ the seat/captain subcommands in `cli/admin.py`). Budget 170–210 lines.
+Implementation: [identity.rs](../../crates/gear-app/src/identity.rs), [seats.rs](../../crates/gear-app/src/seats.rs).
 Invariants upheld: an old generation cannot overwrite newer state; one continuation controller per lane; no writes when identity is unclear.
 
 ## Concepts
@@ -39,24 +39,6 @@ The onboarding target must be a checked, usable shell pane: if an existing Agent
 - **An incoming captain awaiting handover** (pending binding) may only read its own handover packet and submit that handover's ACK; all other writes are rejected.
 
 ## External interface
-
-```python
-@dataclass
-class Caller:
-    kind: Literal["seat", "admin", "anonymous"]
-    project: str | None
-    seat: Seat | None
-    generation: int | None
-def resolve_caller(conn, env: Mapping[str,str], herdr_ro: HerdrReadOnly) -> Caller   # queries outside the transaction
-def require(conn, caller, *, roles=None, states=None) -> Seat   # re-read and check generation inside the transaction
-
-def onboard_intent(conn, seat_id, pane_id, kind, profile, resume_ref: str|None) -> str
-    # inside a transaction, reserve a unique new generation and create a pending binding, return the op id; retries/restarts reuse the same operation and generation
-def onboard_complete(conn, op_id, fingerprint: Fingerprint) -> None
-    # only confirms the start result of the same binding, no further increment; ordinary seats activate on confirmation and the old binding is voided;
-    # an incoming captain stays pending until the ACK for this handover
-def mark(conn, seat_id, state: SeatState, reason: str) -> None
-```
 
 Data (02's `seats` and `bindings` tables): one binding per onboarding (seat, generation, execution host/session, pane, kind, session_ref, status active/void/pending).
 
