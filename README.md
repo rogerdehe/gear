@@ -44,10 +44,11 @@ description = "GEAR plan board"
 
 ## Start a project
 
-1. **Kickoff** — see what this machine offers (agent CLIs and their models) and get a config skeleton with the TODOs to fill in:
+1. **Kickoff** — see what this machine offers (agent CLIs and their models) and get a config skeleton with the TODOs to fill in. GEAR keeps its files in `gear/` in your project: the config at `gear/gear.toml`, one plan per voyage at `gear/voyages/<milestone>.md`:
 
    ```bash
-   gear admin kickoff | sed -n '/^# gear.toml/,$p' > gear.toml
+   mkdir -p gear
+   gear admin kickoff | sed -n '/^# gear.toml/,$p' > gear/gear.toml
    ```
 
    *Verified:* the kickoff prints the inventory and then a `gear.toml` skeleton; the extracted skeleton is 36 lines of TOML. Fill in the project, the captain's pane, the lanes (names, duty, owned paths), the review slots, the models (developers on a fast model, reviewers on a different, stronger one) and the quota policy (switch to the next model, or wait for the reset). Until the TODOs are filled, `gear admin init` names what is missing.
@@ -57,12 +58,12 @@ description = "GEAR plan board"
 2. **Register it** (in your own shell, not inside an agent):
 
    ```bash
-   GEAR_ADMIN=1 gear admin init gear.toml
+   GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
    *Verified:* with a filled config it registers the project and its seats. After registration, the next `gear` call (the captain's first one, below) starts the engine in the background and brings the lanes up in their own Herdr worktrees.
 
-3. **Start the captain** — in the Herdr pane you named in `gear.toml`, in your project directory, export the captain's context and start the agent you want as captain (the same pane and kind as in the config):
+3. **Start the captain** — in the Herdr pane you named in `gear/gear.toml`, in your project directory, export the captain's context and start the agent you want as captain (the same pane and kind as in the config):
 
    ```bash
    export GEAR_CTX=acme:captain:1        # <project.id>:captain:<generation>
@@ -89,13 +90,15 @@ description = "GEAR plan board"
 
    *Not verifiable here:* `install-skill`, `gear --skill` and the captain guide are the release work in this milestone and are not in this build of `gear` yet. The command and the locations are the intended release behaviour: it writes `SKILL.md` and the references into `~/.claude/skills/gear` (Codex: `~/.codex/skills/gear`, OpenCode: `~/.config/opencode/skills/gear`, Grok: `~/.grok/skills/gear`) and prints every path.
 
-6. **Plan** — the captain writes a plan draft and applies it:
+6. **Plan** — the captain writes the voyage's plan file and applies it:
 
    ```bash
-   gear plan apply plan.md
+   gear plan apply gear/voyages/M1.md
    ```
 
-   *Verified:* as the captain on a scratch store, a first `gear plan apply` created the plan and its tasks (plan version 1, `created T-1`). The plan format itself is described by the captain guide, which is the release work of step 5; the lanes start working at once.
+   After a successful apply GEAR rewrites that same file in place (`base=` becomes the applied version, each `## NEW` block gets its id, the `# Verdicts` section goes), so the file is always the current plan and the captain keeps editing it. A landed voyage's file is kept as its record; the next voyage starts a new `gear/voyages/<milestone>.md`. The lanes start working at once.
+
+   *Verified:* as the captain on a scratch store, a first `gear plan apply` created the plan and its tasks (plan version 1, `created T-1`). The plan format itself is described by the captain guide.
 
 ## Day to day
 
