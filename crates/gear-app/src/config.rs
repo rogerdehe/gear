@@ -2,8 +2,12 @@
 //! text, apply defaults, validate what can be checked without Herdr or git.
 //! Checks that need the outside world (session exists, repo/branch exist,
 //! profile verified) live in `gear admin init`, not here.
+//!
+//! The one exception is [`latest`]: it reads the config a project is
+//! registered with, so the engine and every command read the same version.
 
 use gear_model::{ErrorCode, GearError, GearResult};
+use gear_store::Store;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -173,6 +177,27 @@ pub struct ConfigIssue {
 pub fn parse(text: &str) -> GearResult<ProjectConfig> {
     toml::from_str::<ProjectConfig>(text)
         .map_err(|e| GearError::new(ErrorCode::BadFormat, e.to_string()))
+}
+
+/// The config a project is registered with: the text the store holds for its
+/// **latest** config version, parsed. A project that is not registered →
+/// `NoTarget`; stored text that does not parse → `BadFormat`.
+///
+/// The config is read from the store every time, so a config change (T-6) is
+/// what the next reader sees — there is no second copy anywhere. A caller that
+/// also needs the seats the config is read against (the engine's onboarding)
+/// reads both in **one** transaction and parses outside it, so a config change
+/// can never be seen half-applied (review R-63).
+pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
+    let row = store
+        .read(|tx| tx.get_project(project))?
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("no project {project} in the store"),
+            )
+        })?;
+    parse(&row.config_toml)
 }
 
 /// All findings, in field order (project, quota, captain, lanes in order,
