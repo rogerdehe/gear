@@ -77,6 +77,14 @@ pub fn start_reviews(
     // packet gets it before anything else is started.
     report.started.extend(recover_missing_packets(store, project, &config, now)?);
 
+    // The live reviewers' sessions: Herdr reports an agent's session
+    // asynchronously — it is often missing from the start reply and shows up
+    // in the next observation. The session belongs to the task the seat is
+    // bound to, so a re-review of that task resumes it (F2 of the T-18
+    // review). This runs before the release step, so the session is saved
+    // before the seat is handed to the next job.
+    record_reviewer_sessions(store, herdr, project)?;
+
     for task in tasks_to_review(store, project)? {
         // 1. the reviewer seat: created once and bound to the task for life.
         let seat = match temp_seat_of(store, project, &task.task)? {
@@ -429,7 +437,11 @@ fn start_reviewer(
         // The start was accepted before the restart: adopt it. Nothing is
         // typed into it — not the environment, not the checkout.
         Some(info) => {
-            if !recorded_start(store, &seat.id, generation, &pane, &kind)? {
+            // A recorded request is not evidence that the occupant is its
+            // result: the agent that is really there must be the kind this
+            // engine asked for (F5/F3 of the T-18 review).
+            let wanted = info.agent.as_deref() == Some(kind.as_str());
+            if !wanted || !recorded_start(store, &seat.id, generation, &pane, &kind)? {
                 // Another agent is in the pane: do not start, and never take
                 // the pane from it. A human decides.
                 park(
@@ -501,10 +513,14 @@ fn start_reviewer(
                 Outcome::Ok(info) => info,
                 Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
                     // The shell of a fresh worktree is still starting: the next
-                    // tick tries again (the seat keeps its binding).
+                    // tick tries again (the seat keeps its binding). Nothing
+                    // started, so the intent goes: it must not authorize the
+                    // adoption of an agent that is not ours.
+                    forget_start(store, &seat.id, generation)?;
                     return Ok(Started::NotYet);
                 }
                 other => {
+                    forget_start(store, &seat.id, generation)?;
                     park(store, &seat.id, &step_failure("agent_start", &other), now)?;
                     return Ok(Started::NotYet);
                 }
@@ -728,6 +744,11 @@ fn checkout_ready(
 
 /// Submit the checkout of a job and remember its token, so that the next tick
 /// can read the chain's report.
+///
+/// The command goes out **before** the token is recorded: a saved intent is
+/// not a submission. A restart between the two leaves no intent, so the next
+/// tick submits the (idempotent) checkout again instead of waiting for a
+/// report that will never come (F1 of the T-18 review).
 fn submit_checkout(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -740,13 +761,13 @@ fn submit_checkout(
 ) -> GearResult<()> {
     let token = next_checkout_token(store)?;
     let command = checkout_command(path, branch, candidate, &token);
-    store.write(|tx| tx.set_meta(&checkout_key(seat, generation), &token))?;
     if let Outcome::Ok(()) = herdr.pane_run(pane, &command) {
+        // The command is out: its report is what the next tick waits for.
+        store.write(|tx| tx.set_meta(&checkout_key(seat, generation), &token))?;
         Ok(())
     } else {
-        // The pane refused the text: the intent is void, the next tick tries
-        // again with a fresh token.
-        store.write(|tx| tx.set_meta(&checkout_key(seat, generation), ""))?;
+        // The pane refused the text: nothing was submitted, so no intent is
+        // recorded and the next tick tries again.
         Ok(())
     }
 }
@@ -798,6 +819,13 @@ fn record_start(
 ) -> GearResult<()> {
     let record = serde_json::json!({ "pane": pane, "kind": kind, "label": label });
     store.write(|tx| tx.set_meta(&start_key(seat, generation), &record.to_string()))
+}
+
+/// Forget a recorded start: the start was refused, so nothing is in the pane
+/// and no request may authorize the adoption of an occupant (F5 of the T-18
+/// review).
+fn forget_start(store: &mut Store, seat: &str, generation: i64) -> GearResult<()> {
+    store.write(|tx| tx.set_meta(&start_key(seat, generation), ""))
 }
 
 /// The args a reviewer starts with: the profile's unattended args, the model
@@ -916,6 +944,59 @@ fn recover_missing_packets(
         recovered.push(seat.id.clone());
     }
     Ok(recovered)
+}
+
+/// Record the sessions the live reviewers report.
+///
+/// Herdr reports an agent's session asynchronously: the reply to
+/// `agent.start` often carries none, and the session shows up in the next
+/// observation. The session belongs to the task the seat is bound to — not to
+/// the seat — so it is kept per task and a re-review of that task resumes it
+/// (F2 of the T-18 review).
+fn record_reviewer_sessions(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+) -> GearResult<()> {
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Active {
+            continue;
+        }
+        let Some(task) = seat.task_id.clone() else {
+            continue;
+        };
+        let Some(pane) = seat_pane(store, &seat.id, seat.generation)? else {
+            continue;
+        };
+        let Ok(Some(info)) = herdr.agent_get(&pane) else {
+            // The pane cannot be looked at: no session is known.
+            continue;
+        };
+        let Some(session) = info
+            .agent_session
+            .as_ref()
+            .map(|session| session.value.clone())
+            .filter(|session| !session.is_empty())
+        else {
+            continue;
+        };
+        let key = session_key(project, &task);
+        let known = store.read(|tx| tx.get_meta(&key))?;
+        if known.as_deref() != Some(session.as_str()) {
+            store.write(|tx| tx.set_meta(&key, &session))?;
+        }
+    }
+    Ok(())
+}
+
+/// The pane of a seat's current binding.
+fn seat_pane(store: &mut Store, seat: &str, generation: i64) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        Ok(tx
+            .get_binding(seat, generation)?
+            .map(|binding| binding.pane_id))
+    })
 }
 
 /// Where a seat's worktree path is kept (the seat row has no field for it).
@@ -1905,10 +1986,12 @@ review = ["gpt-6.1-sol"]
     }
 
     #[test]
-    fn a_rereview_resumes_the_jobs_session() {
-        // F3 of the T-18 review: a re-review of the same task resumes that
-        // job's session — the reviewer keeps its conversation instead of
-        // starting from nothing.
+    fn a_late_reported_session_is_used_for_the_rereview() {
+        // F2 and F3 of the T-18 review: Herdr reports an agent's session
+        // asynchronously — the reply to `agent.start` carries none, and the
+        // session shows up in the next observation. The session belongs to the
+        // task, so a re-review of that task resumes it instead of starting a
+        // new conversation.
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
@@ -1918,25 +2001,35 @@ review = ["gpt-6.1-sol"]
         start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 15).unwrap();
         let first_args = starts(&herdr)[0].1.clone();
         assert!(!first_args.iter().any(|arg| arg == "resume"), "{first_args:?}");
-        // Herdr reported the session of the reviewer.
+        // The start reply carried no session …
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&session_key("p", "T-1")))
+                .unwrap()
+                .is_none(),
+            "the start reply has no session"
+        );
+        // … Herdr reports it a moment later, and the engine keeps it.
+        herdr.report_session("wt1:p1", "job1-session");
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
         let session = store
             .read(|tx| tx.get_meta(&session_key("p", "T-1")))
             .unwrap()
             .expect("the reviewer's session");
-        assert!(!session.is_empty(), "the session is kept for the re-review");
+        assert_eq!(session, "job1-session");
 
         // The review fails: the reviewer is released and its agent exits.
         store
             .write(|tx| {
                 let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
                 attempt.state = AttemptState::Rejected;
-                attempt.updated = T0 + 20;
+                attempt.updated = T0 + 25;
                 tx.update_attempt(&attempt)?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.state = TaskState::Ready;
-                task.updated = T0 + 20;
+                task.updated = T0 + 25;
                 tx.update_task(&task)?;
-                tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + 20)
+                tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + 25)
             })
             .unwrap();
         herdr.exit_agent("wt1:p1");
@@ -1944,15 +2037,15 @@ review = ["gpt-6.1-sol"]
         // Attempt 2 of the same task is handed in.
         store
             .write(|tx| {
-                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 25)?;
-                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 25)?;
-                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "abc1234", "ops/reports/T-1.md", T0 + 25)
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "abc1234", "ops/reports/T-1.md", T0 + 30)
             })
             .unwrap();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 35).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 35).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 40).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let second_args = &starts(&herdr)[1].1;
@@ -1961,6 +2054,144 @@ review = ["gpt-6.1-sol"]
             "the re-review resumes the session {session}: {second_args:?}"
         );
         assert!(second_args.iter().any(|arg| arg == "resume"), "{second_args:?}");
+    }
+
+    #[test]
+    fn a_checkout_intent_without_a_submission_is_submitted_again() {
+        // F1 of the T-18 review: a saved intent is not a submission. A restart
+        // between the two leaves no intent, so the engine must submit the
+        // (idempotent) checkout again instead of waiting for a report that
+        // will never come — otherwise the review never starts.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        // The first job's reviewer is up.
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 15).unwrap();
+        // T-1 is settled and T-2 is handed in; the seat takes the new job.
+        store
+            .write(|tx| {
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Accepted;
+                attempt.updated = T0 + 20;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                task.updated = T0 + 20;
+                tx.update_task(&task)?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 2,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    version: 1,
+                    goal: "the second goal".into(),
+                    accept: "the second accept".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0 + 20)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0 + 20)?;
+                gear_app::tasks::submit_result(tx, "p", "T-2", 1, 1, "def5678", "ops/reports/T-2.md", T0 + 20)?;
+                tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + 20)
+            })
+            .unwrap();
+        herdr.exit_agent("wt1:p1");
+
+        // The engine submits the checkout of T-2 …
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 25).unwrap();
+        let token = store
+            .read(|tx| tx.get_meta(&checkout_key("p:review-1", 2)))
+            .unwrap()
+            .expect("the checkout's token");
+        // … and the engine dies before it records the intent (the crash the
+        // review describes). The pane still shows the report of the chain
+        // that went out.
+        store
+            .write(|tx| tx.set_meta(&checkout_key("p:review-1", 2), ""))
+            .unwrap();
+        herdr.set_screen("wt1:p1", &format!("{OK_MARKER}{token}_def5678_review/t2"));
+
+        // The next tick does not wait for that report: it submits the
+        // checkout again.
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
+        let new_token = store
+            .read(|tx| tx.get_meta(&checkout_key("p:review-1", 2)))
+            .unwrap()
+            .expect("the checkout's token");
+        assert_ne!(new_token, token, "a fresh token for the new submission");
+        assert_eq!(
+            herdr.started_agents,
+            vec!["p-review-t1".to_string()],
+            "only the first job's agent so far"
+        );
+
+        // The report of the new chain arrives: the reviewer starts, once.
+        herdr.set_screen("wt1:p1", &format!("{OK_MARKER}{new_token}_def5678_review/t2"));
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 35).unwrap();
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        // Exactly one agent for the second job, on the same seat.
+        assert_eq!(herdr.started_agents.len(), 2, "{:?}", herdr.started_agents);
+        assert_eq!(herdr.started_agents.last().unwrap(), "p-review-t2");
+        // The seat's worktree is the same one: the cache stays.
+        assert_eq!(worktrees(&herdr).len(), 1, "one worktree in total");
+    }
+
+    #[test]
+    fn a_refused_start_does_not_authorize_another_occupant() {
+        // F5/F3 of the T-18 review: a start that was refused proves nothing
+        // started, so its request must not authorize the adoption of an agent
+        // that is not ours. The probe: the start is refused (the shell is not
+        // ready), then a captain action opens another agent in the pane.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        // The shell is not ready: the start is refused.
+        herdr.refuse_next_start = Some("agent_pane_busy".into());
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 15).unwrap();
+        assert!(report.started.is_empty(), "{report:?}");
+        // A captain opens another agent in the reviewer's pane.
+        herdr.exit_agent("wt1:p1");
+        herdr.add_agent("wt1:p1", "claude", gear_herdr::AgentStatus::Idle);
+        let before = pane_runs(&herdr, "wt1:p1").len();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+
+        assert!(report.started.is_empty(), "the other agent is not adopted");
+        assert!(
+            herdr.started_agents.is_empty(),
+            "no reviewer on a foreign agent: {:?}",
+            herdr.started_agents
+        );
+        assert_eq!(
+            pane_runs(&herdr, "wt1:p1").len(),
+            before,
+            "the foreign agent gets no shell text: {:?}",
+            pane_runs(&herdr, "wt1:p1")
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Unknown, "the seat waits for a human");
     }
 
     #[test]

@@ -85,6 +85,12 @@ impl FakeHerdr {
         p.agent.as_mut().expect("pane has no agent").2 = session.map(str::to_string);
     }
 
+    /// Herdr reports the agent's session: the agent in `pane` gets one (as it
+    /// does a moment after the start, when the session is first known).
+    pub fn report_session(&mut self, pane: &str, session: &str) {
+        self.set_session_ref(pane, Some(session));
+    }
+
     pub fn set_screen(&mut self, pane: &str, screen: &str) {
         self.panes.get_mut(pane).expect("unknown pane").screen = screen.into();
     }
@@ -235,10 +241,12 @@ impl HerdrAct for FakeHerdr {
                 Outcome::Refused { code: "pane_not_available".into(), message: "occupied".into() }
             }
             Some(p) => {
-                // Herdr reports the session of the agent it started (the codex
-                // uuid), so the fake does too: a caller that resumes a session
-                // needs one to resume.
-                p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
+                // Herdr reports the session of the agent it started
+                // asynchronously: the reply of `agent.start` often carries
+                // none, and the session shows up in the next observation. The
+                // fake does the same — a test that needs a session reports it
+                // with `report_session`.
+                p.agent = Some((kind, AgentStatus::Idle, None));
                 p.revision += 1;
                 let p = p.clone();
                 s.started_agents.push(name.to_string());
