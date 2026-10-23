@@ -58,7 +58,7 @@ pub fn merge_passed(
     // 1. queue a merge for every passed task that has none.
     let passed = passed_tasks(store, project)?;
     for (task, lane, candidate, attempt, attempt_candidate) in passed {
-        if merge_op_of(store, project, &task)?.is_some() {
+        if merge_op_of(store, project, &task, attempt)?.is_some() {
             continue;
         }
         let branch = branch_of(&lane, &task);
@@ -249,7 +249,10 @@ fn review_branch(task: &str) -> String {
 
 /// The merge op of a task, if one is queued, running or done (a Failed or
 /// Void one does not block a retry).
-fn merge_op_of(store: &mut Store, project: &str, task: &str) -> GearResult<Option<OpRow>> {
+fn merge_op_of(store: &mut Store, project: &str, task: &str, attempt: i64) -> GearResult<Option<OpRow>> {
+    // Every state counts, Failed and Void too: a merge that failed waits for
+    // the captain (one item) and is never re-queued tick after tick — a new
+    // passing attempt gets its own merge.
     store.read(|tx| {
         for state in [
             OpState::Intended,
@@ -257,12 +260,12 @@ fn merge_op_of(store: &mut Store, project: &str, task: &str) -> GearResult<Optio
             OpState::Submitted,
             OpState::Unknown,
             OpState::Confirmed,
+            OpState::Failed,
+            OpState::Void,
         ] {
-            if let Some(op) = tx
-                .ops_in_state(project, state)?
-                .into_iter()
-                .find(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task))
-            {
+            if let Some(op) = tx.ops_in_state(project, state)?.into_iter().find(|op| {
+                op.kind == OpKind::Merge && op.task.as_deref() == Some(task) && op.attempt == Some(attempt)
+            }) {
                 return Ok(Some(op));
             }
         }
@@ -794,6 +797,37 @@ gate = "{gate}"
         let branches = scratch.origin_branches();
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// L-67: a failed merge is not queued again tick after tick (it filed 120
+    /// items for the captain); a new passing attempt gets its own merge.
+    #[test]
+    fn a_failed_merge_is_not_queued_again() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                gear_store::testing::seed_project(tx, "p", "sess", 1)?;
+                let id = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Merge,
+                        task: Some("T-5".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({}),
+                        created: 1,
+                    })?
+                    .id;
+                tx.set_op_state("p", &id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &id, OpState::Failed, Some("conflict"), 3)
+            })
+            .unwrap();
+
+        assert!(merge_op_of(&mut store, "p", "T-5", 1).unwrap().is_some(), "the failed merge stands");
+        assert!(merge_op_of(&mut store, "p", "T-5", 2).unwrap().is_none(), "a new attempt merges anew");
     }
 
     #[test]
