@@ -19,6 +19,12 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 | 2026-10-22 | T-12 / T-13 | One feature (review verdict → merge) split across two lanes in parallel: data settles states, runtime executes the merge; the shared piece is a one-line enum both may add. | Experiment: split along the seam (state vs side effect) with the tiny shared part allowed on both sides. Watch whether it conflicts. |
 | 2026-10-22 | T-11 | Queued only to keep a lane busy; duplicated T-7. Cancelled. | Never fill a queue with busywork. If a lane has no valuable work, re-plan (pull work from a busy lane, split a big task) — or let it stand by and say why. |
 
+## Input from the user (2026-10-22)
+
+- **Rolling horizon of 3–5 steps.** Plan only the next 3–5 steps per lane, chosen so they do not depend on each other and each stands on its own. Keep those near steps stable — avoid changing them while they run; when a lane's steps are done, plan its next ones. A BMAD-style full plan up front is only a hope.
+- **Steer, don't swerve.** The captain adjusts course continuously from what it sees, like a helmsman: a big reversal (hard left to hard right) can happen but should be rare; most corrections are small, so the rowers keep rowing.
+- Offered as experience to weigh, not a rule.
+
 ## Emerging principles (candidates for the skill)
 
 1. Queue depth is a mechanical check, not a memory.
@@ -27,6 +33,7 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 4. The contract states the role's limits up front; changing a contract mid-attempt is expensive.
 5. Rework goes first in its lane.
 6. Value over occupancy: no busywork; an idle lane is a planning signal, answered with real work.
+7. Rolling horizon: 3–5 independent, stable steps per lane; re-plan a lane when its horizon runs down, with small course corrections rather than reversals.
 
 ## Open questions
 
