@@ -16,7 +16,7 @@ Verified on: OpenCode v2.1.2, Herdr 0.9.1 (protocol 22), macOS, 2026-10-22.
 | Model / effort / context | switched inside the agent: `/model`, `/effort`, `/clear`; the model can also be fixed at start (see "Start on a chosen model") |
 | Status bar (bottom, above the input) | `Build auto · <model> <provider> · <effort>` — `auto` confirms the unattended flag |
 | Busy sign | `esc interrupt` at the bottom-left while a turn runs |
-| Private server flag | `--standalone` — needed to start on a model that comes from the environment |
+| Private server flag | `--standalone` — **not for long-lived lanes** (see "Start on a chosen model") |
 
 ## Before anything: check the pane
 
@@ -56,14 +56,14 @@ Two private servers with different models ran at the same time and each kept its
 
 Why: the config is loaded by the *server* process (`role=server` in `~/.local/share/opencode/log/opencode.log`), not by the TUI client. The shared background service was started long before the export, so its own environment does not have the variable. A private server inherits the environment of the pane it is started in; a project `opencode.json` is re-read by the server when it changes.
 
-So, to start an agent on a chosen model:
+**Rule (2026-10-23):**
+- **Long-lived lanes run on the shared background service — no `--standalone`.** Private servers exited on their own twice in a day (the lane vanished), and they cost ~260 MB each. A lane gets its model **in place** with `/model` (picker filter, Enter, the variant dialog if any), checked on the status bar; the filter must be specific (`DeepSeek V4.1 Flash OpenCode Go`, not a free tier). Changing a model never closes the agent.
+- **Short-lived reviewers** may use `--standalone` + the environment line (they exit soon after their verdict); today reviewers run on Codex anyway.
 
 ```bash
-herdr pane run <pane> "export OPENCODE_CONFIG_CONTENT='{\"model\":\"<provider/model>\"}'"
-herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --standalone --auto
+herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --auto        # lane
+# then, when the status bar is not on the wanted model: /model, filter, Enter, check the bar
 ```
-
-Check: the status bar shows the wanted model, not the one used last. Resume keeps the model: `herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --standalone --auto -s <session-id>`.
 
 ## Find the session id
 
