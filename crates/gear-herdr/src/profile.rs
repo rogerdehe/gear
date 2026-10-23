@@ -1,6 +1,6 @@
 //! Per-CLI observation profile (design/04).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScreenFlag {
@@ -11,7 +11,7 @@ pub enum ScreenFlag {
     Auth,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     /// Herdr agent kind: `opencode`, `claude`, `codex`, `pi`…
     pub kind: String,
@@ -107,6 +107,104 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
 /// Any other kind → None.
+impl Profile {
+    /// The starting point for a profile the config defines (T-31): the screen
+    /// window of design/04 — the last 16 lines, a flag confirmed after two
+    /// consecutive observations. A derived `Default` (all zero) would read no
+    /// line and never see a marker (review R2).
+    pub fn for_new() -> Profile {
+        Profile {
+            tail_lines: 16,
+            confirm_rounds: 2,
+            ..Profile::default()
+        }
+    }
+}
+
+/// The fields a project config may set for a profile (T-31). Every field is
+/// optional: a field left out keeps the value the profile already has (the
+/// built-in's, when the name is a built-in).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilePatch {
+    /// The Herdr agent kind (e.g. `grok`). Defaults to the profile's name.
+    pub kind: Option<String>,
+    /// The CLI flags that turn off interactive permission prompts.
+    pub unattended_args: Option<Vec<String>>,
+    pub busy_markers: Option<Vec<String>>,
+    pub quota_markers: Option<Vec<String>>,
+    pub ratelimit_markers: Option<Vec<String>>,
+    pub auth_markers: Option<Vec<String>>,
+    /// The keys that make the agent exit cleanly.
+    pub exit_keys: Option<Vec<String>>,
+    /// The args to resume a session; `{session}` is replaced.
+    pub resume_args: Option<Vec<String>>,
+    /// Herdr reports `agent_session` for this kind.
+    pub session_ref: Option<bool>,
+    /// Only the last `tail_lines` lines are matched.
+    pub tail_lines: Option<u32>,
+    /// A flag counts only after this many consecutive observations.
+    pub confirm_rounds: Option<u32>,
+}
+
+impl Profile {
+    /// The profile with the patch applied: the given fields win, the others
+    /// keep their value.
+    pub fn patched(&self, patch: &ProfilePatch, name: &str) -> Profile {
+        let mut profile = self.clone();
+        if let Some(kind) = &patch.kind {
+            profile.kind = kind.clone();
+        }
+        if let Some(args) = &patch.unattended_args {
+            profile.unattended_args = args.clone();
+        }
+        if let Some(markers) = &patch.busy_markers {
+            profile.busy_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.quota_markers {
+            profile.quota_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.ratelimit_markers {
+            profile.ratelimit_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.auth_markers {
+            profile.auth_markers = markers.clone();
+        }
+        if let Some(keys) = &patch.exit_keys {
+            profile.exit_keys = keys.clone();
+        }
+        if let Some(args) = &patch.resume_args {
+            profile.resume_args = Some(args.clone());
+        }
+        if let Some(session_ref) = patch.session_ref {
+            profile.session_ref = session_ref;
+        }
+        if let Some(lines) = patch.tail_lines {
+            profile.tail_lines = lines;
+        }
+        if let Some(rounds) = patch.confirm_rounds {
+            profile.confirm_rounds = rounds;
+        }
+        // A profile without a kind of its own runs the kind it is named after.
+        if profile.kind.is_empty() {
+            profile.kind = name.to_string();
+        }
+        profile
+    }
+}
+
+/// The built-in profiles by name (T-31): the kinds GEAR knows how to drive
+/// without the user configuring anything.
+pub fn builtins() -> BTreeMap<String, Profile> {
+    let mut table = BTreeMap::new();
+    for kind in ["opencode", "claude", "codex"] {
+        if let Some(profile) = builtin(kind) {
+            table.insert(kind.to_string(), profile);
+        }
+    }
+    table
+}
+
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
         "opencode" => Some(Profile {
@@ -164,7 +262,9 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             unattended_args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
-            exit_keys: vec!["ctrl+c".into()],
+            // Two: after a turn the first ctrl+c only interrupts ("Conversation
+            // interrupted"); the second exits (seen 2026-10-23, L-63).
+            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
             verified: true,
         }),
         // Only kinds with a verified SOP are built in (design/04).

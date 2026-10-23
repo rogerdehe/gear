@@ -153,6 +153,20 @@ pub fn onboard_queued(
                 continue;
             }
         };
+        // The profile table of this project: the built-ins with the project's
+        // own `[profiles.<name>]` on top (T-31).
+        let profiles = match gear_app::config::profile_table(&cfg.profiles, &config) {
+            Ok(table) => table,
+            Err(e) => {
+                park_queued_lanes(
+                    store,
+                    &project,
+                    &format!("the project profiles do not parse: {}", e.detail),
+                    now,
+                )?;
+                continue;
+            }
+        };
 
         for seat in seats {
             // Only lanes are onboarded by the engine in this cut; the captain
@@ -165,7 +179,7 @@ pub fn onboard_queued(
             if !config.lanes.iter().any(|lane| lane.name == seat.name) {
                 continue;
             }
-            match onboard_seat(store, herdr, cfg, &seat, &config, now) {
+            match onboard_seat(store, herdr, cfg, &seat, &config, &profiles, now) {
                 // The seat is Active now.
                 Ok(()) => active.push(seat.id.clone()),
                 // A failed step parks the seat; it is never retried blindly.
@@ -185,6 +199,7 @@ fn onboard_seat(
     cfg: &crate::EngineCfg,
     seat: &SeatRow,
     config: &gear_app::config::ProjectConfig,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     now: Ts,
 ) -> Result<(), String> {
     // 1. the kind of the lane comes from the project config; the profile is
@@ -194,8 +209,7 @@ fn onboard_seat(
         .iter()
         .find(|lane| lane.name == seat.name)
         .ok_or_else(|| format!("lane {} is not in the project config", seat.name))?;
-    let profile = cfg
-        .profiles
+    let profile = profiles
         .get(&seat.profile)
         .ok_or_else(|| format!("profile {} is not configured", seat.profile))?;
 

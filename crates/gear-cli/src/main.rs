@@ -26,7 +26,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | agent:opencode | agent:codex.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | review | captain | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -139,6 +139,12 @@ enum AdminOp {
     Init { config: std::path::PathBuf },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
+    /// Write the GEAR skill where an agent CLI loads its skills.
+    InstallSkill {
+        /// The agent CLI: claude | codex | opencode.
+        #[arg(long)]
+        agent: String,
+    },
     /// Stop the background engine (it starts again on the next `gear` call).
     Stop,
     Seat {
@@ -204,6 +210,9 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
+        Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
+            cmd_admin_install_skill(&agent, cli.json)
+        }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
         Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
@@ -224,6 +233,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         Some(Cmd::Run)
             | Some(Cmd::Admin { op: AdminOp::Stop })
             | Some(Cmd::Admin { op: AdminOp::Kickoff })
+            | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
             | Some(Cmd::Board { .. })
     )
 }
@@ -527,6 +537,46 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     let mut herdr = open_herdr()?;
     let out = run_reply(&mut store, &env, &mut herdr, &c, now_ts(), json)?;
     println!("{out}");
+    Ok(())
+}
+
+/// `gear admin install-skill --agent <claude|codex|opencode|grok>`: write the
+/// skill (SKILL.md and its references) into the directory the agent CLI loads
+/// its skills from, and say where it was written.
+///
+/// A user command: an agent never writes into the user's home. It needs no
+/// store, so it starts no engine.
+fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin install-skill` runs in the user's own shell, never in an agent",
+        ));
+    }
+    let agent = gear_app::skill::SkillAgent::parse(agent)?;
+    let home = std::env::var("HOME").map_err(|_| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            "HOME is not set: the skill goes into the user's home directory".to_string(),
+        )
+    })?;
+    let home = std::path::PathBuf::from(home);
+    let files = gear_app::skill::install(agent, &home)?;
+    let dir = agent.skills_root(&home).join(gear_app::skill::SKILL_NAME);
+    if json {
+        let out = serde_json::json!({
+            "agent": agent.as_str(),
+            "dir": dir.to_string_lossy(),
+            "files": files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string(&out).unwrap_or_default());
+        return Ok(());
+    }
+    println!("GEAR skill for {}: {}", agent.as_str(), dir.display());
+    for file in &files {
+        println!("wrote {}", file.display());
+    }
     Ok(())
 }
 
@@ -1148,27 +1198,24 @@ fn write_error(e: std::io::Error) -> GearError {
     )
 }
 
-/// Skill topics and their embedded text. The skill is compiled into the
-/// binary, so the printed rules always match this binary's version.
-/// The `--skill` help text must list exactly these names (test `help_lists_every_skill_topic`).
-const SKILL_TOPICS: &[(&str, &str)] = &[
-    ("main", include_str!("../../../skills/gear/SKILL.md")),
-    ("conventions", include_str!("../../../docs/design/17-conventions.md")),
-    ("decompose", include_str!("../../../skills/gear/references/decompose.md")),
-    ("agent:opencode", include_str!("../../../skills/gear/references/agents/opencode.md")),
-    ("agent:codex", include_str!("../../../skills/gear/references/agents/codex.md")),
-];
-
+/// Skill topics and their embedded text live in `gear_app::skill` (T-30): the
+/// skill is compiled into the binary, so the printed rules always match this
+/// binary's version. The `--skill` help text must list exactly these names
+/// (test `help_lists_every_skill_topic`).
 fn print_skill(topic: &str) -> GearResult<()> {
-    let Some((_, text)) = SKILL_TOPICS.iter().find(|(name, _)| *name == topic) else {
-        let available = SKILL_TOPICS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ");
+    let Some(found) = gear_app::skill::TOPICS.iter().find(|t| t.name == topic) else {
+        let available = gear_app::skill::TOPICS
+            .iter()
+            .map(|t| t.name)
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!("unknown skill topic {topic}; available: {available}"),
         ));
     };
     // The text is printed unchanged: no added newline, nothing trimmed.
-    print!("{text}");
+    print!("{}", found.text);
     // `std::process::exit` skips stdout's buffer: flush it ourselves so the
     // last line is never lost.
     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -1181,9 +1228,9 @@ mod tests {
     fn help_lists_every_skill_topic() {
         use clap::CommandFactory;
         let help = Cli::command().render_long_help().to_string();
-        for (name, _) in SKILL_TOPICS {
-            let shown = if *name == "main" { "(none)=SKILL.md" } else { name };
-            assert!(help.contains(shown), "--skill help misses topic {name}");
+        for topic in gear_app::skill::TOPICS {
+            let shown = if topic.name == "main" { "(none)=SKILL.md" } else { topic.name };
+            assert!(help.contains(shown), "--skill help misses topic {}", topic.name);
         }
     }
 

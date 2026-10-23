@@ -88,6 +88,9 @@ pub struct Conventions {
     pub release: String,
     pub staging: String,
     pub review_max_rounds: u32,
+    /// What the engine runs in its integration worktree after a merge, before
+    /// it pushes (T-12).
+    pub gate: String,
 }
 
 impl Default for Conventions {
@@ -97,6 +100,7 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
+            gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
         }
     }
 }
@@ -198,6 +202,40 @@ pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
             )
         })?;
     parse(&row.config_toml)
+}
+
+/// The profile table of a project (T-31): `base` (the built-ins) with the
+/// project's `[profiles.<name>]` on top — a field left out keeps the value the
+/// profile already has. A name that is not a built-in starts from the
+/// defaults, with the kind it is named after.
+///
+/// A profile block that does not parse (an unknown field, a wrong type) is
+/// `BadFormat`, naming the profile.
+pub fn profile_table(
+    base: &BTreeMap<String, gear_herdr::Profile>,
+    config: &ProjectConfig,
+) -> GearResult<BTreeMap<String, gear_herdr::Profile>> {
+    let mut table = base.clone();
+    for (name, raw) in &config.profiles {
+        let patch: gear_herdr::ProfilePatch =
+            toml::Value::Table(raw.clone()).try_into().map_err(|e| {
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("profile {name} is not a valid profile: {e}"),
+                )
+            })?;
+        // A name that is not built in starts from the operational defaults
+        // (16 lines, two confirmation rounds), not from an all-zero profile
+        // (review R2).
+        let current = table.get(name).cloned().unwrap_or_else(gear_herdr::Profile::for_new);
+        let mut profile = current.patched(&patch, name);
+        // A profile the user configured is one GEAR may drive: they wrote the
+        // kind, the args and the exit keys (T-31). `gear admin init` refuses
+        // the ones that cannot run unattended, so the trust is checked there.
+        profile.verified = true;
+        table.insert(name.clone(), profile);
+    }
+    Ok(table)
 }
 
 /// All findings, in field order (project, quota, captain, lanes in order,
