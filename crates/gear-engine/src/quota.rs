@@ -663,6 +663,7 @@ quota_reset_h = 5
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {

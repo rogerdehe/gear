@@ -95,7 +95,7 @@ fn full_work_loop() {
     let mut w = world();
 
     // 1. the captain plans one task for lane heat
-    let r = apply(&mut w, "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\ndeps: -\n", "v1", T0 + 1);
+    let r = apply(&mut w, "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\nestimate: 30\ndeps: -\n", "v1", T0 + 1);
     assert_eq!(r.created, vec!["T-1".to_string()]);
 
     // 2. the engine assigns it to the idle lane and delivers once
