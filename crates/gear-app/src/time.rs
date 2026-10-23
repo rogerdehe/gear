@@ -11,8 +11,9 @@
 //! - **the ratio** actual/estimate, so a plan that says 2.5 h can be compared
 //!   with what the task really took.
 //!
-//! The four durations belong to the task's first round (its dev round); the
-//! rework rounds are counted and timed apart, so nothing is counted twice.
+//! Dev, review and wait describe the first round; merge describes the latest
+//! round with a recorded merge. Rework rounds are also counted and timed apart
+//! as whole spans (including their integration when recorded).
 //! The *actual* time of a task is its whole span: the first start until the
 //! last step that happened (a rework and the waiting around it are part of
 //! what the task cost).
@@ -79,9 +80,9 @@ impl TaskTime {
         self.rounds.first().and_then(|round| round.wait)
     }
 
-    /// The merge time: settle → merge.
+    /// The latest recorded merge time: settle → merge, including after rework.
     pub fn merge(&self) -> Option<i64> {
-        self.rounds.first().and_then(|round| round.merge)
+        self.rounds.iter().rev().find_map(|round| round.merge)
     }
 
     /// Actual time over estimate; None without an estimate.

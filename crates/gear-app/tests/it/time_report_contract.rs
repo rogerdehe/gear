@@ -145,3 +145,63 @@ fn an_unknown_task_is_no_target() {
     let err = s.read(|tx| time::report(tx, "p", &filter)).unwrap_err();
     assert_eq!(err.code, ErrorCode::NoTarget, "{}", err.detail);
 }
+
+/// A rejected first attempt has no merge; the successful rework supplies it.
+#[test]
+fn a_successful_rework_reports_its_merge_for_task_and_voyage() {
+    use gear_model::AttemptState;
+    use gear_store::{AttemptRow, AttemptStep};
+
+    let mut s = world();
+    apply(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        "r1",
+    )
+    .unwrap();
+    s.write(|tx| {
+        for (n, state, offset) in [
+            (1, AttemptState::Rejected, 0),
+            (2, AttemptState::Accepted, 30),
+        ] {
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(), task: "T-1".into(), n, seat: "p:heat".into(),
+                generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
+                state, candidate: Some(CANDIDATE.into()), report: None, safe_point: None,
+                started: T0 + offset * 60, updated: T0 + offset * 60,
+            })?;
+            for (step, minutes) in [
+                (AttemptStep::Started, offset),
+                (AttemptStep::HandedIn, offset + 10),
+                (AttemptStep::Verdict, offset + 15),
+                (AttemptStep::Settled, offset + 20),
+            ] {
+                tx.set_attempt_time("p", "T-1", n, step, T0 + minutes * 60)?;
+            }
+        }
+        tx.set_attempt_time("p", "T-1", 2, AttemptStep::Merged, T0 + 55 * 60)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let report = s.read(|tx| time::report(tx, "p", &Filter::default())).unwrap();
+    let task = &report.tasks[0];
+    assert_eq!(task.rounds[0].merge, None);
+    assert_eq!(task.rounds[1].merge, Some(5));
+    assert_eq!(task.merge(), Some(5));
+    assert_eq!(report.voyages[0].merge, Some(5));
+    assert_eq!(task.dev(), Some(10));
+    assert_eq!(task.review(), Some(5));
+    assert_eq!(task.wait(), Some(5));
+    assert_eq!(task.rework_rounds, 1);
+    assert_eq!(task.rework_min, Some(25));
+    assert_eq!(task.actual_min, Some(55));
+    assert_eq!(task.ratio(), Some(55.0 / 60.0));
+    let text = time::render(&report);
+    for prefix in ["T-1 ·", "Voyage M2 ·"] {
+        let line = text.lines().find(|line| line.starts_with(prefix)).unwrap();
+        assert!(line.contains("merge 5m"), "{line}");
+        assert!(line.contains("rework 1 round (25m)"), "{line}");
+        assert!(line.contains("actual 55m · ratio 0.92"), "{line}");
+    }
+}
