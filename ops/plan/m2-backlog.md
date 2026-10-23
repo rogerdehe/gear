@@ -23,3 +23,4 @@
 - T-18 round 3 (logged, not reworked): restart between checkout intent and submit strands a review; re-review does not resume the reviewer's session; a start intent may adopt a wrong-kind occupant; the warm-build proof in the report can pass without a cache.
 - Snapshot wording: `runtime · idle` means "no task in progress", not "agent idle" (the agent was working) — show the agent's Herdr state and the task state separately.
 - Stale captain items re-alert (from T-23 v2): an open captain action item older than captain_item_stale_min becomes urgent and rings again once per period; snapshot shows count and oldest age.
+- T-22 bug: a task added to an old milestone without a voyage row fails with NOT NULL voyages.done instead of being grandfathered.
