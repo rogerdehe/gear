@@ -27,6 +27,8 @@ use crate::observe::SeatObs;
 /// An OpenCode status bar line begins with this: `Build auto · <model>
 /// <provider> · <effort>` (SOP `agent:opencode`).
 const STATUS_BAR_PREFIX: &str = "Build auto";
+/// The box edges OpenCode draws left of its input and status bar.
+const BOX_EDGES: [char; 3] = ['┃', '│', '╹'];
 /// The variant dialog's title; it is drawn in the middle of the visible screen,
 /// far above the last 16 lines when the conversation is long (review F3).
 const VARIANT_TITLE: &str = "Select variant";
@@ -325,7 +327,8 @@ fn failed_try(store: &mut Store, seat_id: &str, plan: &mut Pending) -> GearResul
 /// (F3).
 fn confirmed(screen: &str, bar: &str) -> bool {
     screen.lines().any(|line| {
-        let line = line.trim_start();
+        // The real bar is drawn inside the input box: `┃  Build auto · …`.
+        let line = line.trim_start_matches(|c: char| c.is_whitespace() || BOX_EDGES.contains(&c));
         line.starts_with(STATUS_BAR_PREFIX) && line.contains(bar)
     })
 }
@@ -418,6 +421,16 @@ fn meta_set(store: &mut Store, key: &str, value: &str) -> GearResult<()> {
 
 #[cfg(test)]
 mod tests {
+
+    /// L-71: the real OpenCode bar sits inside the input box's edge; it was
+    /// never recognised, so every switch "failed" after the model was on.
+    #[test]
+    fn the_real_bar_inside_the_box_edge_is_recognised() {
+        let screen = "  ┃  Ask anything… \"Fix a TODO in the codebase\"\n  ┃\n  ┃  Build auto · MiniMax-M3.1-Flash MiniMax (minimax.cn)\n  ╹▀▀▀▀\n";
+        assert!(confirmed(screen, "MiniMax-M3.1-Flash MiniMax (minimax.cn)"));
+        assert!(!confirmed(screen, "DeepSeek V4.1 Flash OpenCode Go"));
+    }
+
     use super::*;
     use crate::observe::{Presence, SeatObs};
     use gear_herdr::fake::{Call, FakeHerdr};
