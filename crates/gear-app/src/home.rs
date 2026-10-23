@@ -63,20 +63,23 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
         let mut shown_contract: Option<i64> = None;
 
         // A lane or temp sees the task of its open attempt (design/13: the
-        // current task comes right after the identity line).
+        // current task comes right after the identity line). A pending contract
+        // update is shown as the version the lane will work to, and recording
+        // this view adopts it (T-8, design/06).
         if seat.role != SeatRole::Captain {
             if let Some(attempt) = tx.open_attempts_of_seat(&seat_id)?.first() {
+                let version = attempt.pending_update.unwrap_or(attempt.adopted_version);
                 let goal = tx
-                    .get_contract(&ctx.project, &attempt.task, attempt.adopted_version)?
+                    .get_contract(&ctx.project, &attempt.task, version)?
                     .map(|contract| contract.goal)
                     .unwrap_or_default();
                 lines.push(format!(
                     "task {} attempt {} contract v{} — {}",
-                    attempt.task, attempt.n, attempt.adopted_version, goal
+                    attempt.task, attempt.n, version, goal
                 ));
                 shown_task = Some(attempt.task.clone());
                 shown_attempt = Some(attempt.n);
-                shown_contract = Some(attempt.adopted_version);
+                shown_contract = Some(version);
             }
         }
 
@@ -147,8 +150,22 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
 
 /// Persist the view. The CLI calls this **after** printing succeeded; if
 /// printing fails the view is not recorded (design/13).
+///
+/// Recording a lane's view also **adopts** the contract version that page
+/// showed, and only that one (T-8, design/06; review R1): a page read as v2
+/// adopts v2 even when a newer update landed while it was being printed. A
+/// page that was never printed adopts nothing, and a view of a handed-in
+/// attempt adopts nothing (R2).
 pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
-    store.write(|tx| tx.insert_view(view))
+    store.write(|tx| {
+        tx.insert_view(view)?;
+        if let (Some(task), Some(attempt), Some(shown)) =
+            (&view.shown_task, view.shown_attempt, view.shown_contract)
+        {
+            crate::tasks::adopt_contract(tx, &view.project, task, attempt, shown, view.ts)?;
+        }
+        Ok(())
+    })
 }
 
 /// The most lanes the snapshot lists; the rest is one line of count, so the
