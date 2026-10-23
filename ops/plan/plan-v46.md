@@ -1,0 +1,19 @@
+<!-- gear-plan project=gear base=45 -->
+# Decisions
+- 2026-10-23 USER: never-stop holds WITHIN a voyage (a milestone); a voyage must land. The captain needs a global voyage report, read first every time it wakes, and a land-or-extend decision when the voyage runs long or grows. T-22, T-24, T-25 widened accordingly.
+
+# Queue
+## T-22 [must] lane=data milestone=M2 required
+goal: A milestone is a voyage with a bar. The plan's `# Milestone <id>: <title>` block requires three fields: `done:` (one checkable sentence), `bar:` (the quality line for this phase, e.g. "skeleton: block only loop breaks and data loss; log the rest") and `eta:` (planned duration, e.g. `8h`). `gear plan apply` rejects a milestone without them (BAD_FORMAT naming the milestone); they are stored with the milestone, with the time the first task of the milestone was created (departure) and the task count at departure. Shown on the captain home page and in `gear --show T-n`. Purpose: every task and finding is judged against one sentence agreed with the user, and every voyage has a planned landing. Environment: old milestones untouched by a draft keep applying (grandfathered until edited).
+accept: cargo test --workspace green; tests: a milestone without done/bar/eta is rejected; with them it is stored with departure time and task count and shown in the packet; an untouched old milestone still applies. Real proof: a scratch plan on a scratch store with the built binary.
+deps: -
+
+## T-24 [must] lane=runtime milestone=M2 required
+goal: Drift and overrun raise decisions. Per milestone the engine computes: elapsed vs `eta`, scope growth (tasks now vs at departure; tasks created from reviews/rework separately), review rounds per task, lines added per hand-in (candidate diff stat vs integration). Two captain items, one per milestone each, updated not duplicated: (1) `drift` review item (design/11) when rounds reach review_max_rounds-1 or a hand-in adds more than `[timing].lines_per_task` (default 600), question "Does the plan still serve the done-sentence? Critical path? Keep (reason) or change"; (2) `land-or-extend` item when elapsed passes `eta` or scope grew more than `[timing].scope_growth_pct` (default 50): "cut scope to land, or extend with a reason (ask the user if beyond authority)". Both close only through `gear plan apply` with a `# Review` conclusion. When the milestone's required tasks are all done the engine marks it landed: no new dispatch of its tasks, one captain item "M<id> landed: retrospective, then plan the next voyage".
+accept: cargo test --workspace green; engine tests: elapsed past eta -> one land-or-extend item; second tick updates it; scope +60% -> same item; a task at round 2 of 3 -> one drift item; keep conclusion closes it; all required done -> landed item and no dispatch; restart keeps one item each.
+deps: T-22
+
+## T-25 [should] lane=board milestone=M2
+goal: The voyage report — mainly for the captain, also the user. The captain's home page (`gear` as captain) starts with it, before the snapshot and inbox, every time; the board shows the same. Per active milestone: done-sentence; elapsed / eta; scope: tasks at departure -> now (+ new requirements, + from reviews, - cancelled); done / left to land (the required tasks still open); code added this voyage split product / tests / docs (diff stat of merged tasks); review rounds (total, worst task); crew: per lane idle minutes and rework rate. Any value past its threshold is marked. Read-only, under 12 lines. Purpose: the captain sees the whole voyage first, so local issues cannot pull it off course.
+accept: cargo test --workspace green; a contract test with one milestone (departed 9h ago, eta 8h, 6 -> 10 tasks with 2 from reviews, 1 cancelled) checks the lines and the overrun mark; PTY proof of the board frame.
+deps: T-22
