@@ -14,7 +14,7 @@
 //!
 //! The lane is never blocked: the reviewer is a seat of its own.
 
-use gear_app::config::ProjectConfig;
+use gear_app::config::{ModelEntry, ProjectConfig};
 use gear_herdr::{HerdrAct, Outcome, Profile};
 use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
@@ -23,7 +23,6 @@ use gear_model::{
 use gear_store::{BindingStatus, NewMessage, NewOp, SeatRow, Store, Tx};
 
 use crate::model::model_start;
-use crate::model::review_model;
 use crate::EngineCfg;
 
 /// What the review step did in one tick.
@@ -66,34 +65,51 @@ pub fn start_reviews(
     let Some(temps) = config.temps.as_ref() else {
         return Ok(report);
     };
-    let Some(profile) = profiles.get(&temps.profile) else {
-        return Ok(report);
-    };
-    // An unverified profile may not take over a real project (design/04).
-    if !profile.verified {
-        return Ok(report);
-    }
 
     // A reviewer that the old activation/delivery pair could leave without its
     // packet gets it before anything else is started.
     report.started.extend(recover_missing_packets(store, project, &config, now)?);
 
     for task in tasks_to_review(store, project)? {
-        // 1. the reviewer seat: created once and bound to the task for life.
+        // 1. the model the reviewer runs on: the first entry of the review
+        //    chain that differs from the writer's **current** model (T-35).
+        //    Without a review chain the model is not managed.
+        let writer = writer_current_model(store, &config, &task.writer)?;
+        let entry = crate::model::review_entry(&config, writer.as_deref());
+        if entry.is_none() && !config.models.review.is_empty() {
+            report.waiting.push(task.task.clone());
+            tell_captain(store, project, &task, "no review model differs from the writer's current model", now)?;
+            continue;
+        }
+        // The CLI that runs it: the entry names it, else the temps kind.
+        let kind = entry.and_then(ModelEntry::cli).unwrap_or(temps.kind.as_str()).to_string();
+        let selected = if kind == temps.kind {
+            profiles.get(&temps.profile).map(|profile| (temps.profile.as_str(), profile))
+        } else {
+            crate::restart::profile_for_kind(profiles, &kind)
+        };
+        let Some((profile_name, profile)) = selected else {
+            continue;
+        };
+        // An unverified profile may not take over a real project (design/04).
+        if !profile.verified {
+            continue;
+        }
+        // 2. the reviewer seat: created once and bound to the task for life.
         let seat = match temp_seat_of(store, project, &task.task)? {
             Some(seat) => seat,
             // A seat that finished its last job is warm: the job takes it
             // rather than building a new worktree (17 §8a).
             None => match free_seat(store, project)? {
-                Some(seat) => take_seat(store, &seat, &task.task, now)?,
+                Some(seat) => take_seat(store, &seat, &task.task, profile_name, now)?,
                 // No warm seat free: a new one only while the quota has room.
                 // Otherwise the job waits for a seat instead of building a
                 // cold extra worktree (finding 2 of the T-18 review).
                 None => match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
-                    true => create_temp_seat(store, project, &task.task, &temps.profile, now)?,
+                    true => create_temp_seat(store, project, &task.task, profile_name, now)?,
                     false => {
                         report.waiting.push(task.task.clone());
-                        tell_captain(store, project, &task, now)?;
+                        tell_captain(store, project, &task, "every temp seat is in use", now)?;
                         continue;
                     }
                 },
@@ -115,12 +131,13 @@ pub fn start_reviews(
             && !has_free_slot(store, project, i64::from(config.quota.temps))?
         {
             report.waiting.push(task.task.clone());
-            tell_captain(store, project, &task, now)?;
+            tell_captain(store, project, &task, "every temp seat is in use", now)?;
             continue;
         }
 
+        // The same task can choose another CLI after the writer falls back.
+        store.write(|tx| tx.set_seat_profile(&seat.id, profile_name))?;
         // 4. the reviewer: worktree, environment, agent, review packet.
-        let model = review_model(&config, &task.writer);
         match start_reviewer(
             store,
             herdr,
@@ -128,7 +145,8 @@ pub fn start_reviews(
             &config,
             &seat,
             &task,
-            model.as_deref(),
+            entry,
+            &kind,
             profile,
             now,
         )? {
@@ -250,9 +268,20 @@ fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResul
 }
 
 /// Bind a free seat to the new job. The seat keeps its worktree and its
-/// cache; only the job it serves changes.
-fn take_seat(store: &mut Store, seat: &SeatRow, task: &str, now: Ts) -> GearResult<SeatRow> {
-    store.write(|tx| tx.set_seat_task(&seat.id, task))?;
+/// cache; only the job it serves changes. The seat's profile follows the CLI
+/// that runs the review's model (T-35).
+fn take_seat(
+    store: &mut Store,
+    seat: &SeatRow,
+    task: &str,
+    profile: &str,
+    now: Ts,
+) -> GearResult<SeatRow> {
+    store.write(|tx| {
+        tx.set_seat_task(&seat.id, task)?;
+        tx.set_seat_profile(&seat.id, profile)?;
+        Ok(())
+    })?;
     let _ = now;
     Ok(SeatRow { task_id: Some(task.to_string()), ..seat.clone() })
 }
@@ -355,7 +384,8 @@ fn start_reviewer(
     config: &ProjectConfig,
     seat: &SeatRow,
     task: &ReviewTask,
-    model: Option<&str>,
+    entry: Option<&ModelEntry>,
+    kind: &str,
     profile: &Profile,
     now: Ts,
 ) -> GearResult<Started> {
@@ -366,11 +396,7 @@ fn start_reviewer(
     let seat_branch = format!("home/{}", seat.name);
     let seat_label = format!("{}-{}", config.project.id, seat.name);
     let label = agent_name(config, &task.task);
-    let kind = config
-        .temps
-        .as_ref()
-        .map(|temps| temps.kind.clone())
-        .unwrap_or_default();
+    let model = entry.map(ModelEntry::model);
 
     // 1. the pane: the seat's, from its binding (an interrupted start or a new
     //    job on a warm seat), else the seat's worktree — opened, or created
@@ -477,11 +503,9 @@ fn start_reviewer(
                 "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
                 config.project.id, seat.name, generation, cfg.db_path
             );
-            if let Some(model) = model {
-                if let Some(start) = model_start(&kind, model) {
-                    if !start.env.is_empty() {
-                        env_command = format!("{env_command}; {}", start.env);
-                    }
+            if let Some(start) = model.and_then(|model| model_start(kind, model)) {
+                if !start.env.is_empty() {
+                    env_command = format!("{env_command}; {}", start.env);
                 }
             }
             if !env_ready(store, herdr, &seat.id, generation, &pane, &env_command)? {
@@ -515,25 +539,26 @@ fn start_reviewer(
             }
 
             // 6. the agent's args: the profile's unattended args, the model
-            //    when the CLI takes one, and the session of an earlier review
-            //    of the same task when the reviewer resumes it (F3).
-            let args = reviewer_args(store, config, profile, &kind, model, &task.task)?;
+            //    when the CLI takes one, the arguments of the chain entry and
+            //    the session of an earlier review of the same task when the
+            //    reviewer resumes it (F3).
+            let args = reviewer_args(store, config, profile, kind, entry, &task.task)?;
 
             // The start is recorded before Herdr is asked: an engine restart
             // between the two must find the intent and adopt the agent it
             // asked for, and nothing else.
-            record_start(store, &seat.id, generation, &pane, &kind, &label)?;
+            record_start(store, &seat.id, generation, &pane, kind, &label)?;
             // A grok worktree is trusted before its agent starts: grok asks on
             // the first start, while Herdr reports it idle, and the prompt
             // would be lost.
-            if let Err(reason) = crate::trust::trust_worktree(&kind, &path, now) {
+            if let Err(reason) = crate::trust::trust_worktree(kind, &path, now) {
                 // Nothing started, so the request goes: it must not authorize
                 // the adoption of an agent that is not ours.
                 store.write(|tx| tx.set_meta(&start_key(&seat.id, generation), ""))?;
                 park(store, &seat.id, &format!("trust: {reason}"), now)?;
                 return Ok(Started::NotYet);
             }
-            match herdr.agent_start(&label, &kind, &pane, &args) {
+            match herdr.agent_start(&label, kind, &pane, &args) {
                 Outcome::Ok(info) => info,
                 Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
                     // The shell of a fresh worktree is still starting: the next
@@ -551,15 +576,13 @@ fn start_reviewer(
     // The chain's model before the reviewer gets any work (T-33, F5): OpenCode
     // ignores the start environment through its shared service, so the status
     // bar decides. Waiting keeps the start pending; the packet waits with it.
-    if kind == "opencode" {
-        if let Some(model) = model {
-            match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)? {
-                crate::switch::ModelGate::Ready => {}
-                crate::switch::ModelGate::Waiting => return Ok(Started::NotYet),
-                crate::switch::ModelGate::Failed(reason) => {
-                    park(store, &seat.id, &reason, now)?;
-                    return Ok(Started::NotYet);
-                }
+    if let Some(model) = model.filter(|_| kind == "opencode") {
+        match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)? {
+            crate::switch::ModelGate::Ready => {}
+            crate::switch::ModelGate::Waiting => return Ok(Started::NotYet),
+            crate::switch::ModelGate::Failed(reason) => {
+                park(store, &seat.id, &reason, now)?;
+                return Ok(Started::NotYet);
             }
         }
     }
@@ -573,6 +596,7 @@ fn start_reviewer(
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         // The task's reviewer session is kept: a re-review of the same task
         // resumes it instead of starting a new conversation (F3).
+        tx.set_meta(&session_cli_key(&config.project.id, &task.task), kind)?;
         if let Some(session) = session_ref.filter(|session| !session.is_empty()) {
             tx.set_meta(&session_key(&config.project.id, &task.task), session)?;
         }
@@ -645,6 +669,10 @@ fn start_key(seat: &str, generation: i64) -> String {
 }
 
 /// The key of a task's reviewer session: the session a re-review resumes (F3).
+fn session_cli_key(project: &str, task: &str) -> String {
+    format!("engine.review_session_cli.{project}.{task}")
+}
+
 fn session_key(project: &str, task: &str) -> String {
     format!("engine.review_session.{project}.{task}")
 }
@@ -853,32 +881,46 @@ fn record_start(
 }
 
 /// The args a reviewer starts with: the profile's unattended args, the model
-/// when the CLI takes one, and — when the task was reviewed before — the
-/// profile's resume args with that session, so a re-review resumes the job's
-/// session instead of starting a new conversation (F3 of the T-18 review).
+/// when the CLI takes one, the arguments of the chain entry (T-35) and — when
+/// the task was reviewed before — the profile's resume args with that
+/// session, so a re-review resumes the job's session instead of starting a
+/// new conversation (F3 of the T-18 review).
 fn reviewer_args(
     store: &mut Store,
     config: &ProjectConfig,
     profile: &Profile,
     kind: &str,
-    model: Option<&str>,
+    entry: Option<&ModelEntry>,
     task: &str,
 ) -> GearResult<Vec<String>> {
     let mut args = profile.unattended_args.clone();
-    if let Some(model) = model {
-        if let Some(start) = model_start(kind, model) {
-            args.extend(start.args);
-        }
+    if let Some(start) = entry.and_then(|entry| crate::model::entry_args(kind, entry)) {
+        args.extend(start);
     }
     let session = store
         .read(|tx| tx.get_meta(&session_key(&config.project.id, task)))?
         .filter(|session| !session.is_empty());
-    if let Some(session) = session {
+    let session_cli = store.read(|tx| tx.get_meta(&session_cli_key(&config.project.id, task)))?;
+    if let Some(session) = session.filter(|_| session_cli.as_deref() == Some(kind)) {
         if let Some(resume) = &profile.resume_args {
             args.extend(resume.iter().map(|arg| arg.replace("{session}", &session)));
         }
     }
     Ok(args)
+}
+
+/// The model the writer of an attempt runs on **now**: the one the engine
+/// recorded for that seat (a fallback changed it), else the writer's primary
+/// (T-35). The reviewer never runs the writer's current model.
+fn writer_current_model(
+    store: &mut Store,
+    config: &ProjectConfig,
+    writer: &str,
+) -> GearResult<Option<String>> {
+    let recorded = store
+        .read(|tx| tx.get_meta(&crate::model::model_meta_key(writer)))?
+        .filter(|model| !model.is_empty());
+    Ok(recorded.or_else(|| crate::model::writer_model(config, writer)))
 }
 
 /// The review packet of an attempt: the contract's goal and accept, the
@@ -1066,7 +1108,7 @@ fn review_packet(
 
 /// Tell the captain that a review waits: one open item per task, so the tick
 /// does not fill the inbox with the same news.
-fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, now: Ts) -> GearResult<()> {
+fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &str, now: Ts) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
@@ -1095,7 +1137,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, now: Ts) ->
             kind: MsgKind::Question,
             urgent: false,
             body: format!(
-                "The review of {} (attempt {}) waits: every temp seat is in use, so the \
+                "The review of {} (attempt {}) waits: {reason}, so the \
                  reviewer is queued. The lane is not blocked and carries on with its next task.",
                 task.task, task.attempt
             ),
@@ -1201,6 +1243,13 @@ mod tests {
 
     const T0: i64 = 1_800_000_000;
 
+    /// The review chain of the test config: the **entry form** (T-35) — the
+    /// CLI and the reasoning effort are the entry's.
+    const REVIEW_CHAIN: &str =
+        r#"review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]"#;
+    /// The same chain in the old plain form: the CLI is the temps kind.
+    const REVIEW_CHAIN_PLAIN: &str = r#"review = ["gpt-6.1-sol"]"#;
+
     /// A project with one lane, one reviewer kind (codex) and one free temp
     /// slot.
     const CONFIG: &str = r#"
@@ -1231,7 +1280,7 @@ profile = "codex"
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
-review = ["gpt-6.1-sol"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
     /// The same project without a free temp slot.
@@ -1263,7 +1312,7 @@ profile = "codex"
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
-review = ["gpt-6.1-sol"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
     /// An engine that knows the codex profile.
@@ -1367,6 +1416,100 @@ review = ["gpt-6.1-sol"]
             .collect()
     }
 
+    #[test]
+    fn an_empty_review_chain_keeps_the_unmanaged_reviewer() {
+        let text = CONFIG.replace(REVIEW_CHAIN, "review = []");
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(report.started, vec!["p:review-1"]);
+        assert_eq!(starts(&herdr)[0].1, cfg().profiles["codex"].unattended_args);
+    }
+
+    #[test]
+    fn a_reviewer_session_never_crosses_clis() {
+        let mut store = world(CONFIG);
+        store.write(|tx| {
+            tx.set_meta(&session_key("p", "T-1"), "codex-session")?;
+            tx.set_meta(&session_cli_key("p", "T-1"), "codex")
+        }).unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let entry = ModelEntry::Plain("claude-sonnet-5-5".into());
+        let args = reviewer_args(&mut store, &config, &cfg().profiles["claude"], "claude", Some(&entry), "T-1").unwrap();
+        assert!(!args.iter().any(|arg| arg == "codex-session"));
+    }
+
+    /// T-35: a reviewer never runs the writer's **current** model: the lane
+    /// fell back to the review chain's first model, so the review runs the
+    /// next one — on the CLI that entry names, with its arguments.
+    #[test]
+    fn a_review_never_runs_the_writers_current_model() {
+        let text = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 1
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+  { model = "claude-sonnet-5-5", cli = "claude", args = ["--effort", "high"] },
+]
+"#;
+        let mut store = world(text);
+        // The lane fell back to the review chain's first model: that is the
+        // model it wrote the hand-in on.
+        store
+            .write(|tx| tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6.1-sol"))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let starts = starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "claude", "the CLI of the review's chain entry");
+        assert_eq!(
+            starts[0].1,
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--model".to_string(),
+                "claude-sonnet-5-5".to_string(),
+                "--effort".to_string(),
+                "high".to_string(),
+            ],
+            "the arguments of the review's chain entry"
+        );
+        // The reviewer never runs the model it reviews: not gpt-6.1-sol.
+        assert!(!starts[0].1.contains(&"gpt-6.1-sol".to_string()), "{starts:?}");
+    }
+
     /// The shell commands the engine typed into a pane.
     fn pane_runs(herdr: &FakeHerdr, pane: &str) -> Vec<String> {
         herdr.calls
@@ -1425,6 +1568,8 @@ review = ["gpt-6.1-sol"]
                 "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
                 "[temps]\nkind = \"grok\"\nprofile = \"grok\"",
             )
+            // The plain form: the temps kind decides the CLI.
+            .replace(REVIEW_CHAIN, REVIEW_CHAIN_PLAIN)
             + "\n[profiles.grok]\nkind = \"grok\"\nunattended_args = [\"--yolo\"]\ntail_lines = 16\nconfirm_rounds = 1\n";
         let mut store = world(&text);
         let mut herdr = FakeHerdr::new();
@@ -1566,6 +1711,8 @@ review = ["gpt-6.1-sol"]
                 "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
                 "[temps]\nkind = \"opencode\"\nprofile = \"opencode\"",
             )
+            // The plain form: the temps kind decides the CLI.
+            .replace(REVIEW_CHAIN, REVIEW_CHAIN_PLAIN)
             + "\n[models.switch.\"gpt-6.1-sol\"]\npicker = \"GPT-6.1 Sol\"\nbar = \"GPT-6.1 Sol\"\n";
         let mut store = world(&text);
         let mut herdr = FakeHerdr::new();
