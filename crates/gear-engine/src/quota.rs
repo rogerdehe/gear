@@ -5,32 +5,33 @@
 //! the profile's `confirm_rounds` ticks in a row, the engine applies the lane
 //! policy of the project config:
 //!
-//! - `fallback`: restart the lane on the next model of its chain. The chain is
+//! - `fallback`: move the lane to the next entry of its chain. The chain is
 //!   `[models].lanes`, or the lane's own `models` when it has one.
-//! - `wait`, or a chain with no next model: park the seat until the provider
+//! - `wait`, or a chain with no next entry: park the seat until the provider
 //!   resets (`[models].quota_reset_h` hours) and resume on the first model
 //!   then.
 //!
-//! A restart is two ticks, on purpose: the exit keys go first, and a second
-//! `ctrl+c` a moment later would land in the shell instead of the agent. The
-//! next tick, with the pane a shell again, exports the new model in the
-//! environment line (the same line the onboarding uses), starts the agent with
-//! the profile's resume args and the binding's session reference, and delivers
-//! "Continue T-<n>: run `gear` first" — the conversation continues on the new
-//! model.
+//! How the model changes depends on the **CLI** the next entry names (T-35):
+//!
+//! - the same CLI: the model changes **in place** (T-33) — the picker, the
+//!   variant dialog and the status bar; the conversation stays.
+//! - another CLI: the agent is closed and that CLI starts in the same pane
+//!   and worktree ([`crate::restart`]) — no session crosses CLIs; the new
+//!   agent starts from the git state and the lane is told to continue.
 //!
 //! The engine keeps the little state this needs in the store's `meta`
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
 //! restart in progress): the `seats` table has `park_until`, but gear-store
 //! exposes no setter for it yet, and a store API is the follow-up.
 
-use gear_app::config::{ProjectConfig, QuotaPolicy};
+use gear_app::config::{ModelEntry, ProjectConfig, QuotaPolicy};
 use gear_herdr::{HerdrAct, Profile, ScreenFlag};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts,
 };
 use gear_store::{NewMessage, NewOp, SeatRow, Store};
 
+use crate::model::model_meta_key;
 use crate::observe::SeatObs;
 use crate::EngineCfg;
 
@@ -49,7 +50,7 @@ pub struct QuotaReport {
 pub fn apply_quota_policy(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    _cfg: &EngineCfg,
+    cfg: &EngineCfg,
     profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     observed: &[SeatObs],
@@ -70,6 +71,19 @@ pub fn apply_quota_policy(
         if seat.role != SeatRole::Lane {
             continue;
         }
+        // A restart on another CLI is on its way (T-35): the plan is durable,
+        // so it continues whatever the seat's state says now — the seat is
+        // `Missing` or `Starting` while its agent is replaced. It comes
+        // before the profile: the plan drives the restart, not the seat's
+        // current profile.
+        if crate::restart::pending(store, &seat.id)?.is_some() {
+            if let Some(line) =
+                crate::restart::advance(store, herdr, cfg, profiles, project, seat, None, now)?
+            {
+                report.events.push(line);
+            }
+            continue;
+        }
         let Some(profile) = profiles.get(&seat.profile) else {
             continue;
         };
@@ -84,15 +98,17 @@ pub fn apply_quota_policy(
             }
             continue;
         }
-        // A seat parked on quota wakes up when the provider resets: it is
-        // switched back in place, never closed and restarted (F4).
+        // A seat parked on quota wakes up when the provider resets: it goes
+        // back to the first model of its chain — in place when that model runs
+        // on the seat's own CLI, on another CLI when it does not (T-35).
         if seat.state == SeatState::Parked {
             if parked_until(store, &seat.id)?.is_some_and(|until| until <= now) {
-                let chain = lane_chain(&config, &seat.name);
-                match chain.first().map(|model| (*model).to_string()) {
-                    Some(model) => {
-                        if let Some(line) = start_switch(
-                            store, herdr, project, &config, seat, profile, Some(obs), &model, now,
+                let chain = crate::model::role_chain(&config, &seat.name);
+                match chain.first().copied() {
+                    Some(entry) => {
+                        if let Some(line) = change_model(
+                            store, herdr, cfg, profiles, project, &config, seat, profile, Some(obs),
+                            entry, now,
                         )? {
                             report.events.push(line);
                         }
@@ -126,22 +142,26 @@ pub fn apply_quota_policy(
             continue;
         }
         // 2. the policy.
-        let chain = lane_chain(&config, &seat.name);
+        let chain = crate::model::role_chain(&config, &seat.name);
         let current = current_model(store, &seat.id, &chain);
         let policy = config.models.on_quota.lanes;
         let next = match policy {
             QuotaPolicy::Wait => None,
-            QuotaPolicy::Fallback => next_model(&chain, current.as_deref()),
+            QuotaPolicy::Fallback => next_entry(&chain, current.as_deref()),
         };
         match next {
             Some(next) => {
-                // T-33: switch the model in place — no exit, no restart, the
-                // conversation stays. Without labels the seat is flagged, never
-                // closed (F4): a restart cannot carry a model through the
-                // shared OpenCode service.
-                if let Some(line) =
-                    start_switch(store, herdr, project, &config, seat, profile, Some(obs), &next, now)?
-                {
+                // T-33: the model changes **in place** when the next model runs
+                // on the seat's own CLI — no exit, no restart, the
+                // conversation stays. Without labels the seat is flagged,
+                // never closed (F4): a restart cannot carry a model through
+                // the shared OpenCode service.
+                // T-35: the next model needs another CLI — the agent is
+                // closed and the other CLI starts in the same pane.
+                if let Some(line) = change_model(
+                    store, herdr, cfg, profiles, project, &config, seat, profile, Some(obs), next,
+                    now,
+                )? {
                     report.events.push(line);
                 }
             }
@@ -169,44 +189,67 @@ pub fn apply_quota_policy(
     Ok(report)
 }
 
-/// The lane chain: its own `models` when it has one, else `[models].lanes`
-/// (17 §0). Empty entries are dropped.
-fn lane_chain<'a>(config: &'a ProjectConfig, lane_name: &str) -> Vec<&'a str> {
-    let own = config
-        .lanes
-        .iter()
-        .find(|lane| lane.name == lane_name)
-        .map(|lane| &lane.models);
-    let chain = match own {
-        Some(chain) if !chain.is_empty() => chain,
-        _ => &config.models.lanes,
-    };
-    chain
-        .iter()
-        .map(|model| model.trim())
-        .filter(|model| !model.is_empty())
-        .collect()
-}
-
 /// The model the lane runs on now: the one the last switch recorded, else the
 /// first of its chain.
-fn current_model(store: &mut Store, seat: &str, chain: &[&str]) -> Option<String> {
-    match meta_get(store, &meta_key("model", seat)).ok().flatten() {
+fn current_model(store: &mut Store, seat: &str, chain: &[&ModelEntry]) -> Option<String> {
+    match meta_get(store, &model_meta_key(seat)).ok().flatten() {
         Some(model) if !model.is_empty() => Some(model),
-        _ => chain.first().map(|model| (*model).to_string()),
+        _ => chain.first().map(|entry| entry.model().to_string()),
     }
 }
 
-/// The model after `current` in the chain; `None` when the chain is exhausted
-/// (or `current` is not in it: then the first model is the next one).
-fn next_model(chain: &[&str], current: Option<&str>) -> Option<String> {
+/// The entry after `current` in the chain; `None` when the chain is exhausted
+/// (or `current` is not in it: then the first entry is the next one).
+fn next_entry<'a>(chain: &[&'a ModelEntry], current: Option<&str>) -> Option<&'a ModelEntry> {
     let Some(current) = current else {
-        return chain.first().map(|model| (*model).to_string());
+        return chain.first().copied();
     };
-    match chain.iter().position(|model| *model == current) {
-        Some(index) => chain.get(index + 1).map(|model| (*model).to_string()),
-        None => chain.first().map(|model| (*model).to_string()),
+    match chain.iter().position(|entry| entry.model() == current) {
+        Some(index) => chain.get(index + 1).copied(),
+        None => chain.first().copied(),
     }
+}
+
+// ------------------------------------------------------- in place or another CLI
+
+/// Change the lane's model to `entry`'s.
+///
+/// The model changes **in place** when the entry runs on the seat's own CLI
+/// (T-33): no exit, no restart, the conversation stays. The model needs
+/// **another CLI** (T-35): the agent is closed, the other CLI starts in the
+/// same pane and worktree, and the lane continues its task.
+fn change_model(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+    profile: &Profile,
+    obs: Option<&SeatObs>,
+    entry: &ModelEntry,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let current_cli = crate::restart::current_cli(store, seat)?;
+    // The entry names the CLI that runs the model; without one the seat's own
+    // CLI runs it.
+    let default_cli = config.lanes.iter().find(|lane| lane.name == seat.name)
+        .map(|lane| lane.kind.as_str());
+    let target_cli = entry.cli().or(default_cli).map(str::to_string).or(current_cli.clone());
+    let same_cli = match (&target_cli, &current_cli) {
+        (Some(target), Some(current)) => target == current,
+        _ => true,
+    };
+    if same_cli {
+        return start_switch(store, herdr, project, config, seat, profile, obs, entry.model(), now);
+    }
+    let target = ModelEntry::Entry(gear_app::config::ModelSpec {
+        model: entry.model().to_string(),
+        cli: target_cli,
+        args: entry.args().to_vec(),
+    });
+    crate::restart::advance(store, herdr, cfg, profiles, project, seat, Some(&target), now)
 }
 
 // ------------------------------------------------------------- the in-place switch
@@ -317,8 +360,8 @@ fn finish_switch(
     let text = continue_text(store, &seat.id)?;
     let open = open_attempt(store, &seat.id)?;
     store.write(|tx| {
-        tx.set_meta(&meta_key("model", &seat.id), model)?;
-        tx.set_meta(&meta_key("quota", &seat.id), "0")?;
+        tx.set_meta(&model_meta_key(&seat.id), model)?;
+        tx.set_meta(&quota_meta_key(&seat.id), "0")?;
         tx.set_meta(&meta_key("resume", &seat.id), "")?;
         tx.set_meta(&crate::switch::pending_meta_key(&seat.id), "")?;
         if let Some((task, attempt)) = open.clone() {
@@ -355,7 +398,7 @@ fn finish_switch(
 }
 
 /// `Continue T-<n>: run `gear` first` for the lane's open attempt.
-fn continue_text(store: &mut Store, seat: &str) -> GearResult<String> {
+pub(crate) fn continue_text(store: &mut Store, seat: &str) -> GearResult<String> {
     match open_attempt(store, seat)? {
         Some((task, _)) => Ok(format!("Continue {task}: run `gear` first")),
         None => Ok("Continue: run `gear` first".to_string()),
@@ -363,7 +406,7 @@ fn continue_text(store: &mut Store, seat: &str) -> GearResult<String> {
 }
 
 /// The seat's open attempt: (task, attempt).
-fn open_attempt(store: &mut Store, seat: &str) -> GearResult<Option<(String, i64)>> {
+pub(crate) fn open_attempt(store: &mut Store, seat: &str) -> GearResult<Option<(String, i64)>> {
     store.read(|tx| {
         Ok(tx
             .open_attempts_of_seat(seat)?
@@ -466,6 +509,12 @@ fn meta_key(what: &str, seat: &str) -> String {
     format!("engine.{what}.{seat}")
 }
 
+/// The key of a seat's quota counter (how many ticks it showed a provider
+/// limit in a row).
+pub(crate) fn quota_meta_key(seat: &str) -> String {
+    meta_key("quota", seat)
+}
+
 /// Read one key of the engine's own state.
 fn meta_get(store: &mut Store, key: &str) -> GearResult<Option<String>> {
     store.read(|tx| tx.get_meta(key))
@@ -477,7 +526,7 @@ fn meta_set(store: &mut Store, key: &str, value: &str) -> GearResult<()> {
 }
 
 /// Tell the captain about a switch or a park: one information line.
-fn tell_captain(
+pub(crate) fn tell_captain(
     store: &mut Store,
     project: &str,
     seat: &SeatRow,
@@ -488,6 +537,12 @@ fn tell_captain(
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
+        // The seat's current generation: a restart on another CLI (T-35) gave
+        // the seat a new one.
+        let generation = tx
+            .get_seat(&seat.id)?
+            .map(|row| row.generation)
+            .unwrap_or(seat.generation);
         let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
         tx.insert_message(&NewMessage {
             project: project.to_string(),
@@ -495,7 +550,7 @@ fn tell_captain(
             task: None,
             attempt: None,
             sender: seat.id.clone(),
-            sender_gen: seat.generation,
+            sender_gen: generation,
             recipient: captain.id,
             kind: MsgKind::Progress,
             urgent: false,
@@ -687,7 +742,7 @@ quota_reset_h = 5
 
     fn cfg() -> EngineCfg {
         let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
-        for kind in ["opencode", "claude"] {
+        for kind in ["opencode", "claude", "codex"] {
             cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
         cfg
@@ -745,6 +800,20 @@ quota_reset_h = 5
             .iter()
             .filter_map(|call| match call {
                 Call::AgentStart { args, .. } => Some(args.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The agent starts the engine asked for: (kind, pane, args).
+    fn agent_starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { kind, pane, args, .. } => {
+                    Some((kind.clone(), pane.clone(), args.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -919,6 +988,219 @@ quota_reset_h = 5
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, true, T0 + 60);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
+    }
+
+    /// T-35: the next model of the chain runs on **another CLI** — the agent
+    /// is closed, that CLI starts in the same pane and worktree with the
+    /// arguments of its chain entry, and the lane gets one Continue.
+    #[test]
+    fn a_quota_stop_restarts_the_lane_on_another_cli() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+
+        // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        // Tick 2: the limit is confirmed — the restart begins: the opencode
+        // agent is closed, and nothing else happens yet.
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(
+            exits(&herdr),
+            vec![vec!["ctrl+c".to_string()]],
+            "the agent is closed once: {:?}",
+            herdr.calls
+        );
+        assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
+        assert!(deliveries(&mut store).is_empty(), "no continue before the agent is up");
+
+        // The agent leaves: the pane is a shell again.
+        herdr.exit_agent(PANE);
+
+        // A tick while the agent is still there waits — the exit keys are
+        // never sent twice (a second ctrl+c would land in the shell).
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 25);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        assert_eq!(
+            exits(&herdr),
+            vec![vec!["ctrl+c".to_string()]],
+            "the exit keys went once: {:?}",
+            herdr.calls
+        );
+        herdr.exit_agent(PANE);
+
+        // Tick 3: codex starts in the same pane, and the lane continues.
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 30);
+        assert_eq!(report.events.len(), 1, "{:?}", report.events);
+        let starts = agent_starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "codex", "the CLI of the chain entry");
+        assert_eq!(starts[0].1, PANE, "the same pane");
+        assert_eq!(
+            starts[0].2,
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "-m".to_string(),
+                "gpt-6.1-sol".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=medium".to_string(),
+            ],
+            "the arguments of the chain entry"
+        );
+        // One Continue, and the model is recorded.
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert!(delivered[0].starts_with("Continue T-1"), "{delivered:?}");
+        assert_eq!(
+            meta_get(&mut store, &model_meta_key("p:heat")).unwrap().as_deref(),
+            Some("gpt-6.1-sol")
+        );
+        // The seat is back: it runs the new CLI, in a new generation, in the
+        // same pane.
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
+        assert_eq!(seat.generation, 2);
+        assert_eq!(seat.profile, "codex");
+        let binding = store.read(|tx| tx.get_binding("p:heat", 2)).unwrap().unwrap();
+        assert_eq!(binding.kind, "codex");
+        assert_eq!(binding.pane_id, PANE);
+        let old = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
+        assert_eq!(old.status, gear_store::BindingStatus::Void);
+
+        // More quota ticks add no second Continue.
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
+    }
+
+    #[test]
+    fn a_cross_cli_restart_waits_for_a_fresh_idle_status() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        // The observation says idle, but the agent has begun working since.
+        herdr.set_status(PANE, gear_herdr::AgentStatus::Working);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(exits(&herdr).is_empty());
+        assert!(agent_starts(&herdr).is_empty());
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_some());
+        herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        assert_eq!(exits(&herdr).len(), 1);
+    }
+
+    #[test]
+    fn a_refused_cross_cli_start_retries_the_reserved_generation() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        ));
+        store.write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(), seat: "p:heat".into(), generation: 1,
+                kind: OpKind::Doorbell, task: None, attempt: None,
+                ref_msg: None, plan_version: None,
+                payload: serde_json::json!({ "text": "gear", "covers": ["M-404"] }),
+                created: T0,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+            tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)
+        }).unwrap();
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        herdr.exit_agent(PANE);
+        herdr.refuse_next_start = Some("agent_pane_busy".into());
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
+        assert!(deliveries(&mut store).is_empty());
+        // A later tick resumes the durable plan with the same generation.
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert_eq!(lane_seat(&mut store).generation, 2);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
+        assert_eq!(deliveries(&mut store).len(), 1);
+        assert_eq!(exits(&herdr).len(), 1);
+        assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Confirmed);
+        let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 1, T0 + 50).unwrap();
+        assert!(flagged.is_empty(), "the departed generation cannot flag the replacement");
+    }
+
+    #[test]
+    fn reset_returns_to_the_original_cli_and_confirms_its_model() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        );
+        text.push_str("\n[models.switch.\"minimax-cn/MiniMax-M3.1-Flash\"]\npicker = \"MiniMax-M3.1-Flash\"\nbar = \"MiniMax-M3.1-Flash\"\n");
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        herdr.exit_agent(PANE);
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        // Exhaust the fallback and wait for the configured reset.
+        tick_quota(&mut store, &mut herdr, true, T0 + 40);
+        tick_quota(&mut store, &mut herdr, true, T0 + 50);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+        let reset = T0 + 50 + 5 * 3600;
+        tick_quota(&mut store, &mut herdr, false, reset);
+        herdr.exit_agent(PANE);
+        herdr.start_screen = Some("Build auto · wrong-model · high".into());
+        tick_quota(&mut store, &mut herdr, false, reset + 10);
+        assert_eq!(agent_starts(&herdr).last().unwrap().0, "opencode");
+        assert!(deliveries(&mut store).is_empty(), "no Continue before model confirmation");
+        // Onboarding must not take over this pending restart's model switch.
+        assert!(crate::onboard::onboard_queued(&mut store, &mut herdr, &cfg(), reset + 11).unwrap().is_empty());
+        herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
+        tick_quota(&mut store, &mut herdr, false, reset + 20);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
+        assert_eq!(lane_seat(&mut store).generation, 3);
+        assert_eq!(deliveries(&mut store).len(), 1, "one Continue for the new generation");
+        assert_eq!(agent_starts(&herdr).len(), 2);
+    }
+
+    /// T-35: the same CLI keeps the in-place switch (T-33): a plain chain
+    /// entry names no CLI, so the seat's own CLI runs the next model and the
+    /// conversation stays.
+    #[test]
+    fn a_plain_chain_entry_switches_in_place() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
+            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
+        ];
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        for tick in 0..5 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 20 + tick);
+        }
+
+        assert!(agent_starts(&herdr).is_empty(), "no restart: {:?}", agent_starts(&herdr));
+        assert!(
+            exits(&herdr).iter().flatten().all(|key| key != "ctrl+c"),
+            "the agent was not closed: {:?}",
+            exits(&herdr)
+        );
+        assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
     }
 
     /// T-33 (F6): the quota line clears while the switch is under way (a toast
