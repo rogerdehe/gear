@@ -47,6 +47,12 @@ pub struct FakeHerdr {
     /// Worktrees by branch: (workspace id if open, root pane if open, path).
     worktrees: BTreeMap<String, (Option<String>, Option<String>, String)>,
     next_workspace: u32,
+    /// When set, the next `agent_start` is refused with this code (the shell
+    /// of a fresh worktree is still starting). Other calls are unaffected.
+    pub refuse_next_start: Option<String>,
+    /// The names of the agents the fake started successfully (a refused start
+    /// is not in here).
+    pub started_agents: Vec<String>,
 }
 
 impl FakeHerdr {
@@ -219,15 +225,23 @@ impl HerdrAct for FakeHerdr {
             args: args.to_vec(),
         };
         let (pane, kind) = (pane_id.to_string(), kind.to_string());
+        if let Some(code) = self.refuse_next_start.take() {
+            self.calls.push(call);
+            return Outcome::Refused { code, message: "refused".into() };
+        }
         self.act(call, move |s| match s.panes.get_mut(&pane) {
             None => Outcome::Refused { code: "not_found".into(), message: "no pane".into() },
             Some(p) if p.agent.is_some() => {
                 Outcome::Refused { code: "pane_not_available".into(), message: "occupied".into() }
             }
             Some(p) => {
-                p.agent = Some((kind, AgentStatus::Idle, None));
+                // Herdr reports the session of the agent it started (the codex
+                // uuid), so the fake does too: a caller that resumes a session
+                // needs one to resume.
+                p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
                 p.revision += 1;
                 let p = p.clone();
+                s.started_agents.push(name.to_string());
                 Outcome::Ok(Self::info(&pane, &p).expect("just started"))
             }
         })
