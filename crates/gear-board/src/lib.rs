@@ -249,8 +249,9 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
             None => lanes.push(LaneBoard { lane: name, tasks: vec![line] }),
         }
     }
-    // A lane without a task has nothing to show: the board shows the plan.
-    lanes.retain(|lane| !lane.tasks.is_empty());
+    // Every registered lane stays in the model, even with nothing queued: an
+    // empty lane is exactly what the captain has to see to refill it (the
+    // review of T-9).
 
     // The open tasks as a dependency tree (the other view of the plan).
     let deps = deps::tree(&tasks);
@@ -346,6 +347,11 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
                 lines.push(String::new());
                 for lane in &project.lanes {
                     lines.push(format!("Lane {}", lane.lane));
+                    if lane.tasks.is_empty() {
+                        // A registered lane with nothing queued: the captain
+                        // sees it and can refill it.
+                        lines.push("  idle".to_string());
+                    }
                     for task in &lane.tasks {
                         lines.push(format!("  {} {}", task.id, state_word(task.state)));
                     }

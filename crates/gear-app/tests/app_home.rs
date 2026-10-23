@@ -362,6 +362,28 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
 }
 
 #[test]
+fn a_lane_with_nothing_queued_is_still_in_the_snapshot() {
+    let mut s = world();
+    // A registered lane that has no tasks at all: the captain has to see it
+    // to refill it (the review of T-9).
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", NOW)
+    })
+    .unwrap();
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(home.text.contains("runtime · idle · 0 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · idle · 0 queued"), "{}", home.text);
+}
+
+#[test]
 fn the_lane_home_has_no_snapshot() {
     let mut s = world();
     let home = home::build(
