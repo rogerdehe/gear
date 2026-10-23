@@ -119,6 +119,7 @@ description = "GEAR plan board"
 | `gear report time` | captain | where the time went: per task and per voyage |
 | `gear board` | you | the plan, full screen |
 | `gear admin kickoff / init / install-skill / stop` | you | set up, register, install the skill, stop |
+| `gear --version` | everyone | which version of GEAR this is |
 
 ## Developing GEAR
 
