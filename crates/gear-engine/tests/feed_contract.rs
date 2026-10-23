@@ -225,3 +225,68 @@ fn a_parked_lane_closes_its_open_warning() {
     let item = items(&mut w.store, "heat");
     assert_eq!(item[0].state, MsgState::Resolved);
 }
+
+#[test]
+fn a_new_shortage_after_recovery_is_reported_at_once() {
+    let mut w = world(AgentStatus::Working, 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "the first shortage opens an item");
+
+    // Refilled: the item closes.
+    w.store.write(|tx| task(tx, "T-2", 2)).unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Resolved);
+
+    // The new work is finished, the lane is dry again: the alert must be
+    // there on that same tick — no cooldown hides a new shortage (R1).
+    w.store
+        .write(|tx| {
+            let mut done = tx.get_task("p", "T-2").unwrap().unwrap();
+            done.state = TaskState::Done;
+            tx.update_task(&done)?;
+            Ok(())
+        })
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 9).unwrap();
+
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 2, "{item:?}");
+    assert_eq!(item[1].state, MsgState::Open);
+    assert_eq!(item[1].body, "lane heat has 1 ready task left");
+}
+
+#[test]
+fn a_deferred_alert_is_the_same_item_and_resolves_on_refill() {
+    let mut w = world(AgentStatus::Working, 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    // The captain defers the item: Waiting, due later (what
+    // mail::reply(Wait) writes).
+    w.store
+        .write(|tx| {
+            tx.update_message_state(
+                "p",
+                "M-1",
+                MsgState::Waiting,
+                None,
+                Some("p:heat"),
+                Some(T0 + 600),
+                T0 + 2,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    // The condition persists: the deferred item is the lane's item, so no
+    // second System message appears (R2).
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3).unwrap();
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 1, "{item:?}");
+    assert_eq!(item[0].state, MsgState::Waiting);
+
+    // Refilled: the deferred item resolves and never becomes due later.
+    w.store.write(|tx| task(tx, "T-2", 2)).unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 1, "{item:?}");
+    assert_eq!(item[0].state, MsgState::Resolved);
+}

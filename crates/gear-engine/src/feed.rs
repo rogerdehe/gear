@@ -19,10 +19,6 @@ use crate::dispatch;
 /// The ready tasks a lane needs before it is out of danger.
 const ENOUGH_READY: usize = 2;
 
-/// After the captain settles an item, the condition is not reported again for
-/// this long — no endless nagging (design/11).
-const REPEAT_AFTER_S: i64 = 10 * 60;
-
 /// What happened to one lane this tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeedChange {
@@ -109,9 +105,6 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 }
             }
             None => {
-                if cooling_down(tx, project, &seat.name, now)? {
-                    continue;
-                }
                 tx.insert_message(&NewMessage {
                     project: project.to_string(),
                     thread: thread(&seat.name),
@@ -151,22 +144,12 @@ fn open_item(
         .thread_messages(project, &thread(lane))?
         .into_iter()
         .find(|message| {
-            message.state == MsgState::Open
+            // A captain who defers the item (Waiting) still owns the same
+            // lane item: deferral is not a new incident (R2 of the review).
+            matches!(message.state, MsgState::Open | MsgState::Waiting)
                 && message.kind == MsgKind::System
                 && message.recipient == captain
         }))
-}
-
-/// Whether the lane's last item was settled so recently that reporting the
-/// condition again would be nagging.
-fn cooling_down(tx: &Tx<'_>, project: &str, lane: &str, now: Ts) -> GearResult<bool> {
-    let last = tx
-        .thread_messages(project, &thread(lane))?
-        .into_iter()
-        .last();
-    Ok(last.is_some_and(|message| {
-        message.resolved.is_some_and(|resolved| now - resolved < REPEAT_AFTER_S)
-    }))
 }
 
 /// Close the lane's open item once its queue is refilled; true when one was
