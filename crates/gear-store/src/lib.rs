@@ -499,6 +499,23 @@ impl<'s> Tx<'s> {
         Ok(RequestOutcome::Executed(result))
     }
 
+    /// The stored result of a request id, with the hash of its arguments:
+    /// `(args_hash, result json)`. A caller that runs a side effect before its
+    /// transaction (T-19: the hand-in's git check) can replay a committed
+    /// request's receipt without repeating the side effect.
+    pub fn get_request(&self, request_id: &str) -> GearResult<Option<(String, String)>> {
+        let stored: Option<(String, String)> = self
+            .tx
+            .query_row(
+                "SELECT args_hash, result FROM requests WHERE id=?1",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(stored)
+    }
+
     pub fn get_meta(&self, key: &str) -> GearResult<Option<String>> {
         let value: Option<String> = self
             .tx
@@ -1802,6 +1819,12 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 
 fn fnv1a_hex(data: &[u8]) -> String {
     format!("{:016x}", fnv1a_64(data))
+}
+
+/// The hash [`Tx::run_request`] stores for a request's arguments, so a caller
+/// can recognise an identical committed request before its transaction (T-19).
+pub fn args_hash(args_key: &str) -> String {
+    fnv1a_hex(args_key.as_bytes())
 }
 
 fn binding_status_str(status: BindingStatus) -> &'static str {
