@@ -17,10 +17,12 @@ min_herdr_version = "0.9.1"
 description = "Keep agent fleets working under one captain: the plan board in a pane."
 platforms = ["linux", "macos"]
 
-# The binary the pane runs. `cargo build --release` puts it in
-# target/release/gear; bin/gear is the wrapper that finds it.
+# The binary the pane runs. The build step downloads the prebuilt `gear` of this
+# version (verified SHA-256) and installs it at target/release/gear; on any miss
+# it builds from source with `cargo build --release`. bin/gear is the wrapper.
 [[build]]
-command = ["cargo", "build", "--release"]
+platforms = ["linux", "macos"]
+command = ["/bin/sh", "scripts/fetch-or-build.sh"]
 
 # The board pane. The two actions below choose the placement; this is the
 # default when the pane is opened without one.

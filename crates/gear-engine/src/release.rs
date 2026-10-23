@@ -68,7 +68,8 @@ pub fn release_finished_reviews(
 }
 
 /// Whether the reviewer still has work: its task is `Verifying`, its attempt is
-/// the one the reviewer was started for, and that attempt is `Submitted`.
+/// the one the reviewer was started for, that attempt is `Submitted`, and the
+/// reviewer has not handed in its verdict yet.
 fn under_review(
     store: &mut Store,
     project: &str,
@@ -93,6 +94,11 @@ fn under_review(
             if job.attempt != Some(latest.n) {
                 return Ok(false);
             }
+        }
+        // Its verdict is in: the reviewer's job is done, whoever settles it
+        // and whenever (L-58) — the slot is not held for the settlement.
+        if tx.get_review_verdict(project, task, latest.n)?.is_some() {
+            return Ok(false);
         }
         Ok(true)
     })
@@ -521,5 +527,23 @@ profile = "codex"
         assert!(removes(&herdr).is_empty());
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
+
+        // Its verdict comes in while the task still waits for settlement: the
+        // reviewer's job is done and it leaves at once (L-58).
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:r-1".into(),
+                    created: T0 + 20,
+                })
+            })
+            .unwrap();
+        release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        assert_eq!(exits(&herdr), 1, "the reviewer is told to exit once its verdict is in");
     }
 }
