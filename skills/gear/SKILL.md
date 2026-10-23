@@ -22,7 +22,7 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Run no write comma
   - `progress` — a step done (one line; not a substitute for committing and pushing);
   - `question` — you need a decision; say Question / Options / Context / Default (conventions §7), then continue with other ready work if there is any;
   - `blocked` — you cannot continue at all: use the exact command in your task packet (it names task, attempt and contract); waiting on another task is `--about T-<x> --need "<what you wait on>"`;
-  - `result` — use the exact command in your task packet.
+  - `result` — use the exact command in your task packet. **Then end your turn.** The next task is delivered to you as soon as you are idle; do not wait for the review, do not investigate GEAR (its logs, its code, its store) to see why nothing came yet — a busy lane is never given work.
 - Answer a captain instruction with `gear send --kind progress --reply-to M-<n> "<text>"` (the `ack` kind is not available in this version).
 - A temp reviewer hands in its verdict with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`; it reaches the captain and settles nothing by itself.
 - In this version a lane reports `progress`, `question` and `result`; the captain sends `instruction`; a temp reviewer sends `review`. `blocked`, `ack` and `--about` are not available yet and return `BAD_FORMAT`.
