@@ -77,6 +77,10 @@ pub trait HerdrAct: HerdrRead {
     /// Herdr `worktree.open` (never focuses): reopen the existing worktree of
     /// `branch` (temp-worker rework / resume).
     fn worktree_open(&mut self, repo: &str, branch: &str, label: &str) -> Outcome<Worktree>;
+    /// Herdr `worktree.open --path`: reopen the worktree at `path`, whatever
+    /// branch it is on now (a warm review seat's checkout moves to each job's
+    /// review branch).
+    fn worktree_open_path(&mut self, repo: &str, path: &str, label: &str) -> Outcome<Worktree>;
     /// Herdr `worktree.remove` (never forced): removes the checkout and its
     /// workspace; the branch is kept.
     fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()>;
@@ -242,6 +246,19 @@ impl HerdrAct for SocketHerdr {
         let params = json!({
             "cwd": repo,
             "branch": branch,
+            "label": label,
+            "focus": false,
+        });
+        match self.client.call("worktree.open", params) {
+            Ok(result) => worktree_from_reply(&result),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn worktree_open_path(&mut self, repo: &str, path: &str, label: &str) -> Outcome<Worktree> {
+        let params = json!({
+            "cwd": repo,
+            "path": path,
             "label": label,
             "focus": false,
         });
