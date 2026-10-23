@@ -114,6 +114,19 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // Seat observations (reads screen tails; no write transaction is held).
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
 
+        // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
+        //     the pane was closed) reaches the captain at once (L-56): the
+        //     seat still says Active, so nothing else would ever notice.
+        for obs in &observed {
+            if matches!(obs.presence, observe::Presence::Missing)
+                && obs.seat.state == gear_model::SeatState::Active
+                && matches!(obs.seat.role, gear_model::SeatRole::Lane | gear_model::SeatRole::Temp)
+                && !report.flagged.contains(&obs.seat.id)
+            {
+                report.flagged.push(obs.seat.id.clone());
+            }
+        }
+
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
