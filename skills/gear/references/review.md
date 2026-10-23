@@ -38,10 +38,10 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
 - Hand the verdict in with exactly:
 
   ```bash
-  gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<the path to your review file>"
+  gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<the path to your review file, or the text>"
   ```
 
-  GEAR records the verdict and the path. The findings themselves stay in the repository on `review/t<n>`, so the branch must stay pushed after your turn: the writer's rework note names the exact command that reads them (`git show origin/review/t<n>:<path>`). Do not delete the branch or the file, and do not rely on the store carrying the text.
+  GEAR reads the file and keeps the **text** of your findings: the writer reads them from GEAR — the rework note and the task packet — so your worktree, your branch and your file may be gone afterwards. A path that names no file is refused (`BAD_FORMAT`) and nothing is stored; a file longer than 64 KiB is cut with a note.
 - A `fail` becomes the writer's rework: write every finding so the writer can act on it without asking. A `pass` lets the captain merge.
 - End your turn after the hand-in. You review exactly one task.
 
