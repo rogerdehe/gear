@@ -19,6 +19,7 @@
 
 mod deps;
 mod screen;
+pub mod voyage;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -100,6 +101,8 @@ pub struct Board {
 /// The plan of one project.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectBoard {
+    /// The same voyage measurements shown first on the captain home page.
+    pub voyages: Vec<voyage::VoyageReport>,
     pub project: String,
     pub totals: Totals,
     /// The lanes that have work, in seat order; a lane a task names but no
@@ -367,6 +370,7 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
     }
 
     Ok(ProjectBoard {
+        voyages: voyage::reports(tx, project, now)?,
         project: project.to_string(),
         totals,
         lanes,
@@ -417,6 +421,12 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
             project.totals.handed_in
         ),
     ];
+    let mut voyage_lines: Vec<_> = project.voyages.iter().flat_map(|v| v.lines()).collect();
+    if !voyage_lines.is_empty() {
+        voyage_lines.push(String::new());
+        voyage_lines.append(&mut lines);
+        lines = voyage_lines;
+    }
     match view {
         View::Lanes => {
             if !project.lanes.is_empty() {
@@ -530,6 +540,14 @@ pub fn to_json(board: &Board) -> GearResult<String> {
         .map(|project| {
             serde_json::json!({
                 "project": project.project,
+                "voyages": project.voyages.iter().map(|v| serde_json::json!({
+                    "milestone": v.milestone, "done": v.done, "eta": v.eta,
+                    "elapsed_min": v.elapsed_min, "pace": v.pace(),
+                    "remaining_estimate_min": v.remaining_estimate_min,
+                    "projected_min": v.projected_min, "projected_at": v.projected_at,
+                    "scope_min": v.scope_min, "departure_scope_min": v.departure_scope_min,
+                    "rework_rounds": v.rework_rounds, "slowest": v.slowest,
+                })).collect::<Vec<_>>(),
                 "totals": {
                     "tasks": project.totals.tasks,
                     "done": project.totals.done,

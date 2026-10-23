@@ -212,39 +212,12 @@ fn estimate_of(
     project: &str,
     task: &gear_store::TaskRow,
 ) -> GearResult<Option<i64>> {
-    if let Some(minutes) = task.estimate_min {
-        return Ok(Some(minutes));
-    }
-    let Some(contract) = tx.get_contract(project, &task.id, task.contract_version)? else {
-        return Ok(None);
-    };
-    Ok(estimate_from_goal(&contract.goal))
+    gear_board::voyage::estimate_of(tx, project, task)
 }
 
-/// The estimate a goal states in prose: `Estimate: 2.5h`, `Estimate: 90m`.
+#[cfg(test)]
 fn estimate_from_goal(goal: &str) -> Option<i64> {
-    let after = goal.split_once("Estimate:")?.1;
-    let rest = after.trim_start();
-    let number: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '.')
-        .collect();
-    if number.is_empty() {
-        return None;
-    }
-    let value: f64 = number.parse().ok()?;
-    let unit: String = rest[number.len()..]
-        .trim_start()
-        .chars()
-        .take_while(char::is_ascii_alphabetic)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let minutes = match unit.as_str() {
-        "h" | "hr" | "hrs" | "hour" | "hours" => value * 60.0,
-        "m" | "min" | "mins" | "minute" | "minutes" => value,
-        _ => return None,
-    };
-    Some(minutes.round() as i64)
+    gear_board::voyage::estimate_from_goal(goal)
 }
 
 /// The time of one task: its rounds, the rework behind it and its span.

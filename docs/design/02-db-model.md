@@ -125,3 +125,15 @@ Counter-type state (cooldown start, continuation count, reminder count, check bu
 ## Test points
 
 Exhaustive transition table; the three request replay cases, and replay does not authorize a new generation; concurrent IDs never collide; lock timeout leaves no partial writes; the same worktree cannot be held by two seats; budget counters do not reset after restart.
+
+
+### Voyage measurements (T-39)
+
+`voyages.departure_estimate_min` stores the first known total estimate at departure.
+It is nullable and migrated additively. Later plan edits preserve it; existing
+voyages recover it from the oldest applicable stored plan during a plan apply.
+Missing historical estimates remain unknown. The captain home page and board
+use the same read-only `gear_board::voyage` measurements and five-line renderer.
+Pace samples only completed tasks with both estimates and recorded attempt spans.
+Projection is elapsed + remaining estimates × pace, rounded up to whole minutes;
+the JSON view includes both minutes from departure and the projected epoch time.
