@@ -375,7 +375,8 @@ fn start_reviewer(
     //    job on a warm seat), else the seat's worktree — opened, or created
     //    once at the integration branch.
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-    let pane = match binding.as_ref().map(|binding| binding.pane_id.clone()) {
+    let live = binding.as_ref().filter(|binding| binding.status != BindingStatus::Void);
+    let pane = match live.map(|binding| binding.pane_id.clone()) {
         Some(pane) => pane,
         None => {
             let worktree = match herdr.worktree_open(repo, &seat_branch, &seat_label) {
