@@ -258,7 +258,13 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             ),
         ));
     }
-    if v.contract_version != attempt.adopted_version {
+    // A pass may also name the task's current contract when the attempt
+    // worked to an older one: the captain attests (with review evidence) that
+    // the candidate meets the current contract. Needed while contract updates
+    // can miss a lane mid-attempt (lesson L-43).
+    let current_contract = tx.get_task(&v.project, &v.task)?.map(|t| t.contract_version);
+    let attested = v.pass && Some(v.contract_version) == current_contract;
+    if v.contract_version != attempt.adopted_version && !attested {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
