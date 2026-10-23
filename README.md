@@ -58,31 +58,42 @@ description = "GEAR plan board"
    GEAR_ADMIN=1 gear admin init gear.toml
    ```
 
-   *Verified:* with a filled config it registers the project and its seats. The engine starts by itself in the background and brings the lanes up in their own Herdr worktrees.
+   *Verified:* with a filled config it registers the project and its seats. After registration, the next `gear` call (the captain's first one, below) starts the engine in the background and brings the lanes up in their own Herdr worktrees.
 
-3. **Quality bar** — agree one with your captain at kickoff; it goes into the milestone's `bar:` and is never raised mid-voyage:
+3. **Start the captain** — in the Herdr pane you named in `gear.toml`, in your project directory, export the captain's context and start the agent you want as captain (the same pane and kind as in the config):
+
+   ```bash
+   export GEAR_CTX=acme:captain:1        # <project.id>:captain:<generation>
+   claude                                 # or codex, opencode, grok
+   ```
+
+   `init` bound that pane and generation for you; the export is what makes the agent's `gear` calls carry the captain's identity. Keep `GEAR_DB` the same as in the shell that ran `init` if you changed it. Then tell the captain to read its GEAR skill (it says how to plan) and to write and apply the first plan.
+
+   *Not verifiable here:* starting a real agent in a fresh install. The identity path — the export, the pane and `gear plan apply` as the captain — was exercised on a scratch store (see step 6).
+
+4. **Quality bar** — agree one with your captain at kickoff; it goes into the milestone's `bar:` and is never raised mid-voyage:
 
    | Bar | For | What blocks | Rework |
    |---|---|---|---|
    | **FASTEST** | an MVP or a skeleton, iterations of a few hours | only what breaks the chain or loses data; the rest is logged | at most one round |
-   | **DELIVERABLE** | a mature project | errors in normal use are fixed; edge cases are logged | capped; the gate is the project's own build/test command |
+   | **DELIVERABLE** | a mature project | errors in normal use are fixed; edge cases are logged | capped; the gate is the project's own checks |
    | **STRICT** | e.g. finance | severe issues must be fixed; medium ones are the captain's call | more rounds, each approved by the captain; more time and cost agreed up front |
 
-4. **Give the captain its instructions** — install the GEAR skill where its CLI loads skills:
+5. **Give the captain its instructions** — install the GEAR skill where its CLI loads skills:
 
    ```bash
    gear admin install-skill --agent claude     # or codex, opencode, grok
    ```
 
-   *Verified:* it writes `SKILL.md` and the references into `~/.claude/skills/gear` (Codex: `~/.codex/skills/gear`, OpenCode: `~/.config/opencode/skills/gear`, Grok: `~/.grok/skills/gear`) and prints every path. `gear --skill` prints the same text from the binary.
+   *Not verifiable here:* `install-skill`, `gear --skill` and the captain guide are the release work in this milestone and are not in this build of `gear` yet. The command and the locations are the intended release behaviour: it writes `SKILL.md` and the references into `~/.claude/skills/gear` (Codex: `~/.codex/skills/gear`, OpenCode: `~/.config/opencode/skills/gear`, Grok: `~/.grok/skills/gear`) and prints every path.
 
-5. **Plan** — the captain writes a plan draft and applies it:
+6. **Plan** — the captain writes a plan draft and applies it:
 
    ```bash
    gear plan apply plan.md
    ```
 
-   *Verified:* a plan written from the captain guide applies on a fresh project (it creates the tasks and the milestone). The lanes start working at once.
+   *Verified:* as the captain on a scratch store, a first `gear plan apply` created the plan and its tasks (plan version 1, `created T-1`). The plan format itself is described by the captain guide, which is the release work of step 5; the lanes start working at once.
 
 ## Day to day
 
