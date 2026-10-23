@@ -40,7 +40,7 @@ Check: reply `"type":"agent_started"`; status bar shows `Build auto · …`.
 
 ## Start on a chosen model
 
-OpenCode has no `--model` flag. The model comes from its config, and the only config source a *client* can carry is the environment variable `OPENCODE_CONFIG_CONTENT` (a JSON object, `{"model":"<provider/model>"}`).
+OpenCode has no `--model` flag in the TUI (only `opencode run` has one, and `run` is a one-shot, not the long-lived agent Herdr drives). The model comes from its config, and the only config source a *client* can carry is the environment variable `OPENCODE_CONFIG_CONTENT` (a JSON object, `{"model":"<provider/model>"}`).
 
 Verified 2026-10-22 on **OpenCode v2.1.2** (Herdr 0.9.1, macOS) in a scratch pane, with `deepseek/deepseek-v4-pro` as the wanted model:
 
@@ -49,6 +49,10 @@ Verified 2026-10-22 on **OpenCode v2.1.2** (Herdr 0.9.1, macOS) in a scratch pan
 | `opencode --auto` (shared background service) | the environment line | **ignored** — status bar stayed `Build auto · MiniMax-M3.1-Flash MiniMax (minimax.cn)` |
 | `opencode --standalone --auto` (private server) | the environment line | **applied** — status bar `Build auto · DeepSeek V4 Pro DeepSeek · high`; the session record shows `providerID: deepseek`, `model: deepseek-v4-pro` |
 | `opencode --auto` (shared background service) | `opencode.json` in the working directory | **applied** — status bar `Build auto · DeepSeek V4 Pro DeepSeek · high` |
+| `opencode run` (shared service, no TUI) | the environment line | **ignored** — the session ran on `opencode/flint-40b-free` |
+| `opencode run --standalone` (private server) | the environment line | **applied** — the session record shows `providerID: deepseek`, `model: deepseek-v4-pro` |
+
+Two private servers with different models ran at the same time and each kept its own model (`minimax-cn/MiniMax-M3.1-Flash` and `deepseek/deepseek-v4-pro`): a private server per agent is what isolates them.
 
 Why: the config is loaded by the *server* process (`role=server` in `~/.local/share/opencode/log/opencode.log`), not by the TUI client. The shared background service was started long before the export, so its own environment does not have the variable. A private server inherits the environment of the pane it is started in; a project `opencode.json` is re-read by the server when it changes.
 
