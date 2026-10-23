@@ -118,12 +118,14 @@ fn the_skeleton_is_a_config_the_parser_reads() {
     assert_eq!(config.quota.lanes, 3);
     assert_eq!(config.quota.temps, 2);
     // Lanes run fast models; review runs stronger ones, never the writers'.
+    let lanes: Vec<&str> = config.models.lanes.iter().map(|entry| entry.model()).collect();
     assert_eq!(
-        config.models.lanes,
+        lanes,
         vec!["deepseek/deepseek-flash", "minimax-cn/MiniMax-M3.1-Flash"]
     );
+    let review: Vec<&str> = config.models.review.iter().map(|entry| entry.model()).collect();
     assert_eq!(
-        config.models.review,
+        review,
         vec!["deepseek/deepseek-v4-pro", "minimax-cn/MiniMax-M3"]
     );
     assert_eq!(config.models.quota_reset_h, 5);
@@ -139,7 +141,8 @@ fn an_empty_machine_still_prints_a_skeleton_to_fill_in() {
     let config = gear_app::config::parse(&text).expect("valid gear.toml");
 
     assert_eq!(config.captain.kind, "TODO");
-    assert_eq!(config.models.lanes, vec!["TODO"]);
+    assert_eq!(config.models.lanes.len(), 1);
+    assert_eq!(config.models.lanes[0].model(), "TODO");
 
     let report = kickoff::report(&Inventory::default());
     assert!(report.contains("none — install an agent Herdr can start"), "{report}");
