@@ -893,6 +893,19 @@ impl<'s> Tx<'s> {
         require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
+    /// Replace a message's body. The engine updates its own open item while
+    /// a condition lasts (T-7); a caller keeps every other field.
+    pub fn update_message_body(&self, project: &str, id: &str, body: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE messages SET body=?3 WHERE project=?1 AND id=?2",
+                params![project, id, body],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "message", &format!("{id} in project {project}"))
+    }
+
     /// Messages to `recipient` in state Open, or Waiting with `wait_until <= now`.
     /// Ordered by created ascending.
     pub fn actionable_for(

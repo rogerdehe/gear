@@ -17,6 +17,7 @@
 
 pub mod dispatch;
 pub mod doorbell;
+pub mod feed;
 pub mod model;
 pub mod observe;
 pub mod onboard;
@@ -65,6 +66,9 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Reviewer seats started this tick (a lane handed a result in).
     pub reviewers: Vec<String>,
+    /// Lane items for the captain opened, updated or closed this tick
+    /// (`lane:action`), from the keep-lanes-fed watch.
+    pub feed: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -122,12 +126,20 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
-        // 6. review: a lane handed a result in → a temp reviewer starts. The
+        // 6. feed: a lane running dry gets one item in the captain's inbox,
+        //    before it stops (never-stop). Idempotent per lane and tick.
+        report.feed.extend(
+            feed::keep_lanes_fed(store, &project, now)?
+                .into_iter()
+                .map(|change| format!("{}:{}", change.lane, change.action)),
+        );
+
+        // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
 
-        // 7. execute: re-check each op, call Herdr, record the outcome.
+        // 8. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)
