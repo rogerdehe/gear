@@ -252,7 +252,9 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
     if json {
         println!("{}", serde_json::to_string(&r).unwrap_or_default());
     } else {
-        println!("registered project {} (config v{})", r.project, r.config_version);
+        // The project is registered with this config version; a re-init
+        // stores the next one (T-6).
+        println!("project {} (config v{})", r.project, r.config_version);
         for seat in &r.seats {
             println!("seat {seat}");
         }
@@ -916,7 +918,7 @@ fn cmd_admin_stop() -> GearResult<()> {
 fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     let mut cfg = gear_engine::EngineCfg::default();
     cfg.db_path = db_path.to_string();
-    for kind in ["opencode", "claude"] {
+    for kind in ["opencode", "claude", "codex"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
         }
@@ -1581,7 +1583,15 @@ mod tests {
         assert_eq!(opencode.unattended_args, vec!["--auto".to_string()]);
         // A kind without a verified SOP stays out, so its seats fail closed.
         assert!(cfg.profiles.contains_key("claude"), "the captain gets a doorbell");
-        assert!(!cfg.profiles.contains_key("codex"));
+        // The reviewers run on Codex (T-5): its SOP is verified, so the
+        // engine knows how to start and observe one.
+        let codex = cfg.profiles.get("codex").expect("codex is built in");
+        assert_eq!(codex.kind, "codex");
+        assert!(codex.verified);
+        assert_eq!(
+            codex.unattended_args,
+            vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+        );
     }
 
     #[test]

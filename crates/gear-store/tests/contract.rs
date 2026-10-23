@@ -294,3 +294,50 @@ fn project_ids_lists_every_project_in_order() {
     .unwrap();
     assert_eq!(s.read(|tx| tx.project_ids()).unwrap(), vec!["alpha".to_string(), "zeta".to_string()]);
 }
+
+/// T-6: a config change is the next config version of the project row.
+#[test]
+fn a_project_row_takes_the_next_config_version() {
+    let mut s = store();
+    s.write(|tx| testing::seed_project(tx, "p", "sess", NOW).map(|_| ())).unwrap();
+    let mut row = s.read(|tx| tx.get_project("p")).unwrap().unwrap();
+    assert_eq!(row.config_version, 1);
+
+    row.config_toml = "[project]\nid = \"p\"\n".to_string();
+    row.config_version = 2;
+    row.quota_lanes = 5;
+    row.quota_temps = 2;
+    row.quota_includes_captain = true;
+    s.write(|tx| tx.update_project(&row)).unwrap();
+
+    let after = s.read(|tx| tx.get_project("p")).unwrap().unwrap();
+    assert_eq!(after.config_version, 2);
+    assert_eq!(after.config_toml, row.config_toml);
+    assert_eq!((after.quota_lanes, after.quota_temps, after.quota_includes_captain), (5, 2, true));
+    assert_eq!(after.created, NOW, "the creation time does not change");
+
+    // A missing project is NoTarget.
+    let mut ghost = row.clone();
+    ghost.id = "ghost".to_string();
+    assert_eq!(
+        s.write(|tx| tx.update_project(&ghost)).unwrap_err().code,
+        ErrorCode::NoTarget
+    );
+}
+
+/// T-6: a lane's profile follows the config.
+#[test]
+fn a_seat_profile_is_written_and_read_back() {
+    let mut s = store();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", NOW)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)
+    })
+    .unwrap();
+    s.write(|tx| tx.set_seat_profile("p:heat", "codex")).unwrap();
+    assert_eq!(s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().profile, "codex");
+    assert_eq!(
+        s.write(|tx| tx.set_seat_profile("p:ghost", "codex")).unwrap_err().code,
+        ErrorCode::NoTarget
+    );
+}
