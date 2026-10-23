@@ -13,11 +13,9 @@
 //! that never had an agent — is removed. One failing release is recorded and
 //! the loop carries on with the next reviewer.
 
-use gear_herdr::{HerdrAct, Outcome, Profile};
+use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store};
-
-use crate::EngineCfg;
 
 /// What the release step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -211,12 +209,6 @@ fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, Str
                 .map(|binding| binding.pane_id))
         })
         .map_err(|e| e.detail)
-}
-
-/// The profile of a seat, when the engine knows it.
-#[allow(dead_code)]
-fn profile_of<'a>(cfg: &'a EngineCfg, seat: &SeatRow) -> Option<&'a Profile> {
-    cfg.profiles.get(&seat.profile)
 }
 
 #[cfg(test)]

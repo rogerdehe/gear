@@ -125,6 +125,15 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
     let path = dir.path().join("gear.db");
     a_store_of_v1(&path);
 
+    // A development v1 store can already have T-39's estimate. Rebuilding
+    // the historical NOT NULL voyage shape must preserve that value too.
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE voyages ADD COLUMN departure_estimate_min INTEGER;
+         UPDATE voyages SET departure_estimate_min=30;",
+    ).unwrap();
+    drop(conn);
+
     // The binary opens the store: it is carried up to the current version.
     let mut store = Store::open(&path).unwrap();
     assert_eq!(version_of(&mut store), SCHEMA_VERSION.to_string());
@@ -140,6 +149,7 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
         ("attempts", "verdict_at"),
         ("attempts", "settled_at"),
         ("attempts", "merged_at"),
+        ("voyages", "departure_estimate_min"),
     ] {
         assert!(shape.iter().any(|(name, columns)| name == table
             && columns.iter().any(|(name, not_null)| name == column && !not_null)),
@@ -163,6 +173,7 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
     assert_eq!(voyage.done.as_deref(), Some("it works"));
     assert_eq!(voyage.departure, Some(90));
     assert_eq!(voyage.departure_tasks, Some(3));
+    assert_eq!(voyage.departure_estimate_min, Some(30));
 }
 
 #[test]

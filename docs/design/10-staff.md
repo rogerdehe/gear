@@ -1,6 +1,6 @@
 # 10 Staff: long-lived lane standby, temp workers (incl. resume), retirement, missing seats
 
-File: `gear/engine/staff.py`. Budget 240–300 lines.
+Implementation: [onboard.rs](../../crates/gear-engine/src/onboard.rs), [release.rs](../../crates/gear-engine/src/release.rs).
 Invariants upheld: one writer per write resource (when uncertain, do not hand over); results are never lost; quota is never bypassed.
 
 ## Long-lived lanes

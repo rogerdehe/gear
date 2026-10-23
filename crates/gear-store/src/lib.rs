@@ -317,17 +317,6 @@ pub struct VerdictRow {
     pub created: Ts,
 }
 
-/// The findings of a review that block (T-23): the ids the reviewer named.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReviewBlockRow {
-    pub project: String,
-    pub task: String,
-    pub attempt: i64,
-    /// The ids, comma separated.
-    pub ids: String,
-    pub created: Ts,
-}
-
 /// The review verdict a temp reviewer handed in for one attempt (design/08,
 /// conventions §8). One record per (project, task, attempt).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -361,6 +350,8 @@ pub struct VoyageRow {
     pub departure: Option<Ts>,
     /// How many tasks the milestone had at departure.
     pub departure_tasks: Option<i64>,
+    /// Total estimate at departure; unknown for unmeasured historical scope.
+    pub departure_estimate_min: Option<i64>,
     pub updated: Ts,
 }
 
@@ -1884,12 +1875,13 @@ impl<'s> Tx<'s> {
         self.tx
             .execute(
                 "INSERT INTO voyages
-                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated, departure_estimate_min)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(project, milestone) DO UPDATE SET
                    title=excluded.title, done=excluded.done, bar=excluded.bar, eta=excluded.eta,
                    departure=COALESCE(voyages.departure, excluded.departure),
                    departure_tasks=COALESCE(voyages.departure_tasks, excluded.departure_tasks),
+                   departure_estimate_min=COALESCE(voyages.departure_estimate_min, excluded.departure_estimate_min),
                    updated=excluded.updated",
                 params![
                     row.project,
@@ -1901,6 +1893,7 @@ impl<'s> Tx<'s> {
                     row.departure,
                     row.departure_tasks,
                     row.updated,
+                    row.departure_estimate_min,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -1933,12 +1926,25 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Preserve the first known departure estimate. Callers recover historical
+    /// values from the departure plan, never from today's edited scope.
+    pub fn set_voyage_departure_estimate(
+        &self, project: &str, milestone: &str, minutes: i64,
+    ) -> GearResult<()> {
+        self.tx.execute(
+            "UPDATE voyages SET departure_estimate_min=?3
+             WHERE project=?1 AND milestone=?2 AND departure_estimate_min IS NULL",
+            params![project, milestone, minutes],
+        ).map_err(map_sqlite)?;
+        Ok(())
+    }
+
     /// One milestone's voyage, if it has one.
     pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
         let row: Option<VoyageRow> = self
             .tx
             .query_row(
-                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated, departure_estimate_min
                  FROM voyages WHERE project=?1 AND milestone=?2",
                 params![project, milestone],
                 voyage_from_row,
@@ -1953,7 +1959,7 @@ impl<'s> Tx<'s> {
         let mut stmt = self
             .tx
             .prepare(
-                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated, departure_estimate_min
                  FROM voyages WHERE project=?1 ORDER BY milestone",
             )
             .map_err(map_sqlite)?;
@@ -2410,6 +2416,7 @@ fn voyage_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageRow> {
         eta: row.get(5)?,
         departure: row.get(6)?,
         departure_tasks: row.get(7)?,
+        departure_estimate_min: row.get(9)?,
         updated: row.get(8)?,
     })
 }

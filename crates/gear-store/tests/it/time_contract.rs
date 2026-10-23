@@ -159,6 +159,8 @@ fn an_older_database_gains_the_columns() {
         s.write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
             tx.insert_attempt(&attempt())?;
+            tx.set_voyage_departure("p", "M2", T0, 1, T0)?;
+            tx.set_voyage_departure_estimate("p", "M2", 30)?;
             Ok(())
         })
         .unwrap();
@@ -173,7 +175,8 @@ fn an_older_database_gains_the_columns() {
              ALTER TABLE attempts DROP COLUMN verdict_at;
              ALTER TABLE attempts DROP COLUMN settled_at;
              ALTER TABLE attempts DROP COLUMN merged_at;
-             ALTER TABLE tasks DROP COLUMN estimate_min;",
+             ALTER TABLE tasks DROP COLUMN estimate_min;
+             ALTER TABLE voyages DROP COLUMN departure_estimate_min;",
         )
         .unwrap();
         // The old shape predates v2. Restore its stamp too, so this fixture
@@ -186,9 +189,27 @@ fn an_older_database_gains_the_columns() {
 
     // Opening it migrates it up: the columns are back and the rows are there.
     let mut s = Store::open(&path).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap();
+    assert_eq!(voyage.departure, Some(T0));
+    assert_eq!(voyage.departure_estimate_min, None);
+    s.write(|tx| tx.set_voyage_departure_estimate("p", "M2", 30)).unwrap();
+    assert_eq!(s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().departure_estimate_min, Some(30));
     s.write(|tx| tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0 + 60))
         .unwrap();
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.started, Some(T0 + 60));
     assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().task, "T-1");
+}
+
+#[test]
+fn departure_estimate_is_fixed_once() {
+    let mut s = store();
+    s.write(|tx| {
+        tx.set_voyage_departure("p", "M2", T0, 1, T0)?;
+        tx.set_voyage_departure_estimate("p", "M2", 30)?;
+        tx.set_voyage_departure_estimate("p", "M2", 90)?;
+        Ok(())
+    }).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap();
+    assert_eq!(voyage.departure_estimate_min, Some(30));
 }

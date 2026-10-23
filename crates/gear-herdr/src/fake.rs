@@ -91,11 +91,6 @@ impl FakeHerdr {
         p.revision += 1;
     }
 
-    pub fn set_session_ref(&mut self, pane: &str, session: Option<&str>) {
-        let p = self.panes.get_mut(pane).expect("unknown pane");
-        p.agent.as_mut().expect("pane has no agent").2 = session.map(str::to_string);
-    }
-
     pub fn set_screen(&mut self, pane: &str, screen: &str) {
         self.panes.get_mut(pane).expect("unknown pane").screen = screen.into();
     }
@@ -115,10 +110,6 @@ impl FakeHerdr {
         let p = self.panes.get_mut(pane).expect("unknown pane");
         p.agent = None;
         p.revision += 1;
-    }
-
-    pub fn remove_pane(&mut self, pane: &str) {
-        self.panes.remove(pane);
     }
 
     pub fn prompts_to(&self, pane: &str) -> Vec<&str> {

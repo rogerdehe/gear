@@ -222,3 +222,174 @@ fn the_snapshot_shows_the_voyage_that_has_work() {
     assert!(page.text.contains("done: M4 done"), "{}", page.text);
     assert!(page.text.contains("+1 more voyages"), "{}", page.text);
 }
+
+/// T-39: one shared five-line report precedes the snapshot and inbox, with a
+/// measured pace rather than counting unstarted estimates as completed work.
+#[test]
+fn voyage_report_starts_home_and_matches_both_board_views() {
+    use gear_model::AttemptState;
+    use gear_store::{AttemptRow, AttemptStep};
+    let mut s = world();
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship the voyage\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+    let more = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 90\ndeps: -\n";
+    run(&mut s, more, "r2", NOW + 60).unwrap();
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)?;
+        for (n, state, start, finish) in [
+            (1, AttemptState::Rejected, 0, 50),
+            (2, AttemptState::Accepted, 60, 120),
+        ] {
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(), task: "T-1".into(), n, seat: "p:heat".into(),
+                generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
+                state, candidate: Some("abc".into()), report: None, safe_point: None,
+                started: NOW + start * 60, updated: NOW + finish * 60,
+            })?;
+            tx.set_attempt_time("p", "T-1", n, AttemptStep::Started, NOW + start * 60)?;
+            tx.set_attempt_time("p", "T-1", n, AttemptStep::Settled, NOW + finish * 60)?;
+        }
+        Ok(())
+    }).unwrap();
+    s.write(|tx| {
+        tx.insert_message(&gear_store::NewMessage {
+            project: "p".into(), thread: "question".into(), task: None, attempt: None,
+            sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
+            kind: gear_model::MsgKind::Question, urgent: false, body: "Review scope".into(),
+            reply_to: None, needs_ack: false, state: gear_model::MsgState::Open, created: NOW,
+        })?;
+        Ok(())
+    }).unwrap();
+    let now = NOW + 180 * 60;
+    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", now)).unwrap();
+    let report = &reports[0];
+    assert_eq!(report.elapsed_min, Some(180));
+    assert_eq!(report.pace(), Some(2.0));
+    assert_eq!(report.remaining_estimate_min, Some(90));
+    assert_eq!(report.projected_min, Some(180 + 90 * 2));
+    assert_eq!(report.projected_at, Some(NOW + 360 * 60));
+    assert_eq!(report.scope_min, Some(150));
+    assert_eq!(report.departure_scope_min, Some(60));
+    assert_eq!(report.rework_rounds, 1);
+    assert_eq!(report.slowest, Some(("T-1".into(), 120)));
+    let lines = report.lines();
+    assert_eq!(lines.len(), 5);
+    assert_eq!(lines[0], "Voyage M2 course · done: ship the voyage");
+    assert_eq!(lines[1], "  elapsed 180m / eta 8h");
+    assert_eq!(lines[2], "  pace 2.00x · projected finish 360m from departure");
+    assert_eq!(lines[3], "  scope now 150m / departure 60m");
+    assert_eq!(lines[4], "  rework 1 round · slowest T-1 120m");
+    let block = lines.join("\n");
+    let (env, fp) = cap();
+    // Every home build starts with it, including when there are no new messages.
+    for _ in 0..2 {
+        let page = home::build(&mut s, &env, Some(&fp), now).unwrap();
+        assert!(page.text.starts_with(&block), "{}", page.text);
+        assert!(page.text.find("SNAPSHOT").unwrap() > block.len());
+        assert!(page.text.find("INBOX").unwrap() > block.len());
+        home::record_view(&mut s, &page.view).unwrap();
+    }
+    let project = s.read(|tx| gear_board::project(tx, "p", now)).unwrap();
+    assert_eq!(project.voyages, reports);
+    let board = gear_board::Board { engine: gear_board::EngineState::Running, projects: vec![project] };
+    for view in [gear_board::View::Lanes, gear_board::View::Deps] {
+        let text = gear_board::render(&board, view);
+        assert!(text.contains(&block), "{text}");
+    }
+    let json: serde_json::Value = serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
+    let json = &json["projects"][0]["voyages"][0];
+    assert_eq!(json["pace"], 2.0);
+    assert_eq!(json["projected_min"], 360);
+    assert_eq!(json["scope_min"], 150);
+    assert_eq!(json["departure_scope_min"], 60);
+
+    // Editing today's estimate must not change the departure baseline.
+    let edit = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat milestone=M2\nestimate: 120\n";
+    run(&mut s, edit, "r3", now).unwrap();
+    assert_eq!(s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().departure_estimate_min, Some(60));
+    // A running task may be the slowest, but cannot dilute completed-task pace.
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.state = TaskState::Running;
+        tx.update_task(&task)?;
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(), task: "T-2".into(), n: 1, seat: "p:heat".into(),
+            generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
+            state: AttemptState::Started, candidate: None, report: None, safe_point: None,
+            started: NOW + 10 * 60, updated: now,
+        })?;
+        tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, NOW + 10 * 60)
+    }).unwrap();
+    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", now)).unwrap();
+    assert_eq!(reports[0].slowest, Some(("T-2".into(), 170)));
+    assert_eq!(reports[0].pace(), Some(1.0));
+    assert_eq!(reports[0].projected_min, Some(270));
+}
+
+#[test]
+fn voyage_report_keeps_unknowns_and_omits_finished_milestones() {
+    let mut s = world();
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].pace(), None, "no completed measured task yet");
+    assert_eq!(reports[0].projected_min, None);
+    assert_eq!(reports[0].slowest, None, "unstarted tasks have no elapsed span");
+    assert_eq!(reports[0].departure_scope_min, Some(60));
+    s.write(|tx| {
+        let mut a = tx.get_task("p", "T-1")?.unwrap();
+        a.state = TaskState::Done;
+        tx.update_task(&a)?;
+        let mut b = tx.get_task("p", "T-2")?.unwrap();
+        b.estimate_min = None;
+        tx.update_task(&b)?;
+        Ok(())
+    }).unwrap();
+    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
+    assert_eq!(reports[0].pace(), None, "legacy completion has no measured time");
+    assert_eq!(reports[0].scope_min, None, "unknown estimate is not zero");
+    assert_eq!(reports[0].remaining_estimate_min, None);
+    assert_eq!(reports[0].projected_min, None);
+    s.write(|tx| {
+        let mut b = tx.get_task("p", "T-2")?.unwrap();
+        b.state = TaskState::Cancelled;
+        tx.update_task(&b)
+    }).unwrap();
+    assert!(s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap().is_empty());
+}
+
+/// A migrated voyage recovers its estimate from the departure plan, even when
+/// the first new edit changes that task's estimate. Legacy goals count too.
+#[test]
+fn historical_departure_scope_uses_the_original_plan() {
+    let mut old = world();
+    run(&mut old, &plan(0, FULL), "r1", NOW).unwrap();
+    let (tasks, contracts, mut voyage, mut history) = old.read(|tx| {
+        let tasks = tx.tasks_of_project("p")?;
+        let contracts = tasks.iter().map(|t| tx.get_contract("p", &t.id, 1)
+            .map(|c| c.unwrap())).collect::<gear_model::GearResult<Vec<_>>>()?;
+        Ok((tasks, contracts, tx.get_voyage("p", "M1")?.unwrap(), tx.get_plan("p", 1)?.unwrap()))
+    }).unwrap();
+    voyage.departure_estimate_min = None;
+    // The old plan had no estimate field, but stated each estimate in its goal.
+    history.draft = history.draft.replace("estimate: 30\n", "")
+        .replace("goal: A", "goal: A. Estimate: 0.5h")
+        .replace("goal: B", "goal: B. Estimate: 30m");
+    let mut s = world();
+    s.write(|tx| {
+        for task in &tasks { tx.insert_task(task)?; }
+        for contract in &contracts { tx.insert_contract(contract)?; }
+        tx.upsert_voyage(&voyage)?;
+        tx.insert_plan(&history)
+    }).unwrap();
+    let edit = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M1\nestimate: 300\n";
+    run(&mut s, edit, "r2", NOW + 60).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(voyage.departure, Some(NOW));
+    assert_eq!(voyage.departure_estimate_min, Some(60));
+    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
+    assert_eq!(reports[0].scope_min, Some(330));
+    assert_eq!(reports[0].departure_scope_min, Some(60));
+}
