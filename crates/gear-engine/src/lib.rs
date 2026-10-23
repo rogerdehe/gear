@@ -45,11 +45,17 @@ pub struct EngineCfg {
     pub profiles: std::collections::BTreeMap<String, gear_herdr::Profile>,
     /// The store path agents get as `GEAR_DB` when onboarded (slice 3).
     pub db_path: String,
+    /// Settle review verdicts without the captain (T-13). OFF by default
+    /// (L-57): until the captain's gate (T-23: blocking vs logged findings,
+    /// a round cap) and the engine merge (T-12) exist, an automatic pass marks
+    /// a task done that is not merged, and an automatic fail sends back every
+    /// finding round after round. With it off a verdict stays a captain item.
+    pub auto_settle: bool,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false }
     }
 }
 
@@ -97,9 +103,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     //     task's dependants and a fail puts the rework at the head of the
     //     lane's queue in this same tick. It needs no Herdr, so it runs even
     //     when the observation fails.
-    let (settled, settle_failed) = settle_reviews(store, now)?;
-    report.settled = settled;
-    report.settle_failed = settle_failed;
+    if cfg.auto_settle {
+        let (settled, settle_failed) = settle_reviews(store, now)?;
+        report.settled = settled;
+        report.settle_failed = settle_failed;
+    }
 
     let projects = store.read(|tx| tx.project_ids())?;
 
@@ -113,6 +121,19 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+
+        // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
+        //     the pane was closed) reaches the captain at once (L-56): the
+        //     seat still says Active, so nothing else would ever notice.
+        for obs in &observed {
+            if matches!(obs.presence, observe::Presence::Missing)
+                && obs.seat.state == gear_model::SeatState::Active
+                && matches!(obs.seat.role, gear_model::SeatRole::Lane | gear_model::SeatRole::Temp)
+                && !report.flagged.contains(&obs.seat.id)
+            {
+                report.flagged.push(obs.seat.id.clone());
+            }
+        }
 
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
