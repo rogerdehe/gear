@@ -242,10 +242,12 @@ fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
     home::record_view(&mut store, &page.view).unwrap();
     tick(&mut store, &mut herdr, &cfg, T0+2).unwrap();
     assert!(tick(&mut store, &mut herdr, &cfg, T0+600).unwrap().parallel.is_empty());
-    assert_eq!(herdr.prompts_to("w1:p1").len(), 1);
+    assert!(tick(&mut store, &mut herdr, &cfg, T0+900).unwrap().parallel.is_empty());
+    assert!(tick(&mut store, &mut herdr, &cfg, T0+1200).unwrap().parallel.is_empty());
+    assert_eq!(herdr.prompts_to("w1:p1").len(), 1, "unchanged overlap must not get a stale-item reminder");
     repo.change("heat/t1", "third.rs", "heat third");
     repo.change("steady/t2", "third.rs", "steady third");
-    assert_eq!(tick(&mut store, &mut herdr, &cfg, T0+1200).unwrap().parallel.len(), 1);
+    assert_eq!(tick(&mut store, &mut herdr, &cfg, T0+1800).unwrap().parallel.len(), 1);
     assert_eq!(herdr.prompts_to("w1:p1").len(), 2, "a changed set rings despite a view of the previous item");
     let items = pair_items(&mut store);
     assert_eq!(items[0].state, MsgState::Resolved);
