@@ -30,16 +30,19 @@ title = "GEAR board"
 placement = "tab"
 command = ["./bin/gear", "board"]
 
+# Actions run without the user's PATH: call Herdr through HERDR_BIN_PATH
+# (injected by Herdr), as the file viewer does.
+#
 # The board beside the current work: a split, like the file viewer.
 [[actions]]
 id = "open-board"
 title = "Open GEAR board"
 description = "Open the GEAR plan board in a split pane beside the current work."
-command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "board", "--placement", "split", "--focus"]
+command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin herdr-gear --entrypoint board --placement split --focus"]
 
 # The same board in its own tab.
 [[actions]]
 id = "open-board-tab"
 title = "Open GEAR board (tab)"
 description = "Open the GEAR plan board in its own tab."
-command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "board", "--placement", "tab", "--focus"]
+command = ["sh", "-c", "exec \"${HERDR_BIN_PATH:-herdr}\" plugin pane open --plugin herdr-gear --entrypoint board --placement tab --focus"]
