@@ -1,6 +1,6 @@
 # 11 Review Scheduling
 
-File: `gear/engine/review.py`. Budget 90–120 lines. Decisions are pure functions; reminders go through 08 ops.
+Implementation: [lib.rs](../../crates/gear-engine/src/lib.rs), [review.rs](../../crates/gear-engine/src/review.rs).
 Invariants upheld: reviews do not depend on the captain remembering; no endless nagging; running out of reminders does not equal completion.
 
 ## Five triggers (computed by the program, no tokens spent)
@@ -14,10 +14,6 @@ Invariants upheld: reviews do not depend on the captain remembering; no endless 
 | `staff_change` | A lane entered MISSING / RETIRING / RETIRED / NEEDS_CHECK |
 
 ## Merging and lifecycle
-
-```python
-def evaluate(snapshot: ProjectSnapshot, open_reviews, now) -> list[ReviewChange]   # pure function; the caller reads the snapshot first
-```
 
 - At most one open item per cause at a time (`V-n`, including ones already decided and waiting for a checkpoint); while the condition persists only the detail is updated, no new item is created.
 - The captain writes the conclusion in the draft's `# Review`: `V-9 keep plan=<version>: reason; next=time` or `V-9 change plan=<version>: …; next=time` (or `gear plan apply --keep V-9 --next <time> "reason"`). `plan apply` validates that the conclusion is linked to the current plan version and to that item, writes `decided` and `checkpoint`; the item is paused.
