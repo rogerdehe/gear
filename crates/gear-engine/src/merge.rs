@@ -799,6 +799,37 @@ gate = "{gate}"
         assert!(!branches.contains("review/t5"), "{branches}");
     }
 
+    /// L-67: a failed merge is not queued again tick after tick (it filed 120
+    /// items for the captain); a new passing attempt gets its own merge.
+    #[test]
+    fn a_failed_merge_is_not_queued_again() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                gear_store::testing::seed_project(tx, "p", "sess", 1)?;
+                let id = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Merge,
+                        task: Some("T-5".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({}),
+                        created: 1,
+                    })?
+                    .id;
+                tx.set_op_state("p", &id, OpState::Executing, None, 2)?;
+                tx.set_op_state("p", &id, OpState::Failed, Some("conflict"), 3)
+            })
+            .unwrap();
+
+        assert!(merge_op_of(&mut store, "p", "T-5", 1).unwrap().is_some(), "the failed merge stands");
+        assert!(merge_op_of(&mut store, "p", "T-5", 2).unwrap().is_none(), "a new attempt merges anew");
+    }
+
     #[test]
     fn a_conflict_leaves_dev_untouched_and_fails() {
         let scratch = Scratch::new("conflict");

@@ -39,3 +39,6 @@
 - One canonical plan file: the captain edits a single plan file in place (the CLI default `plan.draft.md`); history lives in git and the store's plan versions; no numbered `plan-vN.md` copies. Delete ops/plan/plan-v*.md at M1 close and say so in the skill.
 - T-26 review R2-R4 (cut under FASTEST): the skill-install label, "own checks" wording, init's engine-start timing.
 - The engine's merge step (T-12) runs git and the build gate inside the tick: while it merges, no lane is fed and no reviewer starts. Run it beside the tick.
+- T-34 review R1-R4 (cut under FASTEST): `## NEW` in free text is rewritten; a compact header `<!--gear-plan ... base=N-->` loses `-->`; extra spaces in `##  NEW`; `# Verdicts<tab>` survives. Each fails loudly on the next apply.
+- T-32 review R3-R5 (cut): trust-file key not TOML-escaped; `exit_command` not in configurable profiles; a `trusted = false` entry is taken as trust.
+- Static lane binding: a ready task waits behind its lane's current task while another lane is idle (T-23 behind T-33). The engine could offer such a task to an idle lane that may own its paths.
