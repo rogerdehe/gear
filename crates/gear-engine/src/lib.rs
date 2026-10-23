@@ -18,6 +18,7 @@
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod merge;
 pub mod model;
 pub mod observe;
 pub mod onboard;
@@ -85,6 +86,8 @@ pub struct TickReport {
     pub reviewers: Vec<String>,
     /// Reviewer seats released this tick (their task left review).
     pub released: Vec<String>,
+    /// Tasks merged into the integration branch this tick (`task @ branch`).
+    pub merged: Vec<String>,
     /// Lane items for the captain opened, updated or closed this tick
     /// (`lane:action`), from the keep-lanes-fed watch.
     pub feed: Vec<String>,
@@ -202,7 +205,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
         report.released.extend(releases.released);
 
-        // 9. execute: re-check each op, call Herdr, record the outcome.
+        // 6b. merge: a passed task goes into the integration branch, after the
+        //     gate and before the branches are closed (T-12).
+        for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
+            report.merged.push(format!("{} @ {}", merged.task, merged.branch));
+        }
+
+        // 7. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
