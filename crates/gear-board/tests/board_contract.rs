@@ -63,8 +63,14 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
 
     assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
     // The lanes come in seat order, their tasks in queue order.
-    assert!(text.contains("Lane data\n  T-1 done\n  T-3 waiting"), "{text}");
-    assert!(text.contains("Lane runtime\n  T-2 in progress\n  T-4 queued"), "{text}");
+    assert!(
+        text.contains("Lane data · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Lane runtime · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -83,7 +89,7 @@ fn a_lane_with_no_tasks_is_shown_as_idle() {
 
     // A registered lane with no tasks stays visible: the captain refills it.
     assert!(text.contains("Totals: 0 tasks"), "{text}");
-    assert!(text.contains("Lane data\n  idle"), "{text}");
+    assert!(text.contains("Lane data · rework 0/0 · no task yet\n  idle"), "{text}");
 }
 
 #[test]
@@ -243,7 +249,10 @@ fn a_task_in_review_is_shown_as_in_review() {
 
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
-    assert!(text.contains("Lane data\n  T-1 done\n  T-3 waiting\n  T-5 in review"), "{text}");
+    assert!(
+        text.contains("Lane data · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
+        "{text}"
+    );
     // A task in review is not done and not running: the totals say so.
     assert!(text.contains("Totals: 5 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
 }
