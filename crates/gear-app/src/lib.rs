@@ -16,6 +16,7 @@ pub mod home;
 pub mod identity;
 pub mod mail;
 pub mod plan;
+pub mod review;
 pub mod seats;
 pub mod tasks;
 

@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS verdicts (project TEXT NOT NULL, task TEXT NOT NULL, 
   contract_version INTEGER NOT NULL, candidate TEXT NOT NULL, passed INTEGER NOT NULL,
   evidence TEXT, by_seat TEXT NOT NULL, created INTEGER NOT NULL);
 
+-- The verdict a temp reviewer handed in for one attempt (T-2). One record per
+-- attempt; the findings hold a path or the text itself.
+CREATE TABLE IF NOT EXISTS review_verdicts (project TEXT NOT NULL, task TEXT NOT NULL,
+  attempt INTEGER NOT NULL, passed INTEGER NOT NULL, findings TEXT NOT NULL,
+  by_seat TEXT NOT NULL, created INTEGER NOT NULL,
+  PRIMARY KEY (project, task, attempt));
+
 CREATE TABLE IF NOT EXISTS reviews (project TEXT NOT NULL, id TEXT NOT NULL, cause TEXT NOT NULL,
   state TEXT NOT NULL, detail TEXT, decided TEXT, plan_version INTEGER, checkpoint INTEGER,
   reminders INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL,
