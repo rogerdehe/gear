@@ -100,6 +100,29 @@ fn the_board_shows_the_rework_rate_and_the_time_since_the_last_task() {
 }
 
 #[test]
+fn the_measure_follows_the_seat_that_made_the_attempt() {
+    let mut store = world();
+    // The task moves to another lane after the rejection: the board lane's
+    // hands did the work, so its rate keeps the two hand-ins (the review of
+    // T-16).
+    store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-1").unwrap().unwrap();
+            task.lane = Some("runtime".into());
+            tx.update_task(&task)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
+
+    assert!(text.contains("Lane data · rework 1/2"), "{text}");
+    assert!(text.contains("Lane runtime · rework 0/0"), "{text}");
+    // And the project-wide rate counts each hand-in once.
+    assert!(text.contains("rework 1/2"), "{text}");
+}
+
+#[test]
 fn the_measures_are_in_the_json() {
     let mut store = world();
     let board = build(&mut store, &options(), T0).unwrap();
