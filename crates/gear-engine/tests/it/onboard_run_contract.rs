@@ -189,6 +189,7 @@ profile = "claude"
 
 [models]
 lanes = ["grok-4.7"]
+on_quota = { lanes = "wait", review = "wait" }
 "#;
     // The grok trust store lives under HOME: give it a scratch one.
     let home = std::env::temp_dir().join(format!(
