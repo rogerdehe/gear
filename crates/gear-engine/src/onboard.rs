@@ -287,9 +287,19 @@ fn onboard_seat(
     // first start, while Herdr reports it idle, and the prompt would be lost.
     crate::trust::trust_worktree(&plan.kind, &created.path, now)
         .map_err(|reason| format!("trust: {reason}"))?;
-    let started = match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &plan.args) {
-        Outcome::Ok(info) => info,
-        other => return Err(step_failure("agent_start", &other)),
+    // The shell may still be running the environment line when the start
+    // comes (a slow shell init): Herdr then refuses with agent_pane_busy.
+    // That is a race, not a failure — wait a moment and try again.
+    let mut tries = 0;
+    let started = loop {
+        match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &plan.args) {
+            Outcome::Ok(info) => break info,
+            Outcome::Refused { code, .. } if code == "agent_pane_busy" && tries < PANE_BUSY_RETRIES => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(PANE_BUSY_WAIT_MS));
+            }
+            other => return Err(step_failure("agent_start", &other)),
+        }
     };
 
     // 6. an OpenCode agent runs on the chain's model before the seat is marked
@@ -366,6 +376,11 @@ fn resume_start(
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
     Ok(true)
 }
+
+/// How often a start refused because the shell is still busy is retried, and
+/// how long to wait between tries.
+const PANE_BUSY_RETRIES: u32 = 5;
+const PANE_BUSY_WAIT_MS: u64 = 1000;
 
 /// Park a seat in NeedsCheck with the reason. It is never retried
 /// automatically (design/10): a human decides what happens next. The
@@ -588,6 +603,21 @@ bar = "MiniMax-M3.1-Flash"
         let reason = seat.state_reason.unwrap_or_default();
         assert!(reason.contains("opencode"), "{reason}");
         assert!(herdr.calls.is_empty(), "nothing was done in Herdr: {:?}", herdr.calls);
+    }
+
+    /// The shell still runs the environment line when the start comes: Herdr
+    /// refuses with agent_pane_busy, and the start is tried again, not parked.
+    #[test]
+    fn a_busy_shell_at_start_is_retried() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.refuse_next_start = Some("agent_pane_busy".into());
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active);
     }
 
     #[test]

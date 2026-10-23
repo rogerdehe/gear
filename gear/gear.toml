@@ -51,8 +51,8 @@ quota_reset_h = 5
 # the status bar says once the model is on. Required for an OpenCode lane or
 # reviewer on that model — without it the seat is flagged, never closed.
 [models.switch."minimax-cn/MiniMax-M3.1-Flash"]
-picker = "MiniMax-M3.1-Flash  MiniMax"
-bar = "MiniMax-M3.1-Flash MiniMax"
+picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
+bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
 
 [conventions]
 integration = "dev"

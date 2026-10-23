@@ -59,6 +59,8 @@ Why: the config is loaded by the *server* process (`role=server` in `~/.local/sh
 **Rule (2026-10-23):**
 - **Long-lived lanes run on the shared background service — no `--standalone`.** Private servers exited on their own twice in a day (the lane vanished), and they cost ~260 MB each. A lane gets its model **in place** with `/model` (picker filter, Enter, the variant dialog if any), checked on the status bar; the filter must be specific (`DeepSeek V4.1 Flash OpenCode Go`, not a free tier). Changing a model never closes the agent.
 - **Short-lived reviewers** may use `--standalone` + the environment line (they exit soon after their verdict); today reviewers run on Codex anyway.
+- **Start model: the project's `opencode.json`** (`{"model":"<provider/model>"}` at the repo root): the shared service applies it to every new session in that project (re-verified 2026-10-23: `minimax-cn/MiniMax-M3.1-Flash` on the bar at start); `/model` still changes it inside the session.
+- **Effort (variant) is not configurable per project or per process.** `agent.build.variant` in `opencode.json` is ignored. OpenCode remembers one variant per model in `~/.local/state/opencode/model.json` (`"variant": {"<provider/model>": "high"}`), shared by every session on the machine. Set it in the session with `/effort` (the "Select variant" dialog) and check the bar (`· max`); it changes that model's default for every new session, the user's own included.
 
 ```bash
 herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --auto        # lane
