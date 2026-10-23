@@ -1601,7 +1601,7 @@ review = ["gpt-6.1-sol"]
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::PaneRun { command, .. } => Some(command.clone()),
+                Call::PaneType { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect();

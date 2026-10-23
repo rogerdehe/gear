@@ -72,6 +72,11 @@ pub trait HerdrAct: HerdrRead {
     /// Start an agent of `kind` in an available shell pane.
     fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo>;
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()>;
+    /// Type `text` into the pane as keystrokes (`pane.send_text`), without
+    /// Enter. Unlike `pane_run`/`prompt` (a paste), typed text triggers an
+    /// agent's slash-command menu: `/model` typed opens OpenCode's picker,
+    /// `/model` pasted is sent to the model as a message (L-71).
+    fn pane_type(&mut self, pane_id: &str, text: &str) -> Outcome<()>;
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()>;
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()>;
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()>;
@@ -207,6 +212,14 @@ impl HerdrAct for SocketHerdr {
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()> {
         match self.client.pane_send_keys(pane_id, keys) {
             Ok(()) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn pane_type(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
+        let params = json!({ "pane_id": pane_id, "text": text });
+        match self.client.call("pane.send_text", params) {
+            Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
     }

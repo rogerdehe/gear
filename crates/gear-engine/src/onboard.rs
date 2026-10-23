@@ -696,7 +696,7 @@ bar = "MiniMax-M3.1-Flash"
             .calls
             .iter()
             .filter_map(|call| match call {
-                gear_herdr::fake::Call::PaneRun { command, .. } => Some(command.clone()),
+                gear_herdr::fake::Call::PaneType { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect();
@@ -719,7 +719,7 @@ bar = "MiniMax-M3.1-Flash"
             .calls
             .iter()
             .filter_map(|call| match call {
-                gear_herdr::fake::Call::PaneRun { command, .. } => Some(command.clone()),
+                gear_herdr::fake::Call::PaneType { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect();
