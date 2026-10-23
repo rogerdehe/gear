@@ -84,6 +84,8 @@ fn world() -> Store {
 fn a_review_verdict_settles_the_task_in_the_tick() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
+    // The lane's agent is in its pane (a missing agent alerts the captain, L-56).
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
 
     let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 10).unwrap();
     assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
