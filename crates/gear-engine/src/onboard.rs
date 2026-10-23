@@ -305,6 +305,14 @@ fn onboard_seat(
         })
         .map_err(|e| format!("begin_onboard: {}", e.detail))?;
 
+    if kind == "opencode" {
+        if let Some(entry) = entry {
+            plan.args.extend(crate::opencode::start_args(
+                store, herdr, &seat.id, generation, &created.path, config, entry.model(),
+            )?);
+        }
+    }
+
     // 5. the environment in the pane, then the agent itself.
     match herdr.pane_run(&pane, &plan.env_command) {
         Outcome::Ok(()) => {}
@@ -347,7 +355,10 @@ fn onboard_seat(
     // 7. the agent is there on the right model: the binding becomes Active and
     //    so does the seat. The model the seat runs on is recorded: the review
     //    must never run the writer's current model (T-35).
-    let session_ref = started.agent_session.as_ref().map(|session| session.value.as_str());
+    let api_session = store.read(|tx| tx.get_binding(&seat.id, generation))
+        .map_err(|e| e.detail)?.and_then(|binding| binding.session_ref);
+    let session_ref = api_session.as_deref()
+        .or_else(|| started.agent_session.as_ref().map(|session| session.value.as_str()));
     store
         .write(|tx| {
             gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
@@ -373,12 +384,12 @@ fn resume_start(
     let Some(plan) = crate::switch::pending(store, &seat.id).map_err(|e| e.detail)? else {
         return Ok(false);
     };
-    let Some(labels) = config
+    let Some((model, labels)) = config
         .models
         .switch
         .iter()
         .find(|(_, labels)| labels.bar == plan.to)
-        .map(|(_, labels)| labels.clone())
+        .map(|(model, labels)| (model.clone(), labels.clone()))
     else {
         crate::switch::clear_pending(store, &seat.id).map_err(|e| e.detail)?;
         return Err(format!(
@@ -386,7 +397,7 @@ fn resume_start(
             plan.to
         ));
     };
-    match crate::switch::switch_in_place(store, herdr, &seat.id, profile, None, &labels, now)
+    match crate::switch::switch_model(store, herdr, &seat.id, profile, None, &labels, &model, now)
         .map_err(|e| format!("model switch: {}", e.detail))?
     {
         crate::switch::SwitchOutcome::Done | crate::switch::SwitchOutcome::Already => {}
@@ -400,9 +411,11 @@ fn resume_start(
         .read(|tx| tx.get_binding(&seat.id, seat.generation))
         .map_err(|e| e.detail)?
         .map(|binding| binding.pane_id);
-    let session_ref = pane
+    let api_session = store.read(|tx| tx.get_binding(&seat.id, seat.generation))
+        .map_err(|e| e.detail)?.and_then(|binding| binding.session_ref);
+    let session_ref = api_session.or_else(|| pane
         .and_then(|pane| herdr.agent_get(&pane).ok().flatten())
-        .and_then(|info| info.agent_session.map(|session| session.value));
+        .and_then(|info| info.agent_session.map(|session| session.value)));
     store
         .write(|tx| {
             gear_app::seats::finish_onboard(tx, &seat.id, seat.generation, session_ref.as_deref(), now)
@@ -627,6 +640,35 @@ bar = "MiniMax-M3.1-Flash"
             })
             .unwrap();
         store
+    }
+
+    #[test]
+    fn api_start_records_session_before_tui_and_sends_no_model_keys() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("┃ Build auto · MiniMax-M3.1-Flash".into());
+        let model = serde_json::json!({"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"});
+        herdr.api_replies.extend([
+            Ok(serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_api_start", "model":model}})),
+            Ok(serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_api_start", "model":model}})),
+        ]);
+        assert_eq!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(), ["toy:heat"]);
+        assert_eq!(start_args(&herdr), ["--auto", "--session", "ses_api_start"]);
+        let binding = store.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.session_ref.as_deref(), Some("ses_api_start"));
+        assert!(!herdr.calls.iter().any(|call| matches!(call,
+            gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. })));
+        let create = herdr.calls.iter().find_map(|call| match call {
+            gear_herdr::fake::Call::OpenCodeApi { args } if args[0] == "session.create" => Some(args),
+            _ => None,
+        }).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&create[2]).unwrap();
+        assert_eq!(body["agent"], "build");
+        assert_eq!(body["model"], model);
+        let path = store.read(|tx| tx.get_meta(&worktree_path_key("toy:heat"))).unwrap().unwrap();
+        assert_eq!(body["location"]["directory"], path);
     }
 
     #[test]

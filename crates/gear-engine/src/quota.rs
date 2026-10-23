@@ -278,7 +278,7 @@ fn start_switch(
         flag_needs_check(store, seat, &line, now)?;
         return Ok(Some(line));
     };
-    let outcome = crate::switch::switch_in_place(store, herdr, &seat.id, profile, obs, labels, now)?;
+    let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
     settle_switch(store, project, seat, model, outcome, now)
 }
 
@@ -316,7 +316,7 @@ fn resume_switch(
         return Ok(Some(line));
     };
     let labels = config.models.switch.get(&model).cloned().expect("just found");
-    let outcome = crate::switch::switch_in_place(store, herdr, &seat.id, profile, obs, &labels, now)?;
+    let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
     settle_switch(store, project, seat, &model, outcome, now)
 }
 

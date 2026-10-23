@@ -487,6 +487,20 @@ fn start(
             return Ok(false);
         }
     }
+    if plan.cli == "opencode" {
+        if let Some(path) = worktree_path(store, seat)? {
+            let project = store.read(|tx| tx.get_project(&seat.project))?.expect("project exists");
+            let config = gear_app::config::parse(&project.config_toml)?;
+            match crate::opencode::start_args(store, herdr, &seat.id, plan.generation, &path, &config, &plan.model) {
+                Ok(session_args) => args.extend(session_args),
+                Err(reason) => {
+                    flag(store, seat, &reason, now)?;
+                    clear_pending(store, &seat.id)?;
+                    return Ok(false);
+                }
+            }
+        }
+    }
     match herdr.agent_start(&name, &plan.cli, &pane, &args) {
         Outcome::Ok(_) => {
             plan.phase = Phase::Finish;
