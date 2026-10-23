@@ -25,6 +25,10 @@ pub struct SendArgs {
     pub candidate: Option<String>,
     /// Review only (T-2): the verdict a temp reviewer hands in.
     pub verdict: Option<crate::review::Outcome>,
+    /// Result only (T-19): the hand-in gate — the candidate must contain the
+    /// project's current integration branch. `None` skips the check (tests and
+    /// callers that are not a lane hand-in).
+    pub base: Option<crate::base::BaseGate>,
     /// Upstream task to ask (must be a registered dependency) — slice 2.
     pub about: Option<String>,
     /// Captain only: seat name to instruct.
@@ -71,6 +75,17 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
+    // The hand-in gate (T-19) runs before the transaction: a candidate that
+    // does not contain the current integration branch is refused and nothing —
+    // no message, no attempt change — is stored.
+    if args.kind == MsgKind::Result {
+        if let Some(gate) = &args.base {
+            let candidate = args.candidate.as_deref().ok_or_else(|| {
+                GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
+            })?;
+            crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+        }
+    }
     store.write(|tx| {
         // The caller must be a seat that may write (design/03).
         let (ctx, seat) = require_seat(
