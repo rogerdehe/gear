@@ -61,6 +61,9 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// `project:task/attempt` of the review verdicts that settled a task this
+    /// tick (T-13).
+    pub settled: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -70,6 +73,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
     report.onboarded = onboard::onboard_queued(store, herdr, cfg, now)?;
+
+    // 0b. settle: a review verdict that arrived settles its task without the
+    //     captain (T-13) — before the dispatch below, so a pass frees the
+    //     task's dependants and a fail puts the rework at the head of the
+    //     lane's queue in this same tick. It needs no Herdr, so it runs even
+    //     when the observation fails.
+    report.settled = settle_reviews(store, now)?;
 
     let projects = store.read(|tx| tx.project_ids())?;
 
@@ -122,6 +132,22 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)
+}
+
+/// Settle every review verdict whose attempt is still handed in (T-13), in
+/// every project. One `settle_review` call per verdict; a verdict that already
+/// settled its attempt is not listed (and would be a no-op anyway).
+fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<Vec<String>> {
+    let mut settled = Vec::new();
+    for project in store.read(|tx| tx.project_ids())? {
+        for review in store.read(|tx| tx.reviews_to_settle(&project))? {
+            store.write(|tx| {
+                gear_app::tasks::settle_review(tx, &project, &review.task, review.attempt, now)
+            })?;
+            settled.push(format!("{project}:{}/{}", review.task, review.attempt));
+        }
+    }
+    Ok(settled)
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
