@@ -194,15 +194,21 @@ fn onboard_seat(
         .clone()
         .ok_or_else(|| "a lane gets a worktree, but the plan has none".to_string())?;
 
-    // 3. the worktree, with the root pane the agent starts in.
-    let created = match herdr.worktree_create(
-        &worktree.repo,
-        &worktree.branch,
-        &worktree.base,
-        &worktree.label,
-    ) {
+    // 3. the worktree, with the root pane the agent starts in. A lane's home
+    // worktree is long-lived (17 §3): reopen it when its branch exists (a
+    // restart, or a lane GEAR takes over), create it otherwise.
+    let created = match herdr.worktree_open(&worktree.repo, &worktree.branch, &worktree.label) {
         Outcome::Ok(worktree) => worktree,
-        other => return Err(step_failure("worktree_create", &other)),
+        Outcome::Refused { code, .. } if code == "worktree_not_found" => match herdr.worktree_create(
+            &worktree.repo,
+            &worktree.branch,
+            &worktree.base,
+            &worktree.label,
+        ) {
+            Outcome::Ok(worktree) => worktree,
+            other => return Err(step_failure("worktree_create", &other)),
+        },
+        other => return Err(step_failure("worktree_open", &other)),
     };
     let pane = created.pane_id;
 

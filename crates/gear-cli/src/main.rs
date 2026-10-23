@@ -872,7 +872,7 @@ fn cmd_admin_stop() -> GearResult<()> {
 fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     let mut cfg = gear_engine::EngineCfg::default();
     cfg.db_path = db_path.to_string();
-    for kind in ["opencode"] {
+    for kind in ["opencode", "claude"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
         }
@@ -956,16 +956,8 @@ fn run_engine_with(
         }
         match tick(store, herdr, cfg, clock()) {
             Ok(report) if report != gear_engine::TickReport::default() => {
-                writeln!(
-                    out,
-                    "tick: observe_failed={:?} intended={} executed={} confirmed={} flagged={}",
-                    report.observe_failed,
-                    report.intended.len(),
-                    report.executed.len(),
-                    report.confirmed.len(),
-                    report.flagged.len()
-                )
-                .map_err(write_error)?;
+                // Verbose while GEAR is in development (PRD §15): every id.
+                writeln!(out, "tick: {report:?}").map_err(write_error)?;
             }
             Ok(_) => {}
             Err(e) => {
@@ -1438,7 +1430,7 @@ mod tests {
         assert!(opencode.verified);
         assert_eq!(opencode.unattended_args, vec!["--auto".to_string()]);
         // A kind without a verified SOP stays out, so its seats fail closed.
-        assert!(!cfg.profiles.contains_key("claude"));
+        assert!(cfg.profiles.contains_key("claude"), "the captain gets a doorbell");
         assert!(!cfg.profiles.contains_key("codex"));
     }
 

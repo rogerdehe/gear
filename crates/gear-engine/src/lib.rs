@@ -59,6 +59,8 @@ pub struct TickReport {
     pub confirmed: Vec<String>,
     /// Seats flagged for attention (e.g. doorbell evidence budget exhausted).
     pub flagged: Vec<String>,
+    /// Seats onboarded this tick (worktree, pane and agent all up).
+    pub onboarded: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -67,7 +69,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
-    onboard::onboard_queued(store, herdr, cfg, now)?;
+    report.onboarded = onboard::onboard_queued(store, herdr, cfg, now)?;
 
     let projects = store.read(|tx| tx.project_ids())?;
 

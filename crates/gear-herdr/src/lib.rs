@@ -298,6 +298,8 @@ const REFUSED_CODES: &[&str] = &[
     // an unknown workspace are refused before anything runs.
     "unsupported_agent_kind",
     "workspace_not_found",
+    // `worktree.open` on a branch with no worktree (seen on 0.9.1).
+    "worktree_not_found",
 ];
 
 /// Protocol error codes that answer "there is no agent in that pane": an

@@ -268,7 +268,7 @@ impl HerdrAct for FakeHerdr {
         let call = Call::WorktreeOpen { repo: repo.into(), branch: branch.into(), label: label.into() };
         let branch = branch.to_string();
         self.act(call, move |s| match s.worktrees.get(&branch).cloned() {
-            None => Outcome::Refused { code: "not_found".into(), message: "no worktree".into() },
+            None => Outcome::Refused { code: "worktree_not_found".into(), message: "worktree branch not found".into() },
             Some((Some(ws), Some(pane), path)) => {
                 Outcome::Ok(Worktree { workspace_id: ws, pane_id: pane, path, branch })
             }

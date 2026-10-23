@@ -18,7 +18,7 @@ fn opencode_is_built_in_and_verified() {
 
 #[test]
 fn unverified_kinds_are_not_built_in() {
-    for kind in ["claude", "codex", "pi", "nope"] {
+    for kind in ["codex", "pi", "nope"] {
         assert!(builtin(kind).is_none(), "{kind}");
     }
 }

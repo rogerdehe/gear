@@ -122,6 +122,24 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             exit_keys: vec!["ctrl+c".into()],
             verified: true,
         }),
+        // Claude Code as captain (seen on 2026-10-22: Herdr reports its
+        // working/idle and its session id). No quota markers: the captain's
+        // tail is conversation text that may quote them; GEAR does not manage
+        // the captain's quota.
+        "claude" => Some(Profile {
+            kind: "claude".into(),
+            busy_markers: vec!["esc to interrupt".into()],
+            ratelimit_markers: vec![],
+            quota_markers: vec![],
+            auth_markers: vec![],
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--dangerously-skip-permissions".into()],
+            session_ref: true,
+            resume_args: Some(vec!["--resume".into(), "{session}".into()]),
+            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
+            verified: true,
+        }),
         // Only kinds with a verified SOP are built in (design/04).
         _ => None,
     }
