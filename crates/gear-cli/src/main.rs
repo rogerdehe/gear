@@ -119,7 +119,7 @@ struct ReplyCmd {
 
 #[derive(Subcommand, Debug)]
 enum PlanOp {
-    /// Apply a plan draft (default: the project's plan.draft.md).
+    /// Apply a voyage plan file; the file is rewritten in place after a successful apply.
     Apply {
         path: Option<std::path::PathBuf>,
         #[arg(long, value_name = "V-ID")]
@@ -626,7 +626,7 @@ fn run_plan(
     let Some(path) = path else {
         return Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
-            "give the draft path: gear plan apply <path>".to_string(),
+            "give the voyage file, e.g. gear plan apply gear/voyages/M1.md".to_string(),
         ));
     };
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -638,10 +638,43 @@ fn run_plan(
     let draft = gear_app::draft::parse(&text)?;
     let fp = gear_app::identity::observe(env, herdr)?;
     let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
+    // The file is the voyage's plan: after a successful apply it is rewritten
+    // in place (a temp file, then a rename) so it stays the current plan
+    // (T-34): base= the applied version, each NEW block gets its id, the
+    // Verdicts section goes (verdicts live in the store).
+    let rewritten = gear_app::draft::rewrite_applied(&text, result.version, &result.created);
+    write_in_place(path, &rewritten).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "plan version {} applied, but the voyage file was not rewritten: {}",
+                result.version, e.detail
+            ),
+        )
+    })?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
     }
     Ok(render_apply(&result))
+}
+
+/// Replace `path` with `text` through a temp file in the same directory, so a
+/// reader never sees a half-written plan.
+fn write_in_place(path: &std::path::Path, text: &str) -> GearResult<()> {
+    let tmp = path.with_extension("gear-tmp");
+    std::fs::write(&tmp, text).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot write {}: {e}", tmp.display()),
+        )
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot replace {}: {e}", path.display()),
+        )
+    })
 }
 
 /// One line per item of an apply: version, created, contract changes, the
@@ -1403,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_apply_without_path_is_bad_format() {
+    fn plan_apply_without_path_names_the_voyage_file() {
         let (mut store, mut herdr) = world();
         let err = run_plan(
             &mut store,
@@ -1418,7 +1451,113 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
-        assert!(err.detail.contains("draft path"), "{}", err.detail);
+        assert!(
+            err.detail.contains("gear/voyages/M1.md"),
+            "the error names the voyage file: {}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn plan_apply_rewrites_the_voyage_file() {
+        let (mut store, mut herdr) = world();
+        let draft = format!(
+            "<!-- gear-plan project=p base=0 -->\n# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n"
+        );
+        let path = write_draft(&draft);
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("created T-1"), "{out}");
+
+        // The file is the current plan again: base= the applied version, the
+        // NEW block carries its id, the Verdicts section is gone.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("<!-- gear-plan project=p base=1 -->"), "{text}");
+        assert!(text.contains("## T-1 [must] lane=heat"), "{text}");
+        assert!(!text.contains("NEW"), "{text}");
+        assert!(!text.contains("# Verdicts"), "{text}");
+        assert!(text.contains("# Goal\nthe goal"), "{text}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_second_apply_of_the_rewritten_file_does_nothing() {
+        let (mut store, mut herdr) = world();
+        let draft = format!(
+            "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n"
+        );
+        let path = write_draft(&draft);
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan-2",
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("plan version 2"), "{out}");
+        assert!(!out.contains("created"), "{out}");
+        assert!(!out.contains("contract"), "{out}");
+        assert!(!out.contains("settled"), "{out}");
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        assert_eq!(tasks.len(), 1, "{tasks:?}");
+        assert_eq!(tasks[0].contract_version, 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("<!-- gear-plan project=p base=2 -->"), "{text}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_failed_apply_leaves_the_file_untouched() {
+        let (mut store, mut herdr) = world();
+        // T-9 does not exist: the apply fails after the file is read.
+        let draft = format!(
+            "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-9 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        );
+        let path = write_draft(&draft);
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), draft, "the file is untouched");
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

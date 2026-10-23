@@ -262,8 +262,11 @@ pub fn confirm_pending(
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
                 let evidence = match op.kind {
-                    // A doorbell is proven by the message ids it carried.
-                    OpKind::Doorbell => shown_in_a_view(tx, &op)?,
+                    // A doorbell is proven by a view of the ids it carried
+                    // that are still open; ids closed another way need no
+                    // showing (else the doorbell never settles, holds the
+                    // slot, and no doorbell rings again — L-66).
+                    OpKind::Doorbell => shown_in_a_view(tx, project, &op, now)?,
                     // A review delivery is proven by the verdict the reviewer
                     // hands in — the review packet is not on the reviewer's
                     // home page. A review takes longer than the check budget
@@ -329,10 +332,11 @@ pub fn confirm_pending(
     })
 }
 
-/// The time of the view that shows every message id the op covers, if any.
-/// Only a view of the seat's current generation, at or after the op's `created`
-/// time, counts: a view from before the doorbell was intended proves nothing.
-fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
+/// The time of the view that shows every message id the doorbell covers that
+/// is still open (Open/Waiting), if any. Ids closed another way need no view;
+/// when none is left open the doorbell is settled at `now`. Only a view of the
+/// seat's current generation, at or after the op's `created` time, counts.
+fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<Option<Ts>> {
     let covers: Vec<&str> = op
         .payload
         .get("covers")
@@ -343,14 +347,20 @@ fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         // Nothing to show: no view can be linked to this op.
         return Ok(None);
     }
+    let mut open = Vec::new();
+    for id in covers {
+        match tx.get_message(project, id)? {
+            Some(msg) if !matches!(msg.state, gear_model::MsgState::Open | gear_model::MsgState::Waiting) => {}
+            _ => open.push(id),
+        }
+    }
+    if open.is_empty() {
+        return Ok(Some(now));
+    }
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
     Ok(views
         .iter()
-        .find(|view| {
-            covers
-                .iter()
-                .all(|id| view.shown_msgs.iter().any(|shown| shown == id))
-        })
+        .find(|view| open.iter().all(|id| view.shown_msgs.iter().any(|shown| shown == id)))
         .map(|view| view.ts))
 }
 

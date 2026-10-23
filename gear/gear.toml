@@ -1,5 +1,5 @@
 # GEAR's own project config (kickoff agreed with the user 2026-10-22).
-# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init ops/gear.toml
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
 
 [project]
 id = "gear"
