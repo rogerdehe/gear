@@ -133,6 +133,22 @@ fn the_skeleton_is_a_config_the_parser_reads() {
     );
 }
 
+/// T-42: the skeleton's header tells the user how to register the config:
+/// the `gear/` path the README and the captain guide use, and no `GEAR_DB`
+/// (the store has a default).
+#[test]
+fn the_skeleton_header_names_the_config_of_the_project() {
+    let text = kickoff::skeleton(&inventory());
+    let header: Vec<&str> = text.lines().take(2).collect();
+    let header = header.join("\n");
+
+    assert!(header.contains("gear admin init gear/gear.toml"), "{header}");
+    assert!(!header.contains("GEAR_DB"), "{header}");
+    // The first line still starts the extraction the README does
+    // (`sed -n '/^# gear.toml/,$p'`).
+    assert!(text.lines().next().unwrap().starts_with("# gear.toml"), "{text}");
+}
+
 #[test]
 fn an_empty_machine_still_prints_a_skeleton_to_fill_in() {
     let text = kickoff::skeleton(&Inventory::default());

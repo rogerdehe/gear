@@ -44,7 +44,6 @@ fn texts_carry_no_screen_marker() {
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],
-        exit_command: None,
         verified: true,
     };
     validate_template(&p, &continue_text("T-1", 1, "x.md")).unwrap();

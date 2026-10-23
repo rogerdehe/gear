@@ -118,6 +118,7 @@ description = "GEAR plan board"
 | `gear plan apply` | captain | apply a plan draft |
 | `gear board` | you | the plan, full screen |
 | `gear admin kickoff / init / install-skill / stop` | you | set up, register, install the skill, stop |
+| `gear --version` | everyone | which version of GEAR this is |
 
 ## Developing GEAR
 

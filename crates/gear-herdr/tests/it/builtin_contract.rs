@@ -25,9 +25,9 @@ fn grok_is_built_in_and_verified() {
     assert_eq!(p.unattended_args, vec!["--always-approve".to_string()]);
     assert_eq!(p.resume_args, Some(vec!["-r".to_string(), "{session}".to_string()]));
     assert!(p.session_ref, "Herdr reports grok's session");
-    // It exits on `/exit`, not on a key.
+    // It has no exit keys: a released agent's pane is closed by Herdr, and
+    // nothing in GEAR sends grok a command (T-42).
     assert_eq!(p.exit_keys, Vec::<String>::new());
-    assert_eq!(p.exit_command.as_deref(), Some("/exit"));
     // Its busy sign is the shortcut line of a running turn.
     assert!(classify_screen(&p, "  status  │  Ctrl+c:cancel  │").contains(&ScreenFlag::Busy));
 }
