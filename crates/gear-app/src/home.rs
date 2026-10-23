@@ -133,7 +133,13 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
         lines.push(String::new());
         lines.push(match seat.role {
             SeatRole::Captain => match shown_msgs.first() {
-                Some(first) => format!("next: gear reply {first} --resolve"),
+                Some(first) => match tx.get_message(&ctx.project, first)? {
+                    Some(message) if crate::station::is_station(&message) => {
+                        let milestone = message.thread.trim_start_matches("station:");
+                        format!("next: gear plan apply gear/voyages/{milestone}.md (# Decisions: station {first}: keep course|time-box|cut|move)")
+                    }
+                    _ => format!("next: gear reply {first} --resolve"),
+                },
                 None => "next: gear".to_string(),
             },
             _ => "next: gear send --kind progress".to_string(),
