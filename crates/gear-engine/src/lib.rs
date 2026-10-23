@@ -23,6 +23,7 @@ pub mod merge;
 pub mod model;
 pub mod observe;
 pub mod onboard;
+mod opencode;
 pub mod ops;
 pub mod quota;
 pub mod release;

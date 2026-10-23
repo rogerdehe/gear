@@ -14,6 +14,7 @@
 
 pub mod fake;
 pub mod profile;
+pub mod opencode;
 
 use serde_json::{json, Value};
 
@@ -65,6 +66,11 @@ pub trait HerdrRead {
 }
 
 pub trait HerdrAct: HerdrRead {
+    /// OpenCode service requests, separate from terminal input. The real door
+    /// runs the local CLI; fakes must opt in with scripted API replies.
+    fn opencode_api(&mut self, _args: &[String]) -> Result<Value, String> {
+        Err("OpenCode service API unavailable".into())
+    }
     /// Submit `text` + Enter to the agent in `pane_id` (no --wait).
     fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()>;
     /// Run a shell command in a shell pane (used to export GEAR_CTX before start).
@@ -155,6 +161,9 @@ impl HerdrRead for SocketHerdr {
 }
 
 impl HerdrAct for SocketHerdr {
+    fn opencode_api(&mut self, args: &[String]) -> Result<Value, String> {
+        opencode::request(args)
+    }
     fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
         let params = board_herdr::AgentPromptParams {
             target: pane_id.to_string(),
