@@ -13,6 +13,7 @@ pub enum Call {
     AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
     SendKeys { pane: String, keys: Vec<String> },
     PaneClose { pane: String },
+    PaneType { pane: String, text: String },
     SetTitle { pane: String, title: String },
     Notify { title: String, body: String },
     WorktreeCreate { repo: String, branch: String, base: String, label: String },
@@ -58,6 +59,8 @@ pub struct FakeHerdr {
     /// key sent, then the new screen). Models how the real UI renders after a
     /// submission, one action at a time.
     pub screen_after: Vec<(String, String)>,
+    /// Text typed into a pane (`pane_type`) and not yet submitted by Enter.
+    typed: BTreeMap<String, String>,
     /// The screen a freshly started agent shows (a real agent renders its UI,
     /// status bar included). Empty by default.
     pub start_screen: Option<String>,
@@ -302,7 +305,20 @@ impl HerdrAct for FakeHerdr {
         let pane = pane_id.to_string();
         let first = keys.first().cloned().unwrap_or_default();
         self.act(Call::SendKeys { pane: pane_id.into(), keys: keys.to_vec() }, move |s| {
-            s.render_after(&pane, &first);
+            // Enter submits what was typed: the screen follows the typed text.
+            let typed = if first == "enter" { s.typed.remove(&pane) } else { None };
+            match typed {
+                Some(text) if !text.is_empty() => s.render_after(&pane, &text),
+                _ => s.render_after(&pane, &first),
+            }
+            Outcome::Ok(())
+        })
+    }
+
+    fn pane_type(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
+        let (pane, typed) = (pane_id.to_string(), text.to_string());
+        self.act(Call::PaneType { pane: pane_id.into(), text: text.into() }, move |s| {
+            s.typed.entry(pane).or_default().push_str(&typed);
             Outcome::Ok(())
         })
     }

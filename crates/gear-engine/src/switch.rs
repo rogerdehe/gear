@@ -38,6 +38,8 @@ const PICKER_MARKS: [&str; 4] = ["Search", "Recent", "Select model", "No results
 /// How many ticks one step may wait for the screen to move before it counts as
 /// a failed try. A render that never comes must not hang the lane.
 const WAIT_TICKS: i64 = 6;
+/// The pause between typed text and its Enter.
+const TYPE_SETTLE_MS: u64 = 300;
 
 /// What a switch attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,11 +211,17 @@ pub fn switch_in_place(
                 return Ok(SwitchOutcome::Waiting);
             }
         }
-        Ok(Some(_)) => {
-            // Another agent holds the lane's pane: a human must look.
-            return Ok(SwitchOutcome::Failed);
+        // Not (yet) recognised as this kind — right after a start Herdr may
+        // not have classified the agent (status unknown, no kind). Wait,
+        // bounded like any other step; only a lasting mismatch fails.
+        Ok(Some(_)) | Ok(None) => {
+            plan.waited += 1;
+            if plan.waited > WAIT_TICKS {
+                return failed_try(store, seat_id, &mut plan);
+            }
+            set_pending(store, seat_id, &plan)?;
+            return Ok(SwitchOutcome::Waiting);
         }
-        Ok(None) => return Ok(SwitchOutcome::Failed),
         Err(_) => return Ok(SwitchOutcome::Waiting),
     }
 
@@ -337,10 +345,17 @@ fn keys(herdr: &mut dyn HerdrAct, pane: &str, key: &str) -> bool {
     matches!(herdr.send_keys(pane, &[key.to_string()]), Outcome::Ok(()))
 }
 
-/// Text + Enter: `pane_run` submits the line as one unit (the production path
-/// already carries its Enter, review F2), so no extra Enter is sent here.
+/// Typed text, then Enter on its own (Herdr src/app/api/panes.rs: send_input
+/// wraps text in a bracketed paste when the agent enabled it, and a pasted
+/// `/model` is a chat message, not a command; send_text writes raw bytes).
 fn text(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
-    matches!(herdr.pane_run(pane, text), Outcome::Ok(()))
+    // Typed, then Enter on its own: a pasted `/model` is not a command (L-71).
+    if !matches!(herdr.pane_type(pane, text), Outcome::Ok(())) {
+        return false;
+    }
+    // Let the TUI take the typed text before the Enter arrives.
+    std::thread::sleep(std::time::Duration::from_millis(TYPE_SETTLE_MS));
+    matches!(herdr.send_keys(pane, &["enter".to_string()]), Outcome::Ok(()))
 }
 
 /// What a startup model check says about going on (F5).
@@ -507,7 +522,7 @@ mod tests {
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::PaneRun { command, .. } => Some(command.clone()),
+                Call::PaneType { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -544,24 +559,23 @@ mod tests {
         let mut herdr = switching();
 
         assert_eq!(run(&mut s, &mut herdr, T0), SwitchOutcome::Done);
-        // pane_run already carries its Enter (F2): esc is the only key, and no
-        // extra `enter` is sent.
-        assert_eq!(keys(&herdr), vec!["esc"], "{:?}", keys(&herdr));
+        // Each typed line gets its own Enter (L-71: a pasted line is not a
+        // command); nothing else is pressed.
+        assert_eq!(keys(&herdr), vec!["esc", "enter", "enter"], "{:?}", keys(&herdr));
         assert_eq!(
             texts(&herdr),
             vec!["/model", "DeepSeek V4.1 Flash OpenCode Go"],
             "{:?}",
             texts(&herdr)
         );
-        // A /model submission, then the filter: never both in one tick.
-        // The exact order: esc, /model, the filter — each in its own tick,
-        // and never an extra `enter` (F2).
+        // The exact order: esc, then /model typed + Enter, then the filter
+        // typed + Enter — each submission in its own tick.
         let order: Vec<String> = herdr
             .calls
             .iter()
             .map(|call| match call {
                 Call::SendKeys { keys, .. } => format!("key:{}", keys.first().cloned().unwrap_or_default()),
-                Call::PaneRun { command, .. } => format!("run:{command}"),
+                Call::PaneType { text, .. } => format!("run:{text}"),
                 other => format!("{other:?}"),
             })
             .collect();
@@ -570,7 +584,9 @@ mod tests {
             vec![
                 "key:esc",
                 "run:/model",
-                "run:DeepSeek V4.1 Flash OpenCode Go"
+                "key:enter",
+                "run:DeepSeek V4.1 Flash OpenCode Go",
+                "key:enter"
             ],
             "{order:?}"
         );

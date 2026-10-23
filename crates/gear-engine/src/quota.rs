@@ -1007,7 +1007,7 @@ quota_reset_h = 5
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::PaneRun { command, .. } => Some(command.clone()),
+                Call::PaneType { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
