@@ -51,3 +51,18 @@ After `timing.lane_busy_idle_min` (default 10, positive), one urgent captain ite
 opens. Timer/generation/incident state is stored in `meta`; intent and the latch
 are atomic. Recovery closes an outstanding item and resets the clock. Failed
 observations interrupt the timing evidence without silently resolving an alert.
+
+## Parallel changes (T-51)
+
+A new hand-in triggers a scan on the next tick; otherwise scans run every ten
+minutes. Read-only Git diffs compare each task branch with the integration tip,
+and compare different lanes' changed-file sets. Integration-side changes since
+each branch's merge base count too. The scanner reads committed local refs and
+known origin tracking refs without fetching or changing any worktree. Git runs
+outside database transactions against captured commit IDs.
+
+Each overlapping pair gets one captain item naming both sides and all shared
+files. Persisted file sets suppress repeats across acknowledgment and restart.
+A changed set resolves the old item and opens a fresh one; a cleared overlap
+resolves its item. Git errors preserve the last evidence and appear in the tick
+report. These warnings inform ordering and merging; they do not block a merge.
