@@ -270,7 +270,7 @@ fn a_current_candidate_is_accepted() {
     assert_eq!(sent.recipient, "p:captain");
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate.as_deref()), (AttemptState::Submitted, Some(current.as_str())));
-    assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().len(), 1);
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------- R1 fixes
@@ -330,7 +330,7 @@ fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
     assert_eq!(again.thread, first.thread);
 
     // Nothing was stored twice, and the attempt is still the one submitted.
-    assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 7)).unwrap().len(), 1);
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Submitted);
 }
@@ -396,6 +396,6 @@ fn a_replay_needs_the_live_seat() {
     assert_eq!(err.code, ErrorCode::StaleGeneration, "{err:?}");
 
     // Nothing was stored twice anywhere; the committed message is still one.
-    assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 7)).unwrap().len(), 1);
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
     assert_eq!(first.msg_id, "M-1");
 }

@@ -52,7 +52,7 @@ pub struct EngineCfg {
     /// (L-57): until the captain's gate (T-23: blocking vs logged findings,
     /// a round cap) and the engine merge (T-12) exist, an automatic pass marks
     /// a task done that is not merged, and an automatic fail sends back every
-    /// finding round after round. With it off a verdict stays a captain item.
+    /// finding round after round. With it off verdicts remain stored without automatic settlement.
     pub auto_settle: bool,
 }
 
@@ -105,8 +105,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
     // 0b. settle: a review verdict that arrived settles its task without the
     //     captain (T-13) — before the dispatch below, so a pass frees the
-    //     task's dependants and a fail puts the rework at the head of the
-    //     lane's queue in this same tick. It needs no Herdr, so it runs even
+    //     task's dependants. Failing verdicts wait for the captain's judgement.
+    //     Settlement needs no Herdr, so it runs even
     //     when the observation fails.
     if cfg.auto_settle {
         let (settled, settle_failed) = settle_reviews(store, now)?;
