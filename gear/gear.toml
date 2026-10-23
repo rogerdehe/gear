@@ -36,16 +36,27 @@ owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; fallback Claude Code claude-sonnet-5-5 --effort high (cross-CLI, steady S1)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is Claude Code claude-sonnet-5-5 --effort high (T-35)
 kind = "codex"
 profile = "codex"
 
 [models]
-lanes = ["minimax-cn/MiniMax-M3.1-Flash"]   # M2: official MiniMax; fallback Codex gpt-6.1-sol reasoning medium (cross-CLI, steady S1)
-review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane model
+# A chain entry may name the CLI that runs the model and the arguments that
+# CLI starts with (T-35). The first entry runs on the lane's own CLI (the
+# in-place switch of T-33); the second one needs another CLI, so the engine
+# closes the agent and starts codex in the same pane and worktree.
+lanes = [
+  "minimax-cn/MiniMax-M3.1-Flash",
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+]
+# The reviewer never runs the model it reviews: when a lane fell back to
+# gpt-6.1-sol, the review runs the next entry of this chain (Claude Code).
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+  { model = "claude-sonnet-5-5", cli = "claude", args = ["--effort", "high"] },
+]
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
-# Until steady S1 lands a chain cannot cross CLIs: a lane out of MiniMax quota parks and the captain switches it by hand (ops/STOPGAPS.md).
 
 # The in-place model switch (T-33): what `/model` shows in the picker and what
 # the status bar says once the model is on. Required for an OpenCode lane or
