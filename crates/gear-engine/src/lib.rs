@@ -25,6 +25,7 @@ pub mod ops;
 pub mod quota;
 pub mod release;
 pub mod review;
+pub mod stall;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -172,6 +173,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // 9. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+    }
+    // 10. every flagged seat reaches its captain (L-52): a flag that only goes
+    //     to the log leaves a lane standing still with nobody knowing.
+    for seat in report.flagged.clone() {
+        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+            // One seat's alert failing never stops the tick.
+            report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
+        }
     }
     Ok(report)
 }
