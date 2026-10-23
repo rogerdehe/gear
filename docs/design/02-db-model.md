@@ -75,7 +75,10 @@ CREATE TABLE contracts (project TEXT, task TEXT, version INT, goal TEXT, accept 
 CREATE TABLE attempts  (project TEXT, task TEXT, n INT, seat TEXT, generation INT,
                         contract_version INT, adopted_version INT, pending_update INT,
                         state TEXT, candidate TEXT, report TEXT, safe_point TEXT,
-                        started INT, updated INT, PRIMARY KEY (project, task, n));
+                        started INT, updated INT,
+                        delivered_at INT, started_at INT, handed_in_at INT,  -- the time of
+                        verdict_at INT, settled_at INT, merged_at INT,         -- every step
+                        PRIMARY KEY (project, task, n));
 CREATE TABLE messages  (project TEXT, id TEXT, thread TEXT, task TEXT, attempt INT,
                         sender TEXT, sender_gen INT, recipient TEXT, kind TEXT, urgent INT,
                         body TEXT, reply_to TEXT, needs_ack INT,

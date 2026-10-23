@@ -169,6 +169,7 @@ fn stale_delivery_is_voided() {
                 wait_on: None,
                 wait_cond: None,
                 rework_note: None,
+                estimate_min: None,
                 updated: T0,
             })?;
             // The seat's open attempt is attempt 2 ...
