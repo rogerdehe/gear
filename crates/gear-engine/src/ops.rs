@@ -252,6 +252,10 @@ pub fn confirm_pending(
     budget: i64,
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
+    // The seats whose screen shows a provider limit right now (T-15): their
+    // deliveries cannot be answered until the quota comes back, so they spend
+    // no check budget below.
+    let on_quota = crate::quota::seats_on_quota(store, project)?;
     store.write(|tx| {
         let mut confirmed = Vec::new();
         let mut flagged: Vec<String> = Vec::new();
@@ -303,6 +307,13 @@ pub fn confirm_pending(
                         start_confirmed_attempt(tx, project, &op, now)?;
                     }
                     confirmed.push(op.id.clone());
+                    continue;
+                }
+                // A seat the screen shows on a provider limit is not failing:
+                // its agent cannot answer until the quota comes back, so its
+                // budget is not spent and it is not flagged (T-15: a quota
+                // turn is not "no progress").
+                if on_quota.contains(&op.seat) {
                     continue;
                 }
                 // No evidence yet: the op waits for the next round. Its budget
