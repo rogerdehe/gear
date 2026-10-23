@@ -98,6 +98,9 @@ pub fn apply(
             // Steps 3 to 6 run inside the closure, so a replay returns the
             // stored result instead of meeting a moved plan version.
             let result = apply_queue(tx, &ctx.project, &seat.id, ctx.generation, draft, text, now)?;
+            // The milestone blocks of the draft become voyages (T-22), after the
+            // queue so the task count at departure is the plan's.
+            record_voyages(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
                     ErrorCode::BadFormat,
@@ -669,6 +672,83 @@ mod tests {
     }
 }
 
+/// One line for a voyage (T-22): the milestone, its planned landing, the
+/// sentence it is judged by, the quality bar and where it departed from.
+pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
+    let mut line = format!(
+        "Voyage {} {} · eta {} · done: {} · bar: {}",
+        voyage.milestone, voyage.title, voyage.eta, voyage.done, voyage.bar
+    );
+    match (voyage.departure, voyage.departure_tasks) {
+        (Some(departure), Some(tasks)) => {
+            line.push_str(&format!(" · departed {} with {tasks} tasks", utc_date(departure)))
+        }
+        _ => line.push_str(" · not departed yet"),
+    }
+    line
+}
+
+/// `YYYY-MM-DD` for unix seconds (civil-from-days, no extra crate) — enough to
+/// date a departure without pulling a time library in.
+fn utc_date(ts: i64) -> String {
+    let (days, _) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Record the draft's milestone blocks as voyages (T-22).
+///
+/// Every block in the draft must carry `done:`, `bar:` and `eta:` — the one
+/// sentence the phase is judged by, the quality bar, and its planned landing;
+/// a block missing one is `BadFormat`, naming the milestone. A milestone that
+/// the draft does not mention keeps what it has (grandfathered): the
+/// requirement applies to what the captain edits, not to old plans.
+///
+/// The departure is fixed when the milestone gets its first task: the time of
+/// that apply (the tasks it creates are created then) and how many tasks the
+/// milestone holds. Later applies update the words but never move it.
+fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: Ts) -> GearResult<()> {
+    for (header, body) in &draft.milestones {
+        let (id, title) = crate::draft::milestone_parts(header);
+        let (done, bar, eta) = crate::draft::milestone_fields(body);
+        for (field, value) in [("done", &done), ("bar", &bar), ("eta", &eta)] {
+            if value.as_deref().map(str::is_empty).unwrap_or(true) {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    format!(
+                        "milestone {id} needs a `{field}:` line: done, bar and eta make a voyage (T-22)"
+                    ),
+                ));
+            }
+        }
+        let tasks = tx
+            .tasks_of_project(project)?
+            .into_iter()
+            .filter(|task| task.milestone.as_deref() == Some(id))
+            .count() as i64;
+        tx.upsert_voyage(&gear_store::VoyageRow {
+            project: project.to_string(),
+            milestone: id.to_string(),
+            title: title.to_string(),
+            done: done.unwrap_or_default(),
+            bar: bar.unwrap_or_default(),
+            eta: eta.unwrap_or_default(),
+            departure: (tasks > 0).then_some(now),
+            departure_tasks: (tasks > 0).then_some(tasks),
+            updated: now,
+        })?;
+    }
+    Ok(())
+}
+
 /// The task packet a lane reads (`gear --show T-n`, design/05 "Views"),
 /// rendered from the contract version the seat's open attempt adopted (else
 /// the task's current version). Plain text, in this order:
@@ -719,6 +799,13 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         adopted,
         row.state.as_str()
     ));
+    // The voyage this task sails on (T-22): the one sentence the phase is
+    // judged by, its quality bar, the planned landing and where it departed.
+    if let Some(milestone) = row.milestone.as_deref() {
+        if let Some(voyage) = tx.get_voyage(project, milestone)? {
+            text.push_str(&format!("{}\n", voyage_line(&voyage)));
+        }
+    }
     text.push_str(&format!("\n## Goal\n{}\n", contract.goal));
     text.push_str(&format!("\n## Acceptance\n{}\n", contract.accept));
     text.push_str("\n## Evidence\n");

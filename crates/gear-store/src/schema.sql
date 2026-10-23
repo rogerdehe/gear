@@ -15,6 +15,15 @@ CREATE TABLE IF NOT EXISTS id_seq (project TEXT NOT NULL, kind TEXT NOT NULL, ne
 CREATE TABLE IF NOT EXISTS milestones (project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
   scope TEXT, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
+-- A milestone as a voyage (T-22): the one-sentence `done` it is judged by, the
+-- quality `bar` of its phase, the planned `eta`, and where it departed from —
+-- the time its first task was created and the tasks it had then. `milestones`
+-- above is the old (unused) shape; a store without migrations gets a new table.
+CREATE TABLE IF NOT EXISTS voyages (project TEXT NOT NULL, milestone TEXT NOT NULL,
+  title TEXT NOT NULL, done TEXT NOT NULL, bar TEXT NOT NULL, eta TEXT NOT NULL,
+  departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
+  PRIMARY KEY (project, milestone));
+
 CREATE TABLE IF NOT EXISTS seats (
   id TEXT PRIMARY KEY,                 -- '<project>:<name>'
   project TEXT NOT NULL, role TEXT NOT NULL, name TEXT NOT NULL, profile TEXT NOT NULL,

@@ -249,6 +249,24 @@ pub struct ReviewVerdictRow {
     pub created: Ts,
 }
 
+/// A milestone as a voyage (T-22): its one-sentence `done`, the quality `bar`
+/// of its phase, the planned `eta`, and where it departed from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageRow {
+    pub project: String,
+    /// The milestone id the plan uses (`M1`, `M2`, …).
+    pub milestone: String,
+    pub title: String,
+    pub done: String,
+    pub bar: String,
+    pub eta: String,
+    /// When the milestone's first task was created; None while it has none.
+    pub departure: Option<Ts>,
+    /// How many tasks the milestone had at departure.
+    pub departure_tasks: Option<i64>,
+    pub updated: Ts,
+}
+
 /// One applied plan version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanRow {
@@ -1546,6 +1564,71 @@ impl<'s> Tx<'s> {
         Ok(verdicts)
     }
 
+    // ---- voyages (T-22)
+
+    /// Store or update a milestone as a voyage. The departure is fixed once: a
+    /// later apply may change the fields but never moves the departure.
+    pub fn upsert_voyage(&self, row: &VoyageRow) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO voyages
+                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(project, milestone) DO UPDATE SET
+                   title=excluded.title, done=excluded.done, bar=excluded.bar, eta=excluded.eta,
+                   departure=COALESCE(voyages.departure, excluded.departure),
+                   departure_tasks=COALESCE(voyages.departure_tasks, excluded.departure_tasks),
+                   updated=excluded.updated",
+                params![
+                    row.project,
+                    row.milestone,
+                    row.title,
+                    row.done,
+                    row.bar,
+                    row.eta,
+                    row.departure,
+                    row.departure_tasks,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// One milestone's voyage, if it has one.
+    pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
+        let row: Option<VoyageRow> = self
+            .tx
+            .query_row(
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                 FROM voyages WHERE project=?1 AND milestone=?2",
+                params![project, milestone],
+                voyage_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// The voyages of a project, in milestone-id order.
+    pub fn voyages_of_project(&self, project: &str) -> GearResult<Vec<VoyageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                 FROM voyages WHERE project=?1 ORDER BY milestone",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], voyage_from_row)
+            .map_err(map_sqlite)?;
+        let mut voyages = Vec::new();
+        for row in rows {
+            voyages.push(row.map_err(map_sqlite)?);
+        }
+        Ok(voyages)
+    }
+
     // ---- review verdicts (T-2)
 
     /// Store the review verdict of one attempt. One record per (project, task,
@@ -1928,6 +2011,20 @@ fn attempt_from_row(row: &rusqlite::Row) -> rusqlite::Result<AttemptRow> {
         safe_point: row.get(11)?,
         started: row.get(12)?,
         updated: row.get(13)?,
+    })
+}
+
+fn voyage_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageRow> {
+    Ok(VoyageRow {
+        project: row.get(0)?,
+        milestone: row.get(1)?,
+        title: row.get(2)?,
+        done: row.get(3)?,
+        bar: row.get(4)?,
+        eta: row.get(5)?,
+        departure: row.get(6)?,
+        departure_tasks: row.get(7)?,
+        updated: row.get(8)?,
     })
 }
 

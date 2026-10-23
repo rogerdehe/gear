@@ -172,6 +172,9 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
 
+/// The most voyages the snapshot lists (the rest is one line of count).
+const SNAPSHOT_VOYAGES: usize = 3;
+
 /// The captain's snapshot: the totals, one line per lane (the task it is on
 /// and how much is queued), the deliveries in flight and the temp slots.
 ///
@@ -193,6 +196,15 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
         "deliveries not confirmed: {} · temps {}/{}",
         plan.unconfirmed_deliveries, plan.temps.in_use, plan.temps.quota
     ));
+    // The voyages (T-22): the sentence each phase is judged by, its bar and its
+    // planned landing, so the captain sees the bar before the inbox.
+    let voyages = tx.voyages_of_project(project)?;
+    for voyage in voyages.iter().take(SNAPSHOT_VOYAGES) {
+        lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
+    }
+    if voyages.len() > SNAPSHOT_VOYAGES {
+        lines.push(format!("+{} more voyages", voyages.len() - SNAPSHOT_VOYAGES));
+    }
     Ok(lines)
 }
 
