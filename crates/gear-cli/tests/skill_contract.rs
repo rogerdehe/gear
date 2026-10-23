@@ -12,6 +12,9 @@ fn gear(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gear"))
         .args(args)
         .env_remove("GEAR_CTX")
+        // Never the real store: lanes run tests with GEAR_DB set, and a
+        // `gear` call starts an engine on it (design/14).
+        .env_remove("GEAR_DB")
         .output()
         .expect("run gear")
 }
