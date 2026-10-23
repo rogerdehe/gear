@@ -180,7 +180,7 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 4. **Watch the lanes.** A lane that stops with work left is asked to continue (`herdr agent prompt <agent> "run \`gear\` first"`); a lane that ran dry gets work in the next plan; a quota stop is a model switch or a park, never a finished task (read the screen first — `gear --skill agent:<kind>` says what a quota screen looks like).
 5. **Hold the course.** The milestone's `done:` and `bar:` decide what is good enough. A reviewer judges against them, not against perfection (`gear --skill review`). Do not widen the scope in the middle of a milestone: new work goes into the next milestone, and the plan says so in `# Decisions`.
 6. **Look at the time.** `gear report time` says where the time went: per task and per voyage the estimate, the dev time, the review time, the wait for you, the merge time, the rework rounds and the ratio actual/estimate. Read it when the pace looks off; a task that always takes twice its estimate wants a smaller plan, not a faster lane.
-7. **Merge and close.** A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
+7. **Merge and close.** Lane hand-ins and passing reviews are information records: the engine starts review, settles passes and queues the merge without ringing you. Failed verdicts, failed merges and alerts need your judgement. Resolving information records sends no reply to the lane. A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
 8. **The user** is asked only about what is theirs.
 
 ## 4. What you never do
