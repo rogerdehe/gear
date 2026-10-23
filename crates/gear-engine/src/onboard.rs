@@ -508,7 +508,7 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
         assert!(env.starts_with("export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db"), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
-        assert!(start_args(&herdr).contains(&"--standalone".to_string()), "{:?}", start_args(&herdr));
+        assert!(!start_args(&herdr).contains(&"--standalone".to_string()), "no --standalone (L-56): {:?}", start_args(&herdr));
     }
 
     #[test]

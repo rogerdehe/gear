@@ -45,7 +45,7 @@ pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
         kind: MsgKind::System,
         urgent: true,
         body: format!(
-            "lane {} is stuck: a delivery was not confirmed or continuing it made no progress, and the engine stopped sending to it. Look at its pane (context full? a dialog? quota?), get it going (or give it a fresh session), then resolve this item.",
+            "lane {} is stuck: its agent is gone from its pane, a delivery was not confirmed, or continuing it made no progress. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.",
             seat.name
         ),
         reply_to: None,

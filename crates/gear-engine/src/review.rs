@@ -2014,3 +2014,87 @@ review = ["gpt-6.1-sol"]
         assert_eq!(herdr.prompts_to(pane).len(), 1);
     }
 }
+
+/// How many "continue" nudges a reviewer gets before the captain is told.
+const REVIEW_NUDGE_BUDGET: i64 = 3;
+
+/// Reviewers that stopped before handing in their verdict are told to go on
+/// (L-53). The signal is Herdr's own state — the agent is idle while its job
+/// (a verdict for the attempt it reviews) is not done — whatever stopped it: a
+/// server error ("model at capacity"), a dropped connection, a pause. Screen
+/// text only rules out the cases a nudge cannot fix (quota, auth). After
+/// [`REVIEW_NUDGE_BUDGET`] nudges the seat is returned as flagged, which opens
+/// the captain's stall item.
+///
+/// Returns (seats nudged, seats flagged).
+pub fn nudge_stopped_reviewers(
+    store: &mut Store,
+    project: &str,
+    observed: &[crate::observe::SeatObs],
+    cooldown_s: i64,
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    let mut nudged = Vec::new();
+    let mut flagged = Vec::new();
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Active || !obs.idle {
+            continue;
+        }
+        if obs.flags.iter().any(|f| {
+            matches!(f, gear_herdr::profile::ScreenFlag::Quota | gear_herdr::profile::ScreenFlag::Auth)
+        }) {
+            continue; // a nudge cannot fix a quota or a login
+        }
+        let Some(task) = seat.task_id.clone() else { continue };
+        let outcome = store.write(|tx| {
+            // The attempt under review and whether its verdict is in.
+            let Some(attempt) = tx.attempts_of_task(project, &task)?.into_iter().last() else {
+                return Ok(None);
+            };
+            if attempt.state != gear_model::AttemptState::Submitted
+                || tx.get_review_verdict(project, &task, attempt.n)?.is_some()
+            {
+                return Ok(None);
+            }
+            // Never two deliveries in flight; wait out the cooldown.
+            if !tx.slot_ops(&seat.id)?.is_empty() {
+                return Ok(None);
+            }
+            let Some(last) = tx.last_op(&seat.id, OpKind::Deliver)? else {
+                return Ok(None); // the packet itself is not sent yet
+            };
+            if now - last.created < cooldown_s {
+                return Ok(None);
+            }
+            let used = last.payload.get("nudge").and_then(|n| n.as_i64()).unwrap_or(0);
+            if used >= REVIEW_NUDGE_BUDGET {
+                return Ok(Some(false));
+            }
+            tx.insert_op(&NewOp {
+                project: project.to_string(),
+                seat: seat.id.clone(),
+                generation: seat.generation,
+                kind: OpKind::Deliver,
+                task: Some(task.clone()),
+                attempt: Some(attempt.n),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "text": format!(
+                        "You stopped before handing in your verdict on {task} (a server error such as \"model at capacity\", or a pause). Continue the review where you stopped, then hand in the verdict with the `gear send --kind review` command from your packet."
+                    ),
+                    "nudge": used + 1,
+                }),
+                created: now,
+            })?;
+            Ok(Some(true))
+        })?;
+        match outcome {
+            Some(true) => nudged.push(seat.id.clone()),
+            Some(false) => flagged.push(seat.id.clone()),
+            None => {}
+        }
+    }
+    Ok((nudged, flagged))
+}

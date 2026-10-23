@@ -120,6 +120,7 @@ fn full_work_loop() {
         kind: MsgKind::Result, body: "Report: notes/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(1), candidate: Some("abc1234".into()), about: None, to: None, reply_to: None, urgent: false,
         verdict: None, request_id: "res-1".into(),
+        base: None,
     };
     mail::send(&mut w.store, &env("heat", LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, T0 + 300).unwrap();
     assert_eq!((attempt_state(&mut w), task_state(&mut w)), (AttemptState::Submitted, TaskState::Verifying));

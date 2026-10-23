@@ -82,7 +82,11 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
     match kind {
         "opencode" => Some(ModelStart {
             env: format!("export OPENCODE_CONFIG_CONTENT='{{\"model\":\"{model}\"}}'"),
-            args: vec!["--standalone".to_string()],
+            // No `--standalone`: private servers exited on their own twice
+            // on 2026-10-23 (the lane disappeared). Without it the model in
+            // the environment is not applied by the shared service; switching
+            // the model through `/model` by the engine is M2 (L-56).
+            args: Vec::new(),
         }),
         "codex" => Some(ModelStart {
             env: String::new(),
@@ -108,7 +112,7 @@ mod tests {
             start.env,
             "export OPENCODE_CONFIG_CONTENT='{\"model\":\"minimax-cn/MiniMax-M3.1-Flash\"}'"
         );
-        assert_eq!(start.args, vec!["--standalone".to_string()]);
+        assert!(start.args.is_empty(), "no --standalone (L-56): {:?}", start.args);
     }
 
     #[test]
