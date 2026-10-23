@@ -112,7 +112,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
-        let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+        // The profile table of this project: the built-ins with the project's
+        // own `[profiles.<name>]` on top (T-31). A config that does not parse
+        // leaves the built-ins in place (the lanes are parked by the onboard
+        // step instead).
+        let profiles = match gear_app::config::latest(store, &project) {
+            Ok(config) => gear_app::config::profile_table(&cfg.profiles, &config)?,
+            Err(_) => cfg.profiles.clone(),
+        };
+        let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the

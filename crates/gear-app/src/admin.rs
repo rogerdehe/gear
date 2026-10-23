@@ -62,6 +62,38 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
 
     let project_id = config.project.id.clone();
 
+    // Every seat's profile must resolve against the table (built-ins + the
+    // project's own) and must be able to run unattended (T-31): an agent that
+    // stops on a permission dialog cannot be driven by GEAR.
+    let table = config::profile_table(&gear_herdr::builtins(), &config)?;
+    let seats_to_check: Vec<(&str, &str)> = std::iter::once(("captain", config.captain.profile.as_str()))
+        .chain(config.lanes.iter().map(|lane| (lane.name.as_str(), lane.profile.as_str())))
+        .chain(
+            config
+                .temps
+                .iter()
+                .map(|temps| ("temps", temps.profile.as_str())),
+        )
+        .collect();
+    for (name, profile_name) in seats_to_check {
+        let Some(profile) = table.get(profile_name) else {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{name} uses the profile {profile_name:?}, which is neither built in nor configured under `[profiles.{profile_name}]`"
+                ),
+            ));
+        };
+        if profile.unattended_args.is_empty() {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "the profile {profile_name:?} has no unattended args: an agent that stops on permission dialogs cannot run unattended (T-31)"
+                ),
+            ));
+        }
+    }
+
     store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
