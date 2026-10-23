@@ -145,6 +145,8 @@ Before execution starts the captain proposes an **execution plan** (distinct fro
 4. **Models per role**: development on a fast/cheap model (tasks are cut small and concrete); review on a stronger model that differs from the writer's — a stronger model of the same vendor is acceptable when only one vendor is available.
 5. **Quota policy** per model chain: **wait** for the reset (most vendors reset every 5 hours; GEAR parks the lane and resumes it at reset) or **fall back** to the next model in the chain (e.g. MiniMax → DeepSeek).
 
+6. **The quality bar of this voyage — the user chooses, nobody changes it mid-voyage** (user, 2026-10-23): *fastest to the goal* (MVP/skeleton: only what breaks the chain or loses data is fixed; every other detail found on the way is cut — logged, never reworked), *deliverable* (normal-use errors fixed, edge cases logged), or *strict* (everything fixed, at a much higher cost the user accepts up front). Reviewers get the bar in every packet; the captain judges every finding and every added task by it; only the user may change it.
+
 Kickoff ends with `gear admin init`; from then on the run needs no dialogs (C-13).
 
 ## 9. Staffing management
