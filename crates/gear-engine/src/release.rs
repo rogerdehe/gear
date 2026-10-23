@@ -277,6 +277,7 @@ profile = "codex"
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, profile, T0)?;
@@ -427,6 +428,7 @@ profile = "codex"
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 testing::seed_temp_seat(tx, "p", "r-2", "T-2", &second.pane_id, "codex", T0)?;

@@ -10,6 +10,10 @@ The current format and voyage file workflow are in `gear --skill captain`
 [draft.rs](../../crates/gear-app/src/draft.rs); use these instead of the old
 exported `plan.draft.md` and generated `PLAN.md` workflow.
 
+New task blocks require `estimate:` in minutes. Existing tasks retain their
+estimate unless the draft changes it; time reports compare the planned time
+with the recorded attempt lifecycle times (T-38).
+
 ## Apply flow (`gear plan apply`, one transaction, via run_request)
 
 1. Parse → any format error is `BAD_FORMAT` (with line number), nothing is written.

@@ -41,6 +41,7 @@ fn world() -> Store {
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
             }
@@ -241,6 +242,7 @@ fn a_task_in_review_is_shown_as_in_review() {
                 wait_on: None,
                 wait_cond: None,
                 rework_note: None,
+                estimate_min: None,
                 updated: T0,
             })?;
             Ok(())

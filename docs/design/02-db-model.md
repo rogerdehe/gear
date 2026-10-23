@@ -20,7 +20,7 @@ No business judgement; no Herdr calls; no ORM. Neither Herdr queries nor git sam
 
 ## Table structure
 
-See [schema.sql](../../crates/gear-store/src/schema.sql) for the table definitions.
+See [schema.sql](../../crates/gear-store/src/schema.sql) for the table definitions, including the attempt lifecycle timestamps added by T-38.
 
 **resources**: one row per worktree. The key is the worktree path returned by Herdr `worktree.create` / `worktree.open` (04); GEAR never constructs worktree paths itself. The row records the holder seat, the branch checked out, and the Herdr workspace id. A long-lived lane's row is created once at onboarding and held long-term (its branch changes as task branches are switched inside it); a temp worker's row is created per new task; after the result is merged, `worktree.remove` removes the checkout and the Herdr workspace (the branch is kept) and `workspace_id` becomes NULL; `worktree.open` on rework sets it again (17 §4). `seats.worktree` points to the resources row of the worktree Herdr created for that seat.
 
