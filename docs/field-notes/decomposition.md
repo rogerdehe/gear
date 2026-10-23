@@ -24,6 +24,12 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 | 2026-10-22 | quota | All lanes ran the same provider plan and hit its limit together; every lane stopped at once. | Spread lanes over providers (or keep a different-provider fallback ready) so one limit does not stop the whole fleet; quota handling is part of never-stop (T-15). |
 | 2026-10-22 | T-11 | Queued only to keep a lane busy; duplicated T-7. Cancelled. | Never fill a queue with busywork. If a lane has no valuable work, re-plan (pull work from a busy lane, split a big task) — or let it stand by and say why. |
 
+## Baseline before M1 (2026-10-23) — to compare once the loop runs by itself
+
+- Captain manual steps per task on the normal path: 6 (start reviewer, read verdict, settle it, merge, release the reviewer and its worktree, rank rework first). After M1 the target is 0 on the normal path.
+- Attempt start → accepted (minutes, includes writing): T-1 56, T-2 50, T-4 24, T-14 36; reworked tasks' second attempts T-3 9, T-5 27, T-6 16. Hand-ins often waited for the captain's turn before review started and again before the merge.
+- Measure after M1: hand-in → merged on dev, and captain actions per task (from operations/attempts in the store).
+
 ## Input from the user (2026-10-22)
 
 - **Rolling horizon of 3–5 steps.** Plan only the next 3–5 steps per lane, chosen so they do not depend on each other and each stands on its own. Keep those near steps stable — avoid changing them while they run; when a lane's steps are done, plan its next ones. A BMAD-style full plan up front is only a hope.
