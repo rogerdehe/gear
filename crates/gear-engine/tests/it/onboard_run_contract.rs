@@ -152,3 +152,93 @@ fn a_lane_missing_from_the_config_snapshot_is_skipped_not_parked() {
     let pricing = s.read(|tx| tx.get_seat("toy:pricing")).unwrap().unwrap();
     assert_eq!((pricing.state, pricing.generation), (SeatState::Active, 1));
 }
+
+/// T-32: a grok lane's worktree is trusted before its agent starts (one entry,
+/// written once), its start carries the unattended flag and the model, and a
+/// claude lane's start carries `--model`.
+#[test]
+fn grok_is_trusted_and_started_with_its_model_and_claude_carries_its_model() {
+    const BOTH: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "grok1"
+duty = "everything"
+owns = ["src/"]
+kind = "grok"
+profile = "grok"
+
+[[lanes]]
+name = "claude1"
+duty = "everything"
+owns = ["lib/"]
+kind = "claude"
+profile = "claude"
+
+[models]
+lanes = ["grok-4.7"]
+"#;
+    // The grok trust store lives under HOME: give it a scratch one.
+    let home = std::env::temp_dir().join(format!(
+        "gear-grok-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+    ));
+    std::fs::create_dir_all(&home).unwrap();
+    let previous = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &home);
+
+    let mut s = Store::open_in_memory().unwrap();
+    admin::init(&mut s, &Env { ctx: None, pane_id: None, admin: true }, BOTH, T0).unwrap();
+    let mut herdr = FakeHerdr::new();
+    let mut c = cfg();
+    c.profiles.insert("grok".into(), builtin("grok").unwrap());
+    c.profiles.insert("claude".into(), builtin("claude").unwrap());
+    let active = onboard_queued(&mut s, &mut herdr, &c, T0 + 1).unwrap();
+    assert_eq!(active.len(), 2, "{active:?}");
+
+    // The grok lane: the unattended flag and the model, as args.
+    assert!(
+        herdr.calls.iter().any(|call| matches!(call, Call::AgentStart { name, kind, args, .. }
+            if name == "toy-grok1" && kind == "grok"
+                && args == &vec!["--always-approve".to_string(), "-m".to_string(), "grok-4.7".to_string()])),
+        "{:?}",
+        herdr.calls
+    );
+    // Its worktree was trusted before the start: one entry, written once.
+    let trust = std::fs::read_to_string(home.join(".grok/trusted_folders.toml")).unwrap();
+    assert!(trust.contains("[folders.\"/fake-worktrees/home-grok1\"]"), "{trust}");
+    assert!(trust.contains("trusted = true"), "{trust}");
+    assert_eq!(trust.matches("[folders.").count(), 1, "one entry: {trust}");
+
+    // The claude lane: its model as `--model`.
+    assert!(
+        herdr.calls.iter().any(|call| matches!(call, Call::AgentStart { name, kind, args, .. }
+            if name == "toy-claude1" && kind == "claude"
+                && args.contains(&"--model".to_string())
+                && args.contains(&"grok-4.7".to_string()))),
+        "{:?}",
+        herdr.calls
+    );
+
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
+}

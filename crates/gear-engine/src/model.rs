@@ -97,6 +97,17 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
                 "model_reasoning_effort=high".to_string(),
             ],
         }),
+        // Grok takes the model as a start flag (`-m <model>`; the SOP
+        // `gear --skill agent:grok`).
+        "grok" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["-m".to_string(), model.to_string()],
+        }),
+        // Claude Code takes the model as a start flag (`--model <model>`).
+        "claude" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["--model".to_string(), model.to_string()],
+        }),
         _ => None,
     }
 }
@@ -132,6 +143,20 @@ mod tests {
 
     #[test]
     fn a_cli_without_a_verified_way_manages_no_model() {
-        assert!(model_start("claude", "gpt-6.1-sol").is_none());
+        assert!(model_start("pi", "gpt-6.1-sol").is_none());
+    }
+
+    #[test]
+    fn grok_and_claude_take_the_model_as_a_flag() {
+        // T-32: grok `-m <model>`, claude `--model <model>`.
+        let grok = model_start("grok", "grok-4.7").unwrap();
+        assert_eq!(grok.env, "");
+        assert_eq!(grok.args, vec!["-m".to_string(), "grok-4.7".to_string()]);
+        let claude = model_start("claude", "claude-opus-4").unwrap();
+        assert_eq!(claude.env, "");
+        assert_eq!(
+            claude.args,
+            vec!["--model".to_string(), "claude-opus-4".to_string()]
+        );
     }
 }

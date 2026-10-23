@@ -1146,7 +1146,7 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // A passing review merges without the captain; a failing one waits for
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
-    for kind in ["opencode", "claude", "codex"] {
+    for kind in ["opencode", "claude", "codex", "grok"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
         }
