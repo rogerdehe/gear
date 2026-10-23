@@ -1032,7 +1032,7 @@ fn cmd_admin_stop() -> GearResult<()> {
 fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     let mut cfg = gear_engine::EngineCfg::default();
     cfg.db_path = db_path.to_string();
-    for kind in ["opencode", "claude", "codex"] {
+    for kind in ["opencode", "claude", "codex", "grok"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
         }

@@ -17,6 +17,22 @@ fn opencode_is_built_in_and_verified() {
 }
 
 #[test]
+fn grok_is_built_in_and_verified() {
+    // T-32: the facts of `gear --skill agent:grok`.
+    let p = builtin("grok").expect("grok is built in");
+    assert_eq!(p.kind, "grok");
+    assert!(p.verified);
+    assert_eq!(p.unattended_args, vec!["--always-approve".to_string()]);
+    assert_eq!(p.resume_args, Some(vec!["-r".to_string(), "{session}".to_string()]));
+    assert!(p.session_ref, "Herdr reports grok's session");
+    // It exits on `/exit`, not on a key.
+    assert_eq!(p.exit_keys, Vec::<String>::new());
+    assert_eq!(p.exit_command.as_deref(), Some("/exit"));
+    // Its busy sign is the shortcut line of a running turn.
+    assert!(classify_screen(&p, "  status  │  Ctrl+c:cancel  │").contains(&ScreenFlag::Busy));
+}
+
+#[test]
 fn unverified_kinds_are_not_built_in() {
     // `codex` left this list with T-5: its SOP is verified
     // (`gear --skill agent:codex`), so it is built in like `opencode`.

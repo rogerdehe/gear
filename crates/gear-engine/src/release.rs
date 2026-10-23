@@ -121,13 +121,28 @@ fn release_one(
     // 1. the agent leaves, once. A seat already in Releasing has sent its keys.
     if seat.state == SeatState::Active {
         if let (Some(pane), Some(profile)) = (pane.as_deref(), profile) {
-            for key in &profile.exit_keys {
-                match herdr.send_keys(pane, &[key.clone()]) {
+            if let Some(command) = &profile.exit_command {
+                // The CLI exits on a command, not on a key (grok: `/exit`).
+                match herdr.prompt(pane, command) {
                     Outcome::Ok(()) => {}
                     Outcome::Refused { code, message } => {
-                        return Err(format!("send_keys: refused ({code}): {message}"))
+                        return Err(format!("exit command: refused ({code}): {message}"))
                     }
-                    Outcome::Uncertain { reason } => return Err(format!("send_keys: {reason}")),
+                    Outcome::Uncertain { reason } => {
+                        return Err(format!("exit command: {reason}"))
+                    }
+                }
+            } else {
+                for key in &profile.exit_keys {
+                    match herdr.send_keys(pane, &[key.clone()]) {
+                        Outcome::Ok(()) => {}
+                        Outcome::Refused { code, message } => {
+                            return Err(format!("send_keys: refused ({code}): {message}"))
+                        }
+                        Outcome::Uncertain { reason } => {
+                            return Err(format!("send_keys: {reason}"))
+                        }
+                    }
                 }
             }
         }
@@ -250,7 +265,7 @@ profile = "codex"
     }
 
     /// A project with one task in `state` and a reviewer bound to it on `pane`.
-    fn world(state: TaskState, pane: &str) -> Store {
+    fn world(state: TaskState, pane: &str, profile: &str) -> Store {
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -282,7 +297,7 @@ profile = "codex"
                     rework_note: None,
                     updated: T0,
                 })?;
-                testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, "codex", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, profile, T0)?;
                 Ok(())
             })
             .unwrap();
@@ -317,7 +332,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
 
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
 
@@ -356,7 +371,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         // The engine died right after the exit keys were sent.
         store
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
@@ -390,7 +405,7 @@ profile = "codex"
             other => panic!("{other:?}"),
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         store
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
@@ -416,7 +431,7 @@ profile = "codex"
         };
         herdr.add_agent(&first.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         herdr.add_agent(&second.pane_id, "codex", gear_herdr::AgentStatus::Idle);
-        let mut store = world(TaskState::Cancelled, &first.pane_id);
+        let mut store = world(TaskState::Cancelled, &first.pane_id, "codex");
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
@@ -464,12 +479,37 @@ profile = "codex"
     }
 
     #[test]
+    fn a_grok_reviewer_exits_by_its_command() {
+        // T-32: grok does not exit on a key (ctrl+c and ctrl+d do not exit
+        // it), so its profile carries an `exit_command` and the release sends
+        // it as a prompt.
+        let mut herdr = FakeHerdr::new();
+        let worktree = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
+            Outcome::Ok(worktree) => worktree,
+            other => panic!("{other:?}"),
+        };
+        herdr.add_agent(&worktree.pane_id, "grok", gear_herdr::AgentStatus::Idle);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id, "grok");
+        let mut cfg = cfg();
+        cfg.profiles.insert("grok".into(), gear_herdr::builtin("grok").unwrap());
+
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        assert_eq!(exits(&herdr), 0, "no key is pressed");
+        let prompts = herdr.prompts_to(&worktree.pane_id);
+        assert_eq!(prompts, vec!["/exit"], "the exit command is the prompt");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing);
+    }
+
+    #[test]
     fn a_queued_or_starting_reviewer_is_never_released() {
         // R1 of the review: a reviewer waiting for a slot (Queued) or one that
         // is starting holds no worktree, and releasing it would throw away the
         // review it is about to do — even when its task is already cancelled.
         let mut herdr = FakeHerdr::new();
-        let mut store = world(TaskState::Cancelled, "w1:p1");
+        let mut store = world(TaskState::Cancelled, "w1:p1", "codex");
         for state in [SeatState::Queued, SeatState::Starting] {
             store
                 .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
@@ -494,7 +534,7 @@ profile = "codex"
         };
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         // The task is Verifying with a submitted attempt: the reviewer works.
-        let mut store = world(TaskState::Verifying, &worktree.pane_id);
+        let mut store = world(TaskState::Verifying, &worktree.pane_id, "codex");
         store
             .write(|tx| {
                 let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap_or(gear_store::AttemptRow {
