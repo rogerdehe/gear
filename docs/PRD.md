@@ -18,6 +18,8 @@ GEAR is for work that is **all** of:
 
 For anything else, talk to an agent directly; GEAR adds nothing.
 
+**The soul: lanes never stop.** Parallel work is the default, not an option. A lane hands in a result and immediately takes its next task; review and merge run beside development, never in front of it. And never-stop means valuable work — every queued task moves the goal forward, no busywork. Every wait in the flow must answer: who is idle while this waits, and does it have to be?
+
 Why it works where a long chat does not: the plan, the task states and the messages live in GEAR's store, not in anyone's conversation. The captain reads `gear` (a bounded page) when woken, so it can re-plan without its context filling up, getting compacted and forgetting.
 
 GEAR is not a planning method. Requirements and technical design may come from BMAD, Superpowers or plain conversation; GEAR starts at **execution** — dispatching work to other agents (not in-process subagents), keeping them working, reviewing in parallel, and merging. Methods are tools the captain may use; they never decide for it.
