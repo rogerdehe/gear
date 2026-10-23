@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS milestones (project TEXT NOT NULL, id TEXT NOT NULL, 
 -- the time its first task was created and the tasks it had then. `milestones`
 -- above is the old (unused) shape; a store without migrations gets a new table.
 CREATE TABLE IF NOT EXISTS voyages (project TEXT NOT NULL, milestone TEXT NOT NULL,
-  title TEXT NOT NULL, done TEXT NOT NULL, bar TEXT NOT NULL, eta TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  -- NULL until the plan describes the voyage: a milestone whose tasks predate
+  -- its first `# Milestone` block still has a departure (T-22, review R1/R2).
+  done TEXT, bar TEXT, eta TEXT,
   departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
   PRIMARY KEY (project, milestone));
 

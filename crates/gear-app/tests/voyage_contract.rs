@@ -90,15 +90,15 @@ fn a_voyage_is_stored_with_its_departure_and_shown() {
     assert_eq!(
         (
             voyage.title.as_str(),
-            voyage.done.as_str(),
-            voyage.bar.as_str(),
-            voyage.eta.as_str()
+            voyage.done.as_deref(),
+            voyage.bar.as_deref(),
+            voyage.eta.as_deref()
         ),
         (
             "delivery v0.1.0",
-            "users install v0.1.0 without Rust",
-            "block only loop breaks and data loss; log the rest",
-            "8h"
+            Some("users install v0.1.0 without Rust"),
+            Some("block only loop breaks and data loss; log the rest"),
+            Some("8h")
         )
     );
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(2)));
@@ -121,7 +121,10 @@ fn a_voyage_is_stored_with_its_departure_and_shown() {
     let later = plan(1, "done: users install v0.1.1 without Rust\nbar: keep only loop breaks\neta: 9h\n");
     run(&mut s, &later, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.done.as_str(), voyage.eta.as_str()), ("users install v0.1.1 without Rust", "9h"));
+    assert_eq!(
+        (voyage.done.as_deref(), voyage.eta.as_deref()),
+        (Some("users install v0.1.1 without Rust"), Some("9h"))
+    );
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(2)));
 }
 
@@ -136,5 +139,86 @@ fn an_untouched_old_milestone_keeps_applying() {
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].milestone.as_deref(), Some("M1"));
     assert_eq!(tasks[0].state, TaskState::Ready);
-    assert!(s.read(|tx| tx.get_voyage("p", "M1")).unwrap().is_none());
+    // The departure is recorded (the tasks exist); the words wait for a block.
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!((voyage.done, voyage.bar, voyage.eta), (None, None, None));
+    let packet = s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap();
+    assert!(packet.contains("Voyage M1"), "{packet}");
+    assert!(packet.contains("not described yet"), "{packet}");
+}
+
+/// R1 (review): a milestone whose block was applied earlier departs when its
+/// first **tasks** are created — a queue-only apply, no repeated block — and a
+/// later block/task addition never moves the departure.
+#[test]
+fn the_departure_is_the_first_task_creation_even_without_the_block() {
+    let mut s = world();
+    // base 0: the block only, no tasks.
+    let block_only = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n";
+    run(&mut s, block_only, "r1", NOW).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (None, None), "no task yet: no departure");
+
+    // base 1: only the queue, one task on M1 — the milestone departs now.
+    let first_task = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n";
+    run(&mut s, first_task, "r2", NOW + 10).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
+    assert!(s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap().contains("with 1 tasks"));
+
+    // base 2: the block again plus a second task — the words update, the
+    // departure stays.
+    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: -\n";
+    run(&mut s, more, "r3", NOW + 20).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
+    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
+}
+
+/// R2 (review): a grandfathered milestone whose block arrives later keeps the
+/// departure it had when its first task was created, even after another edit.
+#[test]
+fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
+    let mut s = world();
+    // T-1 is created on M1 with no block at all.
+    let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+    // Much later the block arrives together with T-2.
+    let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: -\n";
+    run(&mut s, block, "r2", NOW + 100).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW), Some(1)),
+        "the departure is the first task's creation, not the edit"
+    );
+    // Another metadata edit: still unchanged.
+    let edit = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n";
+    run(&mut s, edit, "r3", NOW + 200).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(voyage.done.as_deref(), Some("users install v2"));
+}
+
+/// R3 (review): the captain's snapshot shows the voyage that has work, even
+/// when three earlier milestones exist without any.
+#[test]
+fn the_snapshot_shows_the_voyage_that_has_work() {
+    let mut s = world();
+    // Four voyages; only M4 carries a task.
+    let mut text = String::from("<!-- gear-plan project=p base=0 -->\n");
+    for id in ["M1", "M2", "M3", "M4"] {
+        text.push_str(&format!(
+            "# Milestone {id}: voyage {id}\ndone: {id} done\nbar: {id} bar\neta: 8h\n"
+        ));
+    }
+    text.push_str("# Queue\n## NEW [must] lane=heat milestone=M4\ngoal: A\naccept: a\ndeps: -\n");
+    run(&mut s, &text, "r1", NOW).unwrap();
+
+    let (env, fp) = cap();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 10).unwrap();
+    assert!(page.text.contains("Voyage M4 voyage M4"), "{}", page.text);
+    assert!(page.text.contains("done: M4 done"), "{}", page.text);
+    assert!(page.text.contains("+1 more voyages"), "{}", page.text);
 }

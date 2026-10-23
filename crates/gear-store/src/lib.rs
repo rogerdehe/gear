@@ -257,9 +257,11 @@ pub struct VoyageRow {
     /// The milestone id the plan uses (`M1`, `M2`, …).
     pub milestone: String,
     pub title: String,
-    pub done: String,
-    pub bar: String,
-    pub eta: String,
+    /// None until the plan describes the voyage (a milestone whose tasks
+    /// predate its first block has a departure and no words yet).
+    pub done: Option<String>,
+    pub bar: Option<String>,
+    pub eta: Option<String>,
     /// When the milestone's first task was created; None while it has none.
     pub departure: Option<Ts>,
     /// How many tasks the milestone had at departure.
@@ -1590,6 +1592,32 @@ impl<'s> Tx<'s> {
                     row.departure_tasks,
                     row.updated,
                 ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Fix the departure of a milestone whose first tasks are created now: the
+    /// row is created (words NULL) when the plan has no block for it yet, and
+    /// an existing departure is never moved (design of T-22, review R1/R2).
+    pub fn set_voyage_departure(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+        tasks: i64,
+        now: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO voyages
+                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated)
+                 VALUES (?1, ?2, '', NULL, NULL, NULL, ?3, ?4, ?5)
+                 ON CONFLICT(project, milestone) DO UPDATE SET
+                   departure=COALESCE(voyages.departure, excluded.departure),
+                   departure_tasks=COALESCE(voyages.departure_tasks, excluded.departure_tasks),
+                   updated=excluded.updated",
+                params![project, milestone, departure, tasks, now],
             )
             .map_err(map_sqlite)?;
         Ok(())
