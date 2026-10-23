@@ -34,6 +34,12 @@ use gear_store::{NewMessage, NewOp, SeatRow, Store};
 use crate::observe::SeatObs;
 use crate::EngineCfg;
 
+/// The restart phases of a lane that is switching models (F3 of the T-15
+/// review): after the exit keys the engine waits for the pane to show a
+/// **shell**; only then is the start attempted.
+const RESTART_EXIT: &str = "exit";
+const RESTART_START: &str = "start";
+
 /// What the quota step did in one tick.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuotaReport {
@@ -207,6 +213,10 @@ fn begin_restart(
         }
     }
     meta_set(store, &meta_key("restart", &seat.id), model.unwrap_or("-"))?;
+    // Phase 1: waiting for the pane to become a shell. The switch completes
+    // only after the OLD agent is gone (F3 of the T-15 review): an agent that
+    // is still there is the old one, never a replacement.
+    meta_set(store, &meta_key("restart_phase", &seat.id), RESTART_EXIT)?;
     // The counter is not reset here: the old agent's screen still shows the
     // limit, and while it does the seat must not be flagged (F2 of the T-15
     // review). It goes back to zero when the screen does.
@@ -245,16 +255,32 @@ fn finish_restart(
     let Some(binding) = active_binding(store, seat)? else {
         // No pane to start in: forget the restart rather than spin.
         meta_set(store, &meta_key("restart", &seat.id), "")?;
+        meta_set(store, &meta_key("restart_phase", &seat.id), "")?;
         return Ok(None);
     };
     let raw = restart_model(store, &seat.id)?.unwrap_or_default();
     let model = if raw.is_empty() { None } else { Some(raw) };
 
-    // 1. the pane: a shell accepts the environment line; an agent of this
-    //    seat's kind means the start was accepted before the engine died, so
-    //    it is adopted rather than started twice; anything else is parked (F3).
+    // 1. the pane, in two phases (F3 of the T-15 review): after the exit keys,
+    //    the switch waits for a **shell** — an agent of this seat's kind that
+    //    is still there is the OLD one, not a replacement. Only once the pane
+    //    is a shell is the start attempted, and only then may a live agent of
+    //    the kind be adopted (the start was attempted after seeing the shell).
+    let phase = match meta_get(store, &meta_key("restart_phase", &seat.id))? {
+        Some(phase) if phase == RESTART_START => RESTART_START,
+        _ => RESTART_EXIT,
+    };
     let holder = match herdr.agent_get(&binding.pane_id) {
-        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str()) => Some(info),
+        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str()) => {
+            if phase == RESTART_EXIT {
+                // The old agent has not exited yet: keep the restart pending,
+                // type nothing and record nothing.
+                return Ok(None);
+            }
+            // The start was attempted after the shell was seen: this agent is
+            // the replacement.
+            Some(info)
+        }
         Ok(Some(_)) => {
             park_for_human(store, seat, "another agent holds the lane's pane", now)?;
             return Ok(None);
@@ -265,6 +291,11 @@ fn finish_restart(
             return Ok(None);
         }
     };
+    if holder.is_none() {
+        // The shell is there: from now on a start may have happened, so a live
+        // agent met on a later tick is the replacement.
+        meta_set(store, &meta_key("restart_phase", &seat.id), RESTART_START)?;
+    }
 
     let _started = match holder {
         Some(info) => info,
@@ -342,6 +373,7 @@ fn finish_restart(
         Ok(())
     })?;
     meta_set(store, &meta_key("restart", &seat.id), "")?;
+    meta_set(store, &meta_key("restart_phase", &seat.id), "")?;
     meta_set(store, &meta_key("quota", &seat.id), "0")?;
     meta_set(store, &meta_key("resume", &seat.id), "")?;
     if let Some(model) = model.as_deref() {
@@ -1056,8 +1088,10 @@ quota_reset_h = 5
         assert!(flagged.is_empty(), "the restart tick is not 'no progress'");
     }
 
-    /// F3: the environment line is never typed into an agent. The pane is read
-    /// first; a live agent of the same kind is adopted, anything else parks.
+    /// F3: the environment line is never typed into an agent, and a delayed
+    /// exit is not mistaken for a replacement. While the old agent is still in
+    /// the pane the restart stays pending: nothing is typed, started, adopted
+    /// or recorded.
     #[test]
     fn the_environment_line_is_not_typed_into_an_agent() {
         let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
@@ -1066,29 +1100,148 @@ quota_reset_h = 5
         herdr.set_screen(PANE, QUOTA_SCREEN);
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert_eq!(exits(&herdr).len(), 1, "the exit keys are sent once");
+
         // The exit has not happened yet: the old agent is still in the pane.
-        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        let runs_before = herdr
-            .calls
-            .iter()
-            .filter(|call| matches!(call, Call::PaneRun { .. }))
-            .count();
+        for tick in 0..3 {
+            let seat = lane_seat(&mut store);
+            apply_quota_policy(
+                &mut store,
+                &mut herdr,
+                &cfg(),
+                "p",
+                &observed(&seat, true),
+                T0 + 30 + tick,
+            )
+            .unwrap();
+        }
+        assert!(env_lines(&herdr).is_empty(), "nothing was typed into the agent");
+        assert!(starts(&herdr).is_empty(), "the old agent is not started again");
+        // The restart is still waiting for the shell, and no model was recorded.
+        assert_eq!(restart_model(&mut store, "p:heat").unwrap(), Some("deepseek/deepseek-flash".into()));
+        assert_eq!(meta_get(&mut store, &meta_key("restart_phase", "p:heat")).unwrap().as_deref(), Some(RESTART_EXIT));
+        assert_eq!(meta_get(&mut store, &meta_key("model", "p:heat")).unwrap(), None);
+        assert!(deliveries(&mut store).is_empty(), "no continue into the old agent");
+    }
 
+    /// F3 (acceptance): the switch completes only when the pane shows a shell —
+    /// then the environment line, the resume start and exactly one Continue.
+    #[test]
+    fn the_switch_waits_for_the_shell_then_starts_with_resume_args() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = herdr_with_quota();
+        // The attempt the lane continues after the switch.
+        let attempt = open_attempt_for(&mut store);
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The old agent is delayed: nothing happens.
+        let seat = lane_seat(&mut store);
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 25).unwrap();
+        assert!(starts(&herdr).is_empty());
+
+        // The old agent is gone; the pane is a shell.
+        herdr.exit_agent(PANE);
+        herdr.set_screen(PANE, "  Session  T-1 work\n  Continue  opencode -s ses_keep\n");
+        let seat = lane_seat(&mut store);
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 30).unwrap();
+
+        let env = env_lines(&herdr);
+        assert_eq!(env.len(), 1, "{env:?}");
+        assert!(env[0].contains("deepseek/deepseek-flash"), "{}", env[0]);
+        let starts = starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
+        assert!(starts[0].contains(&"ses_lane".to_string()), "{:?}", starts[0]);
+        // Exactly one Continue, for the open attempt.
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert!(delivered[0].contains(&attempt.0), "{}", delivered[0]);
+    }
+
+    /// F3 (acceptance): an engine restart between the exit and the start must
+    /// not adopt the old agent; the start happens only after the shell is seen.
+    #[test]
+    fn a_restart_between_exit_and_start_does_not_adopt_the_old_agent() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The engine restarts (recovery) while the old agent is still there.
+        crate::ops::recover_on_start(&mut store, T0 + 25).unwrap();
+        let seat = lane_seat(&mut store);
         apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 30).unwrap();
+        assert!(starts(&herdr).is_empty(), "the old agent is not adopted");
+        assert!(env_lines(&herdr).is_empty());
+        assert_eq!(restart_model(&mut store, "p:heat").unwrap(), Some("deepseek/deepseek-flash".into()));
 
-        let runs_after = herdr
-            .calls
-            .iter()
-            .filter(|call| matches!(call, Call::PaneRun { .. }))
-            .count();
-        assert_eq!(runs_before, runs_after, "nothing was typed into the agent");
-        let starts = herdr
-            .calls
-            .iter()
-            .filter(|call| matches!(call, Call::AgentStart { .. }))
-            .count();
-        assert_eq!(starts, 0, "the live agent is adopted, not started again");
-        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Active, "the lane is back on its task");
+        // Then the shell appears: one start with the resume args.
+        herdr.exit_agent(PANE);
+        herdr.set_screen(PANE, "  Continue  opencode -s ses_after\n");
+        let seat = lane_seat(&mut store);
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 40).unwrap();
+        let starts = starts(&herdr);
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
+        assert!(starts[0].contains(&"ses_lane".to_string()), "{:?}", starts[0]);
+    }
+
+    /// F3 (acceptance): a pending delivery is not flagged while the restart
+    /// waits for the old agent to exit — a quota turn is not "no progress".
+    #[test]
+    fn waiting_for_the_exit_does_not_flag_the_seat() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = herdr_with_quota();
+        let op = pending_delivery(&mut store);
+        // The edge the review reproduced: two checks already spent.
+        store.write(|tx| {
+            tx.bump_op_check_budget("p", &op, T0)?;
+            tx.bump_op_check_budget("p", &op, T0)?;
+            Ok(())
+        })
+        .unwrap();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The exit is delayed: the quota counter is still the reason the
+        // delivery gets no budget.
+        let seat = lane_seat(&mut store);
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 30).unwrap();
+        for tick in 0..4 {
+            let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 2, T0 + 40 + tick).unwrap();
+            assert!(flagged.is_empty(), "a quota turn never flags the seat");
+        }
+        let stored = store.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
+        assert_eq!(stored.check_budget, 2, "the waiting tick spends no budget");
+        assert_eq!(stored.state, OpState::Submitted);
+    }
+
+    /// Give the lane an open attempt to continue after a restart. The world
+    /// already starts T-1 attempt 1.
+    fn open_attempt_for(_store: &mut Store) -> (String, i64) {
+        ("T-1".to_string(), 1)
+    }
+
+    /// A Submitted delivery at the edge of the check budget.
+    fn pending_delivery(store: &mut Store) -> String {
+        store
+            .write(|tx| {
+                let op = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Doorbell,
+                        task: None,
+                        attempt: None,
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "x", "covers": ["M-404"] }),
+                        created: T0,
+                    })
+                    .unwrap();
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
+                Ok(op.id)
+            })
+            .unwrap()
     }
 }
