@@ -53,11 +53,11 @@ A long first turn makes `--wait` time out; that does not mean the prompt was los
 Only when the agent is `idle`/`done`:
 
 ```bash
-herdr agent send-keys <name> ctrl+c     # once
+herdr agent send-keys <name> ctrl+c ctrl+c     # twice: the first may only interrupt ("Conversation interrupted")
 herdr pane read <pane> --source recent-unwrapped --lines 8
 ```
 
-Check: the screen shows `Token usage: …` and `To continue this session, run: codex resume <uuid>`, then the shell prompt; `herdr agent get <name>` returns `agent_not_found`. Do not press `ctrl+c` again (it would hit the shell). On a working agent the first `ctrl+c` only interrupts the turn.
+Check: the screen shows `Token usage: …` and `To continue this session, run: codex resume <uuid>`, then the shell prompt; `herdr agent get <name>` returns `agent_not_found`. Seen 2026-10-23: after a reviewer finished its turn, one `ctrl+c` showed "Conversation interrupted" and the agent stayed; the second exited. A second key landing on the shell is harmless.
 
 ## Resume (re-review)
 

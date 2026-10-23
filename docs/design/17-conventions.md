@@ -101,7 +101,7 @@ Herdr creates and removes every worktree; its config decides the path (`<worktre
    | schema / migration | migrate up on a real database + the store contract tests |
 
    Bug fix: show it red before, green after. Same failure three times → stop and send `blocked`; do not grind.
-5. **Commit small, check the inbox.** Each commit builds and is pushed. After every finished checklist item, look at your inbox (GEAR: `gear`; manual scaffold: `ops/bin/inbox.sh <lane>`) for rework, answers and the next task. Subject `<type>(<task-id>): <slug>` (`feat|fix|refactor|test|docs|chore`), ≤ 70 chars; body says why, plus the verification that ran. No `--no-verify`.
+5. **Commit small, check the inbox.** Each commit builds and is pushed. After every finished checklist item, look at your inbox (`gear`) for rework, answers and the next task. Subject `<type>(<task-id>): <slug>` (`feat|fix|refactor|test|docs|chore`), ≤ 70 chars; body says why, plus the verification that ran. No `--no-verify`.
 6. **Final brief** (`--kind result`), exact headings, nothing padded:
 
    ```
@@ -144,7 +144,7 @@ The captain replies by picking an option (`gear reply <id> --resolve -m "<option
 
 Review is asynchronous: the lane has already moved on. The captain fetches the pushed branch and reviews it; a pass merges it, a fail writes follow-ups into the packet (committed and pushed on that task branch) and marks it for rework.
 
-**Writer ≠ reviewer, and the captain does not review.** Each review is done by a **temp reviewer**: a fresh agent session started for that one review, on a different model from the writer, given only the packet, its contracts and the diff. It writes `ops/reviews/T-<n>.md` (verified acceptance facts, spec compliance, findings P0–P3, set-aside items, questions, verdict) and ends. The captain only decides — pass/merge or fail/rework — from that file, looking at code only where the review raises a question; a 10+ minute review per task would otherwise block the captain all day. A re-review of the same task after rework resumes the same reviewer session (it knows its own findings) and checks the delta. GEAR prescribes these requirements, not the method: a reviewer may follow BMAD `code-review`, superpowers `requesting-code-review` or its own approach.
+**Writer ≠ reviewer, and the captain does not review.** Each review is done by a **temp reviewer**: a fresh agent session started for that one review, on a different model from the writer, given only the packet, its contracts and the diff. It writes its review file — the project chooses the path — and hands the findings in with `gear send --kind review …` (verified acceptance facts, spec compliance, findings P0–P3, set-aside items, questions, verdict) and ends. GEAR keeps the findings text, so the writer reads them from GEAR and the reviewer's worktree may be gone. The captain only decides — pass/merge or fail/rework — from that review, looking at code only where the review raises a question; a 10+ minute review per task would otherwise block the captain all day. A re-review of the same task after rework resumes the same reviewer session (it knows its own findings) and checks the delta. GEAR prescribes these requirements, not the method: a reviewer may follow BMAD `code-review`, superpowers `requesting-code-review` or its own approach.
 
 **Review loop discipline:**
 - Read the findings first, count them, then decide. Never announce "clean" before the review output has been read; output present ≠ review finished — confirm the reviewer actually completed.

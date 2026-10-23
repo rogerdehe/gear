@@ -1,0 +1,5 @@
+<!-- gear-plan project=gear base=70 -->
+# Verdicts
+- T-12 attempt=5 contract=2 candidate=1ed759a pass evidence=ops/reviews/T-12.md
+- T-30 attempt=2 contract=2 candidate=31591a57d1d34ab3292c3a18a3f6e178b3bbb038 pass evidence=ops/reviews/T-30.md
+- T-33 attempt=1 contract=2 candidate=57e4befeeda5626aa4900ab26e9f0ebe1e49c892 fail rework="Captain's fix, one round — do exactly this, ignore the review's other suggestions. (1) Rebase on dev: merge current origin/dev into data/t33 and drop the T-23 settlement changes that came in from your T-23 branch (crates/gear-app/src/tasks.rs settle_review, mail.rs, settle_review_contract.rs must match origin/dev); keep only switch.rs and the quota wiring. (2) crates/gear-engine/src/switch.rs:~109: pane_run already presses Enter after its text — remove every extra Enter key you send after a pane_run (the /model text, the filter text, the variant). (3) switch.rs:~67 `shows_model`: look for the model text only on the status-bar line (the line containing `Build auto`), not anywhere on the screen. Update the tests for (2) and (3). Hand in when the workspace builds and tests pass."

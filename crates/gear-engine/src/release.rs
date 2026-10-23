@@ -32,7 +32,6 @@ pub struct ReleaseReport {
 pub fn release_finished_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    cfg: &EngineCfg,
     project: &str,
     now: Ts,
 ) -> GearResult<ReleaseReport> {
@@ -57,7 +56,7 @@ pub fn release_finished_reviews(
         if seat.state == SeatState::Active && under_review(store, project, &seat, &task)? {
             continue;
         }
-        match release_one(store, herdr, cfg, project, &seat, &task, now) {
+        match release_one(store, herdr, project, &seat, &task, now) {
             Ok(true) => report.released.push(seat.id.clone()),
             Ok(false) => {}
             // One failing reviewer does not stop the others.
@@ -109,41 +108,44 @@ fn under_review(
 fn release_one(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    cfg: &EngineCfg,
     project: &str,
     seat: &SeatRow,
     task: &str,
     now: Ts,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
-    let profile = cfg.profiles.get(&seat.profile);
 
-    // 1. the agent leaves, once. A seat already in Releasing has sent its keys.
+    // 1. the agent leaves, once: its pane is closed. Exit keys differ per
+    //    agent and fail quietly (codex needs two ctrl+c, grok only `/exit`,
+    //    L-63); closing the pane ends any agent. The worktree stays — the next
+    //    job reopens it. A pane already gone is fine.
     if seat.state == SeatState::Active {
-        if let (Some(pane), Some(profile)) = (pane.as_deref(), profile) {
-            if let Some(command) = &profile.exit_command {
-                // The CLI exits on a command, not on a key (grok: `/exit`).
-                match herdr.prompt(pane, command) {
+        if let Some(pane) = pane.as_deref() {
+            // A CLI with an exit command leaves cleanly on it (grok: `/exit`,
+            // L-63 — its session stays resumable). Every other kind's pane is
+            // closed: exit keys differ per agent and fail quietly (codex needs
+            // two ctrl+c), and closing the pane ends any agent.
+            match gear_herdr::builtin(&seat.profile).and_then(|profile| profile.exit_command) {
+                Some(command) => match herdr.prompt(pane, &command) {
                     Outcome::Ok(()) => {}
+                    Outcome::Refused { code, .. } if code == "pane_not_found" => {}
                     Outcome::Refused { code, message } => {
                         return Err(format!("exit command: refused ({code}): {message}"))
                     }
                     Outcome::Uncertain { reason } => {
                         return Err(format!("exit command: {reason}"))
                     }
-                }
-            } else {
-                for key in &profile.exit_keys {
-                    match herdr.send_keys(pane, &[key.clone()]) {
-                        Outcome::Ok(()) => {}
-                        Outcome::Refused { code, message } => {
-                            return Err(format!("send_keys: refused ({code}): {message}"))
-                        }
-                        Outcome::Uncertain { reason } => {
-                            return Err(format!("send_keys: {reason}"))
-                        }
+                },
+                None => match herdr.pane_close(pane) {
+                    Outcome::Ok(()) => {}
+                    Outcome::Refused { code, .. } if code == "pane_not_found" => {}
+                    Outcome::Refused { code, message } => {
+                        return Err(format!("pane_close: refused ({code}): {message}"))
                     }
-                }
+                    Outcome::Uncertain { reason } => {
+                        return Err(format!("pane_close: {reason}"))
+                    }
+                },
             }
         }
         store
@@ -164,7 +166,14 @@ fn release_one(
                 // The pane is a shell again: the seat is free.
             }
             Ok(Some(_)) => {
-                // The old reviewer is still there: it is not released yet.
+                // The old reviewer is still there (its exit was lost, or an
+                // older engine sent exit keys it ignored): close its pane
+                // again; the next tick looks once more.
+                if let Outcome::Refused { code, message } = herdr.pane_close(pane) {
+                    if code != "pane_not_found" {
+                        return Err(format!("pane_close: refused ({code}): {message}"));
+                    }
+                }
                 return Ok(false);
             }
             Err(error) => {
@@ -184,12 +193,16 @@ fn release_one(
     }
 
     // 3. the seat is free again. Its worktree and its build cache stay: the
-    //    next job on this seat reuses them (conventions 17 §8a), so a review
+    //    next job on this seat reopens them (conventions 17 §8a), so a review
     //    never builds the workspace from nothing and a release removes nothing.
+    //    The closed pane's binding ends here, so the next job opens a new pane.
     store
         .write(|tx| {
-            let from = tx.get_seat(&seat.id)?.map(|seat| seat.state).unwrap_or(SeatState::Queued);
-            let _ = from;
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding.status != BindingStatus::Void {
+                    tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                }
+            }
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -256,14 +269,6 @@ kind = "codex"
 profile = "codex"
 "#;
 
-    fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
-        for kind in ["codex", "opencode", "claude"] {
-            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
-        }
-        cfg
-    }
-
     /// A project with one task in `state` and a reviewer bound to it on `pane`.
     fn world(state: TaskState, pane: &str, profile: &str) -> Store {
         let mut store = Store::open_in_memory().unwrap();
@@ -308,7 +313,7 @@ profile = "codex"
         herdr
             .calls
             .iter()
-            .filter(|call| matches!(call, Call::SendKeys { .. }))
+            .filter(|call| matches!(call, Call::PaneClose { .. }))
             .count()
     }
 
@@ -334,32 +339,28 @@ profile = "codex"
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
-        // Nothing is released on the tick that exits the agent: the next tick
-        // frees the seat, so a restart can never send the keys twice.
+        // Nothing is released on the tick that closes the pane: the next tick
+        // frees the seat, so a restart never closes it twice.
         assert!(report.released.is_empty(), "{report:?}");
-        assert_eq!(exits(&herdr), 1, "one exit");
+        assert_eq!(exits(&herdr), 1, "the pane is closed once");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
 
-        // The agent is still there: the seat is not free yet (F5).
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
-        assert!(report.released.is_empty(), "{report:?}");
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Releasing, "the old reviewer is still running");
-
-        // The agent is gone: the seat is free.
-        herdr.exit_agent(&worktree.pane_id);
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        // The pane is gone: the seat is free, its binding ends (the next job
+        // opens a new pane on the same worktree).
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
-        assert_eq!(exits(&herdr), 1, "the exit is not repeated");
+        assert_eq!(exits(&herdr), 1, "the close is not repeated");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", seat.generation)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "the closed pane is not reused");
         // A further tick does nothing.
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 40).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
         assert!(report.released.is_empty());
     }
 
@@ -377,19 +378,19 @@ profile = "codex"
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
 
-        // The agent is still leaving: the seat waits.
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        // The agent is still there (an older engine's exit keys were
+        // ignored): its pane is closed, the seat waits for the next look.
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
         assert!(report.released.is_empty(), "{report:?}");
-        assert_eq!(exits(&herdr), 0, "no second exit");
+        assert_eq!(exits(&herdr), 1, "the pane is closed");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
 
-        // The agent is gone: the seat is free.
-        herdr.exit_agent(&worktree.pane_id);
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        // The pane is gone: the seat is free.
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
-        assert_eq!(exits(&herdr), 0, "no second exit");
+        assert_eq!(exits(&herdr), 1, "no second close");
         assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
@@ -411,7 +412,7 @@ profile = "codex"
             .unwrap();
         herdr.observe_fails = true;
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         assert!(report.released.is_empty(), "{report:?}");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
@@ -460,7 +461,7 @@ profile = "codex"
 
         // Only the first reviewer's agent has left: the other seat waits.
         herdr.exit_agent(&first.pane_id);
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
         assert!(report.failed.is_empty(), "{report:?}");
@@ -468,11 +469,11 @@ profile = "codex"
         let first_seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(first_seat.state, SeatState::Released);
         let second_seat = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
-        assert_eq!(second_seat.state, SeatState::Releasing, "its agent is still there");
+        assert_eq!(second_seat.state, SeatState::Releasing, "its agent was still there");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
 
-        // The second one leaves: it is released too.
-        herdr.exit_agent(&second.pane_id);
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        // Its pane is gone: it is released too.
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
         assert_eq!(report.released, vec!["p:r-2".to_string()], "{report:?}");
         let second_seat = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(second_seat.state, SeatState::Released);
@@ -490,10 +491,8 @@ profile = "codex"
         };
         herdr.add_agent(&worktree.pane_id, "grok", gear_herdr::AgentStatus::Idle);
         let mut store = world(TaskState::Cancelled, &worktree.pane_id, "grok");
-        let mut cfg = cfg();
-        cfg.profiles.insert("grok".into(), gear_herdr::builtin("grok").unwrap());
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg, "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         assert!(report.released.is_empty(), "{report:?}");
         assert_eq!(exits(&herdr), 0, "no key is pressed");
@@ -515,7 +514,7 @@ profile = "codex"
                 .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
                 .unwrap();
             let report =
-                release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+                release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
             assert!(report.released.is_empty(), "{state:?}: {report:?}");
             assert!(report.failed.is_empty(), "{state:?}: {report:?}");
             assert_eq!(exits(&herdr), 0, "{state:?}: no exit");
@@ -560,7 +559,7 @@ profile = "codex"
             })
             .unwrap();
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         assert!(report.released.is_empty());
         assert_eq!(exits(&herdr), 0);
@@ -583,7 +582,7 @@ profile = "codex"
                 })
             })
             .unwrap();
-        release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
         assert_eq!(exits(&herdr), 1, "the reviewer is told to exit once its verdict is in");
     }
 }
