@@ -41,3 +41,13 @@ Side-effect intent, execution and confirmation are recorded in the database.
 ## Test points
 
 Fake Herdr: killed during execution and restarted does not resend; observation failure does not trigger MISSING; RELEASED is not judged missing; an occupant change is not inherited; working does not confirm a delivery; one slow project does not block another; failing to take the single-instance lock exits.
+
+### Busy lane without development work (T-46)
+
+After reconciliation, the engine times present active/standby lane agents whose
+Herdr status is `Working`, whose development attempts are empty, and whose
+eligible unclaimed ready queue is nonempty. Submitted attempts are review work.
+After `timing.lane_busy_idle_min` (default 10, positive), one urgent captain item
+opens. Timer/generation/incident state is stored in `meta`; intent and the latch
+are atomic. Recovery closes an outstanding item and resets the clock. Failed
+observations interrupt the timing evidence without silently resolving an alert.
