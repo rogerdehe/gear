@@ -131,23 +131,9 @@ fn release_one(
         return Ok(false);
     }
 
-    // 2. the worktree goes (the branch is kept), then the slot is free.
-    if let Some(pane) = pane.as_deref() {
-        if let Some(workspace) = workspace_of(pane) {
-            match herdr.worktree_remove(&workspace) {
-                // Already gone (a retry, or a manual removal) is fine.
-                Outcome::Ok(()) => {}
-                Outcome::Refused { code, .. }
-                    if code == "not_found"
-                        || code == "worktree_not_found"
-                        || code == "workspace_not_found" => {}
-                Outcome::Refused { code, message } => {
-                    return Err(format!("worktree_remove: refused ({code}): {message}"))
-                }
-                Outcome::Uncertain { reason } => return Err(format!("worktree_remove: {reason}")),
-            }
-        }
-    }
+    // 2. the seat is free again. Its worktree and its build cache stay: the
+    //    next job on this seat reuses them (conventions 17 §8a), so a review
+    //    never builds the workspace from nothing and a release removes nothing.
     store
         .write(|tx| {
             let from = tx.get_seat(&seat.id)?.map(|seat| seat.state).unwrap_or(SeatState::Queued);
@@ -175,11 +161,6 @@ fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, Str
                 .map(|binding| binding.pane_id))
         })
         .map_err(|e| e.detail)
-}
-
-/// The Herdr workspace of a pane: its id up to the `:` (`w7:p1` → `w7`).
-fn workspace_of(pane: &str) -> Option<String> {
-    pane.split(':').next().filter(|id| !id.is_empty()).map(str::to_string)
 }
 
 /// The profile of a seat, when the engine knows it.
@@ -313,14 +294,13 @@ profile = "codex"
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
-        assert_eq!(removes(&herdr), vec!["wt1".to_string()]);
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         assert_eq!(exits(&herdr), 1, "the exit is not repeated");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
         // A third tick does nothing.
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
         assert!(report.released.is_empty());
-        assert_eq!(removes(&herdr).len(), 1);
     }
 
     #[test]
@@ -341,7 +321,7 @@ profile = "codex"
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert_eq!(exits(&herdr), 0, "no second exit");
-        assert_eq!(removes(&herdr), vec!["wt1".to_string()]);
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
     }
@@ -388,12 +368,13 @@ profile = "codex"
 
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
 
-        assert_eq!(report.failed, vec!["p:r-1".to_string()], "{report:?}");
-        assert_eq!(report.released, vec!["p:r-2".to_string()], "{report:?}");
-        let failed = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(failed.state, SeatState::Releasing, "the next tick tries again");
-        let released = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
-        assert_eq!(released.state, SeatState::Released);
+        assert_eq!(report.released, vec!["p:r-1".to_string(), "p:r-2".to_string()], "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(removes(&herdr).is_empty(), "no seat's worktree is removed (T-18)");
+        for seat in ["p:r-1", "p:r-2"] {
+            let row = store.read(|tx| tx.get_seat(seat)).unwrap().unwrap();
+            assert_eq!(row.state, SeatState::Released, "{seat}");
+        }
     }
 
     #[test]
