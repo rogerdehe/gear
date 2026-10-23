@@ -158,10 +158,15 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
             // A reviewer that is up already: it is not started twice. A
             // reviewer that waits (queued) or is not up yet (starting) is
             // still this task's reviewer: the tick starts it when it can.
+            // A released (or retired) reviewer is finished: a rework attempt,
+            // or a task whose reviewer was lost, gets a new one.
             if seats.iter().any(|seat| {
                 seat.role == SeatRole::Temp
                     && seat.task_id.as_deref() == Some(task.id.as_str())
-                    && !matches!(seat.state, SeatState::Queued | SeatState::Starting)
+                    && !matches!(
+                        seat.state,
+                        SeatState::Queued | SeatState::Starting | SeatState::Released | SeatState::Retired
+                    )
             }) {
                 continue;
             }
@@ -182,7 +187,13 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
         Ok(tx
             .seats_of_project(project)?
             .into_iter()
-            .find(|seat| seat.role == SeatRole::Temp && seat.task_id.as_deref() == Some(task)))
+            // A released or retired reviewer is finished; a rework attempt
+            // (or a lost review) gets a new seat.
+            .find(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.task_id.as_deref() == Some(task)
+                    && !matches!(seat.state, SeatState::Released | SeatState::Retired)
+            }))
     })
 }
 
