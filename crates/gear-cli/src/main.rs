@@ -44,6 +44,8 @@ enum Cmd {
         #[command(subcommand)]
         op: PlanOp,
     },
+    /// User: the read-only plan board (PRD §15).
+    Board,
     /// User: run the engine loop (plugin pane entrypoint).
     Run,
     /// User: project/seat administration.
@@ -173,7 +175,13 @@ fn run(cli: Cli) -> GearResult<()> {
     if let Some(topic) = cli.skill.as_deref() {
         return print_skill(topic);
     }
-    if !matches!(cli.cmd, Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop })) {
+    if !matches!(
+        cli.cmd,
+        Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop }) | Some(Cmd::Board)
+    ) {
+        // The board is the exception: it only observes. Starting the engine
+        // here would hide the "engine down" warning the board exists to show
+        // (PRD §15); the next gear call starts the engine anyway (PRD §16).
         ensure_engine();
     }
     match cli.cmd {
@@ -185,6 +193,7 @@ fn run(cli: Cli) -> GearResult<()> {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
         },
+        Some(Cmd::Board) => cmd_board(cli.json),
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
@@ -411,6 +420,25 @@ fn output_error(e: std::io::Error) -> GearError {
         gear_model::ErrorCode::BadFormat,
         format!("cannot write the home page: {e}"),
     )
+}
+
+/// `gear board`: the plan board (PRD §15). The board itself lives in
+/// `gear-board`; the CLI opens the store, names the project and hands the
+/// terminal over.
+fn cmd_board(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let opts = gear_board::Options {
+        // The caller's project; without a caller (the user's own shell) the
+        // board shows every project in the store.
+        project: env.ctx.as_ref().map(|ctx| ctx.project.clone()),
+        // The engine's lock file sits next to the database.
+        db: std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from),
+        json,
+        ..Default::default()
+    };
+    let mut out = std::io::stdout();
+    gear_board::run(&mut store, &opts, &mut out)
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
