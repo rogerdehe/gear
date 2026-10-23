@@ -25,6 +25,10 @@ pub struct SendArgs {
     pub candidate: Option<String>,
     /// Review only (T-2): the verdict a temp reviewer hands in.
     pub verdict: Option<crate::review::Outcome>,
+    /// Result only (T-19): the hand-in gate — the candidate must contain the
+    /// project's current integration branch. `None` skips the check (tests and
+    /// callers that are not a lane hand-in).
+    pub base: Option<crate::base::BaseGate>,
     /// Upstream task to ask (must be a registered dependency) — slice 2.
     pub about: Option<String>,
     /// Captain only: seat name to instruct.
@@ -71,6 +75,26 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
+    // A request that already committed replays its receipt before the hand-in
+    // gate: the hand-in happened, only the receipt was lost, and an outage
+    // must not report it as failed (T-19 review F2). The caller is the live
+    // seat — identity is checked in the same read transaction as the receipt
+    // (review round 2, F6), so a stale generation or another occupant cannot
+    // replay it.
+    if let Some(receipt) = stored_receipt(store, env, fp, args)? {
+        return Ok(receipt);
+    }
+    // The hand-in gate (T-19) runs before the transaction: a candidate that
+    // does not contain the current integration branch is refused and nothing —
+    // no message, no attempt change — is stored.
+    if args.kind == MsgKind::Result {
+        if let Some(gate) = &args.base {
+            let candidate = args.candidate.as_deref().ok_or_else(|| {
+                GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
+            })?;
+            crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+        }
+    }
     store.write(|tx| {
         // The caller must be a seat that may write (design/03).
         let (ctx, seat) = require_seat(
@@ -196,24 +220,8 @@ pub fn send(
         // and verdict; the body holds the findings). It is built inside the
         // request closure, after the replay check: a repeated request id
         // replays the stored result and never touches the reviewer's file
-        // again (T-21, review F2).
-        let args_key = format!(
-            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
-            ctx.project,
-            ctx.seat,
-            ctx.generation,
-            args.kind.as_str(),
-            args.body,
-            args.task,
-            args.attempt,
-            args.contract,
-            args.candidate,
-            args.verdict.map(|verdict| verdict.as_str()),
-            args.about,
-            args.to,
-            args.reply_to,
-            args.urgent
-        );
+        // again (T-21, review F2). The key keeps the original argument.
+        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
             // The review the verdict belongs to: the findings are resolved
@@ -319,6 +327,71 @@ pub fn send(
         let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
         Ok(SendResult { msg_id, thread, recipient, replayed })
     })
+}
+
+/// The receipt of a request that already committed, if the caller is the live
+/// seat that sent it: the seat, generation, binding and fingerprint are checked
+/// in the **same read transaction** that reads the stored request (review
+/// round 2, F6). No receipt, no `GEAR_CTX` or a different args key → None (the
+/// write path decides, as before); a caller that is no longer the seat gets
+/// its `NotRegistered` / `StaleGeneration` / `Forbidden` here.
+fn stored_receipt(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+) -> GearResult<Option<SendResult>> {
+    if env.ctx.is_none() {
+        return Ok(None);
+    }
+    store.read(|tx| {
+        let Some((stored_hash, stored)) = tx.get_request(&args.request_id)? else {
+            return Ok(None);
+        };
+        let (ctx, _seat) = require_seat(
+            tx,
+            env,
+            fp,
+            Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
+            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+        )?;
+        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
+        if stored_hash != gear_store::args_hash(&key) {
+            return Ok(None);
+        }
+        let value: serde_json::Value = serde_json::from_str(&stored).map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("stored send result for {} is broken: {e}", args.request_id),
+            )
+        })?;
+        Ok(Some(SendResult {
+            msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
+            thread: value["thread"].as_str().unwrap_or_default().to_string(),
+            recipient: value["recipient"].as_str().unwrap_or_default().to_string(),
+            replayed: true,
+        }))
+    })
+}
+
+/// The args key of a send: the same seat and generation with the same
+/// arguments is the same request (design/13), whether it is checked before the
+/// transaction (to replay a committed receipt) or inside it.
+fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
+    format!(
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+        args.kind.as_str(),
+        args.body,
+        args.task,
+        args.attempt,
+        args.contract,
+        args.candidate,
+        args.verdict.map(|verdict| verdict.as_str()),
+        args.about,
+        args.to,
+        args.reply_to,
+        args.urgent
+    )
 }
 
 /// The next unused sequence number of a thread with this prefix.

@@ -247,6 +247,7 @@ fn send_review(outcome: Outcome, rid: &str) -> SendArgs {
         contract: None,
         candidate: None,
         verdict: Some(outcome),
+        base: None,
         about: None,
         to: None,
         reply_to: None,
