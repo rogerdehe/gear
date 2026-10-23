@@ -17,6 +17,7 @@
 
 pub mod dispatch;
 pub mod doorbell;
+pub mod merge;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
@@ -61,6 +62,8 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// Tasks merged into the integration branch this tick (`task @ branch`).
+    pub merged: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -118,7 +121,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
-        // 6. execute: re-check each op, call Herdr, record the outcome.
+        // 6. merge: a passed task goes into the integration branch, after the
+        //    gate and before the branches are closed (T-12).
+        for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
+            report.merged.push(format!("{} @ {}", merged.task, merged.branch));
+        }
+
+        // 7. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)

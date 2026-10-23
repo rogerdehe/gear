@@ -84,6 +84,9 @@ pub struct Conventions {
     pub release: String,
     pub staging: String,
     pub review_max_rounds: u32,
+    /// What the engine runs in its integration worktree after a merge, before
+    /// it pushes (T-12).
+    pub gate: String,
 }
 
 impl Default for Conventions {
@@ -93,6 +96,7 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
+            gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
         }
     }
 }
