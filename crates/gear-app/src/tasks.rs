@@ -456,12 +456,41 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
         return Ok(());
     }
 
+    // The findings the reviewer named as blocking, and the ones it only logged
+    // (T-23).
+    let blocking_ids = blocking_ids(tx, project, task, attempt)?;
+    let (blocking, logged) = split_findings(&review.findings, &blocking_ids);
+
+    // (2) A fail that names no blocking finding is never converted into a
+    // pass: the captain decides, and the task stays Verifying (M-295).
+    if !review.passed && blocking.is_empty() {
+        let line = format!(
+            "{task}: fail without blocking findings — the captain decides (the task stays Verifying)"
+        );
+        resolve_review_items(tx, project, task, attempt, &line, now)?;
+        tell_captain_cap(tx, project, task, attempt, &line, now)?;
+        return Ok(());
+    }
+
     // A pass accepts the candidate for the contract the attempt worked to; it
     // cannot complete a contract the task has moved on to (design/06: an
     // old-version result cannot complete a new contract). Such a pass settles
     // as a rework on the current contract.
     let stale = review.passed && attempt_row.adopted_version != task_row.contract_version;
     let accepted = review.passed && !stale;
+    let rework = !accepted;
+
+    // The rework rounds are capped (T-23): past the cap the captain decides.
+    // The task stays Verifying, the attempt stays handed in, and one action
+    // item goes to the captain's inbox.
+    if rework && rework_rounds_over_cap(tx, project, task, attempt)? {
+        let line = format!(
+            "{task}: review round {attempt} is over the rework cap — the captain decides (the task stays Verifying)"
+        );
+        resolve_review_items(tx, project, task, attempt, &line, now)?;
+        tell_captain_cap(tx, project, task, attempt, &line, now)?;
+        return Ok(());
+    }
 
     let (attempt_state, attempt_name, task_state, task_name) = if accepted {
         (AttemptState::Accepted, "accepted", TaskState::Done, "done")
@@ -518,7 +547,10 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
                 review.findings
             )
         } else {
-            review.findings.clone()
+            // Only the blocking findings go back to the lane (T-23); the rest
+            // are information for the captain. The findings arrive as text
+            // (T-21 reads the reviewer's file), so the note is that text.
+            blocking.join("\n")
         });
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
@@ -569,7 +601,7 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     // The captain is told, not asked: every review item of this attempt stops
     // being an action item and one information line says what happened.
     let lane = task_row.lane.as_deref().unwrap_or("its lane");
-    let line = match (&merge_op, stale) {
+    let mut line = match (&merge_op, stale) {
         (Some(op), _) => format!(
             "{task}: review pass — attempt {attempt} accepted, task done, merge queued ({op})"
         ),
@@ -578,10 +610,121 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             attempt_row.adopted_version, task_row.contract_version
         ),
         (None, false) => format!(
-            "{task}: review fail — attempt {attempt} rejected, task ready at the head of {lane}'s queue with the findings"
+            "{task}: review fail — attempt {attempt} rejected, task ready at the head of {lane}'s queue with the blocking findings"
         ),
     };
+    // The findings the reviewer only logged: one information item for the
+    // captain (T-23).
+    if !logged.is_empty() {
+        line.push_str("\nLogged (not blocking):");
+        for finding in &logged {
+            line.push_str("\n  ");
+            line.push_str(finding);
+        }
+    }
     resolve_review_items(tx, project, task, attempt, &line, now)?;
+    Ok(())
+}
+
+/// The ids the reviewer named as blocking (T-23).
+fn blocking_ids(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    let Some(ids) = tx.review_blocking(project, task, attempt)? else {
+        return Ok(std::collections::BTreeSet::new());
+    };
+    Ok(ids
+        .split(',')
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect())
+}
+
+/// Split the findings of a review into the blocking ones (the lines whose id
+/// the reviewer named) and the ones it only logged (T-23). A finding's id is
+/// the first word of its line (`F1: …`, `P1: …`).
+fn split_findings(
+    findings: &str,
+    blocking: &std::collections::BTreeSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    let mut blocked = Vec::new();
+    let mut logged = Vec::new();
+    for line in findings.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let id = line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(':');
+        if blocking.contains(id) {
+            blocked.push(line.to_string());
+        } else {
+            logged.push(line.to_string());
+        }
+    }
+    (blocked, logged)
+}
+
+/// Whether the task's rework rounds are over the cap (T-23):
+/// `[conventions].review_max_rounds` (default 3) from the project config. The
+/// round is the attempt the review settles.
+fn rework_rounds_over_cap(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<bool> {
+    let cap = tx
+        .get_project(project)?
+        .and_then(|row| crate::config::parse(&row.config_toml).ok())
+        .map(|config| config.conventions.review_max_rounds)
+        .unwrap_or(3);
+    let round = tx.attempts_of_task(project, task)?.len() as u32;
+    Ok(round > cap || attempt as u32 > cap)
+}
+
+/// One action item for the captain: the task's rework rounds are over the cap
+/// (T-23). One per task: the tick must not fill the inbox with the same news.
+fn tell_captain_cap(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(captain) = tx.captain_of(project)? else {
+        return Ok(());
+    };
+    let already = tx
+        .actionable_for(project, &captain.id, now)?
+        .into_iter()
+        .any(|message| message.body == line);
+    if already {
+        return Ok(());
+    }
+    tx.insert_message(&NewMessage {
+        project: project.to_string(),
+        thread: format!("{task}:cap"),
+        task: Some(task.to_string()),
+        attempt: Some(attempt),
+        sender: captain.id.clone(),
+        sender_gen: captain.generation,
+        recipient: captain.id.clone(),
+        kind: MsgKind::Question,
+        urgent: false,
+        body: line.to_string(),
+        reply_to: None,
+        needs_ack: false,
+        state: MsgState::Open,
+        created: now,
+    })?;
     Ok(())
 }
 

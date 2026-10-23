@@ -880,21 +880,40 @@ fn review_packet_for(
     attempt: i64,
     candidate: &str,
 ) -> GearResult<String> {
-    let (goal, accept) = store.read(|tx| {
+    let (goal, accept, done, bar) = store.read(|tx| {
         let version = tx
             .get_attempt(&config.project.id, task, attempt)?
             .map(|row| row.adopted_version)
             .unwrap_or(1);
-        match tx.get_contract(&config.project.id, task, version)? {
-            Some(contract) => Ok((contract.goal, contract.accept)),
-            None => Ok((String::new(), String::new())),
-        }
+        let (goal, accept) = match tx.get_contract(&config.project.id, task, version)? {
+            Some(contract) => (contract.goal, contract.accept),
+            None => (String::new(), String::new()),
+        };
+        // The voyage the task sails on (T-22): the sentence the phase is
+        // judged by and its quality bar (T-23).
+        let (done, bar) = match tx.get_task(&config.project.id, task)? {
+            Some(row) => match row
+                .milestone
+                .as_deref()
+                .map(|milestone| tx.get_voyage(&config.project.id, milestone))
+            {
+                Some(Ok(Some(voyage))) => (
+                    voyage.done.clone().unwrap_or_default(),
+                    voyage.bar.clone().unwrap_or_default(),
+                ),
+                _ => (String::new(), String::new()),
+            },
+            None => (String::new(), String::new()),
+        };
+        Ok((goal, accept, done, bar))
     })?;
     Ok(review_packet(
         task,
         attempt,
         &goal,
         &accept,
+        &done,
+        &bar,
         candidate,
         &config.conventions.integration,
         &review_branch(task),
@@ -994,6 +1013,8 @@ fn review_packet(
     attempt: i64,
     goal: &str,
     accept: &str,
+    done: &str,
+    bar: &str,
     candidate: &str,
     integration: &str,
     branch: &str,
@@ -1003,6 +1024,8 @@ fn review_packet(
          \n\
          Goal: {goal}\n\
          Accept: {accept}\n\
+         Done (the milestone's sentence): {done}\n\
+         Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
          Diff to review: `{integration}..{candidate}`\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
@@ -1013,9 +1036,14 @@ fn review_packet(
          Write the review in your worktree at the path your project uses for reviews, commit it \
          on `{branch}` and push it (the candidate stays untouched).\n\
          \n\
-         Hand your verdict in with exactly:\n\
+         Every finding is either blocking or logged: a blocking finding names the part of the \
+         done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
+         blocking finding; everything else is logged and does not block.\n\
+         \n\
+         Hand your verdict in with exactly (the findings as text, one per line, each starting \
+         with its id; `--blocking` names the ones that block):\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"<the path to your review file, or the text>\"\n\
+         [--blocking <ids>] \"<the path to your review file, or the text>\"\n\
          \n\
          GEAR reads the file and keeps the text of your findings, so the writer reads them from \
          GEAR (the rework note and the task packet): your worktree and your branch may be gone \
@@ -1505,13 +1533,13 @@ review = ["gpt-6.1-sol"]
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
         assert!(!text.contains("ops/"), "no gear-repo path in the packet:\n{text}");
+        // The findings are text with ids; `--blocking` names the ones that
+        // block (T-23).
         assert!(
-            text.contains(
-                "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"<the path to your review file, or the text>\""
-            ),
+            text.contains("gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail>"),
             "{text}"
         );
+        assert!(text.contains("--blocking <ids>"), "{text}");
         // The findings live in GEAR's store (T-21, shipped): the writer reads
         // the text from the rework note and the packet, not from the branch.
         assert!(text.contains("keeps the text of your findings"), "{text}");
