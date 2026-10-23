@@ -220,3 +220,56 @@ fn no_resend_on_exhaustion() {
         .unwrap();
     assert_eq!(ops, (0, 0, 1, 0), "no new op was written");
 }
+
+/// A message to the captain in `state`; returns its id.
+fn message(store: &mut Store, state: gear_model::MsgState) -> String {
+    store
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&gear_store::NewMessage {
+                    project: "p".into(),
+                    thread: "t".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "p:engine".into(),
+                    sender_gen: 1,
+                    recipient: SEAT.into(),
+                    kind: gear_model::MsgKind::Question,
+                    urgent: false,
+                    body: "b".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state,
+                    created: T0,
+                })?
+                .id)
+        })
+        .unwrap()
+}
+
+/// L-66: a doorbell whose items were all closed another way settles — else it
+/// holds the captain's slot and no doorbell ever rings again.
+#[test]
+fn a_doorbell_whose_items_are_closed_settles() {
+    let mut store = store_with_project();
+    let closed = message(&mut store, gear_model::MsgState::Resolved);
+    let id = submitted_op(&mut store, &[closed.as_str()], T0 + 1);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
+
+    assert_eq!(confirmed, vec![id.clone()]);
+    assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
+}
+
+#[test]
+fn a_doorbell_with_an_open_item_waits_for_a_view() {
+    let mut store = store_with_project();
+    let closed = message(&mut store, gear_model::MsgState::Resolved);
+    let open = message(&mut store, gear_model::MsgState::Open);
+    let id = submitted_op(&mut store, &[closed.as_str(), open.as_str()], T0 + 1);
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 6).unwrap();
+
+    assert!(confirmed.is_empty());
+    assert_eq!(op(&mut store, &id).state, OpState::Submitted);
+}
