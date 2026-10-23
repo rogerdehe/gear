@@ -364,6 +364,18 @@ pub struct PlanRow {
     pub by_gen: Option<i64>,
 }
 
+/// Durable captain quota episode (T-37), shared by engine policy and board.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CaptainQuota {
+    pub generation: i64,
+    pub detected_at: Ts,
+    pub reset_at: Ts,
+    pub bar: String,
+    pub wake_op: Option<String>,
+    pub views_before_wake: usize,
+    pub resumed: bool,
+}
+
 /// What one `gear` call actually displayed (design/13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewRecord {
@@ -1098,6 +1110,28 @@ impl<'s> Tx<'s> {
             messages.push(row.map_err(map_sqlite)?);
         }
         Ok(messages)
+    }
+
+    /// The captain quota episode, kept in meta so recovery needs no migration.
+    pub fn captain_quota(&self, project: &str) -> GearResult<Option<CaptainQuota>> {
+        let raw = self.get_meta(&format!("engine.captain_quota.{project}"))?;
+        match raw.filter(|raw| !raw.is_empty()) {
+            Some(raw) => serde_json::from_str(&raw).map(Some).map_err(|error| {
+                GearError::new(ErrorCode::BadFormat, format!("captain quota state: {error}"))
+            }),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_captain_quota(&self, project: &str, state: Option<&CaptainQuota>) -> GearResult<()> {
+        let raw = state.map(serde_json::to_string).transpose()
+            .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?
+            .unwrap_or_default();
+        self.set_meta(&format!("engine.captain_quota.{project}"), &raw)
+    }
+
+    pub fn captain_quota_paused(&self, project: &str) -> GearResult<bool> {
+        Ok(self.captain_quota(project)?.is_some_and(|state| !state.resumed))
     }
 
     // ---- views

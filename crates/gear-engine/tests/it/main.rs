@@ -19,3 +19,5 @@ mod settle_review_tick;
 mod slice1_messaging;
 mod slice2_dispatch;
 mod stall_contract;
+
+mod captain_quota_contract;

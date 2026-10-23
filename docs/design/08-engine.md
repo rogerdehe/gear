@@ -26,7 +26,7 @@ Reconciliation rules:
 | seat pane gone / Agent exited | lane (ACTIVE/STANDBY/PARKED/HELD/RETIRING) → `MISSING` (handled by 10); **captain → `UNAVAILABLE`** (03, relevant permissions frozen); expected changes in QUEUED, RELEASED, STARTING/RELEASING are checked against the corresponding operation and do not count as missing |
 | occupant fingerprint changed | first check whether there is an onboard/release/handover operation for it: an expected start or exit is checked against that operation; only an unexpected change with no corresponding operation revokes the binding and sets `NEEDS_CHECK`, no dispatch, notify |
 | status idle/done | read the screen once (tail N lines) to confirm no busy signature, then hand to 09 as "idle" |
-| ratelimit/quota/auth matched | confirmed only after `confirm_rounds` consecutive rounds; captain matching quota/auth → 03's UNAVAILABLE |
+| ratelimit/quota/auth matched | confirmed only after `confirm_rounds` consecutive rounds; captain auth → 03's UNAVAILABLE; captain quota uses only its configured footer status bar (T-37): pause new assignments, continue current work/reviews/merges, wake at reset and resume after a new view |
 
 ## Side effects
 

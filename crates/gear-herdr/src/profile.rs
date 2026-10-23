@@ -18,6 +18,8 @@ pub struct Profile {
     pub busy_markers: Vec<String>,
     pub ratelimit_markers: Vec<String>,
     pub quota_markers: Vec<String>,
+    /// Footer-only captain quota detection. Conversation markers never apply.
+    pub quota_bar: Option<crate::QuotaBar>,
     pub auth_markers: Vec<String>,
     /// Only the last `tail_lines` lines are matched.
     pub tail_lines: u32,
@@ -140,6 +142,7 @@ pub struct ProfilePatch {
     pub unattended_args: Option<Vec<String>>,
     pub busy_markers: Option<Vec<String>>,
     pub quota_markers: Option<Vec<String>>,
+    pub quota_bar: Option<crate::QuotaBar>,
     pub ratelimit_markers: Option<Vec<String>>,
     pub auth_markers: Option<Vec<String>>,
     /// The keys that make the agent exit cleanly.
@@ -167,6 +170,9 @@ impl Profile {
         }
         if let Some(markers) = &patch.busy_markers {
             profile.busy_markers = markers.clone();
+        }
+        if let Some(bar) = &patch.quota_bar {
+            profile.quota_bar = Some(bar.clone());
         }
         if let Some(markers) = &patch.quota_markers {
             profile.quota_markers = markers.clone();
@@ -224,6 +230,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "(2056)".into(),
                 "Free usage limit reached".into(),
             ],
+            quota_bar: None,
             auth_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
@@ -235,14 +242,14 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             verified: true,
         }),
         // Claude Code as captain (seen on 2026-10-22: Herdr reports its
-        // working/idle and its session id). No quota markers: the captain's
-        // tail is conversation text that may quote them; GEAR does not manage
-        // the captain's quota.
+        // working/idle and its session id). Captain quota comes only from
+        // the verified footer bar, never from conversation quota markers.
         "claude" => Some(Profile {
             kind: "claude".into(),
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![],
+            quota_bar: Some(crate::QuotaBar::claude()),
             auth_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
@@ -265,6 +272,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![],
+            quota_bar: None,
             auth_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
@@ -288,6 +296,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             busy_markers: vec!["Ctrl+c:cancel".into()],
             ratelimit_markers: vec![],
             quota_markers: vec![],
+            quota_bar: None,
             auth_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,

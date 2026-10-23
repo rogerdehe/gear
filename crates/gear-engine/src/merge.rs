@@ -1121,4 +1121,44 @@ gate = "{gate}"
         assert_eq!(times.started, Some(0));
         assert_eq!(times.handed_in, Some(0));
     }
+    #[test]
+    fn passed_work_still_merges_while_the_captain_is_on_quota() {
+        let scratch = Scratch::new("captain-quota");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen("w9:p1", "────────────────\n❯\n────────────────\nOpus 5.5 · medium /repo (dev) · ctx 63% · 5h 100%\n⏵⏵ bypass permissions on");
+        let mut store = world(TaskState::Ready);
+        store.write(|tx| {
+            gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+            gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, &candidate, "report", 1)?;
+            tx.insert_verdict(&gear_store::VerdictRow {
+                project: "p".into(), task: "T-5".into(), attempt: 1, contract_version: 1,
+                candidate, passed: true, evidence: Some("review".into()),
+                by_seat: "p:captain".into(), created: 10,
+            })
+        }).unwrap();
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            let mut profile = gear_herdr::builtin(kind).unwrap();
+            profile.confirm_rounds = 1;
+            cfg.profiles.insert(kind.into(), profile);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let report = crate::tick(&mut store, &mut herdr, &cfg, 20).unwrap();
+            if !report.merged.is_empty() { break; }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(store.read(|tx| tx.captain_quota_paused("p")).unwrap());
+        assert!(scratch.dev_has_task_commit());
+        assert!(scratch.dev_log().contains("review"));
+        assert!(herdr.prompts_to("w9:p1").is_empty(), "the unavailable captain is not rung");
+    }
+
 }
