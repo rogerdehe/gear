@@ -548,8 +548,9 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             )
         } else {
             // Only the blocking findings go back to the lane (T-23); the rest
-            // are information for the captain.
-            findings_pointer(task, &blocking.join("\n"))
+            // are information for the captain. The findings arrive as text
+            // (T-21 reads the reviewer's file), so the note is that text.
+            blocking.join("\n")
         });
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
@@ -804,29 +805,3 @@ fn resolve_review_items(
     Ok(())
 }
 
-/// The rework note for a failed review: reviewers hand in a path on their
-/// review branch (`ops/reviews/T-<n>.md`); the lane must be told where to read
-/// it, because the review worktree is gone by then (lesson L-49).
-fn findings_pointer(task: &str, findings: &str) -> String {
-    let path = findings.trim();
-    if path.ends_with(".md") && !path.contains(char::is_whitespace) {
-        let branch = format!("review/{}", task.to_lowercase().replace('-', ""));
-        format!("Review findings: `git show origin/{branch}:{path}` — fix what it lists, then hand in again.")
-    } else {
-        findings.to_string()
-    }
-}
-
-#[cfg(test)]
-mod findings_pointer_tests {
-    use super::findings_pointer;
-
-    #[test]
-    fn a_path_becomes_a_command_on_the_review_branch() {
-        assert_eq!(
-            findings_pointer("T-12", "ops/reviews/T-12.md"),
-            "Review findings: `git show origin/review/t12:ops/reviews/T-12.md` — fix what it lists, then hand in again."
-        );
-        assert_eq!(findings_pointer("T-3", "rows drift right"), "rows drift right");
-    }
-}

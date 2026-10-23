@@ -219,30 +219,45 @@ pub fn send(
         };
 
         // The review the verdict belongs to (a review names its task, attempt
-        // and verdict; the body holds the findings).
-        let review = match (args.kind, args.verdict) {
-            (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
-                project: ctx.project.clone(),
-                task: args.task.clone().unwrap_or_default(),
-                attempt: args.attempt.unwrap_or_default(),
-                outcome: verdict,
-                findings: args.body.clone(),
-                blocking: args.blocking.clone().unwrap_or_default(),
-                by_seat: seat.id.clone(),
-            }),
-            _ => None,
-        };
-
-        // The body of a review is the findings; the captain reads the verdict
-        // in the first line of the item (design/07: the inbox shows the body).
-        let body = match &review {
-            Some(review) => format!("{}\n{}", crate::review::headline(review), review.findings),
-            None => args.body.clone(),
-        };
-
+        // and verdict; the body holds the findings). It is built inside the
+        // request closure, after the replay check: a repeated request id
+        // replays the stored result and never touches the reviewer's file
+        // again (T-21, review F2). The key keeps the original argument.
         let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
+            // The review the verdict belongs to: the findings are resolved
+            // here, after the replay check. A path to a file in the
+            // reviewer's cwd is read into the store; a missing file fails
+            // before anything is written (T-21). Only a temp reviewer's
+            // findings are read: a lane or the captain is refused as a
+            // reviewer, and that is the error they should see.
+            let review = match (args.kind, args.verdict) {
+                (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
+                    project: ctx.project.clone(),
+                    task: args.task.clone().unwrap_or_default(),
+                    attempt: args.attempt.unwrap_or_default(),
+                    outcome: verdict,
+                    findings: if seat.role == SeatRole::Temp {
+                        crate::review::findings_text(&args.body)?
+                    } else {
+                        args.body.clone()
+                    },
+                    // The ids the reviewer named as blocking (T-23).
+                    blocking: args.blocking.clone().unwrap_or_default(),
+                    by_seat: seat.id.clone(),
+                }),
+                _ => None,
+            };
+
+            // The body of a review is the findings; the captain reads the
+            // verdict in the first line of the item (design/07: the inbox
+            // shows the body).
+            let body = match &review {
+                Some(review) => format!("{}\n{}", crate::review::headline(review), review.findings),
+                None => args.body.clone(),
+            };
+
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
             if args.kind == MsgKind::Result {
