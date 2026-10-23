@@ -18,7 +18,8 @@ Lanes only need to remember `gear` and `gear send`; task packets give complete c
 
 | Command | Purpose |
 |---|---|
-| `gear run` | Start the engine (invoked by the plugin pane) |
+| `gear run` | Run the engine in the foreground (debugging). Normally never typed: every other `gear` call starts it in the background when it is not running |
+| `gear admin stop` | Stop the background engine (upgrade, uninstall) |
 | `gear admin init <project.toml>` | Register/update the project config (01) |
 | `gear admin seat add/confirm/remove …` | Register a lane (name, duty, owns, kind; no pane or path — the engine creates its worktree and pane via Herdr, 17 §4); confirm write resources are safe; remove |
 | `gear admin captain replace --project P --pane X --kind K` | Replace the captain manually (03) |

@@ -206,6 +206,7 @@ dependencies = [
  "gear-herdr",
  "gear-model",
  "gear-store",
+ "libc",
  "serde_json",
 ]
 
