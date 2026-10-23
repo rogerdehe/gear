@@ -146,7 +146,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
-        let quota = quota::apply_quota_policy(store, herdr, cfg, &project, &observed, now)?;
+        let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
@@ -193,7 +193,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
-        let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
+        let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
         report.reviewers.extend(reviews.started);
 
         // 7b. a reviewer that stopped before its verdict is told to go on
@@ -207,7 +207,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
-        let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
+        let releases = release::release_finished_reviews(store, herdr, cfg, &profiles, &project, now)?;
         report.released.extend(releases.released);
 
         // 9. execute: re-check each op, call Herdr, record the outcome.

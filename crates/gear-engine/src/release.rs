@@ -13,7 +13,7 @@
 //! that never had an agent — is removed. One failing release is recorded and
 //! the loop carries on with the next reviewer.
 
-use gear_herdr::{HerdrAct, Outcome, Profile};
+use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store};
 
@@ -33,6 +33,7 @@ pub fn release_finished_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     now: Ts,
 ) -> GearResult<ReleaseReport> {
@@ -57,7 +58,7 @@ pub fn release_finished_reviews(
         if seat.state == SeatState::Active && under_review(store, project, &seat, &task)? {
             continue;
         }
-        match release_one(store, herdr, cfg, project, &seat, &task, now) {
+        match release_one(store, herdr, cfg, profiles, project, &seat, &task, now) {
             Ok(true) => report.released.push(seat.id.clone()),
             Ok(false) => {}
             // One failing reviewer does not stop the others.
@@ -109,14 +110,15 @@ fn under_review(
 fn release_one(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
-    cfg: &EngineCfg,
+    _cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     seat: &SeatRow,
     task: &str,
     now: Ts,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
-    let profile = cfg.profiles.get(&seat.profile);
+    let profile = profiles.get(&seat.profile);
 
     // 1. the agent leaves, once. A seat already in Releasing has sent its keys.
     if seat.state == SeatState::Active {
@@ -186,12 +188,6 @@ fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, Str
 /// The Herdr workspace of a pane: its id up to the `:` (`w7:p1` → `w7`).
 fn workspace_of(pane: &str) -> Option<String> {
     pane.split(':').next().filter(|id| !id.is_empty()).map(str::to_string)
-}
-
-/// The profile of a seat, when the engine knows it.
-#[allow(dead_code)]
-fn profile_of<'a>(cfg: &'a EngineCfg, seat: &SeatRow) -> Option<&'a Profile> {
-    cfg.profiles.get(&seat.profile)
 }
 
 #[cfg(test)]
@@ -307,7 +303,7 @@ profile = "codex"
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         let mut store = world(TaskState::Cancelled, &worktree.pane_id);
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         // Nothing is released on the tick that exits the agent: the next tick
         // removes the worktree, so a restart can never send the keys twice.
@@ -316,7 +312,7 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert_eq!(removes(&herdr), vec!["wt1".to_string()]);
@@ -324,7 +320,7 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
         // A third tick does nothing.
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert!(report.released.is_empty());
         assert_eq!(removes(&herdr).len(), 1);
     }
@@ -343,7 +339,7 @@ profile = "codex"
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert_eq!(exits(&herdr), 0, "no second exit");
@@ -392,7 +388,7 @@ profile = "codex"
         // The first removal fails; the second must still happen.
         herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "boom".into() });
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert_eq!(report.failed, vec!["p:r-1".to_string()], "{report:?}");
         assert_eq!(report.released, vec!["p:r-2".to_string()], "{report:?}");
@@ -414,7 +410,7 @@ profile = "codex"
                 .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
                 .unwrap();
             let report =
-                release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+                release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
             assert!(report.released.is_empty(), "{state:?}: {report:?}");
             assert!(report.failed.is_empty(), "{state:?}: {report:?}");
             assert_eq!(exits(&herdr), 0, "{state:?}: no exit");
@@ -459,7 +455,7 @@ profile = "codex"
             })
             .unwrap();
 
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert!(report.released.is_empty());
         assert_eq!(exits(&herdr), 0);
@@ -482,7 +478,7 @@ profile = "codex"
                 })
             })
             .unwrap();
-        release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert_eq!(exits(&herdr), 1, "the reviewer is told to exit once its verdict is in");
     }
 }

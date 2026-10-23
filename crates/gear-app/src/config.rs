@@ -220,7 +220,10 @@ pub fn profile_table(
                     format!("profile {name} is not a valid profile: {e}"),
                 )
             })?;
-        let current = table.get(name).cloned().unwrap_or_default();
+        // A name that is not built in starts from the operational defaults
+        // (16 lines, two confirmation rounds), not from an all-zero profile
+        // (review R2).
+        let current = table.get(name).cloned().unwrap_or_else(gear_herdr::Profile::for_new);
         let mut profile = current.patched(&patch, name);
         // A profile the user configured is one GEAR may drive: they wrote the
         // kind, the args and the exit keys (T-31). `gear admin init` refuses
