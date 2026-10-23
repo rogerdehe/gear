@@ -30,13 +30,16 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    /// Put the terminal into raw mode. A terminal that refuses is not an
-    /// error: the board then never sees a key and the user leaves it with
-    /// Ctrl-C.
+    /// The keyboard of the terminal the board runs in.
     pub fn new() -> Terminal {
-        let stdin = std::io::stdin().as_raw_fd();
-        let saved = raw_mode(stdin);
-        Terminal { stdin, saved }
+        Terminal::on(std::io::stdin().as_raw_fd())
+    }
+
+    /// The keyboard of a given terminal. A test drives a pty this way, so
+    /// that the raw-mode path is the one that is really exercised.
+    pub fn on(fd: RawFd) -> Terminal {
+        let saved = raw_mode(fd);
+        Terminal { stdin: fd, saved }
     }
 }
 
@@ -93,6 +96,11 @@ pub fn draw(out: &mut dyn Write, text: &str) -> std::io::Result<()> {
 
 /// Raw mode: every key arrives at once and `q` is a key like any other. The
 /// old mode is returned so that it can be restored.
+///
+/// The output processing stays on: `cfmakeraw` clears `OPOST`, and a frame
+/// whose newline does not return to the left margin drifts right and wraps
+/// (the review of T-3). `OPOST` with `ONLCR` gives the board back the
+/// carriage return that belongs to a line feed.
 fn raw_mode(fd: RawFd) -> Option<libc::termios> {
     let mut term: libc::termios = unsafe { std::mem::zeroed() };
     // SAFETY: `term` is a termios to fill in; `fd` is the terminal.
@@ -102,6 +110,7 @@ fn raw_mode(fd: RawFd) -> Option<libc::termios> {
     let saved = term;
     // SAFETY: `term` is a termios we own.
     unsafe { libc::cfmakeraw(&mut term) };
+    term.c_oflag |= libc::OPOST | libc::ONLCR;
     // No blocking read: the poll timeout is the only wait.
     term.c_cc[libc::VMIN] = 0;
     term.c_cc[libc::VTIME] = 0;

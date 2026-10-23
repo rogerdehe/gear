@@ -147,7 +147,7 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
 
     let text = render(&build(&mut store, &options(), T0 + 300).unwrap());
 
-    assert!(text.contains("Waiting for the captain: 1 items · oldest 3m"), "{text}");
+    assert!(text.contains("Waiting for the captain: 1 item · oldest 3m"), "{text}");
     // The project was seeded with a quota of two temp slots; one is in use.
     assert!(text.contains("Temp slots: 1/2 in use"), "{text}");
 }
@@ -239,4 +239,194 @@ fn a_board_that_cannot_read_the_plan_fails() {
     let err = run_with(&mut store, &opts, &mut out, &mut keys).unwrap_err();
 
     assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
+}
+
+// ---- the real raw-mode path, in a pty
+
+/// A pseudo terminal: the master side is read, the slave side is the
+/// terminal the board draws on.
+struct Pty {
+    master: libc::c_int,
+    slave: libc::c_int,
+}
+
+impl Pty {
+    fn open() -> Pty {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        // SAFETY: both pointers are valid; the termios and the window size
+        // are null, so the pty gets the default settings. (`null_mut` fits
+        // the `*const` parameters of the other unix flavours too.)
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, 0, "a pty: {}", std::io::Error::last_os_error());
+        Pty { master, slave }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        // SAFETY: both descriptors are ours and are closed once.
+        unsafe {
+            libc::close(self.slave);
+            libc::close(self.master);
+        }
+    }
+}
+
+/// Writes to a raw descriptor: the board draws on the slave side of the
+/// pty, and the terminal decides what the rows look like.
+struct FdWriter(libc::c_int);
+
+impl std::io::Write for FdWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: `buf` is a valid buffer of `buf.len()` bytes.
+        let written = unsafe {
+            libc::write(self.0, buf.as_ptr() as *const libc::c_void, buf.len())
+        };
+        if written < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(written as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Read from the master side until `needle` is in the buffer, then drain.
+fn read_until(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
+    // The master never blocks the test: a board that draws nothing must
+    // fail the test, not hang it.
+    // SAFETY: the descriptor is ours.
+    unsafe {
+        let flags = libc::fcntl(master, libc::F_GETFL);
+        libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        // SAFETY: the buffer is one chunk long.
+        let read = unsafe {
+            libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+        };
+        if read > 0 {
+            buffer.extend_from_slice(&chunk[..read as usize]);
+            found = String::from_utf8_lossy(&buffer).contains(needle);
+            continue;
+        }
+        if found {
+            // The frame is there; give the rest a moment to arrive.
+            std::thread::sleep(Duration::from_millis(50));
+            // SAFETY: the buffer is one chunk long.
+            let more = unsafe {
+                libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if more > 0 {
+                buffer.extend_from_slice(&chunk[..more as usize]);
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    buffer
+}
+
+/// The column every row of a captured frame starts at.
+///
+/// A terminal prints a character at the cursor and moves the column on; a
+/// newline starts the next row *where the last one ended* unless a carriage
+/// return came first, and a cursor-position sequence puts the cursor back at
+/// the home position. A frame whose rows drift right is a frame the board
+/// cannot show (the review of T-3).
+fn row_starts(bytes: &[u8]) -> Vec<usize> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut starts = vec![0]; // the first row starts at the home position
+    let mut column = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                // An escape sequence prints nothing; a cursor position puts
+                // the cursor back at the left margin.
+                let mut sequence = String::new();
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        sequence.push(c);
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                } else {
+                    // A two-character escape sequence prints nothing either.
+                    chars.next();
+                }
+                if sequence.ends_with('H') || sequence.ends_with('f') {
+                    column = 0;
+                }
+            }
+            '\r' => column = 0,
+            '\n' => starts.push(column),
+            control if control < ' ' => {}
+            _ => column += 1,
+        }
+    }
+    starts
+}
+
+#[test]
+fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
+    let mut store = world();
+    let opts = Options {
+        project: Some("p".into()),
+        // No database: the engine is down, so the warning line is in the
+        // frame too.
+        db: None,
+        refresh: Duration::from_millis(50),
+        ..Options::default()
+    };
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (left, done) = std::sync::mpsc::channel();
+
+    // The board runs on the slave side of the pty, in raw mode.
+    let board = std::thread::spawn(move || {
+        let mut out = FdWriter(slave);
+        let mut keys = gear_board::Terminal::on(slave);
+        let result = run_with(&mut store, &opts, &mut out, &mut keys);
+        let _ = left.send(result.is_ok());
+    });
+
+    let captured = read_until(pty.master, "Temp slots:", Duration::from_secs(5));
+    // SAFETY: the byte is written to our own descriptor.
+    unsafe { libc::write(pty.master, b"q".as_ptr() as *const libc::c_void, 1) };
+    assert!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap_or(false),
+        "the board did not leave on `q`"
+    );
+    board.join().ok();
+
+    // The frame is really there: the warning, the project and a task row.
+    let text = String::from_utf8_lossy(&captured);
+    assert!(text.contains("! engine down"), "{text}");
+    assert!(text.contains("project p"), "{text}");
+    assert!(text.contains("  T-1 done"), "{text}");
+
+    // Every row starts at column zero: the frame does not drift right.
+    let rows = row_starts(&captured);
+    assert!(
+        rows.iter().all(|column| *column == 0),
+        "the rows drift right: {rows:?}\n{text:?}"
+    );
 }

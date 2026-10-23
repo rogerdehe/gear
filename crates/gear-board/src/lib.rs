@@ -26,7 +26,7 @@ use std::time::Duration;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{Store, Tx};
 
-pub use screen::Keys;
+pub use screen::{Keys, Terminal};
 
 /// How long a frame stays on the screen before the board redraws it.
 pub const REFRESH: Duration = Duration::from_secs(2);
@@ -302,13 +302,16 @@ fn project_lines(project: &ProjectBoard) -> Vec<String> {
 
 /// The line about the captain's inbox.
 fn waiting_line(waiting: &Waiting) -> String {
+    let items = match waiting.count {
+        1 => "1 item".to_string(),
+        count => format!("{count} items"),
+    };
     match waiting.oldest_age_s {
         Some(age) => format!(
-            "Waiting for the captain: {} items · oldest {}",
-            waiting.count,
+            "Waiting for the captain: {items} · oldest {}",
             human_age(age)
         ),
-        None => format!("Waiting for the captain: {} items", waiting.count),
+        None => format!("Waiting for the captain: {items}"),
     }
 }
 
