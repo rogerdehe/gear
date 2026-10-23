@@ -20,6 +20,9 @@ pub enum ErrorCode {
     BadTransition,
     /// SQLite lock timeout; nothing was written, safe to retry.
     Locked,
+    /// The store's schema version is newer than this binary's (T-41): the
+    /// schema only migrates up, so the store is refused for writing.
+    SchemaTooNew,
     /// Same request_id reused with different arguments.
     RequestConflict,
     /// Quota exhausted (item queued, not rejected, where the caller is a plan).
@@ -41,6 +44,7 @@ impl ErrorCode {
             ErrorCode::BadFormat => "BAD_FORMAT",
             ErrorCode::BadTransition => "BAD_TRANSITION",
             ErrorCode::Locked => "LOCKED",
+            ErrorCode::SchemaTooNew => "SCHEMA_TOO_NEW",
             ErrorCode::RequestConflict => "REQUEST_CONFLICT",
             ErrorCode::Quota => "QUOTA",
             ErrorCode::Unconfirmed => "UNCONFIRMED",

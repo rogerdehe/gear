@@ -5,21 +5,14 @@
 //!   agent:<kind> → skills/gear/references/agents/<kind>.md
 //! Unknown topic → stderr `ERROR BAD_FORMAT: unknown skill topic <t>; available: <list>`, exit 1.
 
-use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::process::Output;
 
-fn gear(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gear"))
-        .args(args)
-        .env_remove("GEAR_CTX")
-        // Never the real store: lanes run tests with GEAR_DB set, and a
-        // `gear` call starts an engine on it (design/14).
-        .env_remove("GEAR_DB")
-        // … and no default store under the real HOME either.
-        .env("HOME", std::env::temp_dir().join("gear-skill-contract-home"))
-        .env_remove("HERDR_SOCKET_PATH")
-        .output()
-        .expect("run gear")
+use crate::scratch;
+
+/// A `gear` call in a scratch home: never the real store (T-41).
+fn gear(home: &Path, args: &[&str]) -> Output {
+    scratch::gear(home, args).output().expect("run gear")
 }
 
 fn skill_file(rel: &str) -> String {
@@ -37,18 +30,20 @@ fn stderr(o: &Output) -> String {
 
 #[test]
 fn bare_skill_prints_skill_md() {
-    let o = gear(&["--skill"]);
+    let home = scratch::home("skill-bare");
+    let o = gear(&home, &["--skill"]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o), skill_file("SKILL.md"));
 }
 
 #[test]
 fn reference_topics_print_their_file() {
-    let o = gear(&["--skill", "decompose"]);
+    let home = scratch::home("skill-reference");
+    let o = gear(&home, &["--skill", "decompose"]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o), skill_file("references/decompose.md"));
 
-    let o = gear(&["--skill", "agent:opencode"]);
+    let o = gear(&home, &["--skill", "agent:opencode"]);
     assert!(o.status.success(), "{}", stderr(&o));
     assert_eq!(stdout(&o), skill_file("references/agents/opencode.md"));
 }
@@ -57,15 +52,17 @@ fn reference_topics_print_their_file() {
 /// topics of the skill, not files of the gear repo.
 #[test]
 fn the_new_topics_print_their_file() {
+    let home = scratch::home("skill-topics");
     for (topic, rel) in [
         ("review", "references/review.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
     ] {
-        let o = gear(&["--skill", topic]);
+        let o = gear(&home, &["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
-        assert_eq!(stdout(&o), skill_file(rel), "{topic}");
+        let text = stdout(&o);
+        assert_eq!(text, skill_file(rel), "{topic}");
     }
 }
 
@@ -73,6 +70,7 @@ fn the_new_topics_print_their_file() {
 /// of the gear repo — a project that runs GEAR has no such files.
 #[test]
 fn no_topic_names_a_file_of_the_gear_repo() {
+    let home = scratch::home("skill-repo");
     for topic in [
         "main",
         "conventions",
@@ -84,7 +82,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "agent:claude",
         "agent:grok",
     ] {
-        let o = gear(&["--skill", topic]);
+        let o = gear(&home, &["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
         let text = stdout(&o);
         assert!(!text.contains("ops/"), "the {topic} topic names an ops/ path:\n{text}");
@@ -97,7 +95,8 @@ fn no_topic_names_a_file_of_the_gear_repo() {
 
 #[test]
 fn unknown_topic_is_bad_format_and_lists_topics() {
-    let o = gear(&["--skill", "nope"]);
+    let home = scratch::home("skill-unknown");
+    let o = gear(&home, &["--skill", "nope"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stdout(&o).is_empty());
     let e = stderr(&o);
@@ -107,7 +106,21 @@ fn unknown_topic_is_bad_format_and_lists_topics() {
 
 #[test]
 fn not_yet_commands_fail_cleanly() {
-    let o = gear(&["admin", "seat", "confirm", "x"]); // after the walking skeleton
+    let home = scratch::home("skill-not-yet");
+    let o = gear(&home, &["admin", "seat", "confirm", "x"]); // after the walking skeleton
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).starts_with("ERROR FORBIDDEN: "), "{}", stderr(&o));
+}
+
+/// T-41: a `gear` call without `GEAR_DB` opens the store under its `HOME`.
+/// The tests give it a scratch home, so the store they write is a scratch one
+/// and never the production store.
+#[test]
+fn the_store_of_a_test_lives_under_its_scratch_home() {
+    let home = scratch::home("store-home");
+    assert!(!scratch::default_store(&home).exists());
+
+    // The call fails (no seat, no Herdr), but it opened the store first.
+    let o = gear(&home, &[]);
+    assert!(scratch::default_store(&home).exists(), "{}", stderr(&o));
 }

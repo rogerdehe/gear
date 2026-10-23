@@ -429,10 +429,7 @@ fn merge_one(
 
     // 4. the gate, before anything is pushed.
     let gate = config.conventions.gate.clone();
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&gate)
-        .current_dir(dir)
+    let output = gate_command(&gate, dir)
         .output()
         .map_err(|error| format!("gate: {error}"))?;
     if !output.status.success() {
@@ -462,6 +459,22 @@ fn merge_one(
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     Ok(format!("merged {task} into {integration}: {head}"))
+}
+
+/// The gate of the project: its build and test command, in `dir`.
+///
+/// The gate runs without `GEAR_DB` and without `GEAR_CTX`: it is the
+/// project's own build and test command, and it must never see the store of
+/// this machine (L-59). A test that inherited `GEAR_DB` would write to the
+/// production store; the tests give themselves a scratch home instead.
+fn gate_command(gate: &str, dir: &Path) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(gate)
+        .current_dir(dir)
+        .env_remove(gear_model::ctx::ENV_DB)
+        .env_remove(gear_model::ctx::ENV_CTX);
+    cmd
 }
 
 /// Run one git command in `dir`; the output tail comes back as the error.
@@ -904,6 +917,24 @@ gate = "{gate}"
         // for the next run).
         let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
         assert_eq!(head, "dev", "{head}");
+    }
+
+    /// T-41: the gate is the project's build and test command. It must not
+    /// see the store of this machine: a test that inherited `GEAR_DB` would
+    /// write to the production store (L-59).
+    #[test]
+    fn the_gate_runs_without_the_store_of_this_machine() {
+        let command = gate_command("cargo test", Path::new("/tmp"));
+        let removes = |name: &str| {
+            command
+                .get_envs()
+                .filter(|(key, value)| {
+                    *key == std::ffi::OsStr::new(name) && value.is_none()
+                })
+                .count()
+        };
+        assert_eq!(removes("GEAR_DB"), 1, "the gate removes GEAR_DB");
+        assert_eq!(removes("GEAR_CTX"), 1, "the gate removes GEAR_CTX");
     }
 
     #[test]
