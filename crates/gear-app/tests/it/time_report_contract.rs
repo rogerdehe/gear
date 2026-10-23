@@ -130,3 +130,18 @@ fn only_the_captain_may_read_the_report() {
     let err = time::build(&mut s, &lane.0, Some(&lane.1), &Filter::default()).unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden, "{}", err.detail);
 }
+
+/// A task that does not exist is `NoTarget`, not an empty report.
+#[test]
+fn an_unknown_task_is_no_target() {
+    let mut s = world();
+    apply(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        "r1",
+    )
+    .unwrap();
+    let filter = Filter { task: Some("T-9".into()), voyage: None };
+    let err = s.read(|tx| time::report(tx, "p", &filter)).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NoTarget, "{}", err.detail);
+}

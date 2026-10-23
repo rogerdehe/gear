@@ -21,7 +21,7 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{GearResult, SeatRole, SeatState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
 use gear_store::{AttemptTimes, Store, Tx};
 
 /// One round of a task (one attempt) and what its steps took, in minutes.
@@ -163,6 +163,16 @@ pub fn build(
 
 /// The report of a project, read from the store.
 pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report> {
+    // A task that does not exist is `NoTarget`, not an empty report: a typo
+    // must not look like a project without work.
+    if let Some(wanted) = &filter.task {
+        if tx.get_task(project, wanted)?.is_none() {
+            return Err(GearError::new(
+                ErrorCode::NoTarget,
+                format!("no task {wanted} in project {project}"),
+            ));
+        }
+    }
     let mut tasks: Vec<TaskTime> = Vec::new();
     for task in tx.tasks_of_project(project)? {
         if let Some(wanted) = &filter.task {
