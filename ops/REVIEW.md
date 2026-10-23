@@ -13,6 +13,7 @@ The general lane rules in `ops/CONVENTIONS.md` apply (English only, git limits, 
    - `git merge-tree --write-tree origin/dev origin/<branch>` reports no conflicts.
 3. **Required conclusions**, written to `ops/reviews/T-<n>.md` (template below):
    - spec compliance: what is missing, extra, or misunderstood against the packet;
+   - **every blocking finding carries its fix**: the smallest change that satisfies the milestone bar — file, function, what to change, about how many lines — and never a redesign or refactor (the writer executes it as written; the captain may pick a smaller one). Read the bar first: under "fastest to the goal" only what breaks the chain or loses data is blocking;
    - findings with severity, `file:line`, and why it matters — **P0** wrong data, lost work, broken contract or safety rule; **P1** wrong behaviour in a case normal operation reaches (one fault at a time: one restart, one captain action); stacked coincidences are P3 with their likelihood; **P2** fragile or misleading code likely to cause a bug; **P3** style/wording;
    - what you considered and set aside, with the reason (nothing dropped silently);
    - questions only the captain can decide;
