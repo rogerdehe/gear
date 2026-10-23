@@ -49,6 +49,16 @@ impl VoyageReport {
 }
 
 pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
+    build_reports(tx, project, now, false)
+}
+
+/// Also measure finished voyages, so a station can include the final third
+/// completion. Consumers decide which historical voyages they are watching.
+pub fn reports_including_finished(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageReport>> {
+    build_reports(tx, project, now, true)
+}
+
+fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) -> GearResult<Vec<VoyageReport>> {
     let tasks = tx.tasks_of_project(project)?;
     let mut reports = Vec::new();
     for voyage in tx.voyages_of_project(project)? {
@@ -56,7 +66,7 @@ pub fn reports(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<VoyageRepo
             t.milestone.as_deref() == Some(&voyage.milestone)
                 && !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed)
         }).collect();
-        if !scope.iter().any(|t| !t.state.is_terminal()) {
+        if !include_finished && !scope.iter().any(|t| !t.state.is_terminal()) {
             continue;
         }
         let mut r = VoyageReport {
