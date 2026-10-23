@@ -354,6 +354,9 @@ fn show_captain(w: &mut World, now: i64) {
 #[test]
 fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
     let mut w = world(AgentStatus::Working, 2); // no feed warning
+    // This test isolates captain reminders, not a taskless working lane (T-46).
+    w.store.write(|tx| tx.set_seat_state("p:heat", SeatState::Held,
+        Some("captain reminder fixture"), T0)).unwrap();
     let id = w.store.write(|tx| Ok(tx.insert_message(&NewMessage {
         project: "p".into(), thread: "question".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
@@ -465,6 +468,9 @@ fn tail_rejects_unknown_lanes_without_changing_the_plan() {
 #[test]
 fn configured_stale_period_keeps_an_unviewed_item_from_ringing_every_tick() {
     let mut w = world(AgentStatus::Working, 2);
+    // This test isolates captain reminders, not a taskless working lane (T-46).
+    w.store.write(|tx| tx.set_seat_state("p:heat", SeatState::Held,
+        Some("captain reminder fixture"), T0)).unwrap();
     w.store.write(|tx| {
         let mut project = tx.get_project("p")?.unwrap();
         project.config_toml = r#"
