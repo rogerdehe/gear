@@ -26,11 +26,12 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
    | P2 | fragile or misleading code that will likely cause a bug |
    | P3 | style, wording, taste |
 
-5. **The verdict is judged against the milestone, not against perfection.** The task packet names the milestone; its block in the project's current plan carries two separate lines:
+5. **Every blocking finding carries its fix.** Write the smallest change that satisfies the milestone bar — the file, the function, what to change and about how many lines — and never a redesign or a refactor: the writer executes it as written and the captain may pick a smaller one. Read the bar first: under "fastest to the goal" only what breaks the loop or loses data is blocking, and the rest is logged with its severity.
+6. **The verdict is judged against the milestone, not against perfection.** The task packet names the milestone; its block in the project's current plan carries two separate lines:
    - `done:` — the one checkable sentence that says what must be true when the milestone is done;
    - `bar:` — the quality line of this phase: what blocks a task and what is only logged.
    `fail` = a failed mechanical fact, a P0, or a finding that breaks `done:` or the `bar:`. Everything else is listed with its severity and does not block (`pass`). You review one screw; the bar says how tight the ship must be now. If you cannot find the milestone block, ask the captain in your review and judge the mechanical facts meanwhile.
-6. **Re-review** (same task, next round, same session): check that every earlier finding is resolved, review only the delta, and still report anything new.
+7. **Re-review** (same task, next round, same session): check that every earlier finding is resolved, review only the delta, and still report anything new.
 
 ## 2. Delivering
 
