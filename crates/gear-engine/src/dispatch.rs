@@ -165,18 +165,18 @@ pub struct DeliverAction {
 }
 
 /// design/09 "Delivery content", exactly:
-/// `Continue <task> (contract v<version>). Task packet: <packet>. Report progress/blocked/done with gear send.`
+/// `Continue <task> (contract v<version>). Run `gear` first (…). Task packet: <packet>. Report progress/blocked/done with gear send.`
 pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
     format!(
-        "Continue {task} (contract v{version}). Task packet: {packet}. Report progress/blocked/done with gear send."
+        "Continue {task} (contract v{version}). Run `gear` first (it records that you got this). Task packet: {packet}. Report progress/blocked/done with gear send."
     )
 }
 
 /// design/09 "Delivery content", exactly:
-/// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Task packet: <packet>. Read it before starting; report with gear send.`
+/// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send.`
 pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
     format!(
-        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Task packet: {packet}. Read it before starting; report with gear send."
+        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send."
     )
 }
 
