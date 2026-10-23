@@ -14,6 +14,7 @@ The user's line: **never-stop is GEAR's soul.** Lanes keep doing valuable work; 
 | 4 | **Rework queued behind new work.** The sent-back task ranked after a new one. | The lane would start new work while its rejected task waited. | Rework goes to the head of its lane's queue (planned in the verdict settlement). |
 | 5 | **The captain in the middle of every step.** Reviews started by hand, verdicts and merges by hand. | Every hand-in waited for the captain's turn; the captain's context filled with routine. | Engine starts reviewers, settles verdicts, merges (planned: T-5, T-12, T-13). |
 | 6 | **A contract change that never reached the lane.** | The lane finished to v1 after v2 was applied; the pass then had to be attested by hand. | Deliver contract changes mid-attempt (planned: T-8). |
+| 8 | **Code that assumes one task per seat.** After trap 1 was fixed, five places still took "the first open attempt" — the handed-in one — so a lane's new task was never confirmed and could not be handed in. | Lanes asked "may I take the next task?" / "settle the old one so I can hand in". | One ordering at the source: the worked-on attempt first, handed-in last. When a rule changes (one task → several in flight), grep every place that relied on the old shape. |
 | 7 | **Filling queues with busywork.** Over-correcting trap 2. | A task that only duplicated another (a board "DRY" marker next to the low-queue warning). | Rank by value; cancel duplicates. Never-stop on valuable work only. |
 
 ## The pattern behind them
