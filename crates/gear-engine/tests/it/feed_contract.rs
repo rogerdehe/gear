@@ -292,3 +292,220 @@ fn a_deferred_alert_is_the_same_item_and_resolves_on_refill() {
     assert_eq!(item.len(), 1, "{item:?}");
     assert_eq!(item[0].state, MsgState::Resolved);
 }
+
+fn measured_history(w: &mut World) {
+    use gear_store::{AttemptRow, AttemptStep};
+    w.store.write(|tx| {
+        task(tx, "T-90", 90)?;
+        let mut done = tx.get_task("p", "T-90")?.unwrap();
+        done.state = TaskState::Done;
+        tx.update_task(&done)?;
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(), task: "T-90".into(), n: 1, seat: "p:heat".into(),
+            generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
+            state: AttemptState::Accepted, candidate: None, report: None, safe_point: None,
+            started: T0 - 1800, updated: T0,
+        })?;
+        tx.set_attempt_time("p", "T-90", 1, AttemptStep::Started, T0 - 1800)?;
+        tx.set_attempt_time("p", "T-90", 1, AttemptStep::HandedIn, T0)
+    }).unwrap();
+}
+
+#[test]
+fn measured_early_warning_stays_quiet_after_acknowledgment_until_worse() {
+    let mut w = world(AgentStatus::Working, 1);
+    measured_history(&mut w);
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
+    assert_eq!(changes.len(), 1);
+    let first = items(&mut w.store, "heat");
+    assert_eq!(first[0].body, "lane heat runs dry in ~30 min");
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 4).unwrap().is_empty());
+    w.store.write(|tx| tx.update_message_state("p", &first[0].id, MsgState::Resolved,
+        Some("acknowledged"), None, None, T0 + 5)).unwrap();
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 8).unwrap().is_empty());
+    assert_eq!(items(&mut w.store, "heat").len(), 1);
+    // The last task is now finished: the shortage worsens to actual idle.
+    w.store.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)
+    }).unwrap();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 10).unwrap();
+    let all = items(&mut w.store, "heat");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].body, "lane heat is IDLE");
+    assert_eq!(all[1].state, MsgState::Open);
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 12).unwrap().is_empty());
+}
+
+fn cap_env() -> (gear_app::Env, gear_app::identity::Fingerprint) {
+    (gear_app::Env {
+        ctx: Some(gear_model::GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+        pane_id: Some(CAP_PANE.into()), admin: false,
+    }, gear_app::identity::Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None })
+}
+
+fn show_captain(w: &mut World, now: i64) {
+    let (env, fp) = cap_env();
+    let home = gear_app::home::build(&mut w.store, &env, Some(&fp), now).unwrap();
+    gear_app::home::record_view(&mut w.store, &home.view).unwrap();
+}
+
+#[test]
+fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
+    let mut w = world(AgentStatus::Working, 2); // no feed warning
+    let id = w.store.write(|tx| Ok(tx.insert_message(&NewMessage {
+        project: "p".into(), thread: "question".into(), task: None, attempt: None,
+        sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
+        kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),
+        reply_to: None, needs_ack: false, state: MsgState::Open, created: T0,
+    })?.id)).unwrap();
+    show_captain(&mut w, T0 + 60);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 600).unwrap();
+    assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "viewed, not stale yet");
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1200).unwrap();
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
+    assert!(w.herdr.prompts_to(CAP_PANE)[0].contains("1 urgent"));
+    assert!(w.store.read(|tx| tx.get_message("p", &id)).unwrap().unwrap().urgent);
+    show_captain(&mut w, T0 + 1201);
+    for now in [1202, 1300, 1800, 2099] {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + now).unwrap();
+    }
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1, "no reminder every tick");
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 2100).unwrap();
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 2, "next period reminds again");
+    show_captain(&mut w, T0 + 2101);
+    w.store.write(|tx| tx.update_message_state("p", &id, MsgState::Resolved,
+        Some("answered"), None, None, T0 + 2102)).unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3000).unwrap();
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 2, "resolved items stay silent");
+}
+
+#[test]
+fn tail_plan_closes_existing_idle_alert_and_prevents_its_doorbell() {
+    let mut w = world(AgentStatus::Working, 0);
+    feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
+    assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Open);
+    let (env, fp) = cap_env();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: heat\n";
+    let draft = gear_app::draft::parse(text).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "tail1", T0 + 1).unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1200).unwrap();
+    assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "tail prevents even the old stale idle alert ringing");
+    assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Resolved);
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 1300).unwrap().is_empty());
+    // Omitted declaration persists; explicit clearing resumes monitoring.
+    let omitted = "<!-- gear-plan project=p base=1 -->\n# Decisions\n- keep sailing\n";
+    let draft = gear_app::draft::parse(omitted).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, omitted, "tail-omitted", T0 + 1301).unwrap();
+    assert!(w.store.read(|tx| gear_app::plan::lane_in_tail(tx, "p", "heat")).unwrap());
+    let text = "<!-- gear-plan project=p base=2 -->\n# Decisions\n- tail: -\n";
+    let draft = gear_app::draft::parse(text).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "tail2", T0 + 1400).unwrap();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1401).unwrap();
+    let all = items(&mut w.store, "heat");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[1].state, MsgState::Open);
+}
+
+#[test]
+fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
+    use gear_store::{AttemptRow, AttemptStep};
+    let mut w = world(AgentStatus::Working, 2);
+    measured_history(&mut w);
+    w.store.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Running;
+        tx.update_task(&task)?;
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(), task: "T-1".into(), n: 1, seat: "p:heat".into(),
+            generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
+            state: AttemptState::Started, candidate: None, report: None, safe_point: None,
+            started: T0, updated: T0,
+        })?;
+        tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)
+    }).unwrap();
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap().is_empty(), "60m remaining, 30m threshold");
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 29 * 60).unwrap().is_empty());
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 30 * 60).unwrap();
+    assert_eq!(items(&mut w.store, "heat")[0].body, "lane heat runs dry in ~30 min");
+    // Starting the queued task keeps the same runway, so it is not another
+    // warning. Only a shorter measured runway is a worsening condition.
+    w.store.write(|tx| {
+        let mut previous = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        previous.state = AttemptState::Submitted;
+        tx.update_attempt(&previous)?;
+        let mut next = previous;
+        next.task = "T-2".into();
+        next.state = AttemptState::Started;
+        tx.insert_attempt(&next)?;
+        tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, T0 + 30 * 60)
+    }).unwrap();
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 30 * 60).unwrap().is_empty());
+    assert_eq!(items(&mut w.store, "heat").len(), 1);
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 45 * 60).unwrap();
+    let all = items(&mut w.store, "heat");
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].state, MsgState::Resolved);
+    assert_eq!(all[1].body, "lane heat runs dry in ~15 min");
+}
+
+#[test]
+fn tail_rejects_unknown_lanes_without_changing_the_plan() {
+    let mut w = world(AgentStatus::Working, 0);
+    let (env, fp) = cap_env();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: missing\n";
+    let draft = gear_app::draft::parse(text).unwrap();
+    let error = gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "bad-tail", T0).unwrap_err();
+    assert_eq!(error.code, gear_model::ErrorCode::BadFormat);
+    assert_eq!(w.store.read(|tx| tx.plan_version("p")).unwrap(), 0);
+    assert!(!w.store.read(|tx| gear_app::plan::lane_in_tail(tx, "p", "heat")).unwrap());
+}
+
+#[test]
+fn configured_stale_period_keeps_an_unviewed_item_from_ringing_every_tick() {
+    let mut w = world(AgentStatus::Working, 2);
+    w.store.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 0
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+[timing]
+captain_item_stale_min = 30
+"#.into();
+        tx.update_project(&project)?;
+        tx.insert_message(&NewMessage {
+            project: "p".into(), thread: "question".into(), task: None, attempt: None,
+            sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
+            kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Open, created: T0,
+        })?;
+        Ok(())
+    }).unwrap();
+    show_captain(&mut w, T0 + 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1200).unwrap();
+    assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "30-minute override, not default 15");
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1800).unwrap();
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
+    // Model a settled failed doorbell with no new view: the reminder clock,
+    // not the old shown set or normal cooldown, prevents another reminder.
+    w.store.write(|tx| {
+        let op = tx.last_op("p:captain", gear_model::OpKind::Doorbell)?.unwrap();
+        tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("test refusal"), T0 + 1801)
+    }).unwrap();
+    for now in [1900, 2400, 3599] {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + now).unwrap();
+    }
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3600).unwrap();
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 2);
+}
