@@ -333,11 +333,16 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
     .unwrap();
     ask(&mut s, "Schema v1 or v2?", NOW);
 
-    let home = home::build(
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", gear_herdr::AgentStatus::Working);
+    herdr.add_agent("w1:p3", "opencode", gear_herdr::AgentStatus::Idle);
+    let agents = gear_herdr::HerdrRead::agents(&mut herdr).unwrap();
+    let home = home::build_with_agents(
         &mut s,
         &seat_env("captain", CAP_PANE),
         Some(&fp(CAP_PANE, "codex")),
         NOW + 1,
+        Some(&agents),
     )
     .unwrap();
 
@@ -348,8 +353,8 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
         "{}",
         home.text
     );
-    assert!(home.text.contains("heat · T-1 in progress · 1 queued"), "{}", home.text);
-    assert!(home.text.contains("runtime · idle · 2 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · agent working · T-1 in progress · 1 queued"), "{}", home.text);
+    assert!(home.text.contains("runtime · agent idle · no current task · 2 queued"), "{}", home.text);
     assert!(
         home.text.contains("deliveries not confirmed: 0 · temps 0/2"),
         "{}",
@@ -380,8 +385,8 @@ fn a_lane_with_nothing_queued_is_still_in_the_snapshot() {
     )
     .unwrap();
 
-    assert!(home.text.contains("runtime · idle · 0 queued"), "{}", home.text);
-    assert!(home.text.contains("heat · idle · 0 queued"), "{}", home.text);
+    assert!(home.text.contains("runtime · agent unknown · no current task · 0 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · agent unknown · no current task · 0 queued"), "{}", home.text);
 }
 
 #[test]
@@ -408,4 +413,12 @@ fn unregistered_caller_rejected() {
     let env = Env { ctx: None, pane_id: None, admin: true };
     let err = home::build(&mut s, &env, None, NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered, "the admin flag is not an identity");
+}
+
+#[test]
+fn the_snapshot_omits_retired_lanes() {
+    let mut s = world();
+    s.write(|tx| tx.set_seat_state("p:heat", gear_model::SeatState::Retired, None, NOW)).unwrap();
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert!(!home.text.lines().any(|line| line.trim_start().starts_with("heat ·")), "{}", home.text);
 }
