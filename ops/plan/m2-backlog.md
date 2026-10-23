@@ -21,3 +21,4 @@
 - Queue order check (for T-24): a lane's queue must not rank a later milestone's task ahead of an open task of the current milestone; the engine warns the captain (the captain mis-ranked M2's T-20 ahead of M1's T-26 on 2026-10-23).
 - **Engine-driven model switch (head of M2).** Start lanes without --standalone (it exited on its own) and set the model through `/model` in the agent, verified on the status bar (what ops/bin/switch-model.sh did by hand), per kind in the profile.
 - T-18 round 3 (logged, not reworked): restart between checkout intent and submit strands a review; re-review does not resume the reviewer's session; a start intent may adopt a wrong-kind occupant; the warm-build proof in the report can pass without a cache.
+- Snapshot wording: `runtime · idle` means "no task in progress", not "agent idle" (the agent was working) — show the agent's Herdr state and the task state separately.
