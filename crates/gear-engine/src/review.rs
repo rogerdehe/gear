@@ -979,10 +979,11 @@ fn review_packet(
          \n\
          Hand your verdict in with exactly:\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"<the path to your review file>\"\n\
+         \"<the path to your review file, or the text>\"\n\
          \n\
-         The findings stay in the repository on `{branch}`; the writer's rework note names the \
-         `git show origin/{branch}:<path>` command that reads them, so keep the branch pushed.\n\
+         GEAR reads the file and keeps the text of your findings, so the writer reads them from \
+         GEAR (the rework note and the task packet): your worktree and your branch may be gone \
+         afterwards.\n\
          \n\
          A `fail` becomes the writer's rework: write every finding so the writer can act on it \
          without asking."
@@ -1407,13 +1408,14 @@ review = ["gpt-6.1-sol"]
         assert!(
             text.contains(
                 "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"<the path to your review file>\""
+                 \"<the path to your review file, or the text>\""
             ),
             "{text}"
         );
-        // The findings stay on the review branch (T-30 rework, F1): the packet
-        // names the branch and the command the rework note gives the writer.
-        assert!(text.contains("git show origin/review/t1:<path>"), "{text}");
+        // The findings live in GEAR's store (T-21, shipped): the writer reads
+        // the text from the rework note and the packet, not from the branch.
+        assert!(text.contains("keeps the text of your findings"), "{text}");
+        assert!(!text.contains("git show"), "no branch pointer in the packet:\n{text}");
     }
 
     #[test]
