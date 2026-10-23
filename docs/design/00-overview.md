@@ -1,114 +1,121 @@
-# GEAR MVP 技术设计：总览
+# GEAR MVP Technical Design: Overview
 
-依据：[PRD v0.8](../PRD.md)、[TECH-MVP](../TECH-MVP.md)。本目录把 MVP 拆成模块骨架，逐个模块评审后再写代码。签名是设计约定，实现时可改名，但职责边界和合同不能偏。
+> **Status 2026-10-22.** Implemented in Rust (`crates/`), not the Python layout below; budgets are Python-era. Where a design doc disagrees with [PRD v0.9](../PRD.md), the PRD wins. Superseded so far: the engine-in-a-tab and engine-pane manifest (now a background process, 14), the board's content (13 → PRD §15), the code review loop (PRD §10; 11 covers only the captain's plan reviews), kickoff (PRD §8a). Docs are corrected as each part is rebuilt.
 
-## 1. 两个已确认的决定（2026-10-21，用户）
+Basis: [PRD v0.8](../PRD.md), [TECH-MVP](../TECH-MVP.md). This directory breaks the MVP into a module skeleton; each module is reviewed before code is written. Signatures are design conventions and may be renamed during implementation, but responsibility boundaries and contracts must not drift.
 
-1. **临时工 resume**：机制上必须支持。**新活开新会话；同一件活中途需要它回来，找回原来那个临时工（resume 原会话）**。resume 不可用时退回新会话读任务包，并明确标为"新会话恢复"。见 [10-staff.md](10-staff.md)。
-2. **换舰长只由用户手动切换**。MVP 不做任何自动切换或自动启用备用舰长；舰长不可用时只冻结、显示、通知。手动切换流程见 [03-identity-seats.md](03-identity-seats.md)。
+## 0. Scope (2026-10-22, user)
 
-## 2. 目录结构
+GEAR runs one piece of work with several agents: a new product, **or one requirement iterated inside an existing large repo** (named after the requirement, on its own integration branch). Every project starts with a kickoff aligned with the user — installed agents and models, lanes, a per-role model chain with fallbacks — see 17 §0.
+
+## 1. Two confirmed decisions (2026-10-21, user)
+
+1. **Temp worker resume**: must be supported by the mechanism. **New work opens a new session; when the same piece of work needs the worker back midway, bring back the original temp worker (resume the original session).** When resume is unavailable, fall back to a new session that reads the task packet, explicitly marked as "new-session recovery". See [10-staff.md](10-staff.md).
+2. **Captain replacement is only switched manually by the user.** The MVP does no automatic switching and no automatic activation of a standby captain; when the captain is unavailable, GEAR only freezes, displays, and notifies. For the manual switch flow see [03-identity-seats.md](03-identity-seats.md).
+
+## 2. Directory layout
 
 ```text
-herdr-gear/                      # 插件根（herdr plugin link 指向这里）
-  herdr-plugin.toml              # 插件清单：pane=引擎，action=打开看板
-  bin/gear                       # 入口脚本：exec python3 -m gear "$@"
+herdr-gear/                      # plugin root (herdr plugin link points here)
+  herdr-plugin.toml              # plugin manifest: pane=engine, action=open board
+  bin/gear                       # entry script: exec python3 -m gear "$@"
   gear/
-    __main__.py                  # 子命令分发
-    config.py                    # 01 项目配置加载与校验
+    __main__.py                  # subcommand dispatch
+    config.py                    # 01 project config loading and validation
     core/
-      db.py                      # 02 SQLite、schema、事务、request 重放
-      model.py                   # 02 枚举与数据类（状态机定义）
-      identity.py                # 03 调用者定位、座位、代次、手动换舰长
+      db.py                      # 02 SQLite, schema, transactions, request replay
+      model.py                   # 02 enums and data classes (state machine definitions)
+      identity.py                # 03 caller resolution, seats, generations, manual captain replacement
     herdr/
-      client.py                  # 04 Herdr CLI 封装
-      profiles.py                # 04 各 CLI 的观测特征与 resume 模板
+      client.py                  # 04 Herdr CLI wrapper
+      profiles.py                # 04 per-CLI observation signatures and resume templates
     plan/
-      draft.py                   # 05 计划草稿格式解析
-      apply.py                   # 05 校验与事务性应用
-      render.py                  # 05 PLAN.md / 任务包 / 可编辑草稿生成
+      draft.py                   # 05 plan draft format parsing
+      apply.py                   # 05 validation and transactional apply
+      render.py                  # 05 PLAN.md / task packet / editable draft generation
     work/
-      tasks.py                   # 06 任务与执行尝试状态机
-      evidence.py                # 12 证据、验收、产出采样
+      tasks.py                   # 06 task and attempt state machine
+      evidence.py                # 12 evidence, acceptance, output sampling
     mail/
-      send.py                    # 07 发送合同与路由
-      inbox.py                   # 07 线程选择与 reply
+      send.py                    # 07 send contract and routing
+      inbox.py                   # 07 thread selection and reply
     engine/
-      loop.py                    # 08 主循环与调度节拍
-      observe.py                 # 08 Herdr 快照与座位对账
-      ops.py                     # 08 副作用：意图→执行→结果
-      dispatch.py                # 09 续做与派活（纯判断）
-      doorbell.py                # 07 门铃
-      staff.py                   # 10 待命/park/hold、临时工、退役/失联
-      review.py                  # 11 复盘触发与提醒
-      board.py                   # 13 插件 pane 文本看板
+      loop.py                    # 08 main loop and scheduling tick
+      observe.py                 # 08 Herdr snapshot and seat reconciliation
+      ops.py                     # 08 side effects: intent -> execute -> result
+      dispatch.py                # 09 continuation and dispatch (pure judgement)
+      doorbell.py                # 07 doorbell
+      staff.py                   # 10 standby/park/hold, temp workers, retirement/missing
+      review.py                  # 11 review triggers and reminders
+      board.py                   # 13 plugin pane text board
     cli/
       home.py                    # 13 gear
       send_cmd.py                # 13 gear send
       reply_cmd.py               # 13 gear reply
       plan_cmd.py                # 13 gear plan apply
-      admin.py                   # 13 gear admin …（用户运维）、gear run
-  skills/gear/                   # 16 Agent skill（SKILL.md + references），随版本发布
-  templates/                     # 线说明、舰长说明（按项目生成）、催办/门铃/复盘提示
+      admin.py                   # 13 gear admin ... (user ops), gear run
+  skills/gear/                   # 16 Agent skill (SKILL.md + references), released with each version
+  templates/                     # lane instructions, captain instructions (generated per project), nudge/doorbell/review prompts
   tests/
 ```
 
-## 3. 模块清单与预算
+## 3. Module list and budget
 
-| 编号 | 模块 | 文件 | 产品行数预算 |
+| No. | Module | Files | Product line budget |
 |---|---|---|---:|
-| 01 | 配置与项目登记 | config.py、cli/admin.py（init 部分） | 100–130 |
-| 02 | 数据库与事务 | core/db.py、core/model.py | 280–340 |
-| 03 | 身份、座位、代次、手动换舰长 | core/identity.py | 170–210 |
-| 04 | Herdr 适配 | herdr/client.py、herdr/profiles.py | 220–280 |
-| 05 | 计划草稿、应用、视图 | plan/*.py | 270–330 |
-| 06 | 任务与执行尝试 | work/tasks.py | 130–160 |
-| 07 | 消息：发送、收件箱、门铃 | mail/*.py、engine/doorbell.py | 250–310 |
-| 08 | 引擎循环、观测、副作用 | engine/loop.py、observe.py、ops.py | 220–280 |
-| 09 | 续做与派活判断 | engine/dispatch.py | 150–190 |
-| 10 | 人员：待命、临时工（含 resume）、退役、失联 | engine/staff.py | 260–320 |
-| 11 | 复盘调度 | engine/review.py | 90–120 |
-| 12 | 产出采样与验收 | work/evidence.py | 120–150 |
-| 13 | 命令面、首页、看板 | cli/*.py、engine/board.py | 200–250 |
-| 14 | 插件打包与运行 | herdr-plugin.toml、bin/gear、admin run | 50–70 |
-| 16 | Agent skill | skills/gear/（Markdown，不计行数）；`gear --skill` 计入 13 | — |
-| | **合计** | | **2,510–3,140** |
+| 01 | Config and project registration | config.py, cli/admin.py (init part) | 100–130 |
+| 02 | Database and transactions | core/db.py, core/model.py | 280–340 |
+| 03 | Identity, seats, generations, manual captain replacement | core/identity.py | 170–210 |
+| 04 | Herdr adapter | herdr/client.py, herdr/profiles.py | 220–280 |
+| 05 | Plan draft, apply, views | plan/*.py | 270–330 |
+| 06 | Tasks and attempts | work/tasks.py | 130–160 |
+| 07 | Messages: send, inbox, doorbell | mail/*.py, engine/doorbell.py | 250–310 |
+| 08 | Engine loop, observation, side effects | engine/loop.py, observe.py, ops.py | 220–280 |
+| 09 | Continuation and dispatch judgement | engine/dispatch.py | 150–190 |
+| 10 | Staff: standby, temp workers (incl. resume), retirement, missing | engine/staff.py | 260–320 |
+| 11 | Review scheduling | engine/review.py | 90–120 |
+| 12 | Output sampling and acceptance | work/evidence.py | 120–150 |
+| 13 | Command surface, home page, board | cli/*.py, engine/board.py | 200–250 |
+| 14 | Plugin packaging and running | herdr-plugin.toml, bin/gear, admin run | 50–70 |
+| 16 | Agent skill | skills/gear/ (Markdown, not counted); `gear --skill` counted in 13 | — |
+| 17 | Default working conventions (naming, branches, worktrees via Herdr, tasks and commits, review and merge) | [17-conventions.md](17-conventions.md) (spec; enforced by 01, 10) | — |
+| | **Total** | | **2,510–3,140** |
 
-按第 15 轮审阅补齐身份固定上下文、交接、投递核对、resume 边界、验收闭环后，合计 2,510–3,140 行，**超过 3000 行预算**。这是设计估算，不是承诺。实现时先压展示、不压行为：合并零碎文件、简化看板与首页格式、计划视图格式化；不删同因合并、公平名额、提醒预算、单投递占位、resume 正常路径等已定行为。压缩后仍超出，带具体数字回到用户处决定。测试约 1,700–2,700 行另计，见 [15-tests-probes.md](15-tests-probes.md)。
+After round 15 of review filled in identity fixed context, handover, delivery checking, resume boundaries, and the acceptance loop, the total is 2,510–3,140 lines, **exceeding the 3000-line budget**. This is a design estimate, not a commitment. During implementation, compress presentation first, not behavior: merge scattered files, simplify board and home page formats, plan view formatting; do not remove already-decided behavior such as same-cause merging, fair share, reminder budgets, the single delivery placeholder, or the resume normal path. If it still exceeds after compression, bring concrete numbers back to the user for a decision. Tests, roughly 1,700–2,700 lines, are counted separately; see [15-tests-probes.md](15-tests-probes.md).
 
-## 4. 依赖方向
+## 4. Dependency direction
 
 ```text
-cli/* ──▶ mail, plan, work, core, herdr(只读) （命令只做纯数据变化；Herdr 查询在写事务外）
-engine/* ──▶ herdr, mail, plan, work, core （唯一执行 Herdr 副作用）
+cli/* ──▶ mail, plan, work, core, herdr(read-only) (commands only make pure data changes; Herdr queries happen outside write transactions)
+engine/* ──▶ herdr, mail, plan, work, core (the only executor of Herdr side effects)
 mail, plan, work ──▶ core
-herdr ──▶ （仅 subprocess）
+herdr ──▶ (subprocess only)
 ```
 
-- `cli` 只能使用 `herdr` 的只读接口 `HerdrReadOnly`（身份指纹核对用 `agent get`），永不执行 Herdr 副作用。
-- `engine/dispatch.py`、`review.py` 的判断函数是纯函数：输入快照与状态，输出建议动作；副作用统一经 `engine/ops.py`。
+- `cli` may only use `herdr`'s read-only interface `HerdrReadOnly` (identity fingerprint checks use `agent get`) and never executes Herdr side effects.
+- The judgement functions in `engine/dispatch.py` and `review.py` are pure functions: input snapshot and state, output suggested actions; side effects all go through `engine/ops.py`.
 
-## 5. 公共约定
+## 5. Common conventions
 
-- **时间**：库内一律 UTC epoch 秒（int）；显示时转本地。
-- **ID**：任务 `T-<n>`、消息 `M-<n>`、临时工 `R-<n>`、复盘事项 `V-<n>`、操作 `O-<n>`；按项目递增，不复用。
-- **事务**：所有写操作经 `db.tx(conn)`（`BEGIN IMMEDIATE`，busy_timeout 5 秒）。事务内重新读取并核对身份、代次、版本。
-- **request_id**：每个写命令自动生成或由调用方传入；同 ID 同参数返回原结果，同 ID 不同参数报错。
-- **错误**：命令以非零退出码 + 一行 `ERROR <code>: <原因>` 输出；`<code>` 为固定枚举（见 02）。结果不明时退出码 3，输出 `UNCONFIRMED`。所有写命令在提交前先把 request_id 打到 stderr，供丢回执时重跑查回。
-- **身份**：受管 Agent 都由 GEAR 启动接入，继承固定调用上下文 `GEAR_CTX`（03）；不按 pane 查最新代次。
-- **输出**：默认人可读的短文本；`--json` 给结构化结果（Agent 也可用）。
-- **不变量**：见 PRD §17，各模块文件标出自己负责守住哪几条。
+- **Time**: always UTC epoch seconds (int) in the database; converted to local time for display.
+- **IDs**: task `T-<n>`, message `M-<n>`, temp worker `R-<n>`, review item `V-<n>`, operation `O-<n>`; incremented per project, never reused.
+- **Transactions**: all writes go through `db.tx(conn)` (`BEGIN IMMEDIATE`, busy_timeout 5 seconds). Inside the transaction, re-read and check identity, generation, and version.
+- **request_id**: auto-generated for every write command or passed in by the caller; same ID with same arguments returns the original result, same ID with different arguments is an error.
+- **Errors**: commands exit non-zero and print one line `ERROR <code>: <reason>`; `<code>` is a fixed enum (see 02). When the outcome is unknown, exit code 3 and output `UNCONFIRMED`. Every write command prints the request_id to stderr before committing, so a lost receipt can be recovered by rerunning.
+- **Identity**: managed Agents are all started and onboarded by GEAR and inherit the fixed call context `GEAR_CTX` (03); the latest generation is never looked up by pane.
+- **Output**: short human-readable text by default; `--json` gives structured results (also usable by Agents).
+- **Invariants**: see PRD §17; each module file marks which ones it is responsible for upholding.
 
-## 6. 数据流（一个完整回合）
+## 6. Data flow (one complete round)
 
-0. 用户 `gear admin init` 登记项目；引擎按配置启动并接入舰长与长期线（03）。
-1. 舰长编辑 `plan.draft.md` → `gear plan apply`（05）→ 计划新版本入库，任务就绪，待执行的人员动作写入 operations。
-2. 引擎循环（08）观测 Herdr → 续做判断（09）→ 给空闲线投递任务指针（ops）。
-3. 执行线 `gear` 读任务包（13）→ 干活 → `gear send --kind progress/question/result`（07）。
-4. 引擎发现舰长空闲且有待处理 → 门铃（07）。
-5. 舰长 `gear` 看线程批次 → `gear reply` 逐项处理；需要改计划则回到 1。
-6. 引擎定时：复盘触发（11）、产出采样（12）、临时工释放/恢复与待命到期（10）。
+0. The user registers the project with `gear admin init`; the engine starts and onboards the captain and long-lived lanes per config (03).
+1. The captain edits `plan.draft.md` → `gear plan apply` (05) → a new plan version is stored, tasks become ready, and pending staff actions are written to operations.
+2. Engine loop (08) observes Herdr → continuation judgement (09) → delivers a task pointer to idle lanes (ops).
+3. The lane runs `gear` to read the task packet (13) → works → `gear send --kind progress/question/result` (07).
+4. The engine finds the captain idle with pending items → doorbell (07).
+5. The captain runs `gear` to see a batch of threads → handles each with `gear reply`; if the plan needs changing, back to 1.
+6. Engine timers: review triggers (11), output sampling (12), temp worker release/resume and standby expiry (10).
 
-## 7. 评审顺序
+## 7. Review order
 
-建议按依赖从底往上：02 → 03 → 04 → 06 → 05 → 07 → 08 → 09 → 10 → 11 → 12 → 13 → 01 → 14 → 15。
+Suggested bottom-up by dependency: 02 → 03 → 04 → 06 → 05 → 07 → 08 → 09 → 10 → 11 → 12 → 13 → 01 → 14 → 15.

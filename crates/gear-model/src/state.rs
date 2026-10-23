@@ -62,6 +62,7 @@ string_enum!(SeatState {
 string_enum!(MsgKind {
     Progress => "progress", Question => "question", Blocked => "blocked", Result => "result",
     Ack => "ack", Instruction => "instruction", Reply => "reply", System => "system",
+    Review => "review",
 });
 
 string_enum!(MsgState { Open => "open", Waiting => "waiting", Resolved => "resolved", Info => "info" });
@@ -69,6 +70,8 @@ string_enum!(MsgState { Open => "open", Waiting => "waiting", Resolved => "resol
 string_enum!(OpKind {
     Onboard => "onboard", Deliver => "deliver", Doorbell => "doorbell",
     Release => "release", Title => "title", Notify => "notify",
+    // Merge a passed task's branches into the integration branch (T-12/T-13).
+    Merge => "merge",
 });
 
 string_enum!(OpState {
@@ -132,7 +135,8 @@ impl SeatState {
         match role {
             SeatRole::Captain => matches!(
                 (from, to),
-                (Starting, Active | Unknown)
+                (Queued, Starting | Active) // Active: the skeleton binds the user's existing captain pane at init
+                    | (Starting, Active | Unknown)
                     | (Unknown, Active | Unavailable | Handover)
                     | (Active, Unavailable | Handover)
                     | (Unavailable, Handover)
@@ -140,7 +144,8 @@ impl SeatState {
             ),
             SeatRole::Lane => matches!(
                 (from, to),
-                (Starting, Active | NeedsCheck | Unknown)
+                (Queued, Starting | NeedsCheck)
+                    | (Starting, Active | NeedsCheck | Unknown)
                     | (Unknown, Active | NeedsCheck)
                     | (Active, Standby | Parked | Held | Retiring | Missing | NeedsCheck)
                     | (Standby, Active | Parked | Held | Retiring | Missing | NeedsCheck)

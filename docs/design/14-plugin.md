@@ -1,8 +1,8 @@
-# 14 插件打包与运行
+# 14 Plugin Packaging and Runtime
 
-文件：`herdr-plugin.toml`、`bin/gear`、`cli/admin.py`（run）。预算 50–70 行。
+Files: `herdr-plugin.toml`, `bin/gear`, `cli/admin.py` (run). Budget 50–70 lines.
 
-## 清单
+## Manifest
 
 ```toml
 id = "herdr-gear"
@@ -13,30 +13,32 @@ description = "Keep agent fleets working under one captain"
 platforms = ["linux", "macos"]
 
 [[panes]]
-id = "engine"
-title = "GEAR"
+id = "board"
+title = "GEAR board"
 placement = "tab"
-command = ["bin/gear", "run"]
+command = ["bin/gear", "board"]
 
 [[actions]]
 id = "open"
-title = "Open GEAR"
+title = "Open GEAR board"
 contexts = ["workspace"]
-command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "engine"]
+command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "board"]
 ```
 
-- 无 `startup`、无 `events`（MVP）；不 nohup 后台进程。
-- 包内带 `skills/gear/`（16）；安装说明包含 `npx skills add … --skill gear -g`。
-- 引擎跑在插件 tab 里；重复打开时第二个实例拿不到锁，打印已有实例位置后退出（08）。
-- `bin/gear`：`exec python3 -m gear "$@"`，并把插件根加入 `PYTHONPATH`。Agent 调用的 `gear` 通过安装时把 `bin/gear` 链接到 PATH（安装说明里一步），或任务包里写绝对路径。
-- 状态：引擎用 `HERDR_PLUGIN_STATE_DIR`；被接入的 Agent 通过接入时设置的 `GEAR_DB` 找到同一数据库（03）。用户运维命令通过安装时记录的 `~/.config/gear/targets.toml`（执行端/session → 数据库路径）定位，并核对数据库 `meta.engine_session` 与当前 Herdr session 一致，不一致拒绝。MVP 每个执行端一个 Herdr session 绑定一个数据库，不按 UI 焦点猜。
+- **The engine is a background process, never a pane.** It does not interact with anyone, so the user never starts it or sees it. Every `gear` call (agent or user) checks the single-instance lock next to `GEAR_DB`; if it is free it starts `gear run` detached (own session, no terminal, stdin null). The lock file holds the engine's pid; `gear admin stop` signals it (upgrade, uninstall). Revised 2026-10-22 with the user: the earlier "engine in a plugin tab, no background process" made the user run and watch a process that has nothing to show them.
+- **Engine log**: `engine.log` next to the database, every line prefixed with a UTC time — the place to look when something goes wrong.
+- **The only thing the user looks at is the board**: an optional plugin tab showing the requirements/tasks and their state. Closing it changes nothing.
+- No `startup`, no `events` (MVP).
+- The package ships `skills/gear/` (16); install instructions include `npx skills add … --skill gear -g`.
+- `bin/gear`: `exec python3 -m gear "$@"`, and adds the plugin root to `PYTHONPATH`. The `gear` invoked by Agents is made available by linking `bin/gear` onto PATH at install time (one step in the install instructions), or by writing the absolute path in the task packet.
+- State: the engine uses `HERDR_PLUGIN_STATE_DIR`; onboarded Agents find the same database through `GEAR_DB`, set at onboarding (03). User ops commands locate it via `~/.config/gear/targets.toml` (execution host/session → database path), recorded at install time, and check that the database's `meta.engine_session` matches the current Herdr session, rejecting on mismatch. In the MVP, each execution host binds one Herdr session to one database; it does not guess from UI focus.
 
-## 生命周期边界
+## Lifecycle boundaries
 
-- 切 tab、隐藏、本地 remote 客户端断开：引擎继续。
-- 关闭插件 tab：引擎停止；`gear send` 仍可入库；重开后恢复核对（08）。
-- 升级：先停引擎（关 tab），替换代码，重开；schema 只升不降。
+- The engine keeps running regardless of tabs, panes or clients; if it dies, the next `gear` call starts it again and the recovery checks run (08).
+- Upgrade: `gear admin stop`, replace the binary; the next `gear` call starts the new one. The schema only migrates up, never down.
+- Uninstall: `gear admin stop` first (Herdr does not stop processes a plugin started).
 
-## 待探针
+## Pending probes
 
-插件 pane 在 0.9.1 上的单实例与 remote 行为；`placement="tab"` 显示；Agent pane 中 `gear` 的 PATH。
+Single-instance and remote behavior of the plugin pane on 0.9.1; display of `placement="tab"`; PATH of `gear` inside Agent panes.

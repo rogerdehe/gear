@@ -1,44 +1,44 @@
-# 03 身份、座位、代次、手动换舰长
+# 03 Identity, Seats, Generations, Manual Captain Replacement
 
-文件：`gear/core/identity.py`（+ `cli/admin.py` 的 seat/captain 子命令）。预算 170–210 行。
-守住的不变量：旧代次不能覆盖新状态；一条线一个续做控制者；身份不明不写。
+Files: `gear/core/identity.py` (+ the seat/captain subcommands in `cli/admin.py`). Budget 170–210 lines.
+Invariants upheld: an old generation cannot overwrite newer state; one continuation controller per lane; no writes when identity is unclear.
 
-## 概念
+## Concepts
 
-- **座位（seat）**：项目里的一个角色位置——舰长、某条长期线、某个临时工。座位持久，坐在上面的会话可以换。
-- **代次（generation）**：座位每接入一次新会话 +1，旧绑定同时作废。
-- **接入（onboard）**：GEAR 让一个 Agent 会话成为某座位的占用者的唯一方式。**MVP 中所有受管 Agent 都由 GEAR 启动**（新开或按 profile resume），不接管未经 GEAR 启动的现成会话。
+- **Seat**: a role position in a project — the captain, a long-lived lane, a temp worker. Seats are persistent; the session sitting in one can change.
+- **Generation**: incremented by 1 each time a seat onboards a new session; the old binding is voided at the same time.
+- **Onboard**: the only way GEAR makes an Agent session the occupant of a seat. **In the MVP every managed Agent is started by GEAR** (fresh, or resumed per profile); GEAR does not take over existing sessions it did not start.
 
-## 固定调用上下文（替代"每次按 pane 查最新代次"）
+## Fixed call context (replaces "look up the latest generation by pane on every call")
 
-接入时，引擎在目标 pane 的 shell 里先设置环境，再启动 Agent：
+At onboarding, the engine first sets the environment in the target pane's shell, then starts the Agent:
 
 ```text
 pane run <pane> "export GEAR_CTX=<project>:<seat>:<gen>; export GEAR_DB=<state_dir>/gear.db"
-agent start <name> --kind <kind> --pane <pane> -- <args 或 resume args>
+agent start <name> --kind <kind> --pane <pane> -- <args or resume args>
 ```
 
-Agent 进程及其所有子进程（包括它调用的每一个 `gear`）都继承 `GEAR_CTX`。Agent 不需要记任何参数。
+The Agent process and all its children (including every `gear` it invokes) inherit `GEAR_CTX`. The Agent does not need to remember any arguments.
 
-接入目标必须是已核对的可用 shell pane：现有 Agent 尚未退出或结果不明时，不输入 export/启动命令，先完成旧会话停止与资源核对。环境设置与启动分步确认，`pane run` 返回不等于 shell 已执行完 export；环境继承须通过 15 的探针后才启用。
+The onboarding target must be a checked, usable shell pane: if an existing Agent has not exited or its state is unknown, do not type the export/start commands; first finish stopping the old session and checking resources. Environment setup and start are confirmed as separate steps; `pane run` returning does not mean the shell has finished the export; environment inheritance is enabled only after passing the probe in 15 — **verified 2026-10-22 for OpenCode on Herdr 0.9.1**: a variable exported in the pane shell before `agent start` is visible to the agent's tool commands. The shell keeps it after the agent exits, so releasing a seat unsets it before the pane is reused.
 
-- 写请求时，`gear` 读取 `GEAR_CTX`，在事务内核对：座位存在、该代次 = 座位当前代次、绑定未作废、座位状态允许该操作。代次不符 → `STALE_GENERATION`。
-- 旧会话派生的迟到命令带的是旧代次，换绑后一律被拒；`gear` **从不**按 pane 读取并采用最新代次。
-- `HERDR_PANE_ID` 与只读 `herdr agent get` 指纹只作附加一致性检查（pane 对不上、占用者类型不符 → 拒绝），不作为身份来源。Herdr 查询在写事务**之外**完成，事务内只重读数据库绑定。
-- 没有 `GEAR_CTX` 的调用：
-  - 来自用户入口 `gear admin …`（用户在自己 shell 里执行；需 `GEAR_ADMIN=1` 或交互确认）→ 用户；
-  - 其他 → 无角色，只读 `gear --all`，所有写入拒绝。**不因找不到座位就当成用户。**
-- 迁移现有项目：现成 Agent 需由 GEAR 重新启动接入（支持 resume 的 CLI 用 resume 保留上下文）。
+- On a write request, `gear` reads `GEAR_CTX` and checks inside the transaction: the seat exists, this generation = the seat's current generation, the binding is not voided, and the seat state allows the operation. Generation mismatch → `STALE_GENERATION`.
+- Late commands spawned by an old session carry the old generation and are always rejected after rebinding; `gear` **never** reads and adopts the latest generation by pane.
+- `HERDR_PANE_ID` and the read-only `herdr agent get` fingerprint are only additional consistency checks (pane mismatch, occupant type mismatch → reject), not a source of identity. Herdr queries are done **outside** the write transaction; inside the transaction only the database binding is re-read.
+- Calls without `GEAR_CTX`:
+  - from the user entry point `gear admin …` (run by the user in their own shell; requires `GEAR_ADMIN=1` or interactive confirmation) → the user;
+  - anything else → no role, read-only `gear --all`, all writes rejected. **Not finding a seat never makes the caller the user.**
+- Migrating an existing project: existing Agents must be restarted and onboarded by GEAR (CLIs that support resume use resume to keep context).
 
-> 防的是误路由和旧会话误操作，不防同账号恶意伪造环境变量。
+> This guards against misrouting and mistaken operations by old sessions, not against malicious forging of environment variables under the same account.
 
-**事项引用**：
-- `result` 和会改变任务状态的上报（含 `blocked`）必须明确关联原任务/尝试/合同（任务包给出完整命令），不从座位当前任务推断；同一会话做完 T-1 接 T-2 后，T-1 的迟到 result/blocked 仍归 T-1 原尝试。
-- `ack` 按被回复事项的类型核对：任务相关 ACK（合同更新、插队）从该事项取关联并核对；**交接 ACK 只关联交接事项及其 pending binding/代次，不需要任务参数**；普通问题回复按原事项关联。
-- 未关联的 `progress`、`question` 只作为座位级信息/问题，不归入任何尝试，也不改变任务状态。
-- **待接班舰长**（pending binding）只能读取自己的交接包并提交该交接 ACK，其他写操作一律拒绝。
+**Item references**:
+- `result` and reports that change task state (including `blocked`) must explicitly reference the original task/attempt/contract (the task packet gives the full command); they are not inferred from the seat's current task. After the same session finishes T-1 and takes T-2, a late result/blocked for T-1 still belongs to T-1's original attempt.
+- `ack` is checked according to the type of the item being replied to: task-related ACKs (contract update, preemption) take the reference from that item and check it; **a handover ACK references only the handover item and its pending binding/generation, and needs no task arguments**; ordinary question replies reference the original item.
+- Unreferenced `progress` and `question` are only seat-level information/questions; they belong to no attempt and do not change task state.
+- **An incoming captain awaiting handover** (pending binding) may only read its own handover packet and submit that handover's ACK; all other writes are rejected.
 
-## 对外接口
+## External interface
 
 ```python
 @dataclass
@@ -47,52 +47,52 @@ class Caller:
     project: str | None
     seat: Seat | None
     generation: int | None
-def resolve_caller(conn, env: Mapping[str,str], herdr_ro: HerdrReadOnly) -> Caller   # 查询在事务外
-def require(conn, caller, *, roles=None, states=None) -> Seat   # 事务内重读并核对代次
+def resolve_caller(conn, env: Mapping[str,str], herdr_ro: HerdrReadOnly) -> Caller   # queries outside the transaction
+def require(conn, caller, *, roles=None, states=None) -> Seat   # re-read and check generation inside the transaction
 
 def onboard_intent(conn, seat_id, pane_id, kind, profile, resume_ref: str|None) -> str
-    # 事务内预留唯一新代次并创建 pending binding，返回 op id；重试/重启复用同一操作与代次
+    # inside a transaction, reserve a unique new generation and create a pending binding, return the op id; retries/restarts reuse the same operation and generation
 def onboard_complete(conn, op_id, fingerprint: Fingerprint) -> None
-    # 只确认同一 binding 的启动结果，不再递增；普通座位确认后激活、旧绑定作废；
-    # 待接班舰长仍保持 pending，直到针对本次交接的 ACK
+    # only confirms the start result of the same binding, no further increment; ordinary seats activate on confirmation and the old binding is voided;
+    # an incoming captain stays pending until the ACK for this handover
 def mark(conn, seat_id, state: SeatState, reason: str) -> None
 ```
 
-数据（02 的 `seats` 与 `bindings` 表）：每次接入一条 binding（座位、代次、执行端/session、pane、kind、session_ref、状态 active/void/pending）。
+Data (02's `seats` and `bindings` tables): one binding per onboarding (seat, generation, execution host/session, pane, kind, session_ref, status active/void/pending).
 
-## 座位状态迁移
+## Seat state transitions
 
 ```text
-舰长:  ACTIVE → UNAVAILABLE（引擎检测，冻结权限；不自动恢复）
-       ACTIVE/UNAVAILABLE → HANDOVER（用户发起）→ ACTIVE（新代次，待接班者确认后）
-       UNAVAILABLE → ACTIVE 也必须经用户显式重新接入（同一会话也要新代次）
-长期线: ACTIVE ⇄ STANDBY ⇄ PARKED；ACTIVE/STANDBY → HELD → ACTIVE；→ RETIRING → RETIRED；
-       任意 → MISSING（引擎检测）→ NEEDS_CHECK（用户重新接入后，写入资源待核对）→ ACTIVE（用户确认）
-临时工: QUEUED → STARTING → ACTIVE → RELEASING → RELEASED（Agent 已退出，pane 回池，可 resume）
-       RELEASED → STARTING（resume 或新会话）；→ RETIRED
-       STARTING/RELEASING 结果不明 → UNKNOWN（占额度，待核对）
+Captain:   ACTIVE → UNAVAILABLE (engine-detected, permissions frozen; no automatic recovery)
+           ACTIVE/UNAVAILABLE → HANDOVER (user-initiated) → ACTIVE (new generation, after the incoming captain confirms)
+           UNAVAILABLE → ACTIVE also requires explicit re-onboarding by the user (even the same session gets a new generation)
+Lane:      ACTIVE ⇄ STANDBY ⇄ PARKED; ACTIVE/STANDBY → HELD → ACTIVE; → RETIRING → RETIRED;
+           any → MISSING (engine-detected) → NEEDS_CHECK (after user re-onboards, write resources need check) → ACTIVE (user confirms)
+Temp:      QUEUED → STARTING → ACTIVE → RELEASING → RELEASED (Agent has exited; its worktree is kept until the result is merged, resumable)
+           RELEASED → STARTING (resume or new session); → RETIRED
+           STARTING/RELEASING outcome unknown → UNKNOWN (counts against quota, needs check)
 ```
 
-RELEASED、QUEUED 的座位预期没有 Agent，08 不把它们判为 MISSING。
+Seats in RELEASED or QUEUED are expected to have no Agent; 08 does not judge them MISSING.
 
-## 手动换舰长（MVP 唯一方式）
+## Manual captain replacement (the only way in the MVP)
 
-用户：`gear admin captain replace --project oxford --pane w5:p2 --kind codex [--resume <session_ref>]`
+User: `gear admin captain replace --project oxford --pane w5:p2 --kind codex [--resume <session_ref>]`
 
-1. **一个事务内**：座位 → `HANDOVER`；旧绑定作废（由 onboard_intent 为新会话预留新代次，旧代次之后的写一律被拒）；记录待接班目标（pane、kind、本次交接版本）；对在途操作逐项分类写库：
-   - INTENDED 未执行 → 保持，等新舰长确认后继续；
-   - EXECUTING/UNKNOWN → 标"需核对"；
-   - 舰长已回复、对方未确认的消息 → 保持原样；
-   - 旧舰长 gear 之外的动作 → 引擎不推断，记"gear 外动作未核对"。
-   交接中：`gear reply`、`gear plan apply` 对该项目拒绝；执行线 `gear send` 照常入库；已授权且不依赖交接结果的执行任务继续；**受交接影响或影响范围不明的操作保持冻结**。
-2. 引擎按接入流程在目标 pane 启动新舰长（带新 `GEAR_CTX`，绑定状态 pending），生成交接包 `handover.md`（目标、计划版本、未处理消息、等待事项、最近 20 条决定、需核对操作、冻结项、下次复盘点、本次要求的 skill 版本），投递指针（与 skill 入口指针合为同一条投递，16）。交接 ACK 同时确认该 skill 版本。
-3. **确认**：新舰长执行 `gear send --kind ack --reply-to <交接事项 ID>`。只接受来自待接班目标（pending 绑定的代次）对本次交接事项的确认。确认后原子激活：绑定 active、座位 ACTIVE、解冻舰长写入。确认不自动放行"需核对"的操作和写入资源，它们留在新舰长的首页。
-4. 新 Agent 起不来或未确认 → 保持 HANDOVER，看板醒目显示；绝不存在两个有效舰长。旧舰长恢复后不自动复位。
+1. **In one transaction**: seat → `HANDOVER`; the old binding is voided (onboard_intent reserves a new generation for the new session; all writes from the old generation are rejected from then on); record the incoming target (pane, kind, this handover's version); classify in-flight operations one by one and write them to the database:
+   - INTENDED, not executed → kept, continue after the new captain confirms;
+   - EXECUTING/UNKNOWN → marked "needs check";
+   - messages the captain replied to but the other side has not confirmed → kept as is;
+   - actions by the old captain outside gear → the engine does not infer them, records "out-of-gear actions unchecked".
+   During handover: `gear reply` and `gear plan apply` are rejected for the project; lanes' `gear send` is stored as usual; authorized execution tasks that do not depend on the handover outcome continue; **operations affected by the handover or with unclear impact stay frozen**.
+2. The engine starts the new captain in the target pane via the onboarding flow (with a new `GEAR_CTX`, binding status pending), generates the handover packet `handover.md` (goal, plan version, unhandled messages, waiting items, last 20 decisions, operations needing check, frozen items, next review point, the skill version required this time), and delivers a pointer (merged into the same delivery as the skill entry pointer, 16). The handover ACK also confirms that skill version.
+3. **Confirmation**: the new captain runs `gear send --kind ack --reply-to <handover item ID>`. Only a confirmation from the incoming target (the pending binding's generation) for this handover item is accepted. After confirmation, activate atomically: binding active, seat ACTIVE, captain writes unfrozen. Confirmation does not automatically release "needs check" operations and write resources; they stay on the new captain's home page.
+4. The new Agent fails to start or does not confirm → stay in HANDOVER, shown prominently on the board; there are never two valid captains. When the old captain recovers it is not automatically reinstated.
 
-## 舰长不可用（引擎检测，不自动换人）
+## Captain unavailable (engine-detected, no automatic replacement)
 
-检测：Herdr 报退出/关闭；屏幕连续命中额度/认证特征；有待处理事项、上次门铃已确认开始后仍持续无可证实处理。结果：座位 `UNAVAILABLE`，冻结舰长侧写入与派生操作，停止门铃，看板显示，`notify` 用户。限流类暂时状态只标注、不冻结代次（04 分类）。恢复只能由用户显式重新接入（原会话 resume 或新会话），走同样的核对。
+Detection: Herdr reports exit/close; the screen repeatedly matches quota/auth signatures; there are pending items and, after the last doorbell was confirmed started, there is still no provable handling. Result: seat `UNAVAILABLE`, captain-side writes and derived operations frozen, doorbell stopped, shown on the board, `notify` the user. Temporary rate-limit states are only annotated, generation not frozen (04 classification). Recovery only by explicit user re-onboarding (resume of the original session or a new session), through the same checks.
 
-## 测试要点
+## Test points
 
-旧会话子进程在同 pane 换人后迟到写入被拒（同品牌、无 session_ref、查询后到事务前换绑三种）；无 GEAR_CTX 的 Agent 调用不变成 admin；交接中舰长写被拒、执行线 send 正常；只有待接班目标能确认；重启后交接状态可重建；UNAVAILABLE 不自动恢复。
+A late write from an old session's child process after a replacement in the same pane is rejected (three cases: same brand, no session_ref, rebinding between query and transaction); an Agent call without GEAR_CTX does not become admin; captain writes rejected during handover while lane sends work; only the incoming target can confirm; handover state can be rebuilt after restart; UNAVAILABLE does not recover automatically.

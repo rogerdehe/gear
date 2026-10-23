@@ -9,9 +9,19 @@
 
 #![allow(unused_variables, dead_code)] // skeleton
 
+pub mod admin;
+pub mod base;
+pub mod config;
+pub mod draft;
 pub mod home;
 pub mod identity;
+pub mod kickoff;
 pub mod mail;
+pub mod plan;
+pub mod review;
+pub mod seats;
+pub mod skill;
+pub mod tasks;
 
 use gear_model::GearCtx;
 

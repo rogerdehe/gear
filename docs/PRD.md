@@ -1,258 +1,321 @@
-# GEAR 产品规划：Herdr 上的多 Agent 持续协作
+# GEAR Product Plan: Continuous Multi-Agent Collaboration on Herdr
 
-版本：v0.8（2026-10-21）。状态：完整产品规划，MVP 落地后按真实运行证据修订。上一版见 [archive/PRD-v0.7.md](archive/PRD-v0.7.md)。
+Version: v0.9 (2026-10-22). Status: revised after the walking skeleton ran end to end on a real Herdr; the user re-aligned positioning, kickoff, the work loop, the board and the runtime form (§0, §8a, §10, §15, §16). Previous version: [archive/PRD-v0.7.md](archive/PRD-v0.7.md).
 
-项目名 GEAR（**G**oals **E**xecuted through **A**gent **R**elay）；Herdr 插件 ID `herdr-gear`；CLI `gear`。尚未实现。
+Project name GEAR (**G**oals **E**xecuted through **A**gent **R**elay); Herdr plugin ID `herdr-gear`; CLI `gear`. The walking skeleton runs; GEAR is now developed with GEAR itself.
 
-本文写的是**最终形态**，力求全面；第一步落地什么见 [TECH-MVP.md](TECH-MVP.md)。参考项目与取舍见 [research/2026-10-21/references.md](research/2026-10-21/references.md)，其中 Firstmate 是最重要的同类参照，可重度借鉴，但不是我们要的最终形态。
+This document describes the **final form** and aims to be comprehensive; what lands first is in [TECH-MVP.md](TECH-MVP.md). Reference projects and trade-offs are in [research/2026-10-21/references.md](research/2026-10-21/references.md); Firstmate is the most important comparable reference and can be borrowed from heavily, but it is not the final form we want.
 
 ---
 
-## 1. 要解决的问题
+## 0. Positioning
 
-用户在 Herdr 里同时跑多个项目，每个项目一个舰长（主控 Agent）带若干执行线。现有做法是每个项目各写一套 keeper 脚本催办，暴露出这些问题：
+GEAR is for work that is **all** of:
 
-1. **线停了没人接**：一轮结束就停，队列文件启动不了新回合，要人或舰长手动催。
-2. **计划会变形**：项目一直在变，生产 bug 要插队，探索性工作一开始想不清；提前拆死的计划和实际执行脱节。
-3. **舰长被消息淹没、忘了主线**：汇报直接塞进舰长对话，它一直在回消息，钻牛角尖，主线和紧急事项被丢开，也没时间想全局要不要调整。
-4. **只看汇报不看产出**：有的线几小时不提交，第一个小时就跑偏；有的线根本没干活。
-5. **人员变化没人管**：临时工开了不关越挂越多；长期线被要求暂停后永远被忘；有人不辞而别；舰长额度用完一周回不来。
-6. **每个项目重写一套脚本**，规则散落在脚本注释里，改一句催办词就等于改了所有线记住的规矩。
+1. **big and long-running** — hours to days, more than one context window;
+2. **multi-agent** — several agents of possibly different kinds (Claude, OpenCode, Codex …) in Herdr working together;
+3. **re-planned while it runs** — the plan is living: the captain adjusts order, scope and staffing at any time, instead of writing everything up front and stopping for confirmation on every change (the BMAD failure mode).
 
-**成功标准**：有可继续的已授权工作，就一定有人（程序或舰长）在推进；停下的线都有明确原因、负责方和恢复条件；舰长守得住主线并定期调整计划；用户不需要手动催办和横插协调。不以"所有 Agent 都显示 working"衡量。
+For anything else, talk to an agent directly; GEAR adds nothing.
 
-## 2. 已确认的约束
+**The soul: lanes never stop — within a voyage.** A voyage is one milestone: it has a done-sentence and a planned duration, and it must land. Never-stop means the crew works without pause until this voyage lands as fast as it can; then the crew rests, the voyage is reviewed, and the next voyage is planned. It does not mean a voyage that never ends.
 
-| 编号 | 约束 |
+**Within a voyage:** Parallel work is the default, not an option. A lane hands in a result and immediately takes its next task; review and merge run beside development, never in front of it. And never-stop means valuable work — every queued task moves the goal forward, no busywork. Every wait in the flow must answer: who is idle while this waits, and does it have to be?
+
+Why it works where a long chat does not: the plan, the task states and the messages live in GEAR's store, not in anyone's conversation. The captain reads `gear` (a bounded page) when woken, so it can re-plan without its context filling up, getting compacted and forgetting.
+
+GEAR is not a planning method. Requirements and technical design may come from BMAD, Superpowers or plain conversation; GEAR starts at **execution** — dispatching work to other agents (not in-process subagents), keeping them working, reviewing in parallel, and merging. Methods are tools the captain may use; they never decide for it.
+
+## 1. Problems to solve
+
+The user runs several projects in Herdr at once; each project has a captain (the controlling Agent) leading several lanes. The current approach is a separate keeper script per project to nudge work along, which has exposed these problems:
+
+1. **A lane stops and nobody picks it up**: it stops at the end of a turn; queue files cannot start a new turn; a human or the captain has to nudge manually.
+2. **Plans get distorted**: projects keep changing, production bugs need to jump the queue, exploratory work cannot be thought through up front; plans split rigidly in advance drift away from actual execution.
+3. **The captain drowns in messages and loses the main line**: reports are pushed straight into the captain's conversation, it keeps replying to messages, goes down rabbit holes, drops the main line and urgent items, and has no time to think about whether the overall plan needs adjusting.
+4. **Only reports are read, not output**: some lanes go hours without committing and drifted off course in the first hour; some lanes did no work at all.
+5. **Staffing changes are unmanaged**: temp workers are opened and never closed, piling up; long-lived lanes told to pause are forgotten forever; some leave without notice; the captain runs out of quota and is gone for a week.
+6. **Every project rewrites its own scripts**; rules are scattered in script comments, and changing one nudge phrase amounts to changing the rules every lane has memorized.
+
+**Success criteria**: whenever there is authorized work that can continue, someone (the program or the captain) is pushing it forward; every stopped lane has a clear reason, owner, and resume condition; the captain holds the main line and adjusts the plan regularly; the user does not need to nudge manually or step in to coordinate. Success is not measured by "all Agents show working".
+
+## 2. Confirmed constraints
+
+| ID | Constraint |
 |---|---|
-| C-01 | 以 Herdr 为运行底座：终端/会话拓扑、Agent 启动与控制与观测、worktree、remote、插件承载，全部用 Herdr 公开 CLI/API，不另造 |
-| C-02 | 产品是 Herdr 插件；本地 Herdr 客户端通过 remote 操作远端 Herdr 是主要使用方式；断开本地客户端不停止远端监督 |
-| C-03 | 每个项目一名舰长直接管理执行者，不加主管层；独立审核是任务，不是管理层 |
-| C-04 | 舰长、执行者、审核者不绑定 Agent 品牌；同一角色换品牌后行为一致，能力差异明确显示 |
-| C-05 | 并行写代码默认独立 worktree，一个写入资源同一时刻只有一个写入者 |
-| C-06 | 不绑定 BMAD、Superpowers 等研发方法；它们只是任务里可引用的指导 |
-| C-07 | 日常推进按已批准规则自动进行；依赖、授权范围内的重排、例外处理及任务/里程碑验收由舰长按合同组织；越权批准和项目最终验收归用户 |
-| C-08 | 消息可以合并汇总，原始事实不丢；不靠隐藏异常减少消息 |
-| C-09 | 不依赖 Agent 自觉或某家 CLI 专属 hook 维持系统运转；状态不明如实显示 |
-| C-10 | 项目差异放配置和任务合同，不再每个项目复制一套脚本 |
-| C-11 | 插件只增加**一个常驻进程**（引擎）；Agent 调用的 `gear` 命令是短命进程，不算 |
-| C-12 | 轻量：命令少、代码少，复杂度用"限定场景"控制，不用"堆检测系统"解决 |
+| C-01 | Herdr is the runtime foundation: terminal/session topology, Agent start, control and observation, worktrees, remote, and plugin hosting all use Herdr's public CLI/API; nothing is built separately |
+| C-02 | The product is a Herdr plugin; the primary usage is a local Herdr client operating a remote Herdr via remote; disconnecting the local client does not stop remote supervision |
+| C-03 | Each project has one captain who directly manages executors, with no supervisor layer; independent review is a task, not a management layer |
+| C-04 | Captain, executor, and reviewer are not bound to an Agent brand; the same role behaves the same after switching brand, and capability differences are shown explicitly |
+| C-05 | Parallel code writing uses an independent worktree by default; a write resource has only one writer at any time |
+| C-06 | Not bound to development methodologies such as BMAD or Superpowers; they are only guidance that tasks may reference |
+| C-07 | Day-to-day progress runs automatically under approved rules; dependencies, reordering within the authorized scope, exception handling, and task/milestone acceptance are organized by the captain per contract; approvals beyond authority and final project acceptance belong to the user |
+| C-08 | Messages may be merged and summarized, but original facts are not lost; messages are not reduced by hiding anomalies |
+| C-09 | The system does not rely on Agent self-discipline or any one CLI's proprietary hooks to keep running; unclear state is shown as such |
+| C-10 | Project differences live in configuration and task contracts; no more copying a set of scripts per project |
+| C-11 | The plugin adds only **one resident process** (the engine), running in the background with no pane; any `gear` call starts it when it is not running. The `gear` commands that Agents call are short-lived processes and do not count |
+| C-13 | **No popups after kickoff.** Everything that needs the user's choice is asked once, at kickoff, in as few dialogs as possible. After that no agent — captain, lane or reviewer — opens a dialog: a dialog in the captain's pane freezes the doorbell; a dialog in a lane needs the captain to notice, read and answer it. Lanes ask through `gear send --kind question`; a lane caught in a native dialog is reported to the captain by the engine |
+| C-12 | Lightweight: few commands, little code; complexity is controlled by "bounded scenarios", not solved by "piling up detection systems" |
 
-## 3. 角色与对象
+## 3. Roles and objects
 
-**角色**
+**Roles**
 
-- **用户**：给目标、划授权边界、项目验收；随时可查看、纠正、暂停、改目标。
-- **舰长**（Agent）：项目唯一协调决策者——拆解、排队列、做决定、复盘调整计划、开关临时工。
-- **长期线**（Agent）：有固定职责，持续领本线队列的任务；无活时待命。
-- **临时工**（Agent）：为一个有交付物的任务（审核、调查、应急）按额度开，交付后释放。
-- **引擎**（程序，插件里唯一的常驻进程）：续做、门铃、复盘调度、产出采样、Herdr 副作用、记录。只执行规则和舰长的决定，自己不做判断性决策，也不替用户批准越界动作。
+- **User**: sets goals, draws the authorization boundary, does project acceptance; can view, correct, pause, or change goals at any time.
+- **Captain** (Agent): the project's sole coordinating decision-maker — decomposes work, orders queues, makes decisions, reviews and adjusts the plan, opens and closes temp workers.
+- **Long-lived lane** (Agent): has fixed responsibilities and continuously takes tasks from its own queue; stands by when there is no work.
+- **Temp worker** (Agent): opened against quota for one task with a deliverable (review, investigation, emergency) and released after delivery.
+- **Engine** (program, the only resident process in the plugin): continuation, doorbell, review scheduling, output sampling, Herdr side effects, recording. It only executes rules and the captain's decisions; it makes no judgment decisions itself and does not approve out-of-bounds actions on the user's behalf.
 
-**对象**（各自独立，不能互相替代）：项目、里程碑、任务、执行尝试、工作线、Agent 会话、worktree、消息、决定、证据。"Agent 报 done""进程退出""命令返回成功""测试通过""任务完成""项目完成"是不同事实。
+**Objects** (each independent; none substitutes for another): project, milestone, task, execution attempt, lane, Agent session, worktree, message, decision, evidence. "Agent reports done", "process exited", "command returned success", "tests passed", "task complete", and "project complete" are different facts.
 
-## 4. 状态与视图
+## 4. State and views
 
-- **唯一权威状态**：每个执行端一个 SQLite（放 `HERDR_PLUGIN_STATE_DIR` 下），记录项目、角色、计划版本、任务合同、顺序、尝试、消息、证据引用、操作回执。
-- **写入规则**：`gear` 短命命令和引擎都在短事务（`BEGIN IMMEDIATE`）里写库，事务内重新核对身份、代次、版本；`request_id` 相同且参数相同返回原结果，参数不同则拒绝。**纯数据变化由命令当场完成；一切 Herdr 副作用只由引擎执行。**
-- **Markdown 都是生成的视图**：
-  - `PLAN.md`（舰长读）：目标、当前里程碑、明确不做什么、当前决定（含插队理由和原主线恢复条件）、全部在途任务摘要、近期就绪队列、紧急和受阻项。其余待办只显示数量、最老等待时间和查询方式。按行数和正文量双重限长。
-  - 任务包（执行线读）：一任务一份。
-  - 归档：完成/取消的任务移出视图，记录保留在库里，按里程碑可查。
-- **改计划**：舰长编辑计划草稿 → `gear plan apply` 校验并按基准版本事务性应用 → 引擎重新生成视图。直接改生成的视图不生效；基准版本过期返回冲突和新事实；草稿不合法则整份拒绝，保留上一有效版本。
+- **Single authoritative state**: one SQLite per execution host (under `HERDR_PLUGIN_STATE_DIR`), recording projects, roles, plan versions, task contracts, order, attempts, messages, evidence references, and operation receipts.
+- **Write rules**: both the short-lived `gear` commands and the engine write to the database in short transactions (`BEGIN IMMEDIATE`), re-checking identity, generation, and version inside the transaction; the same `request_id` with the same parameters returns the original result, and with different parameters is rejected. **Pure data changes are completed on the spot by the command; all Herdr side effects are executed only by the engine.**
+- **All Markdown files are generated views**:
+  - `PLAN.md` (read by the captain): goal, current milestone, what is explicitly not being done, current decisions (including the reason for a queue jump and the resume condition for the original main line), a summary of all in-flight tasks, the near-term ready queue, and urgent and blocked items. The remaining backlog shows only a count, the oldest wait time, and how to query it. Length is capped both by line count and by body size.
+  - Task packet (read by lanes): one per task.
+  - Archive: completed/cancelled tasks are moved out of the view; records stay in the database and are queryable by milestone.
+- **Changing the plan**: the captain edits a plan draft → `gear plan apply` validates it and applies it transactionally against its base version → the engine regenerates the views. Directly editing a generated view has no effect; a stale base version returns a conflict and the new facts; an invalid draft is rejected in full and the last valid version is kept.
 
-## 5. 计划与任务（活计划）
+## 5. Plan and tasks (living plan)
 
-- **任务合同**：稳定 ID（按创建发号，与顺序无关，永不复用）、目标、范围、验收标准、期望产物、下一证据点、依赖、优先级、负责线、授权边界；合同有版本。
-- **优先级**：`now`（事故）/ `must`（本里程碑承诺）/ `should` / `could` / `wont`（本版本不做，不派发）。优先级不越过依赖、容量、写入权和授权。
-- **状态**：待细化、就绪、执行中、等待、待验证、完成、失败、取消，按合法迁移变化。等待必须写明原因、责任方、恢复条件；待验证失败可在预算内回到修复。
-- **队列操作**：插队首、重排、换线、暂停、取消、拆分、合并（新旧 ID 关联，保留产物和历史），每次留原因。
-- **近细远粗**：只有快开工的任务需要完整合同；细化是舰长的一类工作。
-- **计划变化是常态**：插队、重排、改合同都是普通操作，不是异常；变更记录可追溯。
-- **完成**：里程碑完成 = 必需任务验证通过 + 里程碑验收；取消不算交付；把任务标完成必须附合同与候选版本及验证证据。
+- **Task contract**: stable ID (issued in creation order, independent of ordering, never reused), goal, scope, acceptance criteria, expected artifacts, next evidence point, dependencies, priority, owning lane, authorization boundary; contracts are versioned.
+- **Priority**: `now` (incident) / `must` (committed for this milestone) / `should` / `could` / `wont` (not in this version, not dispatched). Priority does not override dependencies, capacity, write rights, or authorization.
+- **States**: to be refined, ready, in progress, waiting, awaiting verification, done, failed, cancelled; changes follow legal transitions. Waiting must state the reason, the responsible party, and the resume condition; a failed verification can return to fixing within budget.
+- **Queue operations**: insert at head, reorder, change lane, pause, cancel, split, merge (old and new IDs linked, artifacts and history kept); each records a reason.
+- **Detailed near, coarse far**: only tasks about to start need a full contract; refinement is one kind of captain work.
+- **Plan change is normal**: queue jumps, reordering, and contract changes are ordinary operations, not exceptions; change records are traceable.
+- **Completion**: milestone complete = required tasks pass verification + milestone acceptance; cancellation is not delivery; marking a task done must attach the contract version, the candidate version, and verification evidence.
 
-## 6. 执行与续做
+## 6. Execution and continuation
 
-- **观测**：引擎周期性读取 Herdr（`agent list` 拿全部 Agent 状态，需要时 `agent read` 读屏）。事件订阅可作为降延迟优化，但周期对账始终保留——事件可能重复、丢失、迟到。观测失败显示为"本轮观察失败"，不当成全员退出。
-- **三类动作分开**：
-  1. 当前尝试未完成、且确认正常停轮 → 续做**同一任务同一尝试**；
-  2. 当前尝试已交付 → 进入验证或等下一步，不因 idle 重复实现；
-  3. 线上没有在途尝试 → 才领下一项（满足授权、依赖、容量、资源）。
-- **投递**：派活、续做、门铃一律经 Herdr `agent prompt`，内容是有界的任务指针，规则不随催办广播。每条线同时最多一个"已投递、未确认开始"的投递；结果不明先核对，不因超时重发。working 不等于有进展，idle/done 不等于完成。
-- **分别处理**：限流、额度耗尽、认证失败、等授权、人工暂停、观察失败、状态未知各有处理方式，不一律催"继续"。
-- **CLI 适配**：每种 CLI 一组可配置的观测参数（忙碌特征、限流/额度特征、读屏行数、连续确认轮数）和能力声明（是否支持 resume 等）。旧 keeper 的事故（催办词触发自身检测、done 但仍在跑、冷却短于轮询、按 HEAD 只问一次）作为回归样例。
-- **在途合同与插队**：当前尝试继续绑定已采用的合同版本，直到安全点核对、执行线确认并登记新版切换；通知发送成功或读过首页都不等于采用。紧急暂停按已批准规则处理。插队先确认原任务安全状态、保存成果、释放或交接写入权，再激活新任务尝试；原任务保留 ID、成果与恢复条件。保存不强制等于 commit/push，但新任务不能混用原任务未隔离的改动。依赖产物、接口或授权变化影响在途任务时也要通知并核对。
+- **Observation**: the engine periodically reads Herdr (`agent list` for all Agent states, `agent read` to read the screen when needed). Event subscription can be used as a latency optimization, but periodic reconciliation is always kept — events can be duplicated, lost, or late. An observation failure is shown as "observation failed this round", not treated as everyone having exited.
+- **Three kinds of action kept separate**:
+  1. The current attempt is unfinished and a normal end of turn is confirmed → continue **the same task, same attempt**;
+  2. The current attempt has delivered → go to verification or wait for the next step; do not re-implement because of idle;
+  3. The lane has no in-flight attempt → only then take the next item (subject to authorization, dependencies, capacity, resources).
+- **Delivery**: dispatch, continuation, and doorbell all go through Herdr `agent prompt`; the content is a bounded task pointer, and rules are not broadcast with nudges. Each lane has at most one "delivered, not yet confirmed started" delivery at a time; when the result is unclear, check first; never resend because of a timeout. working does not mean progress; idle/done does not mean complete.
+- **Handled separately**: rate limiting, quota exhaustion, authentication failure, waiting for authorization, manual pause, observation failure, and unknown state each have their own handling; not everything gets nudged with "continue".
+- **CLI adaptation**: each CLI has a set of configurable observation parameters (busy signature, rate-limit/quota signature, screen lines to read, consecutive confirmation rounds) and capability declarations (whether it supports resume, etc.). Incidents from the old keeper (the nudge phrase triggering its own detection, done but still running, cooldown shorter than the poll interval, asking only once per HEAD) serve as regression cases.
+- **In-flight contracts and queue jumps**: the current attempt stays bound to the contract version it adopted until, at a safe point, it is checked, the lane confirms, and the switch to the new version is registered; a successfully sent notification or having read the home page does not equal adoption. Emergency pauses are handled under approved rules. A queue jump first confirms the original task's safe state, saves its results, releases or hands over write rights, and only then activates the new task's attempt; the original task keeps its ID, results, and resume condition. Saving does not have to mean commit/push, but the new task must not mix in the original task's unisolated changes. When changes to dependency artifacts, interfaces, or authorization affect in-flight tasks, they must also be notified and checked.
 
-## 7. 消息：发送、收件箱、门铃
+## 7. Messages: send, inbox, doorbell
 
-**发送合同（同步）**：`gear send` 当场核对发送方 → 确定收件人（舰长，或上游任务**当前**负责人）→ 在一个事务里写进**收件人的收件箱** → 返回"已送达 某某 收件箱 #ID"。失败当场报原因（未登记、代次过期、目标不存在、锁超时）。门铃另报一行（"待对方空闲时提醒；引擎最近心跳 …"），不假装对方已收到。提交后进程消失导致没拿到结果，用同一 `request_id` 查回，不盲目重发。
+**Send contract (synchronous)**: `gear send` checks the sender on the spot → determines the recipient (the captain, or the **current** owner of the upstream task) → writes into **the recipient's inbox** in a single transaction → returns "delivered to so-and-so's inbox #ID". Failures report the reason on the spot (not registered, stale generation, target does not exist, lock timeout). The doorbell is reported on a separate line ("will remind when the recipient is idle; engine last heartbeat …"), without pretending the recipient has received it. If the process disappears after commit and the result was not obtained, query it back with the same `request_id`; do not blindly resend.
 
-本任务、尝试和会话代次来自登记上下文；`--about` 仅关联上游任务，不把发送者变成上游执行者。只沿已批准依赖路由；新依赖向舰长提出，不直接生效或解除门槛。result 登记交付并进入待验证，不直接完成任务、关闭会话或释放写入权。
+The task, attempt, and session generation come from the registered context; `--about` only links to an upstream task and does not make the sender the upstream executor. Routing follows only approved dependencies; new dependencies are proposed to the captain and do not take effect or lift gates directly. A result registers the delivery and moves to awaiting verification; it does not directly complete the task, close the session, or release write rights.
 
-**消息类型**：
+**Message types**:
 
-- 信息事件（进展）：只记录、汇总，不占待处理位置。
-- 需处理事项（提问、受阻、交付、合同更新确认）：有稳定 ID、处理状态和结果。
+- Informational events (progress): only recorded and summarized; they do not occupy a pending slot.
+- Action items (question, blocked, delivery, contract-update confirmation): have a stable ID, a handling status, and an outcome.
 
-**收件箱按问题线程读**（一个任务可有多个问题线程）：
+**The inbox is read by issue thread** (one task can have several issue threads):
 
-- 线程之间：紧急优先，同级先到先处理；只要有积压的普通事项，每批至少留一个名额给等得最久的普通线程；同一发件人每批最多占 M 个线程。
-- 线程之内：显示未解决的问题、已有回复与决定、新消息原文和 ID；需要前文可展开整个线程。
-- 确认：`gear reply` 只关闭列出的确切消息 ID；没处理完的可以标"等待谁、什么条件复核"；拉取之后新到的不会被一起关掉。回复写进对方收件箱。
-- 发件人声明的紧急度可被舰长调整；超配额的消息仍可见，不删除、不静默降级。
+- Across threads: urgent first, FIFO within the same level; whenever ordinary items are backlogged, each batch reserves at least one slot for the ordinary thread that has waited longest; a single sender occupies at most M threads per batch.
+- Within a thread: show unresolved questions, existing replies and decisions, and the original text and IDs of new messages; the whole thread can be expanded if earlier context is needed.
+- Acknowledgement: `gear reply` closes only the exact message IDs listed; unfinished ones can be marked "waiting on whom, re-check under what condition"; messages arriving after the fetch are not closed along with them. Replies are written into the other party's inbox.
+- Urgency declared by the sender can be adjusted by the captain; messages over quota remain visible, are not deleted, and are not silently downgraded.
 
-**门铃**：收件箱有待处理事项时，引擎只在收件人空闲时提醒一句；同时最多一个未确认门铃。舰长忙时来再多消息也不打断。
+**Doorbell**: when an inbox has pending items, the engine sends a one-line reminder only when the recipient is idle; at most one unconfirmed doorbell at a time. No matter how many messages arrive while the captain is busy, it is not interrupted.
 
-**依赖路由**：执行线不需要知道任何名字。`gear send --about <上游任务>` 送到上游任务当前负责人；无负责人、新依赖、越权、依赖环一律送舰长。受阻时写明等的是哪个接口/产物/决定及版本；上游满足验证/交付条件后引擎重新评估并唤醒，失败、取消、一句"做完了"都不解锁。
+**Dependency routing**: lanes do not need to know any names. `gear send --about <upstream task>` goes to the upstream task's current owner; no owner, a new dependency, an out-of-authority request, or a dependency cycle all go to the captain. When blocked, state which interface/artifact/decision and version is being waited on; after the upstream meets its verification/delivery condition the engine re-evaluates and wakes the lane; failure, cancellation, or a mere "it's done" does not unblock.
 
-## 8. 舰长的运作
+## 8. How the captain operates
 
-- **主线在文件里，不在聊天里**：每次唤醒舰长都给有界简报包（目标、计划版本、各线现状、最近产出、阻塞、积压、到期事项），证据按需展开。舰长上下文乱了可以换新会话，局面全在库里。
-- **复盘由引擎排，不靠舰长自觉**。五种触发（程序计算，不花 token）：定时、里程碑完成、能派的活不够（就绪任务少于可用线）、有线空闲、有线下线或失联。
-  - 同一原因只保留一个复盘事项，持续期间更新（持续多久、涉及哪些线）；舰长记录决定和下次检查点，到点重新到期。
-  - 复盘是单独一种回合：附快照、问固定问题（计划要不要调整），可以读影响全局的消息，但不逐条回复普通进展。
-  - 在安全回合边界给到期复盘保留处理机会，普通消息不能连续将它挤走；不强行打断正在进行的回合。长期 busy 不能成为无限延期的理由，超过处理或恢复预算就持久显示并通知用户。
-  - 舰长必须提交结构化结论：保持计划及理由，或具体变更及下次检查点（经 `gear plan apply`）。
-  - 确认上一轮正常结束、仍有可处理的复盘事项且没有待核对投递时，按预算提醒，初值最多两次；working、等授权或发送结果不明时不按时硬塞。仍无进展则持久显示并通知用户，不能因提醒次数耗尽把复盘标成完成。
-- **舰长自己也受引擎监督**：有待处理事项却停着，会被唤醒。
+- **The main line lives in files, not in chat**: every time the captain is woken it gets a bounded briefing packet (goal, plan version, status of each lane, recent output, blockers, backlog, items due), with evidence expanded on demand. If the captain's context gets muddled it can switch to a new session; the whole situation is in the database.
+- **Reviews are scheduled by the engine, not left to captain self-discipline**. Five triggers (computed by the program, no tokens spent): timer, milestone complete, not enough dispatchable work (fewer ready tasks than available lanes), a lane idle, a lane offline or lost contact.
+  - Only one review item is kept per cause, updated while it persists (how long, which lanes are involved); the captain records a decision and the next checkpoint, and the item becomes due again at that point.
+  - A review is a distinct kind of turn: it comes with a snapshot and asks fixed questions (does the plan need adjusting); it may read messages with global impact but does not reply to ordinary progress one by one.
+  - At safe turn boundaries, a due review is given a chance to be handled; ordinary messages cannot keep crowding it out; an ongoing turn is not forcibly interrupted. Being busy for a long time cannot justify indefinite postponement; once the handling or recovery budget is exceeded, it is shown persistently and the user is notified.
+  - The captain must submit a structured conclusion: keep the plan with a reason, or specific changes and the next checkpoint (via `gear plan apply`).
+  - When the previous turn is confirmed to have ended normally, there is still a handleable review item, and there is no delivery that needs check, remind within budget, initially at most twice; do not force it in on schedule when working, waiting for authorization, or the send result is unclear. If there is still no progress, show it persistently and notify the user; a review must not be marked complete because the reminder count ran out.
+- **The captain is also supervised by the engine**: if it has pending items but is stopped, it gets woken.
+- **Holding the direction is GEAR's job, not the captain's discipline** (user, 2026-10-23). Workers and reviewers each mind their own piece — a screw minds its own tightness; the captain minds whether the ship floats. GEAR holds every captain to that: each milestone has a checkable `done:` sentence and a quality `bar:` (agreed at kickoff, required by `plan apply`); review packets carry them and reviewers fail only what breaks them; findings outside the bar are logged, not reworked; review rounds are capped and then go to the captain; drift (milestone age, rounds, size per hand-in) opens a direction review the captain must conclude. The captain's home page opens with the **voyage report** every time it is read — elapsed vs planned, scope at departure vs now (new requirements added, changes added by reviews, cancelled), done vs left to land, code added this voyage (product / tests / docs), rework rounds, crew idle time and rework rate. Past the planned duration or a scope growth threshold the engine opens a **land-or-extend** decision: cut scope to land, or extend with a reason (beyond its authority: ask the user). When the done-sentence holds the voyage lands: no new dispatch for it, a retrospective, then the next kickoff.
 
-## 9. 人员管理
+## 8a. Kickoff (the only alignment with the user)
 
-**长期线**
+Before execution starts the captain proposes an **execution plan** (distinct from the work plan) and the user corrects it in one pass:
 
-- 无可派任务时，引擎把它标为**待命**并记录开始时间，**不发任何消息**；线也不需要自己说"我空了"。
-- 舰长通过复盘快照（"待命：heat 35 分钟"）和"有线空闲"复盘触发知道有人停着。
-- 舰长通过计划草稿设置 park 的截止时间或已支持的恢复条件，再由 `gear plan apply` 提交（MVP 不提供独立 park 命令或任意条件表达式语言）。到点或条件满足，引擎自动重新评估：有活就派，没活回到待命并进入下一次复盘——不会被永远忘掉。待命期间有新任务进入就绪，立即派，不等到点。
-- **人工 hold / 等授权** 与 park 不同：新任务不能打断，必须解除才恢复。
-- 长期待命的线可由舰长决定休眠（关闭 Agent、保留会话登记），有活时恢复。
+1. **Captain**: the current agent, or a new one GEAR starts.
+2. **Agents available**: the kinds installed in Herdr (detected, not typed).
+3. **Lanes**: how many long-lived lanes and how many temp slots (e.g. OpenCode × 6: 2 long-lived, 4 temp); each lane's **name** — `<project>-<meaning>`, e.g. `gear-data`, `gear-runtime` — and the work items it owns.
+4. **Models per role**: development on a fast/cheap model (tasks are cut small and concrete); review on a stronger model that differs from the writer's — a stronger model of the same vendor is acceptable when only one vendor is available.
+5. **Quota policy** per model chain: **wait** for the reset (most vendors reset every 5 hours; GEAR parks the lane and resumes it at reset) or **fall back** to the next model in the chain (e.g. MiniMax → DeepSeek).
 
-**临时工**
+6. **The quality bar of this voyage — the user chooses, nobody changes it mid-voyage** (user, 2026-10-23): *fastest to the goal* (MVP/skeleton: only what breaks the chain or loses data is fixed; every other detail found on the way is cut — logged, never reworked), *deliverable* (normal-use errors fixed, edge cases logged), or *strict* (everything fixed, at a much higher cost the user accepts up front). Reviewers get the bar in every packet; the captain judges every finding and every added task by it; only the user may change it.
 
-- 项目配置写明额度，如"长期 4、临时 6"，并写明是否包含舰长。启动中、工作中、停止未确认都占额度；排队不占；确认停止的不占，恢复要重新申请。
-- 舰长在计划草稿里登记临时工作项（有稳定 ID 的任务 + 指定配置），引擎查额度、经 Herdr 开 pane、启动 Agent、登记会话、发任务包。额度满就排队并告知舰长。
-- **正常交付后的自动释放**：仅适用于正常完成的受管临时任务。result 明确指出本次产物和安全结束点；引擎核对报告/候选确实已持久保存，需保留的工作改动已有持久副本；连续两轮观察到 idle/done，且没有已知未完成活动或待核对投递。满足时按批准策略关闭会话，确认关闭后才释放额度，保留任务、报告、worktree 和分支。条件不明不自动关闭，转待核对。额度释放不代表验收通过，也不同时授予新人原资源的写入权。
-- **resume 规则**（2026-10-21 用户决定）：机制上必须支持找回原临时工。**新活开新临时工；同一件活中途需要它回来（返工、追问、补材料）就 resume 原会话。** 重新申请额度；resume 不可用时新会话读任务包返工，并明确标为"新会话恢复"。
-- 舰长不再被定时问"要不要关我"——关闭是默认，找回是常规操作。
+Kickoff ends with `gear admin init`; from then on the run needs no dialogs (C-13).
 
-**不辞而别与交接**
+## 9. Staffing management
 
-- 交接**不依赖离开的人配合**：接手者从持久记录重建。平时要求进展落在持久处（commit、任务笔记、`gear send`、舰长决定都经命令入库）。
-- 引擎识别不可用（Herdr 报退出/关闭；屏幕命中额度/限流/认证特征；有待办却持续无可证实进展），区分暂时与长期。
-- **舰长不可用**：冻结该项目新的舰长决定；旧代次作废（之后发来的确认、决定都被拒）；进行中事项逐项分类（未执行可重领、有回执则确认、结果不明继续核对、等待外部保持等待）。旧舰长在 GEAR 之外做的动作标为"未核对"，可能受影响的部分冻结，人工核对后放行。**换舰长只由用户手动发起**（2026-10-21 用户决定）：引擎持久显示并通知用户，由用户指定新舰长，交接流程见下方"换舰长"。不做自动切换或自动启用备用舰长。旧舰长恢复后不自动复位。冻结只影响该项目相关决定和受影响操作，其他项目不受影响；已授权且不依赖交接结果的执行任务可继续。撤销代次不能取消已经发出的 Herdr/Git 动作，也不能使仍直接操作外部资源的旧舰长停手。新舰长接手失败时保持可见交接状态，不出现两个有效决策者。
-- **执行线不可用**：在途任务冻结；没开始的活可改派。原 worktree 的写入权**不自动交给别人**——关掉 pane 不能证明它启动的后台作业已停止——必须人工核对确认安全后才移交。
-- **退役**（主动下线）：停止派新活；未开始的回到待分配；在途的保存成果、交出写入权；已交付的继续验收。花名册显示计划数、可用数、退役中/失联数及其未交接任务；完成退役和交接后计划容量才变化。退役后的迟到消息保留并转项目负责方。舰长收到一个合并的复盘事项。
-  退役中仍接收当前有效尝试的结果、阻塞和交接通信；退役后或旧代次的迟到报告只保留原文与关联，转项目负责方核对，不以旧身份应用决定、验收或写入权变化。
-- **换舰长（正常换品牌）**：不靠同名。"舰长"是项目的角色，绑定执行端、session、pane、会话引用和代次。交接：冻结 → 旧代次作废 → 逐项分类 → 交接包 → 新舰长确认后激活。
+**Long-lived lanes**
 
-## 10. 产出监督与验收
+- When there is no dispatchable task, the engine marks the lane **standby** and records the start time, **sending no message at all**; the lane also does not need to say "I'm free" itself.
+- The captain learns that someone is stopped through the review snapshot ("standby: heat 35 minutes") and the "a lane idle" review trigger.
+- The captain sets a park deadline or a supported resume condition through the plan draft, then submits it with `gear plan apply` (the MVP provides no separate park command or arbitrary condition expression language). When the time comes or the condition is met, the engine automatically re-evaluates: if there is work, dispatch it; if not, return to standby and enter the next review — it is never forgotten forever. If a new task becomes ready during standby, dispatch immediately without waiting for the deadline.
+- **Manual hold / waiting for authorization** differs from park: new tasks cannot interrupt it; it must be lifted before resuming.
+- A lane on long standby can be put to sleep by the captain's decision (Agent closed, session registration kept) and resumed when there is work.
+- Each long-lived lane gets one worktree, created once at onboarding via Herdr (`herdr worktree create --branch home/<lane> --base dev --label <project>-<lane>`) and kept long-term; task branches are switched inside it and build caches persist. See [design/17-conventions.md](design/17-conventions.md).
 
-- **证据点**：派活时约定下一个证据点（小段 diff + 测试结果、复现记录、调查笔记、实验结果……）。小步提交是手段，不是唯一合法产出。
-- **产出采样**（程序，不花 token）：定时比较每条线 worktree 的变化与证据文件。过了证据点仍缺预期证据 → 生成"需要核对"事项，不直接宣判没干活；有变化也不等于方向正确。设"最长多久没人看过"上限，保证一直在改的任务也会被检查。
-- **跑偏检查**：到期或风险触发时，由舰长（或新上下文的临时审核者）对照任务合同看 diff，记录判断、纠偏动作和下次检查点。过程复查记录观察时刻、基线和可识别快照；并发变化导致证据不一致时标为需重采，不把不稳定 diff 当最终审核对象。
-- **验收**：结果进入待验证 → 固定候选 commit 或产物版本 → 跑合同里的验证 → 按需独立审核（新上下文、可能运行工具时用独立检出，不强制换品牌）→ 通过才完成。批准绑定合同版本和候选版本，任一变化则重新核对。需要集成验收的任务在集成证据到达前不标最终完成。
+**Temp workers**
 
-## 11. 代码与资源
+- Project configuration states the quota, e.g. "long-lived 4, temp 6", and whether it includes the captain. Starting, working, and stop-unconfirmed all occupy quota; queued does not; confirmed stopped does not, and resuming requires reapplying.
+- The captain registers temp work items in the plan draft (a task with a stable ID + a specified configuration); the engine checks the quota, creates the temp worker's own worktree and pane via Herdr (`herdr worktree create`, one per new task), starts the Agent, registers the session, and sends the task packet. When the quota is full, the request is queued and the captain is told.
+- **Automatic release after normal delivery**: applies only to managed temp tasks that completed normally. The result explicitly identifies this run's artifacts and the safe end point; the engine checks that the report/candidate is really persisted and that work changes that must be kept have a persistent copy; idle/done is observed for two consecutive rounds, and there is no known unfinished activity or delivery that needs check. When satisfied, the session is closed per the approved policy, and quota is released only after the close is confirmed; the task, report, worktree, and branch are kept. If conditions are unclear, do not close automatically; move to needs check. Releasing quota does not mean acceptance passed, nor does it grant a newcomer write rights to the original resources.
+- **Temp worker worktree lifecycle**: when the same work needs the temp worker back (rework, resume), its worktree is reopened with `herdr worktree open --branch <task-branch>`; after its result is merged, `herdr worktree remove` removes the checkout and workspace and keeps the branch.
+- **resume rule** (user decision 2026-10-21): the mechanism must support bringing back the original temp worker. **New work opens a new temp worker; when the same piece of work needs it back midway (rework, follow-up questions, supplementary material), resume the original session.** Quota is reapplied for; when resume is unavailable, a new session reads the task packet to do the rework and is explicitly marked "new-session recovery".
+- The captain is no longer asked on a timer "should I close this one" — closing is the default, and bringing back is a routine operation.
+- **Quota exhausted**: the engine recognises the agent's quota marker and applies the kickoff policy — park until the reset time and resume, or switch the lane to the next model in its chain. Neither needs the captain or the user.
 
-- 每个写入者独占 worktree；登记归属时核对实际 cwd、规范化仓库/worktree 身份和活跃写入者，不按路径别名或 workspace 名判断。
-- 换人要交接写入权；会话关闭、worktree 移除、分支删除是三件事；未提交改动、未合入提交和证据必须保留。
-- 端口、数据库、外部账号等共享资源单独登记；不可用或未知就排队/阻塞，不悄悄共享。
+**Leaving without notice and handover**
 
-## 12. 多项目与身份
+- Handover **does not depend on cooperation from whoever left**: the successor rebuilds from durable records. Day to day, progress is required to land somewhere durable (commits, task notes, `gear send`, and captain decisions all go into the database via commands).
+- The engine identifies unavailability (Herdr reports exit/close; the screen matches quota/rate-limit/authentication signatures; pending work but persistently no verifiable progress) and distinguishes temporary from long-term.
+- **Captain unavailable**: freeze new captain decisions for that project; invalidate the old generation (confirmations and decisions it sends afterward are rejected); classify in-progress items one by one (not executed can be re-taken, with a receipt is confirmed, result unclear keeps being checked, waiting on external keeps waiting). Actions the old captain took outside GEAR are marked "unchecked"; the possibly affected parts are frozen and released after manual checking. **Replacing the captain is initiated only manually by the user** (user decision 2026-10-21): the engine shows it persistently and notifies the user, the user designates the new captain, and the handover flow is under "Replacing the captain" below. No automatic switch or automatic activation of a backup captain. The old captain is not automatically reinstated when it recovers. The freeze affects only that project's related decisions and affected operations; other projects are unaffected; authorized execution tasks that do not depend on the handover result can continue. Revoking a generation cannot cancel Herdr/Git actions already issued, nor can it stop an old captain that is still operating external resources directly. If the new captain fails to take over, the handover state stays visible and there are never two valid decision-makers.
+- **Lane unavailable**: in-flight tasks are frozen; work not yet started can be reassigned. Write rights to the original worktree are **not automatically given to someone else** — closing the pane does not prove that background jobs it started have stopped — and are transferred only after manual checking confirms it is safe.
+- **Retirement** (going offline voluntarily): stop dispatching new work; unstarted items go back to unassigned; in-flight ones save results and hand over write rights; delivered ones continue through acceptance. The roster shows the planned count, available count, retiring/lost-contact count, and their un-handed-over tasks; planned capacity changes only after retirement and handover complete. Late messages after retirement are kept and forwarded to the project's responsible party. The captain receives one merged review item.
+  While retiring, results, blockers, and handover communications for the currently valid attempt are still accepted; late reports after retirement or from an old generation keep only the original text and links and are forwarded to the project's responsible party for checking; decisions, acceptance, or write-right changes are not applied under the old identity.
+- **Replacing the captain (normal brand change)**: not by same name. "Captain" is a project role bound to the execution host, session, pane, session reference, and generation. Handover: freeze → invalidate old generation → classify item by item → handover packet → activate after the new captain confirms.
 
-- 同一执行端/session 里一个引擎管多个项目；每个项目有自己的舰长、计划、队列、收件箱、容量和授权。任务、线程、操作都带项目 ID，默认拒绝跨项目操作。一条线只属于一个项目。
-- 项目不等于 workspace：一个项目可跨多个 workspace（各线 worktree），归属以 GEAR 登记为准；workspace/pane metadata 只是显示。
-- 身份由登记的执行端、session、pane 和 GEAR 代次确定；Herdr 注入的 `HERDR_PANE_ID` 等只用于定位。代次在接入时固定给会话，请求携带原代次，不能每次按 pane 自动取最新代次；绑定不明或 pane 移动导致不一致时暂停该线，人工重新登记。不防同账号恶意 Agent。
-- 项目之间公平：一个项目消息洪峰或 Herdr 调用慢，不饿死其他项目。
+## 10. Output supervision and acceptance
 
-## 13. Herdr 在 GEAR 里的角色
+**The work loop runs in parallel, not in series.**
 
-Herdr 是底座，GEAR 只补 Herdr 没有的"工作层"（任务、计划、消息处理状态、角色、复盘、额度）。依据本机 Herdr 0.9.1 源码与文档核查（见 references.md）：
+1. A lane works through its queue: finishes a task, pushes its branch, hands in a result, and **immediately starts its next task** — it does not wait for review.
+2. The engine starts a temp reviewer on the pushed branch (review model ≠ writer model); the reviewer pushes its findings to a review branch.
+3. Verdict: pass → merged into `dev`; fail → the task goes back to the same lane as rework, ahead of its next item.
 
-| GEAR 需要 | Herdr 能力 |
+The captain decides only what the loop cannot: plan changes, questions, disputes, and acceptance of milestones.
+
+**What the engine decides alone, and what it never does** (2026-10-23). Mechanical and reversible steps belong to the engine; judgement that changes scope belongs to the captain.
+- Pass → the engine merges the exact reviewed commit behind a hard gate (build + tests); a wrong merge can be reverted. The captain samples passed tasks during direction reviews to catch reviewer misses.
+- Objective failure (build/tests fail, does not merge, a P0) → automatic rework on the same lane, first in its queue.
+- Other findings: each is marked blocking (it must name the part of the milestone's done-sentence or bar it breaks) or logged. Blocking findings → automatic rework with only those; logged findings → the milestone backlog. After the round cap the task goes to the captain.
+Automatic settlement is on by default; it may only be switched off while these safeguards are missing.
+
+
+- **Evidence points**: when dispatching, agree on the next evidence point (a small diff + test results, a reproduction record, investigation notes, experiment results …). Small commits are a means, not the only legitimate output.
+- **Output sampling** (program, no tokens spent): periodically compare each lane's worktree changes and evidence files. If expected evidence is still missing after the evidence point → create a "needs check" item, without directly ruling that no work was done; changes also do not mean the direction is right. Set a cap on "longest time without anyone looking", so tasks that are constantly changing also get checked.
+- **Drift check**: when due or triggered by risk, the captain (or a temp reviewer in a fresh context) compares the diff against the task contract and records the judgment, corrective action, and next checkpoint. Process re-checks record the observation time, baseline, and an identifiable snapshot; when concurrent changes make evidence inconsistent, mark it as needing resampling, and do not treat an unstable diff as the final review subject.
+- **Acceptance**: the result enters awaiting verification → pin a candidate commit or artifact version → run the verification in the contract → independent review as needed (fresh context; an independent checkout when it may run tools; no forced brand change) → done only if it passes. Approval is bound to the contract version and candidate version; if either changes, re-check. Tasks requiring integration acceptance are not marked finally done until integration evidence arrives.
+
+## 11. Code and resources
+
+- Each writer has exclusive use of a worktree; when registering ownership, check the actual cwd, the normalized repository/worktree identity, and the active writer, not path aliases or workspace names.
+- All worktrees are created through Herdr's worktree API; configuration contains no hand-written worktree paths. Default branch model: `main` (release), optional `staging`, `dev` (integration), task branches `<lane>/<task-id>-<slug>` from `dev`. Long-lived lanes keep one worktree (`home/<lane>`) and switch task branches inside it; temp workers get one worktree per new task, removed after merge with the branch kept. See [design/17-conventions.md](design/17-conventions.md).
+- Changing people requires handing over write rights; closing a session, removing a worktree, and deleting a branch are three separate things; uncommitted changes, unmerged commits, and evidence must be kept.
+- Shared resources such as ports, databases, and external accounts are registered separately; if unavailable or unknown, queue/block rather than share silently.
+
+## 12. Multiple projects and identity
+
+- One engine manages multiple projects within the same execution host/session; each project has its own captain, plan, queue, inbox, capacity, and authorization. Tasks, threads, and operations all carry the project ID; cross-project operations are rejected by default. A lane belongs to only one project.
+- A project is not a workspace: one project can span several workspaces (each lane's worktree); ownership is determined by GEAR registration; workspace/pane metadata is display only.
+- Identity is determined by the registered execution host, session, pane, and GEAR generation; `HERDR_PANE_ID` and similar values injected by Herdr are only used for locating. The generation is fixed to the session at onboarding and requests carry the original generation; the latest generation must not be taken automatically from the pane on each request; when binding is unclear or a pane move causes inconsistency, pause that lane and re-register manually. No protection against malicious Agents on the same account.
+- Fairness between projects: a message flood or slow Herdr calls in one project do not starve the others.
+
+## 13. Herdr's role in GEAR
+
+Herdr is the foundation; GEAR only adds the "work layer" Herdr lacks (tasks, plans, message handling state, roles, reviews, quota). Verified against the local Herdr 0.9.1 source and docs (see references.md):
+
+| GEAR needs | Herdr capability |
 |---|---|
-| 承载引擎和看板 | 插件 manifest 的 `[[panes]]`；引擎跑在插件 pane 里 |
-| 用户快捷入口 | 插件 `[[actions]]` + Herdr 按键绑定（action 无参数、异步，只做固定入口，不做 Agent 业务接口） |
-| 开线、换人 | `pane split` / `tab create`、`agent start --kind`、`worktree create/open/remove` |
-| 派活、续做、门铃 | `agent prompt`（往 pane 终端输入文本 + 回车） |
-| 观测 | `agent list/get/read`、`pane process-info`；可选事件订阅 / `[[events]]` 钩子 |
-| 定位调用方 | Herdr 注入的 `HERDR_WORKSPACE_ID / HERDR_PANE_ID / HERDR_SOCKET_PATH` |
-| 在 Herdr 里可见 | `pane/workspace report-metadata`（键名仅 `[A-Za-z0-9_-]`，如 `gear_project`）、`notification show` |
-| remote | 插件和 GEAR 装在目标执行端，用户经 Herdr remote 查看操作 |
-| 持久状态 | Herdr 不提供插件存储，GEAR 自己在 `HERDR_PLUGIN_STATE_DIR` 放 SQLite |
+| Host the board | Plugin `[[panes]]` opened by a plugin action bound to a key (`[[keys.command]]`); the engine is a background process, not a pane |
+| User shortcuts | Plugin `[[actions]]` + Herdr key bindings (actions take no parameters and are async; only fixed entry points, not an Agent business interface) |
+| Open lanes, change people | `pane split` / `tab create`, `agent start --kind`, `worktree create/open/remove` |
+| Dispatch, continuation, doorbell | `agent prompt` (types text + Enter into the pane terminal) |
+| Observation | `agent list/get/read`, `pane process-info`; optional event subscription / `[[events]]` hooks |
+| Locate the caller | Herdr-injected `HERDR_WORKSPACE_ID / HERDR_PANE_ID / HERDR_SOCKET_PATH` |
+| Visible in Herdr | `pane/workspace report-metadata` (key names only `[A-Za-z0-9_-]`, e.g. `gear_project`), `notification show` |
+| remote | Plugin and GEAR installed on the target execution host; the user views and operates via Herdr remote |
+| Persistent state | Herdr provides no plugin storage; GEAR keeps its own SQLite in `HERDR_PLUGIN_STATE_DIR` |
 
-Herdr 已核对的插件 manifest/API 没有供插件声明的持久定时任务，所以计时类工作（park 到期、复盘定时、产出采样）由引擎循环负责。
+The Herdr plugin manifest/API we verified has no persistent scheduled tasks that a plugin can declare, so timing work (park expiry, review timers, output sampling) is handled by the engine loop.
 
-## 14. 命令面
+## 14. Command surface
 
-日常业务只有 4 个入口（执行线只需记前 2 个）：
+Day-to-day business has only 4 entry points (lanes only need to remember the first 2):
 
-| 命令 | 谁用 | 做什么 |
+| Command | Who uses it | What it does |
 |---|---|---|
-| `gear` | 所有角色 | 首页：按角色返回该看的东西。执行线：当前任务包、给我的回复、下一步建议；舰长：简报快照、本批收件箱线程（带前文）、到期复盘。可按 ID 展开详情；`--all` 只扩大可查看范围 |
-| `gear send` | 执行线、舰长 | 所有上报：`--kind progress/question/blocked/result`，`--about <上游任务>`；也用于回答收到的问题、确认采用新版任务（引用原消息 ID 和版本） |
-| `gear reply` | 舰长 | 处理确切消息 ID：记录决定并回复；未完成的标等待对象和复核条件 |
-| `gear plan apply` | 舰长 | 所有计划与人员变更：插队、重排、细化、park/retire、临时工、复盘结论（不改计划时 `--keep "理由"`）。返回"计划版本已生效"及待执行/待交接项；人员变化的实际完成由引擎执行后在首页显示 |
+| `gear` | All roles | Home page: returns what each role should look at. Lane: current task packet, replies to me, suggested next step; captain: briefing snapshot, this batch of inbox threads (with prior context), due reviews. Details can be expanded by ID; `--all` only widens the viewable scope |
+| `gear send` | Lanes, captain | All reporting: `--kind progress/question/blocked/result`, `--about <upstream task>`; also used to answer questions received and to confirm adopting a new task version (citing the original message ID and version) |
+| `gear reply` | Captain | Handle exact message IDs: record the decision and reply; mark unfinished ones with whom they wait on and the re-check condition |
+| `gear plan apply` | Captain | All plan and staffing changes: queue jumps, reordering, refinement, park/retire, temp workers, review conclusions (`--keep "reason"` when the plan is unchanged). Returns "plan version in effect" plus pending execution/handover items; actual completion of staffing changes is shown on the home page after the engine executes them |
 
-`gear` 读取首页或详情不关闭事项。`plan apply --keep` 仍须关联所依据的计划版本、复盘事项与下次检查点，不关闭未列出的消息或后来新到的事项。
+Reading the home page or details with `gear` does not close items. `plan apply --keep` must still link the plan version it is based on, the review item, and the next checkpoint, and does not close unlisted messages or items that arrived later.
 
-另有安装运维入口（如启动引擎的 `gear run`），Agent 不需要学。用户主要看插件 pane 里的看板。
+There are also install/ops entry points (`gear admin init`, `gear admin stop`; `gear run` only for debugging) that Agents do not need to learn. The user mainly looks at the board, opened by a hotkey.
 
-## 15. 可视与人的介入
+## 15. Visibility and human intervention
 
-- 看板/首页：任务视图、线视图、收件箱、引擎健康（最近成功扫描、观察失败、运行代码与配置版本）、计划与实际的差异。
-- 默认只在这些情况找用户：越权、预算耗尽、舰长不可用、监督异常、需要人工核对的资源交接、项目验收。用户随时可主动介入。
-- 所有决定和操作有审计记录。
+- **Board** — what the user and the captain look at. Opened and closed by a Herdr hotkey (plugin action, like the file viewer), never a pane that must stay open. It shows the **plan**, not agent liveness (Herdr's own agent panel shows working/idle):
+  - totals: how many tasks/stories, how many done;
+  - per lane: its tasks and their state (e.g. `gear-data`: T-1 done, T-2 in review, T-3 queued);
+  - items waiting for the captain or the user;
+  - temp slots in use / quota;
+  - later: the task dependency graph.
+  - A single warning line only when the engine is down or observation fails.
+- Home page (`gear`): the role-specific view for agents.
+- **Engine log**: `engine.log` next to the database, timestamped, verbose while GEAR is in development — the first place to look when something goes wrong.
+- By default the user is sought only in these cases: out-of-authority requests, budget exhausted, captain unavailable, supervision anomalies, resource handovers needing manual checking, project acceptance. The user can step in on their own at any time.
+- All decisions and operations have audit records.
 
-## 16. 运行形态
+## 16. Runtime form
 
-- 插件唯一 tab 承载唯一引擎。切 tab、隐藏视图、本地 remote 客户端断开不终止目标端循环；真正关闭承载 tab 会停止引擎，下次打开核对恢复。没有外部观察者时不承诺自动复活或即时告警。引擎停着时 `gear send` 仍能写入收件箱，门铃待恢复后补发。
-- 项目绑定执行端和 session；运行代码与配置版本可查，变更显式切换；改了文件不等于已生效。
-- 初始化对话（最终形态）：发现执行端可用 Agent → 舰长提队伍方案（长期线数量与类型组合、临时额度与用途）→ 用户对话调整 → 确认每条线的角色与 CLI 类型、容量及配置版本后落地。
+- The engine is a **background process with no pane**: any `gear` call starts it when its lock is free; tabs, panes and clients do not affect it; `gear admin stop` stops it (upgrade, uninstall). If it dies, the next `gear` call restarts it and the recovery checks run. While it is down, `gear send` still writes to inboxes and doorbells follow after recovery. The user never runs or watches it. The one exception is `gear board`: it is read-only and does not start the engine, so it can show that the engine is down.
+- A project is bound to an execution host and session; running code and configuration versions are queryable, and changes are switched explicitly; changing a file does not mean it is in effect.
+- Initialization: the kickoff of §8a.
 
-## 17. 不变量（引擎强制，不靠 Agent 读过说明）
+## 17. Invariants (enforced by the engine, not relying on Agents having read instructions)
 
-1. 单一权威状态和队列来源；一条线一个续做控制者。
-2. 一个写入资源同一时刻一个写入者；不确定就不移交。
-3. 每条线最多一个待核对投递；结果不明不重发。
-4. 消息逐项确认；领取、已读、门铃送达都不算处理完。
-5. 未知不当成功；观察失败不当没事。
-6. 旧代次（舰长、尝试）不能覆盖新状态。
-7. 完成绑定合同和产物版本；取消不算交付。
-8. 成果不丢：关会话、移除 worktree、删分支分开，未交付成果保留。
+1. A single authoritative state and queue source; one continuation controller per lane.
+2. A write resource has one writer at any time; if uncertain, do not transfer.
+3. Each lane has at most one delivery that needs check; if the result is unclear, do not resend.
+4. Messages are acknowledged item by item; being fetched, read, or doorbell-delivered does not count as handled.
+5. Unknown is not treated as success; observation failure is not treated as all-clear.
+6. Old generations (captain, attempt) cannot overwrite new state.
+7. Completion is bound to the contract and artifact versions; cancellation is not delivery.
+8. Results are not lost: closing sessions, removing worktrees, and deleting branches are separate, and undelivered results are kept.
 
-## 18. 不做
+## 18. Not doing
 
-多层主管；核心擅自选型或越权替换 Agent；Web/移动端；跨多执行端联合调度（首版）；重写 Git/worktree/终端管理；内置研发方法论；绑定 GitHub/BMAD；通用工作流引擎；承诺任何模型能完成任意任务。
+Multiple supervisor layers; the core choosing technologies on its own or replacing Agents beyond its authority; Web/mobile; joint scheduling across multiple execution hosts (first version); rewriting Git/worktree/terminal management; built-in development methodology; binding to GitHub/BMAD; a general-purpose workflow engine; promising that any model can complete any task.
 
-## 19. 验收场景
+## 19. Acceptance scenarios
 
-| 编号 | 场景 | 必须观察到 |
+| ID | Scenario | Must be observed |
 |---|---|---|
-| AC-01 | 线写了两行后正常停轮 | 无人催办即续做同一任务；或形成明确的不能续做原因 |
-| AC-02 | prompt 已提交但未观察到开始 | 不重复粘贴、不双开；核对后恢复 |
-| AC-03 | 限流、额度耗尽、等授权、人工暂停 | 各有对应状态与处理，不无限发"继续" |
-| AC-04 | 途中插入紧急 bug | 有实际责任线和安全接手点；原任务 ID、成果、恢复条件保留；复盘确认先后与里程碑影响 |
-| AC-05 | 十条需处理事项，舰长只处理一条 | 只关一条，其余仍可取；同任务不同问题不被误关 |
-| AC-06 | 某线连续刷消息、紧急消息持续到来 | 普通旧事项仍有处理机会；不吞紧急；前文可得 |
-| AC-07 | 消息持续到来时复盘到期 | 复盘仍在回合边界得到处理，产出结构化结论 |
-| AC-08 | `gear send` 成功、失败、提交后丢回执、引擎离线 | 成功即已入收件箱并有 ID；失败当场有原因；丢回执可凭 request_id 查回；引擎离线消息不丢 |
-| AC-09 | 有可信长测试但无 commit；有 diff 但偏离合同 | 前者不误判停工；后者被复查并产生纠偏动作 |
-| AC-10 | 长期线无活 | 安静待命，不发消息；出现在复盘快照；park 到期自动重评估；新任务立即派 |
-| AC-11 | 临时工交付后仍在写文件 | 不提前关闭、不丢产物；条件满足后自动释放额度 |
-| AC-12 | 临时工超额 | 明确排队，不绕过额度 |
-| AC-13 | 10 条线退 2 条 | 停止派活；在途成果保留并交接；花名册如实；舰长收到合并事项；退役完成后容量才变 |
-| AC-14 | 执行线进程退出、pane 关闭 | 不自动把原 worktree 交给新人；人工核对后移交 |
-| AC-15 | 舰长额度耗尽 | 冻结舰长侧变更、旧代次失效并逐项核对；持久显示与通知用户；只由用户手动发起重新接入/换舰长，不自动启用备用；旧会话不能越权 |
-| AC-16 | 正常换舰长品牌 | 不靠同名；交接包完整；新舰长确认后激活，不重做已生效决定 |
-| AC-17 | 两个项目同一 session，相同任务号 | 不串派、不串回复；一个项目洪峰不拖慢另一个 |
-| AC-18 | 引擎重开、客户端断连、Herdr 短时不可达 | 不双开、不重复催办；不可达显示未知，重连核对 |
-| AC-19 | 合同更新与执行线迟到结果交错 | 旧版本不能完成新合同；通知送达不等于已采用 |
-| AC-20 | 候选或验收条件变更 | 旧批准需重核；取消不进完成统计 |
-| AC-21 | 不装任何研发框架，只给目标和验收条件 | 能完成派发、续做、协作、验证、交付、回收的闭环 |
-| AC-22 | 换不同 CLI 担任舰长/执行/审核 | 角色行为一致；能力差异明确显示 |
+| AC-01 | A lane writes two lines and then ends its turn normally | Continues the same task with nobody nudging; or a clear reason why it cannot continue is formed |
+| AC-02 | A prompt was submitted but no start was observed | No duplicate paste, no double start; recovers after checking |
+| AC-03 | Rate limiting, quota exhaustion, waiting for authorization, manual pause | Each has its corresponding state and handling; no endless "continue" |
+| AC-04 | An urgent bug is inserted midway | There is an actual responsible lane and a safe takeover point; the original task's ID, results, and resume condition are kept; a review confirms ordering and milestone impact |
+| AC-05 | Ten action items, the captain handles only one | Only one is closed; the rest remain fetchable; different questions on the same task are not closed by mistake |
+| AC-06 | A lane keeps spamming messages; urgent messages keep arriving | Old ordinary items still get a chance to be handled; urgent ones are not swallowed; prior context is available |
+| AC-07 | A review comes due while messages keep arriving | The review is still handled at a turn boundary and produces a structured conclusion |
+| AC-08 | `gear send` succeeds, fails, loses its receipt after commit, engine offline | Success means it is in the inbox with an ID; failure gives a reason on the spot; a lost receipt can be queried back by request_id; messages are not lost while the engine is offline |
+| AC-09 | A trustworthy long test is running but there is no commit; there is a diff but it deviates from the contract | The former is not misjudged as stopped work; the latter is re-checked and produces a corrective action |
+| AC-10 | A long-lived lane has no work | Quiet standby, no messages; appears in the review snapshot; park expiry automatically re-evaluates; new tasks are dispatched immediately |
+| AC-11 | A temp worker is still writing files after delivery | Not closed early, no artifacts lost; quota is released automatically once conditions are met |
+| AC-12 | Temp workers over quota | Explicitly queued; quota is not bypassed |
+| AC-13 | 2 of 10 lanes retire | Dispatch stops; in-flight results are kept and handed over; the roster is accurate; the captain receives a merged item; capacity changes only after retirement completes |
+| AC-14 | A lane's process exits, the pane closes | The original worktree is not automatically given to a newcomer; transferred after manual checking |
+| AC-15 | Captain quota exhausted | Captain-side changes frozen, old generation invalidated and checked item by item; shown persistently and the user notified; re-onboarding/replacing the captain only initiated manually by the user, no backup activated automatically; the old session cannot exceed its authority |
+| AC-16 | Normal captain brand change | Not by same name; handover packet complete; activated after the new captain confirms; decisions already in effect are not redone |
+| AC-17 | Two projects in the same session, same task numbers | No cross-dispatch, no cross-reply; a flood in one project does not slow the other |
+| AC-18 | Engine reopened, client disconnected, Herdr briefly unreachable | No double start, no duplicate nudges; unreachable shown as unknown, checked on reconnect |
+| AC-19 | Contract update interleaved with a lane's late result | An old version cannot complete a new contract; notification delivered does not mean adopted |
+| AC-20 | Candidate or acceptance conditions change | Old approvals need re-checking; cancellations do not count toward completion statistics |
+| AC-21 | No development framework installed, only a goal and acceptance conditions given | Can complete the loop of dispatch, continuation, collaboration, verification, delivery, and reclamation |
+| AC-22 | Different CLIs serve as captain/executor/reviewer | Role behavior is consistent; capability differences are shown explicitly |
 
-**指标**：人工催办次数、人工插手协调次数、未受监督的未完成任务数、重复派发、误回收、错误解锁、跑偏发现延迟、紧急任务开始延迟、舰长消息积压与最老等待。必须结合误催、漏项、错误完成一起判断。
+**Metrics**: number of manual nudges, number of manual coordination interventions, number of unsupervised unfinished tasks, duplicate dispatches, mistaken reclamations, wrong unblocks, drift detection latency, urgent task start latency, captain message backlog and oldest wait. These must be judged together with false nudges, missed items, and wrong completions.
 
-## 20. 变更记录
+## 20. Change log
 
-- v0.8（2026-10-21）：按 10 余轮 Claude × Codex 讨论重写。加入计划会变形与活计划、舰长不被淹（同步发送+线程收件箱+门铃）、引擎排复盘、看产出、长期线待命与 park、临时工交付即释放、不辞而别与额度耗尽、多项目与身份代次、Herdr 角色核查、4 个日常命令；SQLite 为唯一权威状态，CLI 事务直写、引擎独占 Herdr 副作用；Firstmate 等参考项目取舍单列。
-- v0.7 及以前：见 [archive/PRD-v0.7.md](archive/PRD-v0.7.md)。
+- v0.9 (2026-10-22): after the walking skeleton ran on a real Herdr. Added positioning (§0), kickoff and the no-popup rule (§8a, C-13), the quota policy (wait for reset / fall back), the parallel develop–review–merge loop (§10), the plan-centred hotkey board and the engine log (§15), the background engine (§16, C-11).
+
+- v0.8 (2026-10-21): rewritten after 10+ rounds of Claude × Codex discussion. Added plan distortion and the living plan, keeping the captain from drowning (synchronous send + threaded inbox + doorbell), engine-scheduled reviews, watching output, long-lived lane standby and park, temp worker release on delivery, leaving without notice and quota exhaustion, multiple projects and identity generations, Herdr role verification, 4 daily commands; SQLite as the single authoritative state, CLI writes directly in transactions, engine owns Herdr side effects exclusively; trade-offs for Firstmate and other reference projects listed separately.
+- v0.7 and earlier: see [archive/PRD-v0.7.md](archive/PRD-v0.7.md).

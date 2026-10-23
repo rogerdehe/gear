@@ -1,165 +1,168 @@
-# GEAR MVP 技术方案
+# GEAR MVP Technical Plan
 
-依据：[PRD v0.8](PRD.md)。状态：待实现；本文是第一步落地的骨架与工作量，不宣称已实机验证。上一版见 [archive/TECH-MVP-v0.7.md](archive/TECH-MVP-v0.7.md)。
+> **Status 2026-10-22.** The walking skeleton described here runs end to end on a real Herdr (Rust, not Python). Further work follows [PRD v0.9](PRD.md) and is driven by GEAR itself; this document is kept as history.
 
-## 1. MVP 要做到什么
+Basis: [PRD v0.8](PRD.md). Status: to be implemented; this document is the skeleton and effort estimate for the first landing step and does not claim real-machine verification. Previous version: [archive/TECH-MVP-v0.7.md](archive/TECH-MVP-v0.7.md).
 
-**一条完整的最小链路**，能让正在跑的项目用上：能安全地改计划、驱动执行线干活、处理消息、核对产出、确认交付。
+## 1. What the MVP must achieve
 
-原则：
+**One complete minimal chain** that a running project can use: safely change the plan, drive lanes to work, handle messages, check output, and confirm delivery.
 
-- 削减的是**通用性、自动化程度和界面**；三条底线不削——不双写、不丢成果、不把未知当成功。
-- **正常路径自动推进；异常路径停下来交给人核对**，不为全自动堆检测系统。
-- 产品代码目标 ≤ 3000 行（Python 标准库，零第三方运行依赖，不含测试）；接近上限先砍可选自动化和展示。
-- 按可维护的产品物理行计，含正常空行和注释；测试另计。必要 shell/嵌入脚本单列，不把产品逻辑藏进模板、测试或超长行绕过预算。"零第三方运行依赖"指不额外引入 Python 第三方包，仍依赖已安装的 Herdr、Git 和受支持 Agent CLI。
+Principles:
 
-## 2. 范围
+- What is cut is **generality, degree of automation, and interface**; three bottom lines are not cut — no double writes, no lost results, never treating unknown as success.
+- **The normal path advances automatically; the abnormal path stops and hands over to a human to check**; no piling up detection systems for full automation.
+- Product code target ≤ 3000 lines (Python standard library, zero third-party runtime dependencies, excluding tests); when approaching the limit, cut optional automation and presentation first.
+- Counted as maintainable product physical lines, including normal blank lines and comments; tests counted separately. Necessary shell/embedded scripts are listed separately; product logic must not be hidden in templates, tests, or overlong lines to get around the budget. "Zero third-party runtime dependencies" means no additional third-party Python packages are introduced; it still depends on installed Herdr, Git, and supported Agent CLIs.
 
-### 2.1 MVP 必须做
+## 2. Scope
 
-| 能力 | MVP 做到 |
+### 2.1 MVP must do
+
+| Capability | MVP achieves |
 |---|---|
-| 状态 | SQLite 单一权威；短事务、request_id 重放、代次与版本核对 |
-| 计划与任务 | 严格小格式的计划草稿 → `gear plan apply` 校验并按版本应用；生成有界 PLAN.md 和任务包；插队、重排、手工细化；待验证与完成分开；完成需证据。严格草案仅允许修改任务合同、就绪顺序、人员目标和验收引用；运行观察、执行尝试、消息处理及实际写入权不能由草案任意覆盖。在途合同切换和插队遵守 PRD §6，草案修改 owner 不代表交接完成 |
-| 续做 | 轮询 Herdr；三类动作分开；单待核对投递、冷却、预算；限流/额度/认证/blocked/未知分别处理；固定已验证 CLI 配置的读屏特征 |
-| 消息 | `gear send` 同步写入目标收件箱；线程收件箱（紧急优先、保留最老普通名额、单发件人上限、前文展开）；`gear reply` 逐项处理/等待；回复入对方收件箱 |
-| 门铃 | 收件人空闲时提醒一句，单未确认门铃 |
-| 依赖 | `--about <上游任务>` 路由到当前负责人，其余送舰长；上游验证/交付后重新评估 |
-| 舰长节奏 | 有界简报包；五种复盘触发、同因合并、检查点到期；结论经 `plan apply`；有限提醒后通知用户；舰长停着也受监督 |
-| 长期线 | 待命（静默、计时、进复盘快照）；park 通过计划草稿设置截止时间或已支持的恢复条件，到期重评估（无独立 park 命令、无任意条件语言）；hold 不被新任务打断 |
-| 临时工 | 额度；从预先登记的空 pane 池启动，使用固定已确认配置和现有隔离 worktree；自动释放仅走 PRD §9 的正常交付安全路径，确认关闭后释放额度；同一件活返工/追问时 resume 原会话，不可用则新会话读任务包并标注；新活开新临时工；写入权另行核对 |
-| 退役/失联/不可用 | 花名册计划与实际差异；停止派活；在途冻结；写入权异常时转人工核对；舰长不可用时冻结、旧代次作废、通知用户 |
-| 产出 | 定时 git 快照（HEAD、工作区变化、证据文件）；缺证据/最长未复查生成"需要核对"；舰长看 diff 并登记判断 |
-| 多项目 | 同一执行端/session 多项目登记、路由隔离、项目间公平 |
-| 身份 | 受管 Agent 都由 GEAR 启动接入，继承固定调用上下文 `GEAR_CTX`（座位+代次）；现成会话需由 GEAR 重新启动接入（支持的 CLI 用 resume 保留上下文）；绑定不明暂停该线（design/03） |
-| 可视 | `gear` 首页（按角色）；插件 pane 里的文本看板；pane title 显示角色与任务 |
-| 运行 | 插件 manifest：pane 承载唯一引擎 + 打开入口 action；单实例锁、心跳；配置 TOML；真实 remote 验证 |
-| 迁移 | 盘点旧 keeper 的实际实例、作用域与运行版本，保留 hold/等待/在途状态；显式交接监督权，发现控制者重叠就拒绝接管；先停旧再启新，提供可核对的回滚路径 |
+| State | SQLite as single authority; short transactions, request_id replay, generation and version checks |
+| Plan and tasks | Plan draft in a strict small format → `gear plan apply` validates and applies by version; generates a bounded PLAN.md and task packets; queue jumps, reordering, manual refinement; awaiting verification kept separate from done; done requires evidence. The strict draft may only modify task contracts, ready order, staffing targets, and acceptance references; runtime observations, execution attempts, message handling, and actual write rights cannot be arbitrarily overwritten by the draft. In-flight contract switches and queue jumps follow PRD §6; changing the owner in the draft does not mean the handover is complete |
+| Continuation | Poll Herdr; three kinds of action kept separate; single delivery that needs check, cooldown, budget; rate limit/quota/authentication/blocked/unknown handled separately; fixed screen-reading signatures for verified CLI configurations |
+| Messages | `gear send` writes synchronously into the target inbox; threaded inbox (urgent first, reserved slot for the oldest ordinary item, per-sender cap, prior-context expansion); `gear reply` handles/waits item by item; replies go into the other party's inbox |
+| Doorbell | One-line reminder when the recipient is idle; single unconfirmed doorbell |
+| Dependencies | `--about <upstream task>` routes to the current owner, everything else goes to the captain; re-evaluate after upstream verification/delivery |
+| Captain rhythm | Bounded briefing packet; five review triggers, same-cause merging, checkpoint expiry; conclusions via `plan apply`; notify the user after limited reminders; the captain is also supervised when stopped |
+| Long-lived lanes | Standby (silent, timed, included in the review snapshot); park sets a deadline or a supported resume condition via the plan draft and re-evaluates on expiry (no separate park command, no arbitrary condition language); hold is not interrupted by new tasks; each lane's single long-term worktree is created once at onboarding via `herdr worktree create --branch home/<lane> --base dev --label <project>-<lane>`, task branches are switched inside it (see [design/17-conventions.md](design/17-conventions.md)) |
+| Temp workers | Quota; for each new task the engine creates the temp worker's own worktree and pane via `herdr worktree create` and starts it with a fixed confirmed configuration; for rework/resume it reopens with `herdr worktree open --branch <task-branch>`; after the result is merged, `herdr worktree remove` (removes checkout + workspace, keeps the branch); automatic release only follows the PRD §9 normal-delivery safe path, and quota is released after the close is confirmed; when the same work needs rework/follow-up, resume the original session, and if unavailable a new session reads the task packet and is marked; new work opens a new temp worker; write rights are checked separately |
+| Retirement/lost contact/unavailable | Roster plan vs. actual difference; stop dispatching; in-flight frozen; write-right anomalies go to manual checking; when the captain is unavailable: freeze, invalidate old generation, notify the user |
+| Output | Periodic git snapshots (HEAD, working-tree changes, evidence files); missing evidence/longest-unreviewed creates "needs check"; the captain looks at the diff and registers a judgment |
+| Multiple projects | Registration of multiple projects on the same execution host/session, routing isolation, fairness between projects |
+| Identity | Managed Agents are all started and onboarded by GEAR and inherit a fixed call context `GEAR_CTX` (seat + generation); existing sessions must be restarted and onboarded by GEAR (supported CLIs use resume to keep context); unclear binding pauses that lane (design/03) |
+| Visibility | `gear` home page (by role); text board in the plugin pane; pane title shows role and task |
+| Runtime | Plugin manifest: pane hosts the single engine + an open-entry action; single-instance lock, heartbeat; TOML configuration (no hand-written worktree paths); real remote verification |
+| Migration | Inventory the old keeper's actual instances, scopes, and running versions, keeping hold/waiting/in-flight state; explicitly hand over supervision, refuse to take over if overlapping controllers are found; stop the old before starting the new, and provide a checkable rollback path |
 
-MVP 禁止受管任务主动创建未登记的脱离终端写入作业；不做进程树扫描。接入历史会话时不能假定它遵守过该限制，异常写入资源保持待核对。
+The MVP forbids managed tasks from proactively creating unregistered detached write jobs; no process-tree scanning. When onboarding historical sessions, it cannot be assumed they obeyed this restriction; abnormal write resources stay at needs check.
 
-### 2.2 MVP 延后（最终形态有，第一步不做）
+Worktrees and panes are created through Herdr's worktree API (`herdr worktree create/open/remove`); configuration contains no worktree paths. Default branch model: `main` (release), optional `staging`, `dev` (integration), task branches `<lane>/<task-id>-<slug>` from `dev`. See [design/17-conventions.md](design/17-conventions.md).
 
-| 延后项 | MVP 的替代做法 |
+### 2.2 MVP deferred (in the final form, not in the first step)
+
+| Deferred item | MVP alternative |
 |---|---|
-| 自动创建 workspace/worktree | 使用预先登记的 pane 池和现有隔离 worktree |
-| 异常情况下自动移交写入权 | 标"待核对"，人工确认后移交 |
-| 事件订阅 / `[[events]]` 钩子 | 轮询 + 对账；探针通过后再作为降延迟优化 |
-| 任意 Markdown 解析、语义 diff、归档文档 | 一种严格小格式；归档只在库里查 |
-| 常设裁决自动执行、横向协作协议 | 送舰长 |
-| 自动按时轮换舰长、跨执行端、跨项目共享线 | 不做 |
-| 完整 TUI、metadata 美化、复杂审计筛选 | 文本首页和文本看板 |
-| 初始化对话 | 静态 TOML 承载用户已经逐线确认的角色、CLI 类型与配置，并展示实际生效值；缺失或变更项先明确确认，不能按可用模型或 pane 名静默猜测，不要求用户重复确认已有决定 |
+| Automatic transfer of write rights in abnormal situations | Mark "needs check", transfer after manual confirmation |
+| Event subscription / `[[events]]` hooks | Polling + reconciliation; used as a latency optimization after probes pass |
+| Arbitrary Markdown parsing, semantic diff, archive documents | One strict small format; archive only queried in the database |
+| Automatic execution of standing rulings, lateral collaboration protocol | Sent to the captain |
+| Automatic scheduled captain rotation, cross-execution-host, lanes shared across projects | Not done |
+| Full TUI, metadata polish, complex audit filtering | Text home page and text board |
+| Initialization dialogue | Static TOML carries the roles, CLI types, and configuration the user has already confirmed lane by lane, and shows the actual effective values; missing or changed items are confirmed explicitly first, never guessed silently from available models or pane names; the user is not required to re-confirm existing decisions |
 
-**2026-10-21 用户决定**：
-- 临时工 resume 纳入 MVP：新活开新临时工；同一件活需要它回来时 resume 原会话；resume 不可用退回新会话并标注。实现见 [design/10-staff.md](design/10-staff.md)。
-- 换舰长只由用户手动切换，MVP 不做任何自动切换；舰长不可用时冻结、显示、通知。实现见 [design/03-identity-seats.md](design/03-identity-seats.md)。
+**User decisions 2026-10-21**:
+- Temp worker resume is included in the MVP: new work opens a new temp worker; when the same work needs it back, resume the original session; if resume is unavailable, fall back to a new session and mark it. Implementation in [design/10-staff.md](design/10-staff.md).
+- Replacing the captain is switched only manually by the user; the MVP does no automatic switching of any kind; when the captain is unavailable: freeze, show, notify. Implementation in [design/03-identity-seats.md](design/03-identity-seats.md).
 
-模块级技术设计见 [design/](design/00-overview.md)；代码预算以 design/00-overview.md 当前逐模块预算为准，本文不另维护数字。
+Module-level technical design is in [design/](design/00-overview.md); the code budget follows the current per-module budget in design/00-overview.md, and this document does not maintain separate numbers.
 
-## 3. 架构
+## 3. Architecture
 
 ```text
-本地 Herdr 客户端 ── Herdr remote ── 目标执行端 Herdr session
-                                       ├─ 舰长 / 长期线 / 临时工（各在自己的 pane）
-                                       │     └─ 调用 gear（短命命令）──┐
-                                       └─ 插件 pane：gear run（唯一引擎）   │
-                                             ├─ 轮询 Herdr、续做、门铃      │
-                                             ├─ 复盘调度、产出采样          │
-                                             ├─ 临时工/人员的 Herdr 副作用  │
-                                             └─ 文本看板                    │
-                                       SQLite（HERDR_PLUGIN_STATE_DIR）◀──┘
+Local Herdr client ── Herdr remote ── Target execution host Herdr session
+                                       ├─ Captain / long-lived lanes / temp workers (each in its own pane)
+                                       │     └─ call gear (short-lived command) ──┐
+                                       └─ Plugin pane: gear run (single engine)   │
+                                             ├─ Poll Herdr, continuation, doorbell│
+                                             ├─ Review scheduling, output sampling│
+                                             ├─ Herdr side effects for temp/staff │
+                                             └─ Text board                        │
+                                       SQLite (HERDR_PLUGIN_STATE_DIR) ◀──────────┘
 ```
 
-- **gear 命令**：短事务直写 SQLite，当场返回实际结果；只做纯数据变化。
-- **引擎**：唯一执行 Herdr 副作用的进程；所有副作用先记意图、再执行、再记结果；结果不明保持未知。
-- **Herdr 适配层**：一处封装，通过 `HERDR_BIN_PATH` 调 CLI，统一超时与错误分类；调用有并发上限，慢调用不阻塞其他项目。
+- **gear commands**: write SQLite directly in short transactions and return the actual result on the spot; only pure data changes.
+- **Engine**: the only process that executes Herdr side effects; every side effect records intent first, then executes, then records the result; an unclear result stays unknown.
+- **Herdr adapter layer**: a single wrapper that calls the CLI via `HERDR_BIN_PATH`, with unified timeouts and error classification; calls have a concurrency cap, and slow calls do not block other projects.
 
-## 4. 数据（最小表）
+## 4. Data (minimal tables)
 
-| 表 | 内容 |
+| Table | Contents |
 |---|---|
-| projects | 项目、绑定执行端/session、配置版本、额度 |
-| seats | 角色座位：项目、角色（舰长/长期线/临时工）、pane、会话引用、代次、状态（工作/待命/park/hold/退役中/失联/待核对） |
-| plans | 计划版本、草稿文本、应用结果 |
-| tasks | 合同（版本化）、顺序、状态、负责线、依赖、证据点、优先级 |
-| attempts | 任务的执行尝试、代次、候选版本、结果 |
-| messages | 线程、发件人、收件人、类型、紧急度、正文、状态、处理结果、等待对象 |
-| operations | 副作用意图/结果/回执（投递、启动、关闭、门铃） |
-| reviews | 复盘事项：触发原因、持续信息、决定、下次检查点 |
-| samples | 产出快照：HEAD、工作区摘要、证据文件、时间 |
-| requests | request_id → 结果（重放） |
+| projects | Project, bound execution host/session, configuration version, quota |
+| seats | Role seats: project, role (captain/long-lived lane/temp worker), pane, session reference, generation, status (working/standby/park/hold/retiring/lost contact/needs check) |
+| plans | Plan version, draft text, apply result |
+| tasks | Contract (versioned), order, status, owning lane, dependencies, evidence point, priority |
+| attempts | Execution attempts of a task, generation, candidate version, result |
+| messages | Thread, sender, recipient, type, urgency, body, status, handling result, waiting-on |
+| operations | Side-effect intent/result/receipt (delivery, start, close, doorbell) |
+| reviews | Review items: trigger reason, persistence info, decision, next checkpoint |
+| samples | Output snapshots: HEAD, working-tree summary, evidence files, time |
+| requests | request_id → result (replay) |
 
-## 5. 四个命令的返回合同
+## 5. Return contracts of the four commands
 
-| 命令 | 当场完成并返回 | 不代表 |
+| Command | Completed on the spot and returned | Does not mean |
 |---|---|---|
-| `gear` | 按角色的有界视图；不关闭任何事项 | — |
-| `gear send` | 已写入目标收件箱 + 消息 ID；门铃状态另报 | 对方已读或已处理 |
-| `gear reply` | 列出的消息已记录结果（关闭或等待），回复已入对方收件箱 | 任务完成、写入权已移交 |
-| `gear plan apply` | 计划新版本已生效 + 待执行/待交接项清单 | 临时工已启动、退役已完成（由引擎执行后在首页显示） |
+| `gear` | Bounded view by role; closes no items | — |
+| `gear send` | Written into the target inbox + message ID; doorbell status reported separately | The recipient has read or handled it |
+| `gear reply` | The listed messages have a recorded result (closed or waiting), and the reply is in the other party's inbox | Task complete, write rights transferred |
+| `gear plan apply` | New plan version in effect + list of pending execution/handover items | Temp worker started, retirement complete (shown on the home page after the engine executes) |
 
-失败都当场给原因；提交后丢回执用同一 request_id 查回。
+All failures give a reason on the spot; a receipt lost after commit is queried back with the same request_id.
 
-## 6. 引擎循环（每 3–5 秒一轮，可配置）
+## 6. Engine loop (one round every 3–5 seconds, configurable)
 
-1. 读一次 `herdr agent list`，与登记的座位对账（缺失、身份变化、状态）。观察失败本轮标记，不推断退出。
-2. 对每条线：判断三类动作 → 需要时投递任务指针（遵守单待核对投递、冷却、预算）。
-3. 门铃：收件人空闲且有待处理事项、无未确认门铃 → 提醒。派活、续做与门铃共同遵守每线单待核对投递，不能因两个类别各自无记录而在同轮重复投递。
-4. 计划与人员：执行 `plan apply` 产生的待执行项（开/关临时工、park 到期、退役交接），先核对版本和实际状态，过期动作不照做。
-5. 定时项：复盘触发检测与合并；产出采样（较低频率，如每 20 分钟）；提醒预算。
-6. 写心跳；刷新看板和 pane title。
+1. Read `herdr agent list` once and reconcile with registered seats (missing, identity changes, status). An observation failure is marked for this round; exit is not inferred.
+2. For each lane: decide among the three kinds of action → deliver a task pointer when needed (respecting single delivery that needs check, cooldown, budget).
+3. Doorbell: recipient idle, has pending items, no unconfirmed doorbell → remind. Dispatch, continuation, and doorbell jointly respect the per-lane single delivery that needs check; they must not double-deliver in the same round just because each category has no record of its own.
+4. Plan and staffing: execute the pending items produced by `plan apply` (open/close temp workers including their Herdr worktrees, park expiry, retirement handover), checking version and actual state first; stale actions are not carried out.
+5. Timed items: review trigger detection and merging; output sampling (lower frequency, e.g. every 20 minutes); reminder budget.
+6. Write heartbeat; refresh the board and pane titles.
 
-## 7. 代码预算
+## 7. Code budget
 
-以 [design/00-overview.md](design/00-overview.md) 的逐模块预算为准：当前 **2,510–3,140 行**，超过 3000 行预算，实现时先压展示、不压行为，仍超出则带数字回到用户决定。
+Follows the per-module budget in [design/00-overview.md](design/00-overview.md): currently **2,510–3,140 lines**, exceeding the 3000-line budget; during implementation, compress presentation first, not behavior; if still over, return to the user with the numbers for a decision.
 
-历史：round11 对当时累计范围的独立估算为 3,820–5,900 行（含返工 4,400–7,400 行）；round11 的受限切片（不含 resume）为 2,230–2,860 行。两者都已被当前设计替代，仅作对比。
+History: round11's independent estimate of the cumulative scope at that time was 3,820–5,900 lines (4,400–7,400 lines including rework); round11's restricted slice (excluding resume) was 2,230–2,860 lines. Both have been superseded by the current design and are kept for comparison only.
 
-## 8. 测试
+## 8. Tests
 
-见 [design/15-tests-probes.md](design/15-tests-probes.md)，约 1,700–2,700 行。
+See [design/15-tests-probes.md](design/15-tests-probes.md), about 1,700–2,700 lines.
 
-## 9. 先做的探针（1–2 天，可与开发并行）
+## 9. Probes first (1–2 days, can run in parallel with development)
 
-1. 插件承载：单实例；切 tab/隐藏视图不停循环；关闭 tab 后重开恢复不双开；禁用/卸载边界。
-2. 真实 remote：本地客户端断开重连，目标端循环连续，文件都在目标端。
-3. 身份：pane 移动、Agent 替换、同 CLI 新会话、会话引用缺失时的变化。
-4. 各实际使用的 CLI：状态观测可靠性（工具运行中是否误报 idle）、限流/额度特征、prompt 已接受但未开始的表现。
-5. metadata 键规则与在 UI 的显示。
-6. 各 CLI 的 resume 能力（session_ref 获取、resume 参数、回到原会话的判定）——当前必做。
+1. Plugin hosting: single instance; switching tabs/hiding the view does not stop the loop; after closing the tab, reopening recovers without double start; disable/uninstall boundaries.
+2. Real remote: local client disconnects and reconnects, the target loop is continuous, files are all on the target.
+3. Identity: changes on pane move, Agent replacement, new session of the same CLI, missing session reference.
+4. Each CLI actually used: reliability of state observation (whether it falsely reports idle while a tool is running), rate-limit/quota signatures, behavior when a prompt is accepted but not started.
+5. Metadata key rules and display in the UI.
+6. Resume capability of each CLI (obtaining session_ref, resume parameters, determining return to the original session) — currently mandatory.
 
-探针不过就缩小场景或修接入，不先做界面。
+If a probe fails, narrow the scenario or fix the onboarding; do not build the interface first.
 
-可在隔离普通 pane 中开发内部原型，但接管在跑项目之前必须通过最小插件承载、真实 remote 绑定与恢复核对，并完成旧 keeper 排他迁移；没有通过不称为可接入项目的 MVP。
+Internal prototypes can be developed in an isolated plain pane, but before taking over a running project, minimal plugin hosting, real remote binding and recovery checks must pass, and exclusive migration from the old keeper must be complete; without passing these, it is not called an MVP that can onboard projects.
 
-## 10. 落地顺序与工作量
+## 10. Landing order and effort
 
-| 步骤 | 内容 | 投入 |
+| Step | Content | Effort |
 |---|---|---|
-| 1 | 探针 | 1–2 天（并行） |
-| 2 | 实现 + 测试 + 阶段审阅 | 3–5 个 Agent 工作日（每日 6–8 小时有效开发） |
-| 3 | 模板与说明、接入盘点及迁移/回滚核对：任务包格式、计划草稿格式、线说明、舰长说明、4 个命令说明 | 主动非代码工作合计约 1.5–3 工作日，可与其他步骤交错 |
-| 4 | 接入一个真实项目的部分线，主动制造插队、等待、临时工释放、复盘、重启 | 至少 2–3 天经过时间 |
-| 合计 | | 约 6–10 天经过时间 |
+| 1 | Probes | 1–2 days (parallel) |
+| 2 | Implementation + tests + stage review | 3–5 Agent working days (6–8 hours of effective development per day) |
+| 3 | Templates and instructions, onboarding inventory and migration/rollback checks: task packet format, plan draft format, lane instructions, captain instructions, instructions for the 4 commands | Active non-code work totaling about 1.5–3 working days, can interleave with other steps |
+| 4 | Onboard some lanes of one real project, deliberately creating queue jumps, waits, temp worker release, reviews, restarts | At least 2–3 days elapsed time |
+| Total | | About 6–10 days elapsed time |
 
-以上是有限已验证 CLI、现有隔离 worktree、可用远端环境与额度已经具备时的设计估算，不是交期承诺；探针失败、外部等待或范围恢复时重新估算。
+The above is a design estimate assuming a limited set of verified CLIs, Herdr's worktree API, an available remote environment, and quota are already in place; it is not a delivery commitment; re-estimate when probes fail, external waits occur, or scope is restored.
 
-## 11. 主要风险
+## 11. Main risks
 
-1. **Herdr / CLI 状态观测是否可靠**：工具仍在跑却显示 idle、输入已接受却未开始、会话引用缺失——直接影响续做和释放；探针不过就缩场景。
-2. **现场旧状态**：旧 keeper、脏树、脱离终端的作业、旧舰长未入库的动作——决定多少接管只能人工。
-3. **计划草稿格式是否好用**：太复杂会把成本转嫁给舰长每一轮；需真实回合验证，可能返工格式。
+1. **Whether Herdr / CLI state observation is reliable**: tool still running but showing idle, input accepted but not started, missing session reference — directly affects continuation and release; if probes fail, narrow the scenarios.
+2. **Old on-site state**: old keepers, dirty trees, detached jobs, old captain actions not in the database — how much to take over can only be decided manually.
+3. **Whether the plan draft format is usable**: too complex shifts the cost onto the captain every round; needs validation in real turns; the format may need rework.
 
-## 12. 从参考项目借来的实现要点
+## 12. Implementation points borrowed from reference projects
 
-详见 [references.md](research/2026-10-21/references.md)。直接影响 MVP 实现的：
+Details in [references.md](research/2026-10-21/references.md). Those that directly affect the MVP implementation:
 
-- 发送"已存入"与"门铃结果"分开报告（Firstmate `fm-send`、Orca `send`）。
-- 观测时合并相邻事件、吸收良性事件，只把需要行动的交给舰长（Firstmate watcher 的分类与 30 秒合并窗口）。
-- 文件写入只作"不是卡死"的线索，必须在有界的遍历里取；无证据时维持原升级节奏（Firstmate bounded worktree probe）。
-- 声明式等待（"暂停到某时"）到点按原记录重评估（Firstmate `paused: ... until`）——对应 park。
-- 回收前核对已落地成果和脏树，关闭失败保留待关闭记录（Firstmate `fm-teardown`）。
-- 结果不确定时保持原尝试、不重派（Orca uncertain dispatch）。
-- "判断"与"副作用"分开（herdr-dispatch 纯 Decide 层）。
-- 执行者命令极少（herdr-board worker 只用 comment/done）；列表给摘要、详情另取（herdr-tasks）。
+- Report "stored" and "doorbell result" separately for sends (Firstmate `fm-send`, Orca `send`).
+- During observation, merge adjacent events and absorb benign events, passing only actionable ones to the captain (Firstmate watcher classification and 30-second merge window).
+- File writes serve only as a clue for "not stuck" and must be gathered in a bounded traversal; with no evidence, keep the original escalation rhythm (Firstmate bounded worktree probe).
+- Declarative waits ("paused until some time") re-evaluate against the original record when the time comes (Firstmate `paused: ... until`) — corresponds to park.
+- Before reclamation, check landed results and dirty trees; on close failure, keep a pending-close record (Firstmate `fm-teardown`).
+- When the result is uncertain, keep the original attempt and do not redispatch (Orca uncertain dispatch).
+- Separate "judgment" from "side effects" (herdr-dispatch pure Decide layer).
+- Executor commands are minimal (herdr-board worker uses only comment/done); lists give summaries, details fetched separately (herdr-tasks).

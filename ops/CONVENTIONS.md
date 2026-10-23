@@ -1,51 +1,57 @@
-# 开发约定（所有执行线必读）
+# Lane conventions (every lane reads this first)
 
-## 你是谁、怎么工作
+This repo follows GEAR's own default working conventions: `docs/design/17-conventions.md` (read §3, §5, §6, §7 at least). This file adds what applies while GEAR is not yet running itself: you see your inbox with `ops/bin/inbox.sh` instead of `gear`, and you report by editing your task packet instead of `gear send`.
 
-- 你是一条执行线，只做任务包里写的事。舰长（Claude）负责拆任务、定接口、审代码、合并。
-- 每个任务一个任务包：`ops/tasks/T-<n>.md`。先完整读完再动手。
-- 你在自己的 git worktree / 分支上工作，不要切换分支，不要动其他 worktree。
+## Who you are
 
-## 分支（GitHub Flow）
+- You are a long-lived lane with one duty. The captain (Claude) plans, fixes interfaces, decides on reviews and merges; the review lane reviews.
+- You work only in your own worktree. Never touch other worktrees or the main checkout.
 
-- 只有 `main` 一条长期分支，永远可编译、测试全过。
-- **长期线长期占有自己的 worktree**，只建一次：`herdr worktree create --branch lane-<x> --base main --label lane-<x>`，路径由 Herdr 决定（`/Volumes/Data/.herdr-worktrees/gear/lane-<x>`）。编译缓存跟着 worktree 留着，不重复编译。
-- 每个任务一个短命分支 `t<n>-<主题>`（如 `t1-store`），由舰长在该线的 worktree 里从最新 `main` 切出（`git switch -c t<n>-… main`）。
-- 舰长审完合回 `main` 并删除任务分支；下一个任务在**同一个 worktree** 里切新分支。
-- 临时工才单独开 worktree（同样用 `herdr worktree create`），活干完、成果合入后再 `herdr worktree remove`（只删检出和 workspace，分支保留）。
-- 你不合并、不 rebase、不 push。
+| Lane | Agent name | Duty | Owns | Worktree |
+|---|---|---|---|---|
+| data | `gear-data` | storage and business rules | `crates/gear-store`, `crates/gear-app` | `/Volumes/Data/.herdr-worktrees/gear/home-data` |
+| runtime | `gear-runtime` | Herdr adapter, engine, CLI | `crates/gear-herdr`, `crates/gear-engine`, `crates/gear-cli` | `/Volumes/Data/.herdr-worktrees/gear/home-runtime` |
 
-## 硬规则
+## Your loop — never wait for review
 
-1. **只改任务包"允许修改"里列出的文件。** 其他文件（尤其是 `crates/*/tests/*.rs` 合同测试、`gear-model`、各 crate 的 `lib.rs` 里已定义的公共签名）一律不改。觉得签名或测试有问题 → 写进报告，停下，不要自己改。
-2. **不改公共 API**：不增删 `pub` 函数/类型/字段，不改函数签名。需要辅助函数就写私有的（`fn`，不加 `pub`）。
-3. **不加新依赖**（Cargo.toml 不动），除非任务包明确允许。
-4. **不运行会影响外部的命令**：不 `git push`，不操作 Herdr（不跑 `herdr agent prompt/start/...`），不删目录。
-5. 小步提交：每完成一组能编译的改动就 `git commit`（信息写清做了什么），不要攒到最后。
-6. 不创建后台常驻进程。
+1. Run `ops/bin/inbox.sh <lane>`. Order of work: **rework** first, then **messages**, then the **next** ready task.
+2. Start a task: `git fetch origin && git switch -c <branch> origin/dev` (the branch is named in the packet's header), set `Status: running` in the packet, commit, `git push -u origin <branch>`.
+3. Work the packet's `## Tasks` checklist top to bottom. Tick a box only when its tests pass and the build is warning-free; then add one line under "Progress notes", update "Files", commit, push, and **run the inbox again**.
+4. Done (all boxes ticked, acceptance passes): fill "Result", set `Status: review`, commit, push. **Do not wait** — go to step 1 and take the next task. **End your turn only when `ops/bin/inbox.sh` itself prints "none for now"** — never right after a hand-in, and never from memory of what your queue was. The review lane reviews it; a rework shows up in your inbox with a pointer to `ops/reviews/T-<n>.md` on branch `review/t<n>` — its Findings are your follow-ups.
+5. Rework arrives while you are on another task: finish the checklist item you are on, commit and push it, `git switch <reworked branch>`, do its "Review follow-ups" first, push, set `Status: review` again, push, then switch back and continue. Never switch with uncommitted changes; never stash. If the rework is marked `after-current`, finish your current task first.
+6. Need a decision: write it under "Progress notes" as Question / Options / Context / Default (17 §7), set `Status: question` (or `blocked`), commit, push. Then continue with another ready task if there is one; if not, end your turn.
+7. In-flight cap: 1 task in development + 2 in review. At the cap, or with no ready task left, end your turn — the captain is woken when you stop.
 
-## 验收命令（任务包里会写具体包名）
+## Hard rules
+
+1. **English only** in every file you write: code, comments, docs, packets, commit messages.
+2. **Edit only the files the packet lists under "Allowed changes"** (plus your own packet's Status line, checkboxes and Lane record). Contract tests (`crates/*/tests/*.rs`), `gear-model`, and public signatures are off limits. If a signature or test looks wrong, ask (step 6); do not change it.
+3. **No public API changes**: no added/removed `pub` items, no signature changes. Helpers are private.
+4. **No new dependencies** (Cargo.toml untouched) unless the packet allows it.
+5. **Git:** you may create, switch and push your own task branches only. Never merge, rebase shared branches, push `dev`/`main`, force-push, or delete branches.
+6. **No other side effects**: no Herdr commands, no deleting directories, no background processes.
+7. Commit subject `<type>(T-<n>): <slug>` (≤ 70 chars); body says why and what verification ran. Same failure three times → ask, do not grind.
+
+## Acceptance (the packet names the crate)
 
 ```bash
-cargo build -p <crate> 2>&1 | grep -E '^(warning|error)' && echo "有警告/错误" || echo "编译干净"
+cargo build -p <crate> --all-targets 2>&1 | grep -E '^(warning|error)' && echo "NOT CLEAN" || echo "clean"
 cargo test -p <crate>
 ```
 
-要求：编译零警告零错误；任务包列出的测试全部通过。
+Before every hand-in (`Status: review`): `git fetch origin && git merge origin/dev` into your task branch (never rebase; resolve any conflict), then re-run acceptance **on the merged result**, push. A textually clean merge can still fail to compile (two tasks adding the same name to one test module) — only a build after the merge shows it (lessons L-27, L-33).
 
-## 完成或受阻时怎么汇报
+Zero warnings, zero errors, every listed test passes. `dev` is always green: a contract test for a task not merged yet is `#[ignore = "T-<n>: …"]` on `dev`; that task's packet tells you to run it with `-- --include-ignored`; the captain removes the ignore when merging.
 
-写一个报告文件 `ops/reports/T-<n>.md`，然后结束本轮。**不要**给舰长发消息。报告格式：
+## Result format (exact headings; 17 §6)
 
-```markdown
-# T-<n> 报告
-状态: done | blocked | question
-提交: <最后一个 commit 的短哈希>
-验收:
-- cargo build -p …: 干净 / 有警告（贴出）
-- cargo test -p …: N passed / M failed（贴出失败的名字）
-做了什么: 3–5 行
-问题/阻塞: 具体到文件和函数；需要舰长决定什么
+```
+Scope: T-<n> — <what shipped, one line>
+Branch: <branch> (code @ <short sha of the last code commit>)
+Files: <path> — <what/why>, one line each
+Verification: <command> → <result>, one line each
+Open questions: <each> | none
+Out of scope: <noticed, not touched> | none
 ```
 
-`blocked` / `question` 时写清楚卡在哪、你认为需要什么，然后停下等待。
+No diff counts and no hand-in sha: the Result is written in the hand-in commit itself, so it can never name that commit's own sha or final line counts. The reviewer reads both from git (lesson L-32).
