@@ -45,7 +45,11 @@ enum Cmd {
         op: PlanOp,
     },
     /// User: the read-only plan board (PRD §15).
-    Board,
+    Board {
+        /// Draw the open tasks as a dependency tree.
+        #[arg(long)]
+        deps: bool,
+    },
     /// User: run the engine loop (plugin pane entrypoint).
     Run,
     /// User: project/seat administration.
@@ -177,7 +181,7 @@ fn run(cli: Cli) -> GearResult<()> {
     }
     if !matches!(
         cli.cmd,
-        Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop }) | Some(Cmd::Board)
+        Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop }) | Some(Cmd::Board { .. })
     ) {
         // The board is the exception: it only observes. Starting the engine
         // here would hide the "engine down" warning the board exists to show
@@ -193,7 +197,7 @@ fn run(cli: Cli) -> GearResult<()> {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
         },
-        Some(Cmd::Board) => cmd_board(cli.json),
+        Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
@@ -425,7 +429,7 @@ fn output_error(e: std::io::Error) -> GearError {
 /// `gear board`: the plan board (PRD §15). The board itself lives in
 /// `gear-board`; the CLI opens the store, names the project and hands the
 /// terminal over.
-fn cmd_board(json: bool) -> GearResult<()> {
+fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let opts = gear_board::Options {
@@ -435,6 +439,8 @@ fn cmd_board(json: bool) -> GearResult<()> {
         // The engine's lock file sits next to the database.
         db: std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from),
         json,
+        // The dependency tree instead of the queues of the lanes.
+        view: if deps { gear_board::View::Deps } else { gear_board::View::Lanes },
         ..Default::default()
     };
     let mut out = std::io::stdout();

@@ -17,6 +17,7 @@
 //! This crate is a library. It builds the board from the store and draws it
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
+mod deps;
 mod screen;
 
 use std::io::Write;
@@ -26,6 +27,7 @@ use std::time::Duration;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{Store, Tx};
 
+pub use deps::DepNode;
 pub use screen::{Keys, Terminal};
 
 /// How long a frame stays on the screen before the board redraws it.
@@ -36,6 +38,26 @@ const UNASSIGNED: &str = "unassigned";
 
 /// The one warning line the board may print.
 const ENGINE_DOWN: &str = "! engine down — the next gear call starts it";
+
+/// What the board shows in the middle: the queues of the lanes, or the open
+/// tasks as a dependency tree (PRD §15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    /// One block per lane, with its queue.
+    Lanes,
+    /// The open tasks as a dependency tree.
+    Deps,
+}
+
+impl View {
+    /// The other view: the key `d` toggles between them.
+    pub fn toggled(self) -> View {
+        match self {
+            View::Lanes => View::Deps,
+            View::Deps => View::Lanes,
+        }
+    }
+}
 
 /// How the board is built and shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +70,8 @@ pub struct Options {
     /// Print the board as JSON, once — the machine-readable shape of the
     /// same view.
     pub json: bool,
+    /// What the board shows in the middle.
+    pub view: View,
     /// How long a frame stays on the screen.
     pub refresh: Duration,
 }
@@ -58,6 +82,7 @@ impl Default for Options {
             project: None,
             db: None,
             json: false,
+            view: View::Lanes,
             refresh: REFRESH,
         }
     }
@@ -80,6 +105,8 @@ pub struct ProjectBoard {
     /// The lanes that have work, in seat order; a lane a task names but no
     /// seat carries comes last.
     pub lanes: Vec<LaneBoard>,
+    /// The open tasks as a dependency tree.
+    pub deps: Vec<DepNode>,
     /// The items waiting for the captain.
     pub waiting: Waiting,
     /// The temp slots of the project.
@@ -220,6 +247,9 @@ fn project_board(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard
     // A lane without a task has nothing to show: the board shows the plan.
     lanes.retain(|lane| !lane.tasks.is_empty());
 
+    // The open tasks as a dependency tree (the other view of the plan).
+    let deps = deps::tree(&tasks);
+
     // The captain's inbox: the items that wait for an answer.
     let waiting = match tx.captain_of(project)? {
         Some(captain) => {
@@ -241,7 +271,7 @@ fn project_board(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard
         quota: row.quota_temps.max(0) as usize,
     };
 
-    Ok(ProjectBoard { project: project.to_string(), totals, lanes, waiting, temps })
+    Ok(ProjectBoard { project: project.to_string(), totals, lanes, deps, waiting, temps })
 }
 
 /// The seat states that hold a temp slot (design/10): STARTING, ACTIVE,
@@ -254,14 +284,14 @@ fn holds_temp_slot(state: SeatState) -> bool {
 }
 
 /// The board as text: what the user reads on the screen.
-pub fn render(board: &Board) -> String {
+pub fn render(board: &Board, view: View) -> String {
     let mut head = vec!["GEAR board".to_string()];
     if board.engine == EngineState::Down {
         head.push(ENGINE_DOWN.to_string());
     }
     let mut blocks: Vec<Vec<String>> = vec![head];
     for project in &board.projects {
-        blocks.push(project_lines(project));
+        blocks.push(project_lines(project, view));
     }
     blocks
         .iter()
@@ -271,7 +301,7 @@ pub fn render(board: &Board) -> String {
 }
 
 /// The lines of one project block.
-fn project_lines(project: &ProjectBoard) -> Vec<String> {
+fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
     let mut lines = vec![
         format!("project {}", project.project),
         format!(
@@ -282,12 +312,25 @@ fn project_lines(project: &ProjectBoard) -> Vec<String> {
             project.totals.waiting
         ),
     ];
-    if !project.lanes.is_empty() {
-        lines.push(String::new());
-        for lane in &project.lanes {
-            lines.push(format!("Lane {}", lane.lane));
-            for task in &lane.tasks {
-                lines.push(format!("  {} {}", task.id, state_word(task.state)));
+    match view {
+        View::Lanes => {
+            if !project.lanes.is_empty() {
+                lines.push(String::new());
+                for lane in &project.lanes {
+                    lines.push(format!("Lane {}", lane.lane));
+                    for task in &lane.tasks {
+                        lines.push(format!("  {} {}", task.id, state_word(task.state)));
+                    }
+                }
+            }
+        }
+        View::Deps => {
+            if !project.deps.is_empty() {
+                lines.push(String::new());
+                lines.push("Dependencies".to_string());
+                for node in &project.deps {
+                    lines.push(dep_line(node));
+                }
             }
         }
     }
@@ -298,6 +341,21 @@ fn project_lines(project: &ProjectBoard) -> Vec<String> {
         project.temps.in_use, project.temps.quota
     ));
     lines
+}
+
+/// One line of the dependency tree: the task, its state, and what it still
+/// waits for.
+fn dep_line(node: &DepNode) -> String {
+    let mut line = format!(
+        "  {}{} {}",
+        "  ".repeat(node.depth),
+        node.id,
+        state_word(node.state)
+    );
+    if !node.waits.is_empty() {
+        line.push_str(&format!(" · waits {}", node.waits.join(" ")));
+    }
+    line
 }
 
 /// The line about the captain's inbox.
@@ -361,6 +419,12 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                         "state": state_word(task.state),
                     })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
+                "deps": project.deps.iter().map(|node| serde_json::json!({
+                    "id": node.id,
+                    "state": state_word(node.state),
+                    "waits": node.waits,
+                    "depth": node.depth,
+                })).collect::<Vec<_>>(),
                 "captain_waiting": {
                     "count": project.waiting.count,
                     "oldest_age_s": project.waiting.oldest_age_s,
@@ -399,16 +463,19 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write) -> GearResult
 
 /// The frames over injected keys: the board is redrawn every
 /// [`Options::refresh`], and `q` leaves it.
+/// The frames over injected keys: the board is redrawn every
+/// [`Options::refresh`], `d` toggles the view, and `q` leaves.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
     out: &mut dyn Write,
     keys: &mut dyn Keys,
 ) -> GearResult<()> {
+    let mut view = opts.view;
     let mut first = true;
     loop {
         let text = match build(store, opts, now_ts()) {
-            Ok(board) => render(&board),
+            Ok(board) => render(&board, view),
             Err(e) => {
                 // The first frame decides whether the board can start at all.
                 if first {
@@ -431,6 +498,12 @@ pub fn run_with(
                 if is_quit(key) {
                     return Ok(());
                 }
+                if key == 'd' {
+                    // The other view, drawn at once: the key does not wait
+                    // for the next tick.
+                    view = view.toggled();
+                    break;
+                }
             }
         }
     }
@@ -447,7 +520,7 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
     if opts.json {
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
-        writeln!(out, "{}", render(board)).map_err(write_error)?;
+        writeln!(out, "{}", render(board, opts.view)).map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }
