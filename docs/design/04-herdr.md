@@ -45,3 +45,18 @@ Per CLI: busy/rate-limit/quota/auth signatures, whether idle is falsely reported
 ## Test points
 
 Fake subprocess: timeout → uncertain; JSON error code mapping; regression samples for classify_screen against markers and nudge text; concurrency limit.
+
+## Captain quota footer (T-37)
+
+`Profile.quota_bar` is separate from conversation-tail quota markers. The verified Claude bar displays **percentage used**: `5h 1%` is healthy and `5h 100%` is exhausted. Only the status region between the bottom input separator and the final permission footer is read, even while the captain is working. The live footer was checked on Claude Code 2.1.309: `Opus 5.5 (1M context) · medium /… (dev)  ·  ctx 63%  ·  5h 4% ↻16:20  ·  7d 73% ↻Oct23`, then `⏵⏵ bypass permissions on (shift+tab to cycle)`.
+
+A project can configure the footer grammar per profile:
+
+```toml
+[profiles.claude.quota_bar]
+footer_prefix = "⏵⏵ bypass permissions on"
+separator_prefix = "─"
+windows = ["5h", "7d"]
+```
+
+Unknown CLI footer formats stay disabled. Exact HH:MM reset hints use the same local calendar as the status-line renderer and roll over midnight. Missing, malformed or date-only reset hints use `models.quota_reset_h`; multiple exhausted windows wait for the latest deadline. The durable quota episode and wake op keep ordinary captain doorbells quiet, while lanes finish their current tasks and reviews/merges continue. The reset wake is not repeated on an uncertain effect or a delayed view. A previously recorded view, including one from the same second before the wake intent, does not resume dispatch.
