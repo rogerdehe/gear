@@ -15,6 +15,7 @@
 //! directly with an injected `now` and a `FakeHerdr`.
 
 
+mod attention;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -160,6 +161,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 
+        attention::promote(store, &project, now)?;
+
         // 3. decide (pure): who should be rung now.
         let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
         let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
@@ -288,18 +291,23 @@ fn doorbell_inputs(
         };
 
         // What this generation has already been shown: an open item it has
-        // seen does not ring again (lesson L-42) — it waits for the seat's own
-        // next `gear`.
+        // seen normally waits for the seat's next `gear` (L-42). Stale
+        // captain items are the exception: one reminder per configured period.
         let shown: BTreeSet<String> = tx
             .views_since(&seat.id, seat.generation, 0)?
             .into_iter()
             .flat_map(|view| view.shown_msgs)
             .collect();
-        let actionable: Vec<_> = tx
-            .actionable_for(project, &seat.id, now)?
-            .into_iter()
-            .filter(|m| !shown.contains(&m.id))
-            .collect();
+        let period = attention::period(tx, project)?;
+        let mut actionable = Vec::new();
+        for message in tx.actionable_for(project, &seat.id, now)? {
+            let include = if seat.role == gear_model::SeatRole::Captain {
+                attention::should_show(tx, &message, shown.contains(&message.id), period, now)?
+            } else {
+                !shown.contains(&message.id)
+            };
+            if include { actionable.push(message); }
+        }
         let urgent = actionable.iter().filter(|m| m.urgent).count();
         let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
 

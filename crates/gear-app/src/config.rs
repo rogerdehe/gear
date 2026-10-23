@@ -175,6 +175,8 @@ pub struct Timing {
     pub cooldown_s: u32,
     pub sample_min: u32,
     pub review_timer_min: u32,
+    /// Promote and remind open captain items once per this many minutes.
+    pub captain_item_stale_min: u32,
 }
 
 impl Default for Timing {
@@ -184,6 +186,7 @@ impl Default for Timing {
             cooldown_s: 90,
             sample_min: 20,
             review_timer_min: 45,
+            captain_item_stale_min: 15,
         }
     }
 }
@@ -441,6 +444,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 cfg.timing.cooldown_s, cfg.timing.tick_s
             ),
         ));
+    }
+
+    if cfg.timing.captain_item_stale_min == 0 {
+        issues.push(issue("timing.captain_item_stale_min", "must be at least one minute".to_string()));
     }
 
     // ---- models (17 §0): empty chains mean models are not managed
