@@ -85,6 +85,8 @@ impl SwitchSteps {
 /// The next UI submission of a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
+    /// Service accepted the target; wait for session.get and the TUI bar.
+    ApiConfirm,
     /// `esc`: close whatever the last attempt (or a quota toast) left open.
     Escape,
     /// `/model`: open the picker.
@@ -100,6 +102,7 @@ pub enum Step {
 impl Step {
     fn as_str(self) -> &'static str {
         match self {
+            Step::ApiConfirm => "api-confirm",
             Step::Escape => "escape",
             Step::Command => "command",
             Step::Filter => "filter",
@@ -110,6 +113,7 @@ impl Step {
 
     fn parse(text: &str) -> Option<Step> {
         match text {
+            "api-confirm" => Some(Step::ApiConfirm),
             "escape" => Some(Step::Escape),
             "command" => Some(Step::Command),
             "filter" => Some(Step::Filter),
@@ -252,6 +256,10 @@ pub fn switch_in_place(
     // 6. one submission of the plan this tick.
     let mut sent = false;
     match plan.step {
+        Step::ApiConfirm => {
+            // Only entered here when an API call failed during confirmation.
+            plan.step = Step::Escape;
+        }
         Step::Escape => {
             sent = keys(herdr, &pane, &steps.escape);
             if sent {
@@ -333,7 +341,7 @@ fn failed_try(store: &mut Store, seat_id: &str, plan: &mut Pending) -> GearResul
 /// The status bar shows `bar`: a line that begins with the OpenCode status-bar
 /// prefix and contains the text — a quote in the conversation does not count
 /// (F3).
-fn confirmed(screen: &str, bar: &str) -> bool {
+pub(crate) fn confirmed(screen: &str, bar: &str) -> bool {
     screen.lines().any(|line| {
         // The real bar is drawn inside the input box: `┃  Build auto · …`.
         let line = line.trim_start_matches(|c: char| c.is_whitespace() || BOX_EDGES.contains(&c));
@@ -386,13 +394,129 @@ pub fn ensure_model(
             "no [models.switch.\"{model}\"] labels (picker, bar): the agent cannot be put on the chain's model"
         )));
     };
-    match switch_in_place(store, herdr, &seat.id, profile, None, labels, now)? {
+    match switch_model(store, herdr, &seat.id, profile, None, labels, model, now)? {
         SwitchOutcome::Done | SwitchOutcome::Already => Ok(ModelGate::Ready),
         SwitchOutcome::Waiting => Ok(ModelGate::Waiting),
         SwitchOutcome::Failed => Ok(ModelGate::Failed(format!(
             "the model switch to {model} did not confirm twice"
         ))),
     }
+}
+
+/// API first for session-bound OpenCode agents. A durable API confirmation
+/// plan prevents dispatch while a TUI render lags, including across restart.
+/// Only a failed API call (or an old binding without a service session) enters
+/// the existing typed-key protocol.
+pub fn switch_model(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat_id: &str,
+    profile: &Profile,
+    obs: Option<&SeatObs>,
+    labels: &ModelSwitch,
+    model: &str,
+    now: Ts,
+) -> GearResult<SwitchOutcome> {
+    let resumed = pending(store, seat_id)?;
+    if profile.kind != "opencode" || resumed.as_ref().is_some_and(|p| p.to == labels.bar && p.step != Step::ApiConfirm) {
+        return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
+    }
+    if obs.is_some_and(|obs| !obs.idle) {
+        return Ok(SwitchOutcome::Waiting);
+    }
+    let binding = store.read(|tx| {
+        let Some(seat) = tx.get_seat(seat_id)? else { return Ok(None) };
+        tx.get_binding(seat_id, seat.generation)
+    })?;
+    let Some(binding) = binding else { return Ok(SwitchOutcome::Failed) };
+    let Some(session) = binding.session_ref.as_deref().filter(|id| !id.is_empty()) else {
+        return switch_in_place(store, herdr, seat_id, profile, obs, labels, now);
+    };
+    // Herdr can report a launch-pending/unknown agent before the TUI is ready.
+    // Record the wait now so onboarding resumes it on the following tick.
+    let mut plan = resumed.clone().filter(|p| p.to == labels.bar)
+        .unwrap_or(Pending { to: labels.bar.clone(), step: Step::ApiConfirm, tries: 0, waited: 0 });
+    set_pending(store, seat_id, &plan)?;
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(Some(info)) if info.agent.as_deref() == Some("opencode") => {
+            if !matches!(info.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done) {
+                if info.agent_status != gear_herdr::AgentStatus::Unknown {
+                    return Ok(SwitchOutcome::Waiting);
+                }
+                return wait_for_agent(store, seat_id, &mut plan);
+            }
+        }
+        Ok(_) => return wait_for_agent(store, seat_id, &mut plan),
+        Err(_) => return Ok(SwitchOutcome::Waiting),
+    }
+    // Screen busy wins over a stale idle classification, even for API calls.
+    let Ok(screen) = herdr.read_screen(&binding.pane_id) else { return Ok(SwitchOutcome::Waiting) };
+    if gear_herdr::classify_screen(profile, &screen).contains(&gear_herdr::ScreenFlag::Busy) {
+        return Ok(SwitchOutcome::Waiting);
+    }
+    let directory = meta_get(store, &crate::onboard::worktree_path_key(seat_id))?;
+    let target = match crate::opencode::target(herdr, model, labels.variant.as_deref(), directory.as_deref()) {
+        Ok(target) => target,
+        Err(error) if error.starts_with("invalid OpenCode") => {
+            clear_pending(store, seat_id)?;
+            return Ok(SwitchOutcome::Failed);
+        }
+        Err(_) => return api_fallback(store, herdr, seat_id, profile, obs, labels, now),
+    };
+    let get = vec!["GET".into(), format!("/api/session/{session}")];
+    let value = match herdr.opencode_api(&get) {
+        Ok(value) => value,
+        Err(_) => return api_fallback(store, herdr, seat_id, profile, obs, labels, now),
+    };
+    if !crate::opencode::matches(&value, &target) {
+        if plan.tries == 0 || (plan.waited == WAIT_TICKS && plan.tries < 2) {
+            // Save the intent before the request. After a timeout/crash, GET
+            // determines whether another submission is needed.
+            set_pending(store, seat_id, &plan)?;
+            plan.tries += 1;
+            set_pending(store, seat_id, &plan)?;
+            let body = serde_json::json!({"model": target});
+            if herdr.opencode_api(&["session.switchModel".into(), "--param".into(),
+                format!("sessionID={session}"), "-d".into(), body.to_string()]).is_err() {
+                return api_fallback(store, herdr, seat_id, profile, obs, labels, now);
+            }
+        }
+    } else {
+        // The API and bar are independent confirmations; a quote in the
+        // conversation and a bar showing the wrong effort do not qualify.
+        let variant_ok = labels.variant.as_deref().is_none_or(|variant| screen.lines().any(|line| {
+            confirmed(line, &labels.bar) && line.trim_end().ends_with(&format!("· {variant}"))
+        }));
+        if confirmed(&screen, &labels.bar) && variant_ok && !screen.contains(VARIANT_TITLE) {
+            clear_pending(store, seat_id)?;
+            return Ok(if resumed.is_some() { SwitchOutcome::Done } else { SwitchOutcome::Already });
+        }
+    }
+    plan.waited += 1;
+    if plan.waited > WAIT_TICKS * 2 {
+        clear_pending(store, seat_id)?;
+        return Ok(SwitchOutcome::Failed);
+    }
+    set_pending(store, seat_id, &plan)?;
+    Ok(SwitchOutcome::Waiting)
+}
+
+fn wait_for_agent(store: &mut Store, seat: &str, plan: &mut Pending) -> GearResult<SwitchOutcome> {
+    plan.waited += 1;
+    if plan.waited > WAIT_TICKS * 2 {
+        clear_pending(store, seat)?;
+        return Ok(SwitchOutcome::Failed);
+    }
+    set_pending(store, seat, plan)?;
+    Ok(SwitchOutcome::Waiting)
+}
+
+fn api_fallback(
+    store: &mut Store, herdr: &mut dyn HerdrAct, seat: &str, profile: &Profile,
+    obs: Option<&SeatObs>, labels: &ModelSwitch, now: Ts,
+) -> GearResult<SwitchOutcome> {
+    clear_pending(store, seat)?;
+    switch_in_place(store, herdr, seat, profile, obs, labels, now)
 }
 
 fn pending_key(seat_id: &str) -> String {
@@ -459,6 +583,99 @@ mod tests {
     const OTHER_BAR: &str = "Build auto · MiniMax-M3.1-Flash MiniMax · high";
     /// A picker (SOP: "Search", "Recent", provider groups).
     const PICKER: &str = "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax\n  DeepSeek V4.1 Flash  OpenCode Go";
+
+    fn api_world() -> (Store, FakeHerdr) {
+        let mut store = world();
+        store.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_api")).unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, OTHER_BAR);
+        (store, herdr)
+    }
+
+    fn catalog() -> serde_json::Value {
+        serde_json::json!({"data":[{"providerID":"opencode-go", "id":"deepseek-v4.1-flash",
+            "variants":[{"id":"max"}, {"id":"high"}]}]})
+    }
+
+    fn api_switch(store: &mut Store, herdr: &mut FakeHerdr, labels: &ModelSwitch) -> SwitchOutcome {
+        switch_model(store, herdr, "p:heat", &gear_herdr::builtin("opencode").unwrap(),
+            None, labels, "opencode-go/deepseek-v4.1-flash", T0).unwrap()
+    }
+
+    #[test]
+    fn api_switch_confirms_session_and_bar_after_restart_without_keys() {
+        let (mut store, mut herdr) = api_world();
+        let mut labels = labels();
+        labels.variant = Some("max".into());
+        herdr.api_replies.extend([Ok(catalog()),
+            Ok(serde_json::json!({"data":{"model":{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"}}})),
+            Ok(serde_json::json!({})),
+        ]);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Waiting);
+        assert_eq!(pending(&mut store, "p:heat").unwrap().unwrap().step, Step::ApiConfirm);
+        let target = serde_json::json!({"data":{"model":{"providerID":"opencode-go", "id":"deepseek-v4.1-flash", "variant":"max"}}});
+        // API alone is insufficient: the TUI must have rendered the variant.
+        herdr.api_replies.extend([Ok(catalog()), Ok(target.clone())]);
+        herdr.set_screen(PANE, &format!("┃ Build auto · {} · high", labels.bar));
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Waiting);
+        herdr.api_replies.extend([Ok(catalog()), Ok(target)]);
+        herdr.set_screen(PANE, &format!("┃ Build auto · {} · max", labels.bar));
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Done);
+        assert!(pending(&mut store, "p:heat").unwrap().is_none());
+        assert!(herdr.calls.iter().all(|call| matches!(call, Call::OpenCodeApi { .. })));
+        let requests: Vec<_> = herdr.calls.iter().filter_map(|call| match call {
+            Call::OpenCodeApi { args } if args[0] == "session.switchModel" => Some(args),
+            _ => None,
+        }).collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0][2], "sessionID=ses_api");
+        let body: serde_json::Value = serde_json::from_str(&requests[0][4]).unwrap();
+        assert_eq!(body["model"]["variant"], "max");
+    }
+
+    #[test]
+    fn invalid_variant_never_reaches_api_switch_or_keyboard() {
+        let (mut store, mut herdr) = api_world();
+        let mut labels = labels();
+        labels.variant = Some("unknown".into());
+        herdr.api_replies.push_back(Ok(catalog()));
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels), SwitchOutcome::Failed);
+        assert_eq!(herdr.calls.len(), 1);
+    }
+
+    #[test]
+    fn failed_api_switch_uses_typed_fallback_only_after_failure() {
+        let (mut store, mut herdr) = api_world();
+        herdr.api_replies.extend([Ok(catalog()), Ok(serde_json::json!({"data":{"model":{}}})),
+            Err("service unavailable".into())]);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
+        assert!(herdr.calls.iter().any(|call| matches!(call, Call::SendKeys { .. })));
+        assert_eq!(herdr.calls.iter().filter(|call| matches!(call, Call::OpenCodeApi { .. })).count(), 3);
+    }
+
+    #[test]
+    fn a_launch_pending_agent_keeps_a_durable_confirmation_wait() {
+        let (mut store, mut herdr) = api_world();
+        herdr.set_status(PANE, gear_herdr::AgentStatus::Unknown);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
+        assert_eq!(pending(&mut store, "p:heat").unwrap().unwrap().step, Step::ApiConfirm);
+        assert!(herdr.calls.is_empty());
+        herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, &format!("┃ Build auto · {}", labels().bar));
+        herdr.api_replies.extend([Ok(catalog()), Ok(serde_json::json!({"data":{"model":{
+            "providerID":"opencode-go", "id":"deepseek-v4.1-flash"}}}))]);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Done);
+    }
+
+    #[test]
+    fn working_agent_gets_neither_api_calls_nor_keys() {
+        let (mut store, mut herdr) = api_world();
+        herdr.set_status(PANE, gear_herdr::AgentStatus::Working);
+        assert_eq!(api_switch(&mut store, &mut herdr, &labels()), SwitchOutcome::Waiting);
+        assert!(herdr.calls.is_empty());
+    }
 
     fn world() -> Store {
         let mut s = Store::open_in_memory().unwrap();

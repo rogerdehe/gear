@@ -57,14 +57,14 @@ Two private servers with different models ran at the same time and each kept its
 Why: the config is loaded by the *server* process (`role=server` in `~/.local/share/opencode/log/opencode.log`), not by the TUI client. The shared background service was started long before the export, so its own environment does not have the variable. A private server inherits the environment of the pane it is started in; a project `opencode.json` is re-read by the server when it changes.
 
 **Rule (2026-10-23):**
-- **Long-lived lanes run on the shared background service — no `--standalone`.** Private servers exited on their own twice in a day (the lane vanished), and they cost ~260 MB each. A lane gets its model **in place** with `/model` (picker filter, Enter, the variant dialog if any), checked on the status bar; the filter must be specific (`DeepSeek V4.1 Flash OpenCode Go`, not a free tier). Changing a model never closes the agent.
+- **Long-lived lanes run on the shared background service — no `--standalone`.** Private servers exited on their own twice in a day (the lane vanished), and they cost ~260 MB each. A lane gets its model through the **service API** below (session.create before start, session.switchModel in place), confirmed by session.get and the status bar; typed picker input is a fallback when the API fails; the filter must be specific (`DeepSeek V4.1 Flash OpenCode Go`, not a free tier). Changing a model never closes the agent.
 - **Short-lived reviewers** may use `--standalone` + the environment line (they exit soon after their verdict); today reviewers run on Codex anyway.
-- **Start model: the project's `opencode.json`** (`{"model":"<provider/model>"}` at the repo root): the shared service applies it to every new session in that project (re-verified 2026-10-23: `minimax-cn/MiniMax-M3.1-Flash` on the bar at start); `/model` still changes it inside the session.
-- **Effort (variant) is not configurable per project or per process.** `agent.build.variant` in `opencode.json` is ignored. OpenCode remembers one variant per model in `~/.local/state/opencode/model.json` (`"variant": {"<provider/model>": "high"}`), shared by every session on the machine. Set it in the session with `/effort` (the "Select variant" dialog) and check the bar (`· max`); it changes that model's default for every new session, the user's own included.
+- **Project default model (fallback): the project's `opencode.json`** (`{"model":"<provider/model>"}` at the repo root): the shared service applies it to every new session in that project (re-verified 2026-10-23: `minimax-cn/MiniMax-M3.1-Flash` on the bar at start); `/model` still changes it inside the session.
+- **Effort (variant) is owned by the API session; validate its ID against `opencode api model.list` before creating or switching a session.** The older project/process config route does not set it: `agent.build.variant` in `opencode.json` is ignored. OpenCode remembers one variant per model in `~/.local/state/opencode/model.json` (`"variant": {"<provider/model>": "high"}`), shared by every session on the machine. Set it in the session with `/effort` (the "Select variant" dialog) and check the bar (`· max`); it changes that model's default for every new session, the user's own included.
 
 ```bash
 herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --auto        # lane
-# then, when the status bar is not on the wanted model: /model, filter, Enter, check the bar
+# engine-managed lanes create the API session first and add --session <id>
 ```
 
 ## Model and variant through the service API (preferred)
@@ -77,7 +77,7 @@ opencode api session.switchModel --param sessionID=<id> -d '{"model":{"providerI
 opencode api GET /api/session/<id>          # check .model
 ```
 
-Start the TUI on that session with `opencode --session <id>`. No keystrokes and no change to the machine-wide `model.json`. The model picker command is `/models` (not `/model`); a typed slash command only runs when chosen from its autocomplete, a pasted one is sent as a chat message.
+GEAR creates the session at the lane worktree with agent `build`, records its ID on the binding, then starts the TUI with `opencode --auto --session <id>`. It checks the API session model and the visible status bar before activating or continuing the lane. Explicit variants come from `[models.switch."provider/model"].variant`; unknown IDs are rejected rather than silently discarded. `session.switchModel` returns HTTP 204 (an empty CLI body is success). A launch-pending TUI stays pending until it is idle and both confirmations match. No keystrokes and no change to the machine-wide `model.json`. The model picker command is `/models` (not `/model`); a typed slash command only runs when chosen from its autocomplete, a pasted one is sent as a chat message.
 
 ## Find the session id
 
