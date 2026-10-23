@@ -24,7 +24,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{Store, Tx};
 
 pub use deps::DepNode;
@@ -111,6 +111,10 @@ pub struct ProjectBoard {
     pub waiting: Waiting,
     /// The temp slots of the project.
     pub temps: Temps,
+    /// The deliveries the engine has not confirmed yet: the captain's home
+    /// page shows them, because a delivery that is not confirmed is a lane
+    /// that may not have started.
+    pub unconfirmed_deliveries: usize,
 }
 
 /// The counts of the whole plan.
@@ -198,13 +202,14 @@ pub fn build(store: &mut Store, opts: &Options, now: Ts) -> GearResult<Board> {
             Some(id) => vec![id.clone()],
             None => tx.project_ids()?,
         };
-        ids.iter().map(|id| project_board(tx, id, now)).collect()
+        ids.iter().map(|id| project(tx, id, now)).collect()
     })?;
     Ok(Board { engine, projects })
 }
 
-/// The plan of one project, as the board shows it.
-fn project_board(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> {
+/// The plan of one project: the model both the board and the captain's home
+/// page show. One read transaction; nothing is written.
+pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> {
     let row = tx.get_project(project)?.ok_or_else(|| {
         GearError::new(ErrorCode::NoTarget, format!("project {project} is not registered"))
     })?;
@@ -271,7 +276,30 @@ fn project_board(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard
         quota: row.quota_temps.max(0) as usize,
     };
 
-    Ok(ProjectBoard { project: project.to_string(), totals, lanes, deps, waiting, temps })
+    // The deliveries in flight: a Deliver op that is not settled yet.
+    let mut unconfirmed_deliveries = 0;
+    for state in [
+        OpState::Intended,
+        OpState::Executing,
+        OpState::Submitted,
+        OpState::Unknown,
+    ] {
+        unconfirmed_deliveries += tx
+            .ops_in_state(project, state)?
+            .iter()
+            .filter(|op| op.kind == OpKind::Deliver)
+            .count();
+    }
+
+    Ok(ProjectBoard {
+        project: project.to_string(),
+        totals,
+        lanes,
+        deps,
+        waiting,
+        temps,
+        unconfirmed_deliveries,
+    })
 }
 
 /// The seat states that hold a temp slot (design/10): STARTING, ACTIVE,
@@ -384,8 +412,9 @@ fn human_age(seconds: i64) -> String {
 }
 
 /// The board's word for a task state (PRD §15): the states of the plan, plus
-/// the two ways a task can end without a result.
-fn state_word(state: TaskState) -> &'static str {
+/// the two ways a task can end without a result. The captain's home page
+/// uses the same words (T-9).
+pub fn state_word(state: TaskState) -> &'static str {
     match state {
         TaskState::Ready => "queued",
         TaskState::Running => "in progress",
@@ -433,6 +462,7 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "in_use": project.temps.in_use,
                     "quota": project.temps.quota,
                 },
+                "unconfirmed_deliveries": project.unconfirmed_deliveries,
             })
         })
         .collect();
