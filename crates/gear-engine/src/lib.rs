@@ -22,8 +22,10 @@ pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod quota;
 pub mod release;
 pub mod review;
+pub mod stall;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -65,6 +67,8 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
+    pub quota: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -109,6 +113,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+
+        // 1b. quota: a lane on a provider limit switches model or parks
+        //     (design/01 `[models].on_quota`). It runs before the confirm, so a
+        //     lane that is on quota does not have its delivery budget spent.
+        let quota = quota::apply_quota_policy(store, herdr, cfg, &project, &observed, now)?;
+        report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let (confirmed, flagged) =
@@ -157,12 +167,30 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
 
+        // 7b. a reviewer that stopped before its verdict is told to go on
+        //     (L-53); past its nudge budget it is flagged for the captain.
+        let (_nudged, stuck) =
+            review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
+        for seat in stuck {
+            if !report.flagged.contains(&seat) {
+                report.flagged.push(seat);
+            }
+        }
+
         // 8. release: a reviewer whose task left review frees its slot (T-17).
         let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
         report.released.extend(releases.released);
 
         // 9. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+    }
+    // 10. every flagged seat reaches its captain (L-52): a flag that only goes
+    //     to the log leaves a lane standing still with nobody knowing.
+    for seat in report.flagged.clone() {
+        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+            // One seat's alert failing never stops the tick.
+            report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
+        }
     }
     Ok(report)
 }
