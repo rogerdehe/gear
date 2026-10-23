@@ -2,6 +2,7 @@
 //! agent session the occupant of a seat. This module only *plans* the steps
 //! (pure); executing them through Herdr is a later task.
 
+use gear_app::config::LaneSection;
 use gear_herdr::{HerdrAct, Outcome, Profile};
 use gear_model::state::require_transition;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
@@ -96,6 +97,48 @@ pub fn plan_onboard(
     })
 }
 
+/// The primary model of a lane (17 §0): the first entry of the lane's own
+/// chain, else the first entry of the lane chain (`[models].lanes`). `None`
+/// when no chain is configured — then GEAR does not manage the model.
+fn lane_primary<'a>(lane: &'a LaneSection, lane_chain: &'a [String]) -> Option<&'a str> {
+    lane.models
+        .first()
+        .or_else(|| lane_chain.first())
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+}
+
+/// How a CLI takes the model it starts on.
+struct ModelStart {
+    /// The shell fragment that carries the model in the environment line.
+    env: String,
+    /// Start args the model needs.
+    args: Vec<String>,
+}
+
+/// The model of a lane, as the CLI gets it.
+///
+/// OpenCode has no `--model` flag: it takes the model from its config, and
+/// the only config source a *client* can carry is the environment variable
+/// `OPENCODE_CONFIG_CONTENT` (a JSON object). Verified 2026-10-22 on OpenCode
+/// v2.1.2 — see `skills/gear/references/agents/opencode.md`.
+///
+/// The variable is read by the process that loads the config. Against the
+/// shared background service that is the service, whose environment was fixed
+/// when it started, so the model would be ignored; a private server
+/// (`--standalone`) reads the environment of the pane it is started in, which
+/// is where GEAR exports the model. A CLI without a verified way gets
+/// nothing: its model is not managed by GEAR.
+fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
+    match kind {
+        "opencode" => Some(ModelStart {
+            env: format!("export OPENCODE_CONFIG_CONTENT='{{\"model\":\"{model}\"}}'"),
+            args: vec!["--standalone".to_string()],
+        }),
+        _ => None,
+    }
+}
+
 /// Onboard every **Lane** seat in state Queued, in every project (slice-3
 /// walking skeleton; captain and temps are not onboarded by the engine yet).
 /// Per seat, in this order:
@@ -179,7 +222,7 @@ fn onboard_seat(
         .ok_or_else(|| format!("profile {} is not configured", seat.profile))?;
 
     // 2. the plan: worktree, environment line, agent name and start args.
-    let plan = plan_onboard(
+    let mut plan = plan_onboard(
         seat,
         &lane.kind,
         profile,
@@ -189,6 +232,15 @@ fn onboard_seat(
         &cfg.db_path,
         None,
     )?;
+    // The lane's model goes into the environment line, so the agent GEAR
+    // starts runs on the model GEAR chose (17 §0): the lane's own chain
+    // first, else the lane chain.
+    if let Some(model) = lane_primary(lane, &config.models.lanes) {
+        if let Some(start) = model_start(&lane.kind, model) {
+            plan.env_command = format!("{}; {}", plan.env_command, start.env);
+            plan.args.extend(start.args);
+        }
+    }
     let worktree = plan
         .worktree
         .clone()
@@ -309,6 +361,93 @@ kind = "opencode"
 profile = "opencode"
 "#;
 
+    /// The same project with a lane chain: `minimax-cn/MiniMax-M3.1-Flash`
+    /// first, `deepseek/deepseek-flash` as the fallback.
+    const CONFIG_WITH_MODELS: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+"#;
+
+    /// The same project, but the lane brings its own chain.
+    const CONFIG_WITH_LANE_MODELS: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+models = ["deepseek/deepseek-v4-pro"]
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+"#;
+
+    /// An engine that knows the opencode profile.
+    fn cfg() -> crate::EngineCfg {
+        let mut cfg = crate::EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        cfg
+    }
+
+    /// The environment line the engine ran in the pane.
+    fn env_line(herdr: &FakeHerdr) -> String {
+        herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the engine ran the environment line")
+    }
+
+    /// The start args the engine started the agent with.
+    fn start_args(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::AgentStart { args, .. } => Some(args.clone()),
+                _ => None,
+            })
+            .expect("the engine started the agent")
+    }
+
     /// A project with one registered lane and the given config text.
     fn world(config_toml: &str) -> Store {
         let mut store = Store::open_in_memory().unwrap();
@@ -372,5 +511,52 @@ profile = "opencode"
         assert!(active.is_empty());
         let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active, "an active seat is never onboarded again");
+    }
+
+    #[test]
+    fn the_lane_model_is_carried_by_the_environment_line() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let env = env_line(&herdr);
+        assert!(
+            env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
+            "the environment line must carry the lane's model: {env}"
+        );
+        assert!(env.starts_with("export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db"), "{env}");
+        // The model is only read by a process that inherits the pane's
+        // environment, so the agent gets a private server.
+        assert!(start_args(&herdr).contains(&"--standalone".to_string()), "{:?}", start_args(&herdr));
+    }
+
+    #[test]
+    fn the_lane_own_model_wins_over_the_lane_chain() {
+        let mut store = world(CONFIG_WITH_LANE_MODELS);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let env = env_line(&herdr);
+        assert!(
+            env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"deepseek/deepseek-v4-pro"}'"#),
+            "the lane's own model must win: {env}"
+        );
+        assert!(!env.contains("MiniMax-M3.1-Flash"), "the lane chain must not be used: {env}");
+    }
+
+    #[test]
+    fn without_a_model_chain_the_environment_line_stays_as_it_was() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        assert_eq!(env_line(&herdr), "export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db");
+        assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 }
