@@ -48,6 +48,8 @@ description = "GEAR plan board"
 
    Edit `gear.toml`: the project, the captain's pane, the lanes (`<project>-<duty>` names, what each owns), the review slots, the models (developers on a fast model, reviewers on a different, stronger one) and what happens when a quota runs out (switch to the next model, or wait for the reset).
 
+   An agent kind GEAR does not know needs a profile: `[profiles.<kind>]` sets its kind, the flags that keep it unattended, the screen markers and the exit keys — `gear admin kickoff` prints the skeleton for a kind it detects without a built-in profile.
+
 2. **Register it** (in your own shell, not inside an agent):
 
    ```bash

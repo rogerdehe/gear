@@ -48,7 +48,14 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     assert_eq!(cfg.temps, None);
     assert_eq!(
         cfg.conventions,
-        Conventions { integration: "dev".into(), release: "main".into(), staging: "".into(), review_max_rounds: 3 }
+        // T-12 added `gate`; the rest of the defaults are unchanged.
+        Conventions {
+            integration: "dev".into(),
+            release: "main".into(),
+            staging: "".into(),
+            review_max_rounds: 3,
+            gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
+        }
     );
     assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45 });
     assert!(cfg.profiles.is_empty());

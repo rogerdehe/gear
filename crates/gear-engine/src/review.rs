@@ -9,8 +9,8 @@
 //! - its own agent (the `[temps]` kind) on a model of its own: the first of
 //!   `[models].review` that differs from the writer's,
 //! - a review packet with the goal, the accept criteria, the candidate, the
-//!   diff range, the rules in `ops/REVIEW.md` and the exact command to hand
-//!   the verdict in.
+//!   diff range, the rules (`gear --skill review`) and the exact command to
+//!   hand the verdict in.
 //!
 //! The lane is never blocked: the reviewer is a seat of its own.
 
@@ -47,6 +47,7 @@ pub fn start_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     now: Ts,
 ) -> GearResult<ReviewReport> {
@@ -65,7 +66,7 @@ pub fn start_reviews(
     let Some(temps) = config.temps.as_ref() else {
         return Ok(report);
     };
-    let Some(profile) = cfg.profiles.get(&temps.profile) else {
+    let Some(profile) = profiles.get(&temps.profile) else {
         return Ok(report);
     };
     // An unverified profile may not take over a real project (design/04).
@@ -375,7 +376,8 @@ fn start_reviewer(
     //    job on a warm seat), else the seat's worktree — opened, or created
     //    once at the integration branch.
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-    let pane = match binding.as_ref().map(|binding| binding.pane_id.clone()) {
+    let live = binding.as_ref().filter(|binding| binding.status != BindingStatus::Void);
+    let pane = match live.map(|binding| binding.pane_id.clone()) {
         Some(pane) => pane,
         None => {
             let worktree = match herdr.worktree_open(repo, &seat_branch, &seat_label) {
@@ -1000,9 +1002,11 @@ fn review_packet(
          Diff to review: `{integration}..{candidate}`\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
-         Rules: `ops/REVIEW.md` in your worktree — the mechanical acceptance you run yourself, \
-         the findings with their severity, the template of `ops/reviews/{task}.md` and the \
-         verdict rule.\n\
+         Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
+         the findings with their severity, the review template and the verdict rule.\n\
+         \n\
+         Write the review in your worktree at the path your project uses for reviews, commit it \
+         on `{branch}` and push it (the candidate stays untouched).\n\
          \n\
          Every finding is either blocking or logged: a blocking finding names the part of the \
          done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
@@ -1011,7 +1015,11 @@ fn review_packet(
          Hand your verdict in with exactly (the findings as text, one per line, each starting \
          with its id; `--blocking` names the ones that block):\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         [--blocking <ids>] \"<findings>\"\n\
+         [--blocking <ids>] \"<the path to your review file, or the text>\"\n\
+         \n\
+         GEAR reads the file and keeps the text of your findings, so the writer reads them from \
+         GEAR (the rework note and the task packet): your worktree and your branch may be gone \
+         afterwards.\n\
          \n\
          A `fail` becomes the writer's rework: write every finding so the writer can act on it \
          without asking."
@@ -1367,6 +1375,68 @@ review = ["gpt-6.1-sol"]
         herdr.set_screen(&pane, &format!("{FAIL_MARKER}{token}"));
     }
 
+    /// R1 (review): the project's profile table reaches the reviewer start — a
+    /// reviewer on a profile the config defines starts with that kind.
+    #[test]
+    fn a_configured_reviewer_profile_starts_the_reviewer() {
+        let text = CONFIG
+            .replace(
+                "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
+                "[temps]\nkind = \"grok\"\nprofile = \"grok\"",
+            )
+            + "\n[profiles.grok]\nkind = \"grok\"\nunattended_args = [\"--yolo\"]\ntail_lines = 16\nconfirm_rounds = 1\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        let config = gear_app::config::parse(&text).unwrap();
+        let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
+
+        // The first tick submits the checkout; the reviewer starts once the
+        // shell reports it (T-18's flow).
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
+
+        assert_eq!(report.started, vec!["p:review-1".to_string()], "a reviewer starts on the configured profile");
+        let starts: Vec<(String, Vec<String>)> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { kind, args, .. } => Some((kind.clone(), args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "grok");
+        assert!(starts[0].1.contains(&"--yolo".to_string()), "{:?}", starts[0].1);
+    }
+
+    /// R1 (review): an override of a built-in profile reaches the start — the
+    /// custom unattended args replace the built-in's.
+    #[test]
+    fn a_builtin_reviewer_override_reaches_the_start() {
+        let text = CONFIG.to_string()
+            + "\n[profiles.codex]\nunattended_args = [\"--custom-flag\"]\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        let config = gear_app::config::parse(&text).unwrap();
+        let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
+
+        let starts: Vec<(String, Vec<String>)> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { kind, args, .. } => Some((kind.clone(), args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].1.contains(&"--custom-flag".to_string()), "{:?}", starts[0].1);
+    }
+
     #[test]
     fn a_result_in_starts_one_reviewer() {
         let mut store = world(CONFIG);
@@ -1375,7 +1445,7 @@ review = ["gpt-6.1-sol"]
         // The first tick: the seat and its worktree are made and the checkout
         // is submitted. The reviewer waits — the engine has not seen the
         // checkout land on the candidate yet (F1 of the T-18 review).
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         assert!(first.started.is_empty(), "{first:?}");
         assert_eq!(first.waiting, vec!["T-1".to_string()]);
         assert!(starts(&herdr).is_empty(), "no reviewer before the checkout");
@@ -1387,7 +1457,7 @@ review = ["gpt-6.1-sol"]
 
         // The shell reports the checkout: the reviewer starts.
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         // one temp seat, bound to the task for life
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
@@ -1429,7 +1499,10 @@ review = ["gpt-6.1-sol"]
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
         assert!(text.contains("dev..abc1234"), "{text}");
-        assert!(text.contains("ops/REVIEW.md"), "{text}");
+        // The rules come from the binary, not from a file of the gear repo
+        // (T-30): the packet names `gear --skill review` and no `ops/` path.
+        assert!(text.contains("gear --skill review"), "{text}");
+        assert!(!text.contains("ops/"), "no gear-repo path in the packet:\n{text}");
         // The findings are text with ids; `--blocking` names the ones that
         // block (T-23).
         assert!(
@@ -1437,6 +1510,10 @@ review = ["gpt-6.1-sol"]
             "{text}"
         );
         assert!(text.contains("--blocking <ids>"), "{text}");
+        // The findings live in GEAR's store (T-21, shipped): the writer reads
+        // the text from the rework note and the packet, not from the branch.
+        assert!(text.contains("keeps the text of your findings"), "{text}");
+        assert!(!text.contains("git show"), "no branch pointer in the packet:\n{text}");
     }
 
     #[test]
@@ -1448,11 +1525,11 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         // A second tick while the checkout is still running.
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
 
         let commands = pane_runs(&herdr, "wt1:p1");
         let export = commands
@@ -1479,14 +1556,14 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         let first_token = store
             .read(|tx| tx.get_meta(&checkout_key("p:review-1", 1)))
             .unwrap()
             .unwrap();
         fail_checkout(&mut store, &mut herdr, "p:review-1", 1);
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert!(report.started.is_empty(), "{report:?}");
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
@@ -1523,15 +1600,15 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         // The shell has printed nothing yet: the checkout is still running.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         assert!(report.started.is_empty(), "{report:?}");
         assert!(starts(&herdr).is_empty(), "no reviewer while the checkout runs");
 
         // The report arrives.
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
     }
 
@@ -1543,10 +1620,10 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "9999999", "review/t1");
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert!(report.started.is_empty(), "{report:?}");
         assert!(starts(&herdr).is_empty(), "no reviewer on the wrong commit");
@@ -1585,10 +1662,10 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
 
         assert!(report.started.is_empty(), "{:?}", report.started);
         assert_eq!(worktrees(&herdr).len(), 1);
@@ -1607,7 +1684,7 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG_NO_SLOT);
         let mut herdr = FakeHerdr::new();
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert!(report.started.is_empty());
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
@@ -1624,7 +1701,7 @@ review = ["gpt-6.1-sol"]
         assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
         assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
         // The next tick does not tell the captain again.
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21)).unwrap();
         assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
     }
@@ -1669,13 +1746,13 @@ review = ["gpt-6.1-sol"]
             .unwrap();
 
         // The first tick submits the checkout.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         assert!(report.started.is_empty(), "the checkout is not confirmed yet");
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
 
         // The shell is still starting: the agent start is refused.
         herdr.refuse_next_start = Some("agent_pane_busy".into());
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert!(report.started.is_empty(), "the agent is not up yet");
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
@@ -1683,7 +1760,7 @@ review = ["gpt-6.1-sol"]
         assert_eq!(seat.state, SeatState::Starting, "not parked: tried again");
         // The next tick starts the agent: the worktree and the environment are
         // already there.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         // The refused call was the agent's start; the start happens once.
         assert_eq!(herdr.started_agents.len(), 1, "the agent starts once");
@@ -1809,7 +1886,7 @@ review = ["gpt-6.1-sol"]
             })
             .unwrap();
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert!(report.started.is_empty(), "{report:?}");
         assert!(starts(&herdr).is_empty(), "no reviewer started on a foreign agent");
@@ -1832,10 +1909,10 @@ review = ["gpt-6.1-sol"]
         let mut herdr = FakeHerdr::new();
 
         // Job 1: T-1's result comes in.
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         assert!(first.started.is_empty(), "the checkout waits for its report");
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 15).unwrap();
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
         assert_eq!(first.started, vec!["p:review-1".to_string()]);
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
@@ -1902,10 +1979,10 @@ review = ["gpt-6.1-sol"]
             })
             .unwrap();
 
-        let second = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        let second = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert!(second.started.is_empty(), "the checkout waits for its report");
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "def5678", "review/t2");
-        let second = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 35).unwrap();
+        let second = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
         assert_eq!(second.started, vec!["p:review-1".to_string()], "the warm seat took the job");
         // No second worktree: the seat's own is reused.
@@ -1953,9 +2030,9 @@ review = ["gpt-6.1-sol"]
         let mut herdr = FakeHerdr::new();
 
         // Attempt 1 of T-1 is reviewed.
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 15).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
         let first_args = starts(&herdr)[0].1.clone();
         assert!(!first_args.iter().any(|arg| arg == "resume"), "{first_args:?}");
         // Herdr reported the session of the reviewer.
@@ -1990,9 +2067,9 @@ review = ["gpt-6.1-sol"]
             })
             .unwrap();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 35).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let second_args = &starts(&herdr)[1].1;
