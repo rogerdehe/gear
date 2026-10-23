@@ -83,6 +83,16 @@ impl FakeHerdr {
         self.panes.get_mut(pane).expect("unknown pane").screen = screen.into();
     }
 
+    /// Register a worktree that Herdr already has open (the engine's
+    /// integration worktree of a real repo).
+    pub fn add_worktree(&mut self, branch: &str, path: &str, pane: &str) {
+        let workspace = format!("wt-{}", branch.replace('/', "-"));
+        self.worktrees.insert(
+            branch.to_string(),
+            (Some(workspace), Some(pane.to_string()), path.to_string()),
+        );
+    }
+
     /// Agent exits; pane becomes a shell.
     pub fn exit_agent(&mut self, pane: &str) {
         let p = self.panes.get_mut(pane).expect("unknown pane");
