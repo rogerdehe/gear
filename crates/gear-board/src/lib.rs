@@ -1,13 +1,9 @@
 //! The GEAR plan board (PRD §15).
 //!
-//! The board is what the user and the captain look at: **the plan, not the
-//! agents**. It shows the totals, every lane's queue with the state of each
-//! task, the items waiting for the captain and the temp slots — and one
-//! warning line, only when the engine is down.
-//!
-//! It says nothing about liveness: Herdr's own panel shows whether an agent
-//! is working or idle, so the board has no agent state and no heartbeat
-//! (PRD §15). It also never writes: the plan is read, not touched.
+//! The board shows the plan, lane queues, waiting items and temp slots.
+//! Lane summaries name the observed Herdr agent state separately from task
+//! state. Observation is read-only and happens outside store transactions;
+//! unavailable observations are shown as unknown. The board never writes.
 //!
 //! The board does not start the engine either: it reads the engine's lock
 //! file to know whether the engine is down. A view that revived what it
@@ -26,7 +22,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{Store, Tx};
+use gear_store::{BindingStatus, Store, Tx};
+use gear_herdr::{AgentInfo, AgentStatus, HerdrRead};
 
 pub use deps::DepNode;
 pub use screen::{Keys, Terminal};
@@ -149,6 +146,8 @@ pub struct Rework {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneBoard {
     pub lane: String,
+    /// Herdr observation, never inferred from task or seat state.
+    pub agent_state: &'static str,
     pub tasks: Vec<TaskBoard>,
     /// The lane's never-stop measures.
     pub rework: Rework,
@@ -217,13 +216,21 @@ impl EngineState {
 
 /// Build the board from the store. Read-only: nothing is written.
 pub fn build(store: &mut Store, opts: &Options, now: Ts) -> GearResult<Board> {
+    build_with_agents(store, opts, now, None)
+}
+
+/// Build from an observation obtained before opening the read transaction.
+/// None means observation failed; an empty slice means no agents were seen.
+pub fn build_with_agents(
+    store: &mut Store, opts: &Options, now: Ts, agents: Option<&[AgentInfo]>,
+) -> GearResult<Board> {
     let engine = EngineState::probe(opts.db.as_deref());
     let projects = store.read(|tx| {
         let ids = match &opts.project {
             Some(id) => vec![id.clone()],
             None => tx.project_ids()?,
         };
-        ids.iter().map(|id| project(tx, id, now)).collect()
+        ids.iter().map(|id| project_with_agents(tx, id, now, agents)).collect()
     })?;
     Ok(Board { engine, projects })
 }
@@ -231,24 +238,31 @@ pub fn build(store: &mut Store, opts: &Options, now: Ts) -> GearResult<Board> {
 /// The plan of one project: the model both the board and the captain's home
 /// page show. One read transaction; nothing is written.
 pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> {
+    project_with_agents(tx, project, now, None)
+}
+
+/// The shared project model with an optional read-only Herdr snapshot.
+pub fn project_with_agents(
+    tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[AgentInfo]>,
+) -> GearResult<ProjectBoard> {
     let row = tx.get_project(project)?.ok_or_else(|| {
         GearError::new(ErrorCode::NoTarget, format!("project {project} is not registered"))
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
 
-    // The lanes: the registered ones first (seat order), then a lane that a
-    // task names but no seat carries.
-    let mut order: Vec<String> = Vec::new();
-    for seat in &seats {
-        if seat.role == SeatRole::Lane && !order.contains(&seat.name) {
-            order.push(seat.name.clone());
-        }
+    // Keep active empty lanes visible, but never recreate a retired lane
+    // from a historical task assignment below.
+    let retired: std::collections::BTreeSet<_> = seats.iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
+        .map(|seat| seat.name.as_str()).collect();
+    let mut lanes = Vec::new();
+    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
+        lanes.push(LaneBoard {
+            lane: seat.name.clone(), agent_state: observed_agent_state(tx, seat, agents)?,
+            tasks: Vec::new(), rework: Rework::default(),
+        });
     }
-    let mut lanes: Vec<LaneBoard> = order
-        .into_iter()
-        .map(|lane| LaneBoard { lane, tasks: Vec::new(), rework: Rework::default() })
-        .collect();
 
     let mut totals = Totals::default();
     for task in &tasks {
@@ -264,11 +278,15 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
             _ => {}
         }
         let name = task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string());
+        if retired.contains(name.as_str()) {
+            continue;
+        }
         let line = TaskBoard { id: task.id.clone(), state: task.state };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
             None => lanes.push(LaneBoard {
                 lane: name,
+                agent_state: "unknown",
                 tasks: vec![line],
                 rework: Rework::default(),
             }),
@@ -381,6 +399,40 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
     })
 }
 
+/// Only label the agent in this generation's active binding.
+fn observed_agent_state(
+    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>,
+) -> GearResult<&'static str> {
+    let Some(agents) = agents else { return Ok("unknown"); };
+    let Some(binding) = tx.get_binding(&seat.id, seat.generation)?
+        .filter(|binding| binding.status == BindingStatus::Active)
+    else { return Ok("unknown"); };
+    let Some(agent) = agents.iter().find(|agent| agent.pane_id == binding.pane_id && agent.agent.is_some())
+    else { return Ok("missing"); };
+    if agent.agent.as_deref() != Some(binding.kind.as_str())
+        || binding.session_ref.as_deref().is_some_and(|expected|
+            agent.agent_session.as_ref().map(|session| session.value.as_str()) != Some(expected))
+    {
+        return Ok("unknown");
+    }
+    Ok(match agent.agent_status {
+        AgentStatus::Idle => "idle", AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked", AgentStatus::Done => "done",
+        AgentStatus::Unknown => "unknown",
+    })
+}
+
+/// Shared snapshot/board wording: agent state and task state have separate labels.
+pub fn lane_line(lane: &LaneBoard) -> String {
+    let current = lane.tasks.iter().find(|task| task.state == TaskState::Running)
+        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Waiting))
+        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Verifying));
+    let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
+        .unwrap_or_else(|| "no current task".into());
+    let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
+    format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued)
+}
+
 /// The seat states that hold a temp slot (design/10): STARTING, ACTIVE,
 /// RELEASING and UNKNOWN occupy the quota; QUEUED and RELEASED do not.
 fn holds_temp_slot(state: SeatState) -> bool {
@@ -432,12 +484,7 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
             if !project.lanes.is_empty() {
                 lines.push(String::new());
                 for lane in &project.lanes {
-                    lines.push(format!("Lane {}{}", lane.lane, lane_measures(&lane.rework)));
-                    if lane.tasks.is_empty() {
-                        // A registered lane with nothing queued: the captain
-                        // sees it and can refill it.
-                        lines.push("  idle".to_string());
-                    }
+                    lines.push(format!("Lane {}{}", lane_line(lane), lane_measures(&lane.rework)));
                     for task in &lane.tasks {
                         lines.push(format!("  {} {}", task.id, state_word(task.state)));
                     }
@@ -558,6 +605,7 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                 },
                 "lanes": project.lanes.iter().map(|lane| serde_json::json!({
                     "lane": lane.lane,
+                    "agent_state": lane.agent_state,
                     "rework": {
                         "handed_in": lane.rework.handed_in,
                         "rejected": lane.rework.rejected,
@@ -597,14 +645,15 @@ pub fn to_json(board: &Board) -> GearResult<String> {
 /// Without a terminal — a pipe, a test — the board is printed once and the
 /// command returns: a full-screen view must not hang a caller that cannot
 /// see it. [`run_with`] draws the frames.
-pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write) -> GearResult<()> {
+pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Option<&mut dyn HerdrRead>) -> GearResult<()> {
     if opts.json || !screen::is_terminal() {
-        let board = build(store, opts, now_ts())?;
+        let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
+        let board = build_with_agents(store, opts, now_ts(), agents.as_deref())?;
         return print_once(&board, opts, out);
     }
     let mut keys = screen::Terminal::new();
     screen::enter(out).map_err(write_error)?;
-    let result = run_with(store, opts, out, &mut keys);
+    let result = run_with(store, opts, out, &mut keys, herdr);
     // The terminal is given back even when the board failed.
     let _ = screen::leave(out);
     result
@@ -619,11 +668,13 @@ pub fn run_with(
     opts: &Options,
     out: &mut dyn Write,
     keys: &mut dyn Keys,
+    mut herdr: Option<&mut dyn HerdrRead>,
 ) -> GearResult<()> {
     let mut view = opts.view;
     let mut first = true;
     loop {
-        let text = match build(store, opts, now_ts()) {
+        let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
+        let text = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
             Ok(board) => render(&board, view),
             Err(e) => {
                 // The first frame decides whether the board can start at all.

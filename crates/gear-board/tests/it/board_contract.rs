@@ -65,17 +65,17 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
     assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
     // The lanes come in seat order, their tasks in queue order.
     assert!(
-        text.contains("Lane data · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting"),
+        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting"),
         "{text}"
     );
     assert!(
-        text.contains("Lane runtime · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
+        text.contains("Lane runtime · agent unknown · T-2 in progress · 1 queued · rework 0/0 · no task yet\n  T-2 in progress\n  T-4 queued"),
         "{text}"
     );
 }
 
 #[test]
-fn a_lane_with_no_tasks_is_shown_as_idle() {
+fn a_lane_with_no_tasks_is_shown_without_a_current_task() {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
@@ -90,7 +90,7 @@ fn a_lane_with_no_tasks_is_shown_as_idle() {
 
     // A registered lane with no tasks stays visible: the captain refills it.
     assert!(text.contains("Totals: 0 tasks"), "{text}");
-    assert!(text.contains("Lane data · rework 0/0 · no task yet\n  idle"), "{text}");
+    assert!(text.contains("Lane data · agent unknown · no current task · 0 queued · rework 0/0 · no task yet"), "{text}");
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn q_leaves_the_board() {
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Quitter { timeouts: 0 };
 
-    run_with(&mut store, &opts, &mut out, &mut keys).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("Totals: 4 tasks"), "{text}");
@@ -252,7 +252,7 @@ fn a_task_in_review_is_shown_as_in_review() {
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(
-        text.contains("Lane data · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
+        text.contains("Lane data · agent unknown · T-3 waiting · 0 queued · rework 0/0 · no task yet\n  T-1 done\n  T-3 waiting\n  T-5 in review"),
         "{text}"
     );
     // A task in review is not done and not running: the totals say so.
@@ -266,7 +266,7 @@ fn a_board_that_cannot_read_the_plan_fails() {
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Quitter { timeouts: 0 };
 
-    let err = run_with(&mut store, &opts, &mut out, &mut keys).unwrap_err();
+    let err = run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap_err();
 
     assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
 }
@@ -434,7 +434,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
     let board = std::thread::spawn(move || {
         let mut out = FdWriter(slave);
         let mut keys = gear_board::Terminal::on(slave);
-        let result = run_with(&mut store, &opts, &mut out, &mut keys);
+        let result = run_with(&mut store, &opts, &mut out, &mut keys, None);
         let _ = left.send(result.is_ok());
     });
 
@@ -459,4 +459,68 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
         rows.iter().all(|column| *column == 0),
         "the rows drift right: {rows:?}\n{text:?}"
     );
+}
+
+#[test]
+fn a_retired_lane_is_not_reintroduced_by_its_tasks() {
+    let mut store = world();
+    store.write(|tx| tx.set_seat_state("p:runtime", gear_model::SeatState::Retired, None, T0)).unwrap();
+    let board = build(&mut store, &options(), T0).unwrap();
+    assert!(board.projects[0].lanes.iter().all(|lane| lane.lane != "runtime"));
+    assert_eq!(board.projects[0].totals.tasks, 4, "retirement does not erase plan history");
+    assert!(!render(&board, View::Lanes).contains("Lane runtime"));
+    let json: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
+    assert!(json["projects"][0]["lanes"].as_array().unwrap().iter().all(|lane| lane["lane"] != "runtime"));
+}
+
+#[test]
+fn agent_state_is_reported_independently_of_task_state() {
+    use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead};
+    let mut store = world();
+    let mut herdr = FakeHerdr::new();
+    for (status, word) in [
+        (AgentStatus::Working, "working"), (AgentStatus::Idle, "idle"),
+        (AgentStatus::Blocked, "blocked"), (AgentStatus::Done, "done"),
+        (AgentStatus::Unknown, "unknown"),
+    ] {
+        herdr.add_agent("w1:p3", "opencode", status);
+        let agents = herdr.agents().unwrap();
+        let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
+        let text = render(&board, View::Lanes);
+        assert!(text.contains(&format!("Lane runtime · agent {word} · T-2 in progress · 1 queued")), "{text}");
+        let doc: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
+        assert_eq!(doc["projects"][0]["lanes"][1]["agent_state"], word);
+    }
+    assert!(herdr.calls.is_empty(), "display never acts on agents");
+}
+
+#[test]
+fn failed_observation_and_a_missing_or_replaced_agent_are_distinct() {
+    use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead};
+    let mut store = world();
+    let board = gear_board::build_with_agents(&mut store, &options(), T0, None).unwrap();
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+    let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&[])).unwrap();
+    assert!(render(&board, View::Lanes).contains("runtime · agent missing · T-2 in progress"));
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p3", "claude", AgentStatus::Working);
+    let agents = herdr.agents().unwrap();
+    let board = gear_board::build_with_agents(&mut store, &options(), T0, Some(&agents)).unwrap();
+    assert!(render(&board, View::Lanes).contains("runtime · agent unknown · T-2 in progress"));
+}
+
+#[test]
+fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
+    use gear_herdr::{fake::FakeHerdr, AgentStatus};
+    let mut store = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p3", "opencode", AgentStatus::Working);
+    for (fails, expected) in [(false, "working"), (true, "unknown")] {
+        herdr.observe_fails = fails;
+        let mut out = Vec::new();
+        let mut keys = Quitter { timeouts: 0 };
+        run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&format!("runtime · agent {expected} · T-2 in progress · 1 queued")), "{text}");
+    }
 }
