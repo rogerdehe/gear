@@ -13,6 +13,11 @@ const T0: i64 = 1_800_000_000;
 /// Project `p` with a captain, the lane `heat`, T-1 handed in and its review
 /// (a pass) waiting in the store and in the captain's inbox.
 fn world() -> Store {
+    world_verdict(true)
+}
+
+/// The same world with the given verdict.
+fn world_verdict(passed: bool) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
@@ -53,7 +58,7 @@ fn world() -> Store {
             project: "p".into(),
             task: "T-1".into(),
             attempt: 1,
-            passed: true,
+            passed,
             findings: "ops/reviews/T-1.md".into(),
             by_seat: "p:r-1".into(),
             created: T0 + 2,
@@ -243,4 +248,16 @@ fn without_auto_settle_a_verdict_waits_for_the_captain() {
     herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
     let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 10).unwrap();
     assert!(report.settled.is_empty(), "{report:?}");
+}
+
+/// A failing verdict is never settled by the engine: the captain judges its
+/// findings and writes the rework (L-57).
+#[test]
+fn a_failing_verdict_waits_for_the_captain_even_with_auto_settle() {
+    let mut s = world_verdict(false);
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
+    let report = tick(&mut s, &mut herdr, &auto(), T0 + 10).unwrap();
+    assert!(report.settled.is_empty(), "{report:?}");
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Verifying);
 }

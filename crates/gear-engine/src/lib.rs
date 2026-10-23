@@ -247,7 +247,10 @@ fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<St
     let mut settled = Vec::new();
     let mut failed = Vec::new();
     for project in store.read(|tx| tx.project_ids())? {
-        for review in store.read(|tx| tx.reviews_to_settle(&project))? {
+        // Only passes settle themselves: a pass merges without the captain's
+        // hands (M1). A fail goes to the captain, who judges its findings
+        // against the voyage's goal and bar and writes the rework (L-57).
+        for review in store.read(|tx| tx.reviews_to_settle(&project))?.into_iter().filter(|review| review.passed) {
             let label = format!("{project}:{}/{}", review.task, review.attempt);
             match store.write(|tx| {
                 gear_app::tasks::settle_review(tx, &project, &review.task, review.attempt, now)
