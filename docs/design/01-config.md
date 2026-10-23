@@ -1,6 +1,6 @@
 # 01 Config and Project Registration
 
-Files: `gear/config.py`, `gear/cli/admin.py` (init). Budget 100–130 lines.
+Implementation: [config.rs](../../crates/gear-app/src/config.rs), [admin.rs](../../crates/gear-app/src/admin.rs).
 
 ## Project config (written by the user, registered by `gear admin init`, versioned in the database)
 

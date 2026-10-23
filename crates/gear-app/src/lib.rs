@@ -7,8 +7,6 @@
 //! Slice 1 (messaging loop): identity, mail::{send, reply, select_batch}, home.
 //! Slice 2 adds plan/tasks/verdicts.
 
-#![allow(unused_variables, dead_code)] // skeleton
-
 pub mod admin;
 pub mod base;
 pub mod config;

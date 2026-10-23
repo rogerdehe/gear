@@ -1,6 +1,8 @@
 # 16 Agent skill
 
-Files: `skills/gear/SKILL.md`, `skills/gear/references/*.md` (Markdown, not counted in the code budget). The code for `gear --skill` printing, version checks, adoption records and generation logic is counted within the existing budgets of 13, 07, 05, 02 (not just 20 lines).
+Implementation: [skill.rs](../../crates/gear-app/src/skill.rs).
+The shipped entry point is [SKILL.md](../../skills/gear/SKILL.md);
+`gear --skill` prints the version embedded in the binary.
 
 ## Why it exists
 
@@ -18,45 +20,13 @@ Common operating instructions are centralized in the skill to avoid duplicated m
 
 **Default conventions**: the skill ships GEAR's default working conventions (17), with the project's `[conventions]` overrides applied, so the captain and every lane read the same rules via `gear --skill` rather than from per-lane copies.
 
-## skill structure
+## Content and installation
 
-```text
-skills/gear/
-  SKILL.md                    # entry: guard condition + role detection + all lane content (short) + default conventions (17)
-  references/
-    captain.md                # captain: inbox, reply, plan draft, Verdicts, Staff, review, handover
-    plan-format.md            # strict plan draft format (same source as 05, generated rather than hand-written)
-    errors.md                 # meaning of error codes and what to do (same source as 02)
-    agents/<kind>.md          # per-CLI SOP for whoever drives that agent (captain / user / engine author)
-```
+The authoritative topics and embedded files are listed in
+[skill.rs](../../crates/gear-app/src/skill.rs). Use `gear --skill captain`
+for planning, `gear --skill review` for review rules, and
+`gear --skill agent:<kind>` for verified CLI operation.
+`gear admin install-skill --agent <kind>` installs the matching content.
 
-**Per-agent SOPs** (`gear --skill agent:<kind>`): one file per Herdr agent kind, same headings in every file — Start, Find the session, Resume, Exit, Switch model, Switch effort, Screen signs, Pitfalls. Each step is written as exact Herdr commands plus what the screen must show before going on, so a weaker captain model can follow it without exploring. Only steps verified on a real Herdr go in; unverified ones are marked "unverified". The engine's built-in profile (04) for that kind is derived from the same facts.
-
-SKILL.md key points:
-
-1. **Guard condition**: no `GEAR_CTX` environment variable → you are not an Agent onboarded by GEAR; stop and do not run write commands.
-2. **Run `gear` first**: the home page tells you your role (lane/temp worker/captain), the current task and what to do. The captain uses `gear --skill captain`; the plan format and error descriptions use `gear --skill plan-format` and `gear --skill errors` respectively — no reliance on relative paths in the install directory. The installed skill is only a discovery entry point; the output of `gear --skill` for the currently running version is authoritative; when the CLI and engine versions differ, stop the related changes and report it.
-3. **Lanes must**: use only `gear` and `gear send`; for result/blocked use the complete command given in the task packet; for items that need confirmation use `gear send --kind ack --reply-to <ID>`; save results in small steps; not create background write jobs detached from the terminal; not modify plan and task files; for dependencies use `--about` rather than contacting other Agents directly; when a command returns `UNCONFIRMED`, re-run it with the printed request_id rather than resending it reworded.
-4. **The captain must**: at safe turn boundaries leave due reviews a chance to be handled, and not let ordinary messages repeatedly push reviews aside; give priority to necessary urgent safety items per the established rules; reviews may read messages with global impact rather than handling ordinary progress one by one; not forcibly interrupt the current turn; close exact IDs only with `gear reply`; do plan, staffing and acceptance all through the draft + `gear plan apply`; not prompt other Agents directly.
-
-## Release and installation
-
-- `gear --skill`: prints the SKILL.md matching the current version; `gear --skill captain` prints references/captain.md.
-- Installation (CLIs with a skill system): `npx skills add <gear repo> --skill gear -g`, or copy `skills/gear` into that CLI's skill directory.
-- **Works without installation**: the first business delivery after onboarding is sent only once — the existing task dispatch (or handover packet, or a one-time onboarding hint for a seat without a task) carries an entry pointer "first run `gear --skill` to read this version's rules, then run `gear` to see the current task/handover item" together with the skill version. It does not carry the rule text and no separate skill-initialization delivery is sent. The first delivery still goes through 08 operations and obeys the single needs-check delivery rule; reading the skill does not mean the task packet/handover packet has been shown, nor does it confirm task start, contract adoption or handover completion. The same applies to resume onboarding.
-- **Version updates**: after a GEAR upgrade, reuse a SYSTEM + needs_ack message recording the exact skill version, the receiving seat and its session generation; the Agent confirms with `gear send --kind ack --reply-to <update item ID>` (no task arguments needed). Inside a transaction the item's ownership, generation and version are checked, then the adoption record is saved; the ACK closes only that item. Viewing the skill, receiving a doorbell, or having some copy installed does not equal adoption; an ACK of an old version does not confirm a later version; an adoption record from an old session does not count as adoption by the new generation.
-- **Before the new version is confirmed**: do not force rules into a running turn, do not silently change in-flight contracts or authorizations; do not dispatch new work that depends on the new version's rules; reading, submitting the update ACK, saving results, reporting blockers and ending safely are still allowed; actions that cannot safely continue stay in needs check.
-- **Pending successor captain**: after reading the skill specified by the handover and `gear --skill captain`, the existing handover ACK also confirms the skill version referenced by that handover (the handover item stores the version reference); if the version has changed at confirmation time, it is required to check the current content. No separate skill update ACK is sent during the pending phase.
-- The home page shows the current skill version and the version this seat has adopted.
-
-## Relationship to other modules
-
-- 13: adds `gear --skill [captain|plan-format|errors]` (read-only).
-- 14: the plugin package ships the `skills/` directory.
-- 05, 02: `plan-format.md` and `errors.md` are generated from the format definitions and error code table in code, to avoid documentation and code diverging.
-- 10/03: the first delivery after onboarding points to the skill.
-- 17: the default working conventions are shipped in the skill.
-
-## Not done
-
-No separate "install guide skill" for users (like Herdr's agent-guide); that is left to the final form; the MVP only provides an installation instructions document.
+The former generated `plan-format.md`/`errors.md` layout and skill-adoption
+ACK protocol are removed here: they do not describe the shipped implementation.
