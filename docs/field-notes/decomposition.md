@@ -14,9 +14,17 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 | 2026-10-22 | T-6 → T-2 | Dependency added because the two tasks touch nearby files. | Proximity is not a dependency. "Merge dev before handing in" handles it; a dependency is only "cannot be built without". |
 | 2026-10-22 | T-1 v1 → v2 | Contract changed mid-attempt because v1 asked the lane to do something lanes may not do (operate Herdr). The lane finished to v1. | Write the role's limits into the contract from the start (who runs live probes, who installs). A contract checked before apply avoids mid-attempt changes, which cost a re-adoption or an attested verdict. |
 | 2026-10-22 | T-3 round 1 | Rework: the board's tests compared strings; in a real terminal the rows drifted (raw mode). The reviewer found it by running the real path in a PTY. | Acceptance must name **how it is proven in its real environment** (a PTY run, a real git repo, a live command), not only unit asserts. That turns the reviewer's discovery into the writer's own check — rework avoided. |
+| 2026-10-22 | T-3 round 2 | Rework passed first time; resumed reviewer checked only the delta (one short turn). Rework cost: one extra lane task + one short review — cheap because the finding was precise (file:line, cause, fix, how to verify). | A precise finding makes rework cheap; the review template's "write each finding so the writer can act without asking" pays off. |
 | 2026-10-22 | T-1, T-2, T-4 | Passed first time; all had acceptance naming concrete checks (FakeHerdr test shapes, live probe, manifest vs a reference file). | Concrete, checkable acceptance correlates with first-time pass. |
 | 2026-10-22 | T-12 / T-13 | One feature (review verdict → merge) split across two lanes in parallel: data settles states, runtime executes the merge; the shared piece is a one-line enum both may add. | Experiment: split along the seam (state vs side effect) with the tiny shared part allowed on both sides. Watch whether it conflicts. |
+| 2026-10-22 | quota | All lanes ran the same provider plan and hit its limit together; every lane stopped at once. | Spread lanes over providers (or keep a different-provider fallback ready) so one limit does not stop the whole fleet; quota handling is part of never-stop (T-15). |
 | 2026-10-22 | T-11 | Queued only to keep a lane busy; duplicated T-7. Cancelled. | Never fill a queue with busywork. If a lane has no valuable work, re-plan (pull work from a busy lane, split a big task) — or let it stand by and say why. |
+
+## Input from the user (2026-10-22)
+
+- **Rolling horizon of 3–5 steps.** Plan only the next 3–5 steps per lane, chosen so they do not depend on each other and each stands on its own. Keep those near steps stable — avoid changing them while they run; when a lane's steps are done, plan its next ones. A BMAD-style full plan up front is only a hope.
+- **Steer, don't swerve.** The captain adjusts course continuously from what it sees, like a helmsman: a big reversal (hard left to hard right) can happen but should be rare; most corrections are small, so the rowers keep rowing.
+- Offered as experience to weigh, not a rule.
 
 ## Emerging principles (candidates for the skill)
 
@@ -26,6 +34,7 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 4. The contract states the role's limits up front; changing a contract mid-attempt is expensive.
 5. Rework goes first in its lane.
 6. Value over occupancy: no busywork; an idle lane is a planning signal, answered with real work.
+7. Rolling horizon: 3–5 independent, stable steps per lane; re-plan a lane when its horizon runs down, with small course corrections rather than reversals.
 
 ## Open questions
 
