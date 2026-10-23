@@ -1504,7 +1504,7 @@ mod tests {
             &env("r-1", TEMP_PANE),
             &mut herdr,
             &review_cmd("pass"),
-            "ops/reviews/T-7.md".into(),
+            "P1: the header count is stale".into(),
             None,
             T0 + 1,
             false,
@@ -1514,7 +1514,7 @@ mod tests {
         assert!(out.contains("Delivered to p:captain"), "{out}");
         let record = store.read(|tx| tx.get_review_verdict("p", "T-7", 1)).unwrap().unwrap();
         assert!(record.passed);
-        assert_eq!(record.findings, "ops/reviews/T-7.md");
+        assert_eq!(record.findings, "P1: the header count is stale");
         assert_eq!(record.by_seat, "p:r-1");
         // The captain's inbox holds the item.
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 2)).unwrap();

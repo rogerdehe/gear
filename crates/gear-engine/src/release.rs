@@ -137,23 +137,40 @@ fn release_one(
         return Ok(false);
     }
 
-    // 2. the worktree goes (the branch is kept), then the slot is free.
+    // 2. the old agent has to be *gone* before the seat is free: an exit key
+    //    is accepted long before the process leaves, and a seat that is freed
+    //    too early hands its pane — and its worktree — to the next job while
+    //    the old reviewer is still running in it (F5 of the T-18 review).
+    //    An observation failure is not an absence (design/08): the seat stays
+    //    `Releasing` and the next tick looks again.
     if let Some(pane) = pane.as_deref() {
-        if let Some(workspace) = workspace_of(pane) {
-            match herdr.worktree_remove(&workspace) {
-                // Already gone (a retry, or a manual removal) is fine.
-                Outcome::Ok(()) => {}
-                Outcome::Refused { code, .. }
-                    if code == "not_found"
-                        || code == "worktree_not_found"
-                        || code == "workspace_not_found" => {}
-                Outcome::Refused { code, message } => {
-                    return Err(format!("worktree_remove: refused ({code}): {message}"))
-                }
-                Outcome::Uncertain { reason } => return Err(format!("worktree_remove: {reason}")),
+        match herdr.agent_get(pane) {
+            Ok(None) => {
+                // The pane is a shell again: the seat is free.
+            }
+            Ok(Some(_)) => {
+                // The old reviewer is still there: it is not released yet.
+                return Ok(false);
+            }
+            Err(error) => {
+                // The pane could not be looked at: never call that "gone". The
+                // seat stays on its way out and the next tick looks again.
+                let _ = store.write(|tx| {
+                    tx.set_seat_state(
+                        &seat.id,
+                        SeatState::Releasing,
+                        Some(&format!("agent_get failed: {}", error.0)),
+                        now,
+                    )
+                });
+                return Ok(false);
             }
         }
     }
+
+    // 3. the seat is free again. Its worktree and its build cache stay: the
+    //    next job on this seat reuses them (conventions 17 §8a), so a review
+    //    never builds the workspace from nothing and a release removes nothing.
     store
         .write(|tx| {
             let from = tx.get_seat(&seat.id)?.map(|seat| seat.state).unwrap_or(SeatState::Queued);
@@ -181,11 +198,6 @@ fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, Str
                 .map(|binding| binding.pane_id))
         })
         .map_err(|e| e.detail)
-}
-
-/// The Herdr workspace of a pane: its id up to the `:` (`w7:p1` → `w7`).
-fn workspace_of(pane: &str) -> Option<String> {
-    pane.split(':').next().filter(|id| !id.is_empty()).map(str::to_string)
 }
 
 /// The profile of a seat, when the engine knows it.
@@ -310,27 +322,34 @@ profile = "codex"
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
 
         // Nothing is released on the tick that exits the agent: the next tick
-        // removes the worktree, so a restart can never send the keys twice.
+        // frees the seat, so a restart can never send the keys twice.
         assert!(report.released.is_empty(), "{report:?}");
         assert_eq!(exits(&herdr), 1, "one exit");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
 
+        // The agent is still there: the seat is not free yet (F5).
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the old reviewer is still running");
+
+        // The agent is gone: the seat is free.
+        herdr.exit_agent(&worktree.pane_id);
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
-        assert_eq!(removes(&herdr), vec!["wt1".to_string()]);
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         assert_eq!(exits(&herdr), 1, "the exit is not repeated");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
-        // A third tick does nothing.
-        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+        // A further tick does nothing.
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 40).unwrap();
         assert!(report.released.is_empty());
-        assert_eq!(removes(&herdr).len(), 1);
     }
 
     #[test]
-    fn a_restart_between_exit_and_remove_finishes_without_a_second_exit() {
+    fn a_restart_between_exit_and_release_finishes_without_a_second_exit() {
         let mut herdr = FakeHerdr::new();
         let worktree = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
             Outcome::Ok(worktree) => worktree,
@@ -343,17 +362,49 @@ profile = "codex"
             .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
 
+        // The agent is still leaving: the seat waits.
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        assert!(report.released.is_empty(), "{report:?}");
+        assert_eq!(exits(&herdr), 0, "no second exit");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing);
+
+        // The agent is gone: the seat is free.
+        herdr.exit_agent(&worktree.pane_id);
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert_eq!(exits(&herdr), 0, "no second exit");
-        assert_eq!(removes(&herdr), vec!["wt1".to_string()]);
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
     }
 
     #[test]
-    fn a_failing_remove_does_not_stop_the_other_reviews() {
+    fn an_observation_failure_is_not_an_absence() {
+        // design/08: a pane that cannot be read is not a pane without an
+        // agent. The seat stays on its way out and the next tick looks again.
+        let mut herdr = FakeHerdr::new();
+        let worktree = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
+            Outcome::Ok(worktree) => worktree,
+            other => panic!("{other:?}"),
+        };
+        herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
+        let mut store = world(TaskState::Cancelled, &worktree.pane_id);
+        store
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
+            .unwrap();
+        herdr.observe_fails = true;
+
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "not released on a guess");
+    }
+
+    #[test]
+    fn two_reviewers_are_released_one_by_one() {
         let mut herdr = FakeHerdr::new();
         let first = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
             Outcome::Ok(worktree) => worktree,
@@ -363,6 +414,8 @@ profile = "codex"
             Outcome::Ok(worktree) => worktree,
             other => panic!("{other:?}"),
         };
+        herdr.add_agent(&first.pane_id, "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent(&second.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         let mut store = world(TaskState::Cancelled, &first.pane_id);
         store
             .write(|tx| {
@@ -384,22 +437,30 @@ profile = "codex"
                     updated: T0,
                 })?;
                 testing::seed_temp_seat(tx, "p", "r-2", "T-2", &second.pane_id, "codex", T0)?;
-                // Both already sent their exit keys: the remove is the first call.
+                // Both already sent their exit keys.
                 tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5)?;
                 tx.set_seat_state("p:r-2", SeatState::Releasing, Some("review done"), T0 + 5)
             })
             .unwrap();
-        // The first removal fails; the second must still happen.
-        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "boom".into() });
 
+        // Only the first reviewer's agent has left: the other seat waits.
+        herdr.exit_agent(&first.pane_id);
         let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
 
-        assert_eq!(report.failed, vec!["p:r-1".to_string()], "{report:?}");
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert!(removes(&herdr).is_empty(), "no seat's worktree is removed (T-18)");
+        let first_seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(first_seat.state, SeatState::Released);
+        let second_seat = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
+        assert_eq!(second_seat.state, SeatState::Releasing, "its agent is still there");
+
+        // The second one leaves: it is released too.
+        herdr.exit_agent(&second.pane_id);
+        let report = release_finished_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
         assert_eq!(report.released, vec!["p:r-2".to_string()], "{report:?}");
-        let failed = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(failed.state, SeatState::Releasing, "the next tick tries again");
-        let released = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
-        assert_eq!(released.state, SeatState::Released);
+        let second_seat = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
+        assert_eq!(second_seat.state, SeatState::Released);
     }
 
     #[test]

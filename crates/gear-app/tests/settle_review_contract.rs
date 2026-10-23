@@ -15,7 +15,7 @@ use gear_store::{testing, ContractRow, NewMessage, ReviewVerdictRow, Store, Task
 
 const T0: i64 = 1_800_000_000;
 const CANDIDATE: &str = "abc1234";
-const FINDINGS: &str = "ops/reviews/T-1.md";
+const FINDINGS: &str = "P1: the rows drift right on narrow screens\nP2: the header keeps a stale count";
 /// Findings with ids, as the review packet asks for (T-23).
 const FINDINGS_WITH_IDS: &str = "F1: the store forgets the verdict\nF2: the wording of a comment";
 
@@ -181,11 +181,16 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
 
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Ready);
-    // The rework note carries the blocking finding only (T-23).
+    // The rework note carries the blocking findings as text (T-23): the lane
+    // reads it from GEAR, not from a review branch (T-21).
     let row = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     let note = row.rework_note.unwrap_or_default();
     assert!(note.contains("F1: the store forgets the verdict"), "{note}");
     assert!(!note.contains("F2"), "the logged finding is not a rework: {note}");
+    assert!(!note.contains("git show origin/review"), "no pointer at a review branch: {note}");
+    // The task packet shows the findings of the latest review.
+    let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
+    assert!(packet.contains("F1: the store forgets the verdict"), "the packet carries the findings:\n{packet}");
     // The rework comes before the lane's other ready tasks.
     let ready: Vec<TaskRow> = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     let other_heat: Vec<i64> = ready
