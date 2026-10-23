@@ -1,7 +1,7 @@
 //! The engine merges a passed task (design/08, conventions 17 §8, plan T-12).
 //!
 //! A task whose current attempt has a passing verdict and that has no merge op
-//! yet gets one `merge` op. The engine executes it in its own integration
+//! yet gets one `merge` op. A background thread executes it in the integration
 //! worktree (`home/merge`, created once from the integration branch, reopened
 //! afterwards):
 //!
@@ -17,10 +17,17 @@
 //! output tail and puts one item in the captain's inbox. An op the previous
 //! engine left `Executing` becomes `Unknown` on start; a merge op in `Unknown`
 //! re-runs the same idempotent sequence, so a restart can neither merge twice
-//! nor lose the push.
+//! nor lose the push. One worker per project runs beside the tick; the tick
+//! collects its result without waiting. An OS lock in the worktree's git
+//! directory excludes overlapping recovery workers. Completion timestamps
+//! come from the worker after gate and push, rather than the launching tick.
 
+use std::collections::BTreeMap;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gear_app::config::ProjectConfig;
 use gear_herdr::{HerdrAct, Outcome};
@@ -38,7 +45,32 @@ pub struct Merged {
     pub branch: String,
 }
 
-/// Queue and execute the merges of `project`: the engine's integration step.
+/// Runtime owned by the engine configuration and shared by its clones. Workers
+/// own only git inputs; SQLite and Herdr remain on the tick thread.
+#[derive(Debug, Clone, Default)]
+pub struct MergeWorkers(Arc<Mutex<BTreeMap<String, Worker>>>);
+
+#[derive(Debug)]
+struct Worker {
+    op: OpRow,
+    finished: Arc<Mutex<Option<Finished>>>,
+}
+
+#[derive(Debug, Clone)]
+struct Finished {
+    // None means another engine still holds this worktree's merge lock.
+    result: Result<Option<String>, String>,
+    at: Ts,
+}
+
+fn wall_time() -> Ts {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as Ts
+}
+
+/// Queue, launch or collect a merge without waiting for git or the gate.
 pub fn merge_passed(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -86,74 +118,151 @@ pub fn merge_passed(
         })?;
     }
 
-    // 2. execute the ready ones (Intended, and Unknown from a restart).
-    let ready = ready_merges(store, project)?;
-    if ready.is_empty() {
-        return Ok(merged);
-    }
-    let worktree = match integration_worktree(herdr, &config, project) {
-        Ok(worktree) => worktree,
-        Err(reason) => {
-            // No worktree, no merge: the ops stay where they are, the captain
-            // hears about it.
-            tell_captain(store, project, &format!("merge waits: {reason}"), now)?;
+    // A worker survives between ticks. Collect only a completed result;
+    // never join a running thread.
+    let mut workers =
+        cfg.merges.0.lock().map_err(|_| {
+            GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
+        })?;
+    if let Some(worker) = workers.get(project) {
+        let finished = worker.finished.lock().unwrap().clone();
+        let Some(finished) = finished else {
             return Ok(merged);
-        }
-    };
-    for op in ready {
-        // The task may have been cancelled after the merge was queued: then
-        // nothing is merged and the op is void (T-12 adversarial case).
-        let task = op.task.clone().unwrap_or_default();
-        if let Some(row) = store.read(|tx| tx.get_task(project, &task))? {
-            if !matches!(row.state, TaskState::Verifying | TaskState::Done) {
-                store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
-                continue;
-            }
-        } else {
-            store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
-            continue;
-        }
-        // The op must still describe the current attempt and candidate: a
-        // newer attempt, or a re-hand-in, makes it stale (P1 of the T-12
-        // review round 2).
-        if let Err(reason) = still_current(store, project, &op)? {
-            store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
-            let _ = reason;
-            continue;
-        }
-        let outcome = merge_one(&worktree, &config, &op);
-        match outcome {
-            Ok(lines) => {
+        };
+        let op = &worker.op;
+        match finished.result {
+            Ok(Some(lines)) => {
                 store.write(|tx| {
-                    let state = tx.get_op(project, &op.id)?;
-                    let from = state.map(|op| op.state).unwrap_or(OpState::Intended);
-                    if from == OpState::Intended {
-                        tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
-                        tx.set_op_state(project, &op.id, OpState::Submitted, None, now)?;
+                    let current = tx.get_op(project, &op.id)?.unwrap();
+                    if current.state == OpState::Executing {
+                        tx.set_op_state(project, &op.id, OpState::Submitted, None, finished.at)?;
                     }
-                    tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&lines), now)?;
-                    Ok(())
+                    tx.set_op_state(
+                        project,
+                        &op.id,
+                        OpState::Confirmed,
+                        Some(&lines),
+                        finished.at,
+                    )
                 })?;
                 merged.push(Merged {
                     task: op.task.clone().unwrap_or_default(),
                     branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
                 });
             }
+            Ok(None) => retry_merge(store, project, op, finished.at)?,
             Err(reason) if reason.starts_with(RACE) => {
-                // Lost a push race: try again next tick, a few times.
-                let used = store.write(|tx| tx.bump_op_check_budget(project, &op.id, now))?;
+                let used =
+                    store.write(|tx| tx.bump_op_check_budget(project, &op.id, finished.at))?;
                 if used < RACE_RETRIES {
-                    continue;
+                    retry_merge(store, project, op, finished.at)?;
+                } else {
+                    fail_merge(store, project, op, &reason[RACE.len()..], finished.at)?;
                 }
-                fail_merge(store, project, &op, &reason[RACE.len()..], now)?;
             }
-            Err(reason) => {
-                fail_merge(store, project, &op, &reason, now)?;
-            }
+            Err(reason) => fail_merge(store, project, op, &reason, finished.at)?,
         }
+        // Keep the completion until its database write succeeded: a transient
+        // store error must not lose the result or launch a second worker.
+        workers.remove(project);
+        return Ok(merged);
     }
-    let _ = cfg;
+
+    // One worker per project. Unknown ops are restart recovery: merge_one
+    // resets to origin before doing any merges, and adopts a completed push.
+    for op in ready_merges(store, project)? {
+        let task = op.task.clone().unwrap_or_default();
+        let valid_task = store.read(|tx| {
+            Ok(tx
+                .get_task(project, &task)?
+                .is_some_and(|row| matches!(row.state, TaskState::Verifying | TaskState::Done)))
+        })?;
+        if !valid_task || still_current(store, project, &op)?.is_err() {
+            store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
+            continue;
+        }
+        let worktree = match integration_worktree(herdr, &config, project) {
+            Ok(worktree) => worktree,
+            Err(reason) => {
+                tell_captain(store, project, &format!("merge waits: {reason}"), now)?;
+                return Ok(merged);
+            }
+        };
+        if op.state == OpState::Intended {
+            store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
+        }
+        let finished = Arc::new(Mutex::new(None));
+        let output = finished.clone();
+        let job = op.clone();
+        let config = config.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("merge-{project}"))
+            .spawn(move || {
+                let result = std::panic::catch_unwind(|| {
+                    let Some(_lock) = merge_lock(Path::new(&worktree.path))? else {
+                        return Ok(None);
+                    };
+                    merge_one(&worktree, &config, &job).map(Some)
+                })
+                .unwrap_or_else(|_| Err("merge worker panicked".to_string()));
+                *output.lock().unwrap() = Some(Finished {
+                    result,
+                    at: wall_time(),
+                });
+            });
+        match spawned {
+            Ok(_) => {
+                workers.insert(project.to_string(), Worker { op, finished });
+            }
+            Err(error) => fail_merge(
+                store,
+                project,
+                &op,
+                &format!("start merge worker: {error}"),
+                wall_time(),
+            )?,
+        }
+        break;
+    }
     Ok(merged)
+}
+
+/// A lock in the worktree's git directory also excludes another runtime or a
+/// recovering engine. OS locks are released on process death; stale files are
+/// harmless. Never wait for a lock on the tick thread.
+fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
+    let path = git(dir, &["rev-parse", "--git-path", "gear-merge.lock"])?;
+    let path = dir.join(path.trim());
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("merge lock {}: {error}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("merge lock: {error}")),
+    }
+}
+
+fn retry_merge(store: &mut Store, project: &str, op: &OpRow, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        if tx
+            .get_op(project, &op.id)?
+            .is_some_and(|row| row.state == OpState::Executing)
+        {
+            tx.set_op_state(
+                project,
+                &op.id,
+                OpState::Unknown,
+                Some("merge will retry from origin"),
+                now,
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// A push rejected because the integration branch moved meanwhile.
@@ -202,8 +311,10 @@ fn still_current(store: &mut Store, project: &str, op: &OpRow) -> GearResult<Res
 /// Void a queued merge because its task may not be merged any more.
 fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> GearResult<()> {
     let from = tx.get_op(project, id)?.map(|op| op.state).unwrap_or(OpState::Intended);
-    if from == OpState::Intended {
-        tx.set_op_state(project, id, OpState::Void, Some("the task may not be merged"), now)?;
+    match from {
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some("the task may not be merged"), now)?,
+        OpState::Unknown => tx.set_op_state(project, id, OpState::Failed, Some("the task may not be merged"), now)?,
+        _ => {}
     }
     Ok(())
 }
@@ -795,6 +906,371 @@ gate = "{gate}"
         assert_eq!(op.state, OpState::Void, "{op:?}");
     }
 
+    fn queued_merge(
+        scratch: &Scratch,
+        gate: &str,
+    ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text(gate);
+                tx.update_project(&project)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, &candidate, "report", 0)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+        (store, herdr, cfg)
+    }
+
+    fn wait_merge(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+    ) -> Vec<Merged> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let merged = merge_passed(store, herdr, cfg, "p", 30).unwrap();
+            let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+            if matches!(
+                op.state,
+                OpState::Confirmed | OpState::Failed | OpState::Void
+            ) {
+                return merged;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "merge did not complete: {op:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn wait_file(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "missing {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn dispatch_and_doorbells_continue_while_the_gate_sleeps() {
+        let scratch = Scratch::new("tick-gate");
+        let started = scratch.root.join("gate-started");
+        let done = scratch.root.join("gate-finished");
+        let gate = format!(
+            "touch '{}'; sleep 2; touch '{}'",
+            started.display(),
+            done.display()
+        );
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
+        wait_file(&started);
+        herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
+        store
+            .write(|tx| {
+                let mut next = tx.get_task("p", "T-5")?.unwrap();
+                next.id = "T-6".into();
+                next.state = TaskState::Ready;
+                next.rank = 2;
+                tx.insert_task(&next)?;
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-6".into(),
+                    version: 1,
+                    goal: "keep working".into(),
+                    accept: "done".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: 0,
+                })?;
+                tx.insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "question:1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "p:heat".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Question,
+                    urgent: false,
+                    body: "ready for a decision".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: 11,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        let report = crate::tick(&mut store, &mut herdr, &cfg, 20).unwrap();
+        assert!(!done.exists(), "tick waited for the gate");
+        assert!(report.merged.is_empty());
+        assert!(
+            herdr
+                .prompts_to("w1:p1")
+                .iter()
+                .any(|text| text.contains("New task T-6")),
+            "dispatch: {:?}",
+            herdr.calls
+        );
+        assert!(
+            !herdr.prompts_to("w9:p1").is_empty(),
+            "captain doorbell: {:?}",
+            herdr.calls
+        );
+        // Cloned configurations share the active worker, so another tick
+        // cannot start the same merge or open its worktree again.
+        let calls = herdr.calls.len();
+        merge_passed(&mut store, &mut herdr, &cfg.clone(), "p", 21).unwrap();
+        assert_eq!(herdr.calls.len(), calls);
+        let result = wait_merge(&mut store, &mut herdr, &cfg);
+        assert_eq!(result.len(), 1);
+        let updated = store
+            .read(|tx| tx.get_op("p", "O-1"))
+            .unwrap()
+            .unwrap()
+            .updated;
+        assert!(updated > 20, "completion time follows gate and push");
+        assert!(merge_passed(&mut store, &mut herdr, &cfg, "p", updated + 1)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .read(|tx| tx.get_op("p", "O-1"))
+                .unwrap()
+                .unwrap()
+                .updated,
+            updated
+        );
+    }
+
+    #[test]
+    fn a_second_ready_merge_waits_for_the_first_one() {
+        let scratch = Scratch::new("serial");
+        sh(&scratch.root, "git -C origin.git branch heat/t6 heat/t5 && git -C origin.git branch review/t6 review/t5");
+        let started = scratch.root.join("gates");
+        let gate = format!("echo gate >> '{}'; sleep 1", started.display());
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        store
+            .write(|tx| {
+                let mut next = tx.get_task("p", "T-5")?.unwrap();
+                next.id = "T-6".into();
+                next.state = TaskState::Ready;
+                next.rank = 2;
+                tx.insert_task(&next)?;
+                let candidate = tx.get_attempt("p", "T-5", 1)?.unwrap().candidate.unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-6", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-6", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-6", 1, 1, &candidate, "report", 0)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-6".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t6", "candidate": candidate }),
+                    created: 11,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        wait_file(&started);
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        assert_eq!(
+            store
+                .read(|tx| tx.get_op("p", "O-2"))
+                .unwrap()
+                .unwrap()
+                .state,
+            OpState::Intended
+        );
+        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+            if !merged.is_empty() {
+                assert_eq!(merged[0].task, "T-6");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 2);
+        assert_eq!(
+            store
+                .read(|tx| tx.get_op("p", "O-2"))
+                .unwrap()
+                .unwrap()
+                .state,
+            OpState::Confirmed
+        );
+    }
+
+    #[test]
+    fn a_busy_worktree_waits_without_running_a_second_merge() {
+        let scratch = Scratch::new("locked");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        let lock = merge_lock(&scratch.root.join("merge")).unwrap().unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while store
+            .read(|tx| tx.get_op("p", "O-1"))
+            .unwrap()
+            .unwrap()
+            .state
+            != OpState::Unknown
+        {
+            merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            scratch.dev_log(),
+            "dev",
+            "no git merge while another runtime owns the lock"
+        );
+        drop(lock);
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+    }
+
+    #[test]
+    fn interrupted_worker_child() {
+        let Some(path) = std::env::var_os("GEAR_TEST_MERGE_WORKTREE") else {
+            return;
+        };
+        let worktree = gear_herdr::Worktree {
+            path: PathBuf::from(path).display().to_string(),
+            workspace_id: "test".into(),
+            pane_id: "test".into(),
+            branch: "home/merge".into(),
+        };
+        let _lock = merge_lock(Path::new(&worktree.path)).unwrap().unwrap();
+        merge_one(
+            &worktree,
+            &config(&std::env::var("GEAR_TEST_MERGE_GATE").unwrap()),
+            &op(&std::env::var("GEAR_TEST_MERGE_CANDIDATE").unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_killed_worker_recovers_from_origin_without_a_half_merge() {
+        let scratch = Scratch::new("killed");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        let started = scratch.root.join("gate-started");
+        let done = scratch.root.join("gate-finished");
+        let gate = format!(
+            "touch '{}'; sleep 2; touch '{}'",
+            started.display(),
+            done.display()
+        );
+        let candidate = scratch.head_of("heat/t5");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "merge::tests::interrupted_worker_child",
+                "--nocapture",
+            ])
+            .env("GEAR_TEST_MERGE_WORKTREE", scratch.root.join("merge"))
+            .env("GEAR_TEST_MERGE_GATE", gate)
+            .env("GEAR_TEST_MERGE_CANDIDATE", candidate)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_file(&started);
+        assert_eq!(
+            scratch.dev_log(),
+            "dev",
+            "gate has not passed, so origin is untouched"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        store
+            .write(|tx| tx.set_op_state("p", "O-1", OpState::Executing, None, 20))
+            .unwrap();
+        crate::ops::recover_on_start(&mut store, 21).unwrap();
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+        let log = scratch.dev_log();
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("merge(T-5)"))
+                .count(),
+            2,
+            "{log}"
+        );
+        assert!(scratch.dev_has_task_commit());
+        // The orphaned test gate touches only external marker files. It has
+        // no surviving merge thread that could push its half-finished tree.
+        wait_file(&done);
+    }
+
+    #[test]
+    fn a_sleeping_gate_does_not_block_the_merge_step() {
+        let scratch = Scratch::new("nonblocking");
+        let done = scratch.root.join("gate-finished");
+        let gate = format!("sleep 1; touch '{}'", done.display());
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        let result = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        assert!(!done.exists(), "merge_passed waited for the sleeping gate");
+        assert!(result.is_empty(), "the merge is still running");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let result = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+            if !result.is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the merge never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(done.exists());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert!(
+            op.updated > 30,
+            "finish time is wall clock, not the tick timestamp"
+        );
+    }
+
     #[test]
     fn a_clean_merge_is_pushed_and_the_branches_are_gone() {
         let scratch = Scratch::new("clean");
@@ -1023,7 +1499,8 @@ gate = "{gate}"
 
         let mut cfg = EngineCfg::default();
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
-        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
 
         assert!(merged.is_empty(), "{merged:?}");
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
@@ -1035,7 +1512,7 @@ gate = "{gate}"
         assert_eq!(scratch.dev_log(), "dev", "dev is untouched");
         assert!(!scratch.dev_has_task_commit());
         // One item in the captain's inbox.
-        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 21)).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", op.updated + 1)).unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
         assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
     }
