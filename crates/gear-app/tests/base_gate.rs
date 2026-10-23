@@ -332,3 +332,68 @@ fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Submitted);
 }
+
+// ---------------------------------------------------------------- round 2
+
+/// F5: a failed fetch whose diagnostic is long and multibyte is truncated on a
+/// character boundary — an ordinary BAD_FORMAT with the reason, never a panic.
+#[test]
+fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
+    let r = repos();
+    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    // A valid pathname shape (every component below NAME_MAX) that does not
+    // exist, long enough that the fatal line passes the excerpt limit and the
+    // limit falls inside a multibyte character.
+    let remote = format!(
+        "/missing/{}/{}/{}.git",
+        "a".repeat(151),
+        "b".repeat(150),
+        "界".repeat(60)
+    );
+    git(&r.lane, &["remote", "set-url", "origin", &remote]);
+
+    let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+    assert!(
+        err.detail.contains("does not appear to be a git repository")
+            || err.detail.contains("Could not read from remote repository"),
+        "the reason survives: {}",
+        err.detail
+    );
+}
+
+/// F6: a replay needs the live seat. A caller without a fingerprint, from a
+/// stale generation or with a void binding cannot replay a committed request —
+/// and gets no second message.
+#[test]
+fn a_replay_needs_the_live_seat() {
+    let r = repos();
+    let current = r.candidate("data/t19", "origin/dev", "my work");
+
+    // (a) no fingerprint: the pane hosts no agent, so there is no seat.
+    let mut s = world();
+    let (env, fp) = lane();
+    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
+    let err = mail::send(&mut s, &env, None, &result(&current, gate()), T0 + 6).unwrap_err();
+    assert_eq!(err.code, ErrorCode::NotRegistered, "{err:?}");
+
+    // (b) a stale generation: the seat moved on, the old context may not replay.
+    let mut s = world();
+    mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
+    s.write(|tx| tx.set_seat_generation("p:heat", 2)).unwrap();
+    let err = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 6).unwrap_err();
+    assert_eq!(err.code, ErrorCode::StaleGeneration, "{err:?}");
+
+    // (c) a void binding: the pane no longer belongs to this generation.
+    let mut s = world();
+    mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
+    s.write(|tx| tx.set_binding_status("p:heat", 1, gear_store::BindingStatus::Void)).unwrap();
+    let err = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 6).unwrap_err();
+    assert_eq!(err.code, ErrorCode::StaleGeneration, "{err:?}");
+
+    // Nothing was stored twice anywhere; the committed message is still one.
+    assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 7)).unwrap().len(), 1);
+    assert_eq!(first.msg_id, "M-1");
+}
