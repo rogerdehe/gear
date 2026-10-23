@@ -140,3 +140,60 @@ fn the_measures_are_in_the_json() {
     assert_eq!(runtime["rework"]["rejected"], 0);
     assert!(runtime["rework"]["last_task_age_s"].is_null());
 }
+
+#[test]
+fn temp_hand_ins_count_in_the_project_rate() {
+    let mut store = world();
+    // A temp worker hands the task in: a third hand-in for the project, and
+    // no lane's (F2 of the T-16 review).
+    store
+        .write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 3,
+                seat: "p:t2".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Submitted,
+                candidate: Some("c3".into()),
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
+    // One rejection in three hand-ins; the lane keeps its own 1/2 (F1).
+    assert!(
+        text.contains("Totals: 2 tasks · 0 done · 0 in progress · 0 waiting · rework 1/3"),
+        "{text}"
+    );
+    assert!(text.contains("Lane data · rework 1/2"), "{text}");
+
+    // The temp attempt is sent back: two rejections in three hand-ins.
+    store
+        .write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 3).unwrap().unwrap();
+            attempt.state = AttemptState::Rejected;
+            tx.update_attempt(&attempt)?;
+            Ok(())
+        })
+        .unwrap();
+    let board = build(&mut store, &options(), T0).unwrap();
+    let text = render(&board, View::Lanes);
+    assert!(
+        text.contains("Totals: 2 tasks · 0 done · 0 in progress · 0 waiting · rework 2/3"),
+        "{text}"
+    );
+    let doc: serde_json::Value = serde_json::from_str(&to_json(&board).unwrap()).unwrap();
+    assert_eq!(doc["projects"][0]["totals"]["handed_in"], 3);
+    assert_eq!(doc["projects"][0]["totals"]["rejected"], 2);
+    // The lane still owns only its two hand-ins.
+    assert_eq!(doc["projects"][0]["lanes"][0]["rework"]["handed_in"], 2);
+}

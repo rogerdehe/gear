@@ -286,6 +286,20 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
             attempts.push((attempt.seat.clone(), attempt.state));
         }
     }
+    // The project totals: every attempt of the project, whatever its seat —
+    // a temp worker's hand-in counts too (F2 of the T-16 review).
+    for (_, state) in &attempts {
+        match state {
+            gear_model::AttemptState::Rejected => {
+                totals.rejected += 1;
+                totals.handed_in += 1;
+            }
+            gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted => {
+                totals.handed_in += 1;
+            }
+            _ => {}
+        }
+    }
     for lane in &mut lanes {
         let seat_id = format!("{project}:{}", lane.lane);
         let mut handed_in = 0;
@@ -311,8 +325,6 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
             rejected,
             last_task_age_s: last.map(|op| (now - op.created).max(0)),
         };
-        totals.handed_in += handed_in;
-        totals.rejected += rejected;
     }
 
     // The open tasks as a dependency tree (the other view of the plan).
