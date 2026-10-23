@@ -197,11 +197,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gear-board"
+version = "0.1.0"
+dependencies = [
+ "gear-model",
+ "gear-store",
+ "libc",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "gear-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
  "gear-app",
+ "gear-board",
  "gear-engine",
  "gear-herdr",
  "gear-model",
