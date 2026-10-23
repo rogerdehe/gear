@@ -1,28 +1,7 @@
 # 09 Continuation and Assignment Decisions
 
-File: `gear/engine/dispatch.py`. Budget 140–180 lines. All pure functions; side effects go through 08 ops.
+Implementation: [dispatch.rs](../../crates/gear-engine/src/dispatch.rs).
 Invariants upheld: at most one needs-check delivery per lane; no resend when the outcome is unknown; one controller per lane.
-
-## Input and output
-
-```python
-@dataclass
-class LaneView:
-    seat: Seat
-    obs: SeatObs
-    attempt: Attempt | None           # current non-terminal attempt
-    pending_op: Operation | None      # unconfirmed deliver/doorbell for this seat
-    last_deliver_at: int | None
-    nudges_since_progress: int        # number of continues since the last verifiable progress
-    ready_tasks: list[Task]           # this lane's ready queue (rank order)
-
-class Action(NamedTuple):
-    kind: Literal["continue", "assign", "none", "escalate"]
-    task: str | None
-    reason: str
-
-def decide(v: LaneView, cfg: DispatchCfg) -> Action
-```
 
 ## Decision order (`decide`)
 

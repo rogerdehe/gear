@@ -1,10 +1,10 @@
 # 15 Tests and Probes
 
-## Tests (standard library unittest, about 1,700–2,700 lines)
+## Tests
 
-Layout: `tests/unit/` (pure functions), `tests/flow/` (flow tests with a temporary SQLite + fake Herdr), `tests/live/` (real machine, triggered manually).
-
-Fake Herdr: a programmable fake `herdr` executable (reads a scenario JSON, returns agent list/get/read results, records prompt/start/close calls, can simulate timeouts and being killed).
+Run `cargo test --workspace`. Unit tests live with their modules; integration
+contracts live in `crates/*/tests/it/`. Store tests use in-memory or temporary
+SQLite databases; engine tests use `gear_herdr::fake::FakeHerdr`.
 
 Scenarios that must be covered (mapped to PRD acceptance):
 
@@ -32,7 +32,7 @@ Scenarios that must be covered (mapped to PRD acceptance):
 | Failed acceptance goes back to READY via apply and opens a new attempt; reply does not change task state; evidence present but conclusion fail does not allow DONE | 05, 06, 12 |
 | Lane replies/acks only close the original item and do not produce endless mutual confirmations; resumes after the waited-on dependency is satisfied, a casual reply does not unlock it | 07 |
 | A modified file modified again is still detected as a change; progress spam does not reset the no-output count | 12, 09 |
-| apply does not overwrite the draft (including concurrent writes between compare and overwrite); opening the plugin repeatedly leaves no second resident process | 05, 08 |
+| opening the plugin repeatedly leaves no second resident process | 05, 08 |
 | Onboarding reserves the generation only once (reused on retry/restart); a handover ACK without task arguments succeeds, other writes from the pending successor are rejected | 03 |
 | A late blocked from an old task does not set the new task to WAITING; unlinked progress/question does not change task state | 03, 07 |
 | An INFO reply not yet shown rings the doorbell, no more ringing after it is shown; the view record only confirms an operation when the delivered content was actually shown | 07, 08, 13 |
@@ -45,7 +45,7 @@ Scenarios that must be covered (mapped to PRD acceptance):
 | Both the no-install path (only `gear --skill …`) and a pending successor captain can read and complete the required confirmation | 16, 03 |
 | Rework of the same item on a DONE task keeps the old ACCEPTED/Verdict, creates a new attempt and resumes the original temp worker; an ordinary follow-up does not reopen the task | 05, 10 |
 
-## Probes (1–2 days before development, real machine)
+## Real-machine probes
 
 1. Plugin: single instance, keeps running when switching tabs/hiding, recovery after closing and reopening the tab, placement=tab.
 2. remote: local client disconnects and reconnects, the target-side loop continues.
@@ -56,4 +56,4 @@ Scenarios that must be covered (mapped to PRD acceptance):
 6. PATH of `gear` and state directory location inside Agent panes.
 7. Herdr `worktree.create/open/remove` behavior: branch slug turns `/` into `-` in the path (confirmed); `remove` deletes the checkout and the Herdr workspace but keeps the branch (confirmed); `worktree.open` on an existing branch (e.g. resume of a temp worker's task branch) returns the original worktree/workspace.
 
-Probe results are written into `verified` and the parameters in `profiles.py`; CLIs that fail are not allowed to take over real projects.
+Probe results are written into `verified` and the parameters in [profile.rs](../../crates/gear-herdr/src/profile.rs); CLIs that fail are not allowed to take over real projects.
