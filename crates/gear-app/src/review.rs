@@ -177,8 +177,8 @@ pub fn headline(review: &Review) -> String {
 ///
 /// A review's findings must live in the store, not only in a file on a review
 /// branch: the lane doing the rework has to read them from GEAR whatever
-/// happens to the reviewer, its worktree or its branch. A path that does not
-/// exist is `BAD_FORMAT` and nothing is stored.
+/// happens to the reviewer, its worktree or its branch. A path that names no
+/// file is `BAD_FORMAT` and nothing is stored.
 pub fn findings_text(arg: &str) -> GearResult<String> {
     let trimmed = arg.trim();
     // A path names one file: one line. Anything with line breaks is text, even
@@ -191,13 +191,7 @@ pub fn findings_text(arg: &str) -> GearResult<String> {
     // worktree or branch.
     let path = std::path::Path::new(trimmed);
     if path.is_file() {
-        let bytes = std::fs::read(path).map_err(|e| {
-            GearError::new(
-                ErrorCode::BadFormat,
-                format!("cannot read the findings file {trimmed:?}: {e}"),
-            )
-        })?;
-        return Ok(bounded_findings(&bytes, trimmed));
+        return read_findings(path, trimmed);
     }
     // A path that names no file is a mistake, not findings text: the reviewer
     // meant to hand in a file. Nothing is stored (`BAD_FORMAT`).
@@ -212,29 +206,119 @@ pub fn findings_text(arg: &str) -> GearResult<String> {
     Ok(arg.to_string())
 }
 
-/// A single-line argument that names a file even though no such file exists:
-/// a repository path ending in a text extension (`ops/reviews/T-1.md`) or a
-/// bare `*.md`/`*.txt` name. A word such as `n/a` is not a path.
+/// The text of a findings file, bounded: at most [`FINDINGS_MAX`] bytes are
+/// read from the file, so a mistakenly huge file costs a bounded read inside
+/// the store's transaction, not the whole file.
+fn read_findings(path: &std::path::Path, display: &str) -> GearResult<String> {
+    let file = std::fs::File::open(path).map_err(|e| {
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot read the findings file {display:?}: {e}"),
+        )
+    })?;
+    // The size of the whole file, for the cut note.
+    let total = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let mut buf = Vec::new();
+    use std::io::Read;
+    file.take(FINDINGS_MAX as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read the findings file {display:?}: {e}"),
+            )
+        })?;
+    Ok(bounded_findings(&buf, display, total.max(buf.len() as u64)))
+}
+
+/// The extensions that name a review file.
+const TEXT_EXTENSIONS: &[&str] = &[".md", ".txt", ".markdown", ".rst", ".log"];
+
+/// Is this argument a path to a file the reviewer meant to hand in?
+///
+/// The rule leans to the loud mistake: an argument that *looks* like a path
+/// but names no file is refused (`BAD_FORMAT`, nothing stored), because
+/// storing a path instead of the findings is silent — the lane reads a path
+/// that does not exist. Prose is kept as prose, so the reviewer can hand in
+/// the text itself.
+///
+/// An argument looks like a path when:
+/// - it is written as one: `./x`, `../x`, `/x`, `~/x` — an explicit relative
+///   or absolute path, whatever the extension;
+/// - it carries a text extension (`notes.md`, `ops/reviews/T-1.md`);
+/// - it has a directory part and a file-like last part (`ops/reviews/T-1`,
+///   `crates/app/src/lib.rs`);
+/// - its last part has a space in it (`ops/reviews/T-1 draft.md`): the first
+///   word is already a path, or it names a file itself.
+///
+/// Prose stays prose: `n/a`, `and/or is broken`, `see ops/REVIEW.md`,
+/// `P1 — the header drifts`.
 fn looks_like_path(arg: &str) -> bool {
-    !arg.is_empty()
-        && arg.len() <= 1024
-        && !arg.contains(char::is_whitespace)
-        && (arg.ends_with(".md") || arg.ends_with(".txt") || arg.ends_with(".markdown"))
+    if arg.is_empty() || arg.len() > 1024 {
+        return false;
+    }
+    if is_explicit_path(arg) {
+        return true;
+    }
+    let mut words = arg.split_whitespace();
+    let first = match words.next() {
+        Some(first) => first,
+        None => return false,
+    };
+    let last = arg.split_whitespace().next_back().unwrap_or(arg);
+    match words.next() {
+        // Several words: a path whose last part carries a space, or prose
+        // that mentions a path.
+        Some(_) => {
+            is_path_shaped(first) || (has_text_extension(last) && looks_like_file_name(first))
+        }
+        // One word: a path with a text extension, or with a directory part
+        // and a file-like last part (`n/a` is not a path).
+        None => {
+            has_text_extension(arg)
+                || (arg.rsplit('/').next() != Some(arg) && looks_like_file_name(last))
+        }
+    }
+}
+
+/// `./x`, `../x`, `/x`, `~/x`: written as a path.
+fn is_explicit_path(arg: &str) -> bool {
+    arg.starts_with("./")
+        || arg.starts_with("../")
+        || arg.starts_with('/')
+        || arg.starts_with("~/")
+}
+
+/// Is this one word a path on its own?
+fn is_path_shaped(word: &str) -> bool {
+    is_explicit_path(word)
+        || has_text_extension(word)
+        || (word.rsplit('/').next() != Some(word) && looks_like_file_name(word.rsplit('/').next().unwrap_or(word)))
+}
+
+/// Does the argument end in a text extension?
+fn has_text_extension(arg: &str) -> bool {
+    TEXT_EXTENSIONS.iter().any(|ext| arg.ends_with(ext))
+}
+
+/// Does this part of a path name a file? A bare word (`a` in `n/a`) does not.
+fn looks_like_file_name(part: &str) -> bool {
+    !part.is_empty() && (part.contains('.') || part.contains('-') || part.contains('_'))
 }
 
 /// Findings are stored whole up to this many bytes; a longer file is cut with
 /// a note, so the store never carries a whole book.
 pub const FINDINGS_MAX: usize = 64 * 1024;
 
-/// The text of a findings file, bounded.
-fn bounded_findings(bytes: &[u8], path: &str) -> String {
+/// The text of a findings file, bounded. `total` is the size of the whole
+/// file (for the note).
+fn bounded_findings(bytes: &[u8], path: &str, total: u64) -> String {
     let cut = bytes.len() > FINDINGS_MAX;
     let slice = &bytes[..bytes.len().min(FINDINGS_MAX)];
     let mut text = String::from_utf8_lossy(slice).into_owned();
     if cut {
         text.push_str(&format!(
-            "\n[findings cut at {FINDINGS_MAX} bytes of {}; the whole file is at {path:?}]",
-            bytes.len()
+            "\n[findings cut at {FINDINGS_MAX} bytes of {total}; the whole file is at {path:?}]",
         ));
     }
     text
@@ -277,9 +361,46 @@ mod findings_tests {
         assert!(err.detail.contains("T-404.md"), "{}", err.detail);
     }
 
+    /// The review of T-21 (F1): a missing path is refused whatever it looks
+    /// like — with a space in its last part, without an extension, absolute.
+    #[test]
+    fn a_missing_path_is_refused_whatever_it_looks_like() {
+        for arg in [
+            "ops/reviews/T-1 draft.md",
+            "./ops/reviews/T-1",
+            "../reviews/T-1",
+            "/tmp/gear-t21/findings",
+            "~/reviews/T-1.md",
+            "ops/reviews/T-1",
+            "T-1 draft.md",
+            "notes.md",
+        ] {
+            let err = findings_text(arg).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadFormat, "{arg}");
+            assert!(err.detail.contains("no findings file"), "{}", err.detail);
+        }
+    }
+
+    /// Prose is prose: the reviewer may hand in the findings as text.
+    #[test]
+    fn prose_is_not_a_path() {
+        for arg in [
+            "n/a",
+            "and/or is broken",
+            "see ops/REVIEW.md for the rules",
+            "P1 — the header drifts",
+            "P1: the row drifts right",
+            "the rows drift right",
+            "TODO/FIXME",
+        ] {
+            assert_eq!(findings_text(arg).unwrap(), arg, "{arg}");
+        }
+    }
+
     #[test]
     fn a_long_file_is_cut_with_a_note() {
-        let text = bounded_findings(&vec![b'x'; FINDINGS_MAX + 10], "big.md");
+        let text = bounded_findings(&vec![b'x'; FINDINGS_MAX + 10], "big.md", FINDINGS_MAX as u64 + 10);
         assert!(text.ends_with("the whole file is at \"big.md\"]"), "{text}");
+        assert!(text.contains(&format!("of {}", FINDINGS_MAX as u64 + 10)), "{text}");
     }
 }

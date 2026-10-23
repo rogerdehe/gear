@@ -9,7 +9,7 @@ use gear_app::review::Outcome;
 use gear_app::tasks::{on_delivery_confirmed, start_attempt};
 use gear_app::Env;
 use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, SeatRole, TaskState};
-use gear_store::{testing, ContractRow, Store, TaskRow};
+use gear_store::{testing, ContractRow, RequestOutcome, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -234,4 +234,151 @@ fn a_findings_path_that_does_not_exist_stores_nothing() {
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
     let after = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len();
     assert_eq!(before, after, "nothing is stored");
+}
+
+/// The review of T-21 (F1): a path that names no file is refused whatever it
+/// looks like — with a space in its last part, without an extension, written
+/// as an explicit path — and nothing is stored: no verdict, no message, no
+/// request row.
+#[test]
+fn a_missing_path_is_refused_whatever_it_looks_like() {
+    for (arg, tag) in [
+        ("ops/reviews/T-1 draft.md", "spaces"),
+        ("./ops/reviews/T-1", "no-ext"),
+        ("/tmp/gear-t21/findings", "absolute"),
+    ] {
+        let mut s = world();
+        let request_id = format!("r-missing-{tag}");
+
+        let err = mail::send(
+            &mut s,
+            &env("r-1", TEMP_PANE),
+            Some(&fp(TEMP_PANE, "opencode")),
+            &review(Outcome::Fail, arg, &request_id),
+            T0 + 5,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, ErrorCode::BadFormat, "{arg}: {err:?}");
+        assert!(err.detail.contains("no findings file"), "{}", err.detail);
+
+        // No verdict and no message ...
+        assert_eq!(
+            s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len(),
+            0,
+            "{arg}: a verdict was stored"
+        );
+        assert_eq!(
+            s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 9)).unwrap().len(),
+            0,
+            "{arg}: a message was stored"
+        );
+        // ... and no request row: the same request id is still free (a stored
+        // row with another key would be a conflict, not a fresh request).
+        let outcome = s
+            .read(|tx| {
+                tx.run_request(&request_id, "another-key", T0 + 6, |_tx| Ok(serde_json::json!({})))
+            })
+            .unwrap();
+        assert!(
+            matches!(outcome, RequestOutcome::Executed(_)),
+            "{arg}: a request row was stored"
+        );
+    }
+}
+
+/// The review of T-21 (F1): the file that *does* exist is still read, spaces
+/// in its name included.
+#[test]
+fn an_existing_file_with_a_space_in_its_name_is_stored_as_its_text() {
+    let mut s = world();
+    let path = std::env::temp_dir().join(format!("gear-findings-{} draft.md", std::process::id()));
+    std::fs::write(&path, "# Findings\n\nP1: the header count is stale.\n").unwrap();
+
+    mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Fail, path.to_str().unwrap(), "r-spaces"),
+        T0 + 5,
+    )
+    .unwrap();
+
+    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    assert!(record.findings.contains("P1: the header count is stale"), "{}", record.findings);
+    assert!(!record.findings.contains(".md"), "not the path: {}", record.findings);
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// The review of T-21 (F2): a repeated request id replays the stored result
+/// and never touches the reviewer's file again — the file may be gone.
+#[test]
+fn a_repeated_request_id_replays_even_when_the_file_is_gone() {
+    let mut s = world();
+    let file = findings_file("# Findings\n\nP1: the header count is stale.\n", "replay");
+    let args = review(Outcome::Fail, file.to_str().unwrap(), "r-replay");
+
+    let first = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 5,
+    )
+    .unwrap();
+    assert!(!first.replayed);
+
+    // The worktree is gone (or the reviewer cleaned up) and the send is
+    // repeated with the same request id: the stored result comes back.
+    std::fs::remove_file(&file).ok();
+    let again = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &args,
+        T0 + 6,
+    )
+    .unwrap();
+    assert!(again.replayed, "the retry replays the stored result");
+    assert_eq!(again.msg_id, first.msg_id);
+
+    // Exactly one verdict and one message.
+    assert_eq!(s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len(), 1);
+    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 9)).unwrap();
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+}
+
+/// The review of T-21 (F3): the file is read bounded — at most 64 KiB are
+/// read — and a longer file is cut with a note.
+#[test]
+fn a_huge_findings_file_is_cut_with_a_note() {
+    let mut s = world();
+    let path = std::env::temp_dir().join(format!("gear-findings-{}-huge.md", std::process::id()));
+    let big = "x".repeat(gear_app::review::FINDINGS_MAX + 4096);
+    std::fs::write(&path, &big).unwrap();
+
+    mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Fail, path.to_str().unwrap(), "r-huge"),
+        T0 + 5,
+    )
+    .unwrap();
+
+    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    assert!(record.findings.starts_with(&"x".repeat(64)), "the file's first bytes are stored");
+    assert!(
+        record.findings.len() > gear_app::review::FINDINGS_MAX,
+        "the stored text is the cut plus the note: {} bytes",
+        record.findings.len()
+    );
+    assert!(
+        record.findings.contains(&format!("findings cut at {} bytes", gear_app::review::FINDINGS_MAX)),
+        "{}",
+        &record.findings[record.findings.len().saturating_sub(120)..]
+    );
+
+    std::fs::remove_file(&path).ok();
 }
