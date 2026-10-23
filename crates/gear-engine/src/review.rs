@@ -168,6 +168,12 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
             if attempt.state != AttemptState::Submitted {
                 continue;
             }
+            // Its verdict is in: the review is done and waits for settlement,
+            // not for another reviewer (L-61: with reviewers released on their
+            // verdict, this stops a start/release loop).
+            if tx.get_review_verdict(project, &task.id, attempt.n)?.is_some() {
+                continue;
+            }
             let Some(candidate) = attempt.candidate.clone() else {
                 continue;
             };
