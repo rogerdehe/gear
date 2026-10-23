@@ -164,7 +164,9 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             unattended_args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
-            exit_keys: vec!["ctrl+c".into()],
+            // Two: after a turn the first ctrl+c only interrupts ("Conversation
+            // interrupted"); the second exits (seen 2026-10-23, L-63).
+            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
             verified: true,
         }),
         // Only kinds with a verified SOP are built in (design/04).
