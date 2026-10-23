@@ -26,6 +26,7 @@ pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod parallel;
 pub mod quota;
 pub mod release;
 pub mod restart;
@@ -103,6 +104,10 @@ pub struct TickReport {
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
+    /// Parallel-change warning message ids (`project:M-n`).
+    pub parallel: Vec<String>,
+    /// Git evidence that could not be read during a parallel-change scan.
+    pub parallel_failed: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -125,6 +130,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
 
     let projects = store.read(|tx| tx.project_ids())?;
+    for project in &projects {
+        let checked = parallel::check(store, project, now)?;
+        report.parallel.extend(checked.opened.into_iter().map(|id| format!("{project}:{id}")));
+        report.parallel_failed.extend(checked.problems.into_iter().map(|error| format!("{project}: {error}")));
+    }
     // Station facts need no Herdr observation. Enqueue them before deciding
     // doorbells, including when a previous outage delayed a checkpoint.
     for project in &projects {

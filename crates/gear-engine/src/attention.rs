@@ -16,7 +16,10 @@ fn key(project: &str, message: &str) -> String {
 }
 
 fn stale(message: &MessageRow, period: i64, now: Ts) -> bool {
-    message.state == MsgState::Open && now - message.created >= period
+    // T-51 overlap warnings ring once per shared-file set. A changed set
+    // creates a fresh message; ordinary stale reminders would defeat that latch.
+    !(message.kind == gear_model::MsgKind::System && message.thread.starts_with("parallel:"))
+        && message.state == MsgState::Open && now - message.created >= period
 }
 
 pub(crate) fn promote(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
