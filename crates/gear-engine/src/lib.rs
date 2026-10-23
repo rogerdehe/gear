@@ -20,6 +20,7 @@ pub mod doorbell;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod quota;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -61,6 +62,8 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
+    pub quota: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -83,6 +86,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+
+        // 1b. quota: a lane on a provider limit switches model or parks
+        //     (design/01 `[models].on_quota`). It runs before the confirm, so a
+        //     lane that is on quota does not have its delivery budget spent.
+        let quota = quota::apply_quota_policy(store, herdr, cfg, &project, &observed, now)?;
+        report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let (confirmed, flagged) =
