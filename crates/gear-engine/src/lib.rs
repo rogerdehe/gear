@@ -123,7 +123,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
     for project in projects {
         // Seat observations (reads screen tails; no write transaction is held).
-        let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &cfg.profiles))?;
+        // The profile table of this project: the built-ins with the project's
+        // own `[profiles.<name>]` on top (T-31). A config that does not parse
+        // leaves the built-ins in place (the lanes are parked by the onboard
+        // step instead).
+        let profiles = match gear_app::config::latest(store, &project) {
+            Ok(config) => gear_app::config::profile_table(&cfg.profiles, &config)?,
+            Err(_) => cfg.profiles.clone(),
+        };
+        let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
@@ -141,7 +149,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
-        let quota = quota::apply_quota_policy(store, herdr, cfg, &project, &observed, now)?;
+        let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
@@ -188,7 +196,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
-        let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
+        let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
         report.reviewers.extend(reviews.started);
 
         // 7b. a reviewer that stopped before its verdict is told to go on
