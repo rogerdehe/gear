@@ -1,3 +1,0 @@
-<!-- gear-plan project=gear base=35 -->
-# Verdicts
-- T-15 attempt=2 contract=1 candidate=ee045cd2aa02217ef3dd0c5536df9295073f26e4 fail rework="Review: git show origin/dev:ops/reviews/T-15.md. R2-1: merge current origin/dev and build before handing in — model_start moved to crates/gear-engine/src/model.rs; the hand-in must build and pass the workspace tests merged with dev. R2-2: after sending the exit keys, wait until the pane shows a shell (the old agent is gone) before exporting the new model and starting; an agent of the same kind still in the pane right after the exit is the OLD one, not the new one. Quota turns must not flag the lane. Nothing else."
