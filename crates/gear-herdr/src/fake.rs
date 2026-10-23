@@ -54,6 +54,13 @@ pub struct FakeHerdr {
     /// The names of the agents the fake started successfully (a refused start
     /// is not in here).
     pub started_agents: Vec<String>,
+    /// Screens to show after an action: (a `pane_run` command substring, or a
+    /// key sent, then the new screen). Models how the real UI renders after a
+    /// submission, one action at a time.
+    pub screen_after: Vec<(String, String)>,
+    /// The screen a freshly started agent shows (a real agent renders its UI,
+    /// status bar included). Empty by default.
+    pub start_screen: Option<String>,
 }
 
 impl FakeHerdr {
@@ -168,6 +175,21 @@ impl FakeHerdr {
             None => ok(self),
         }
     }
+
+    /// After a submission, the screen the fake shows next (`screen_after`).
+    fn render_after(&mut self, pane: &str, trigger: &str) {
+        let next = self
+            .screen_after
+            .iter()
+            .find(|(t, _)| trigger.contains(t.as_str()))
+            .map(|(_, screen)| screen.clone());
+        if let Some(screen) = next {
+            if let Some(p) = self.panes.get_mut(pane) {
+                p.screen = screen;
+                p.revision += 1;
+            }
+        }
+    }
 }
 
 impl HerdrRead for FakeHerdr {
@@ -194,6 +216,16 @@ impl HerdrRead for FakeHerdr {
         let start = all.len().saturating_sub(lines as usize);
         Ok(all[start..].join("\n"))
     }
+
+    /// The whole visible screen: the fake's screen is the visible pane (tests
+    /// that need a dialog above the tail window put it high in `set_screen`).
+    fn read_screen(&mut self, pane_id: &str) -> Result<String, ObserveError> {
+        if self.observe_fails {
+            return Err(ObserveError("injected".into()));
+        }
+        let p = self.panes.get(pane_id).ok_or_else(|| ObserveError(format!("no pane {pane_id}")))?;
+        Ok(p.screen.clone())
+    }
 }
 
 impl HerdrAct for FakeHerdr {
@@ -219,8 +251,12 @@ impl HerdrAct for FakeHerdr {
 
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()> {
         let pane = pane_id.to_string();
+        let command_owned = command.to_string();
         self.act(Call::PaneRun { pane: pane_id.into(), command: command.into() }, move |s| {
             if s.panes.contains_key(&pane) {
+                // Text + Enter is one submission (the socket path sends the
+                // Enter itself); the screen it produces comes next.
+                s.render_after(&pane, &command_owned);
                 Outcome::Ok(())
             } else {
                 Outcome::Refused { code: "not_found".into(), message: "no pane".into() }
@@ -236,6 +272,7 @@ impl HerdrAct for FakeHerdr {
             args: args.to_vec(),
         };
         let (pane, kind) = (pane_id.to_string(), kind.to_string());
+        let start_screen = self.start_screen.clone();
         if let Some(code) = self.refuse_next_start.take() {
             self.calls.push(call);
             return Outcome::Refused { code, message: "refused".into() };
@@ -250,6 +287,9 @@ impl HerdrAct for FakeHerdr {
                 // uuid), so the fake does too: a caller that resumes a session
                 // needs one to resume.
                 p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
+                if let Some(screen) = start_screen {
+                    p.screen = screen;
+                }
                 p.revision += 1;
                 let p = p.clone();
                 s.started_agents.push(name.to_string());
@@ -259,7 +299,12 @@ impl HerdrAct for FakeHerdr {
     }
 
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()> {
-        self.act(Call::SendKeys { pane: pane_id.into(), keys: keys.to_vec() }, |_| Outcome::Ok(()))
+        let pane = pane_id.to_string();
+        let first = keys.first().cloned().unwrap_or_default();
+        self.act(Call::SendKeys { pane: pane_id.into(), keys: keys.to_vec() }, move |s| {
+            s.render_after(&pane, &first);
+            Outcome::Ok(())
+        })
     }
 
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()> {

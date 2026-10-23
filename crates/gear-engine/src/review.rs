@@ -538,6 +538,22 @@ fn start_reviewer(
         }
     };
 
+    // The chain's model before the reviewer gets any work (T-33, F5): OpenCode
+    // ignores the start environment through its shared service, so the status
+    // bar decides. Waiting keeps the start pending; the packet waits with it.
+    if kind == "opencode" {
+        if let Some(model) = model {
+            match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)? {
+                crate::switch::ModelGate::Ready => {}
+                crate::switch::ModelGate::Waiting => return Ok(Started::NotYet),
+                crate::switch::ModelGate::Failed(reason) => {
+                    park(store, &seat.id, &reason, now)?;
+                    return Ok(Started::NotYet);
+                }
+            }
+        }
+    }
+
     // 5. the seat is up and has its packet: one transaction. A crash between
     //    the two would leave a live reviewer that every later tick skips (an
     //    Active temp is not started again) and that never gets a job.
@@ -864,21 +880,40 @@ fn review_packet_for(
     attempt: i64,
     candidate: &str,
 ) -> GearResult<String> {
-    let (goal, accept) = store.read(|tx| {
+    let (goal, accept, done, bar) = store.read(|tx| {
         let version = tx
             .get_attempt(&config.project.id, task, attempt)?
             .map(|row| row.adopted_version)
             .unwrap_or(1);
-        match tx.get_contract(&config.project.id, task, version)? {
-            Some(contract) => Ok((contract.goal, contract.accept)),
-            None => Ok((String::new(), String::new())),
-        }
+        let (goal, accept) = match tx.get_contract(&config.project.id, task, version)? {
+            Some(contract) => (contract.goal, contract.accept),
+            None => (String::new(), String::new()),
+        };
+        // The voyage the task sails on (T-22): the sentence the phase is
+        // judged by and its quality bar (T-23).
+        let (done, bar) = match tx.get_task(&config.project.id, task)? {
+            Some(row) => match row
+                .milestone
+                .as_deref()
+                .map(|milestone| tx.get_voyage(&config.project.id, milestone))
+            {
+                Some(Ok(Some(voyage))) => (
+                    voyage.done.clone().unwrap_or_default(),
+                    voyage.bar.clone().unwrap_or_default(),
+                ),
+                _ => (String::new(), String::new()),
+            },
+            None => (String::new(), String::new()),
+        };
+        Ok((goal, accept, done, bar))
     })?;
     Ok(review_packet(
         task,
         attempt,
         &goal,
         &accept,
+        &done,
+        &bar,
         candidate,
         &config.conventions.integration,
         &review_branch(task),
@@ -978,6 +1013,8 @@ fn review_packet(
     attempt: i64,
     goal: &str,
     accept: &str,
+    done: &str,
+    bar: &str,
     candidate: &str,
     integration: &str,
     branch: &str,
@@ -987,6 +1024,8 @@ fn review_packet(
          \n\
          Goal: {goal}\n\
          Accept: {accept}\n\
+         Done (the milestone's sentence): {done}\n\
+         Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
          Diff to review: `{integration}..{candidate}`\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
@@ -997,9 +1036,14 @@ fn review_packet(
          Write the review in your worktree at the path your project uses for reviews, commit it \
          on `{branch}` and push it (the candidate stays untouched).\n\
          \n\
-         Hand your verdict in with exactly:\n\
+         Every finding is either blocking or logged: a blocking finding names the part of the \
+         done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
+         blocking finding; everything else is logged and does not block.\n\
+         \n\
+         Hand your verdict in with exactly (the findings as text, one per line, each starting \
+         with its id; `--blocking` names the ones that block):\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"<the path to your review file, or the text>\"\n\
+         [--blocking <ids>] \"<the path to your review file, or the text>\"\n\
          \n\
          GEAR reads the file and keeps the text of your findings, so the writer reads them from \
          GEAR (the rework note and the task packet): your worktree and your branch may be gone \
@@ -1489,17 +1533,70 @@ review = ["gpt-6.1-sol"]
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
         assert!(!text.contains("ops/"), "no gear-repo path in the packet:\n{text}");
+        // The findings are text with ids; `--blocking` names the ones that
+        // block (T-23).
         assert!(
-            text.contains(
-                "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"<the path to your review file, or the text>\""
-            ),
+            text.contains("gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail>"),
             "{text}"
         );
+        assert!(text.contains("--blocking <ids>"), "{text}");
         // The findings live in GEAR's store (T-21, shipped): the writer reads
         // the text from the rework note and the packet, not from the branch.
         assert!(text.contains("keeps the text of your findings"), "{text}");
         assert!(!text.contains("git show"), "no branch pointer in the packet:\n{text}");
+    }
+
+    /// T-33 (F5): an OpenCode reviewer gets no packet until its status bar
+    /// shows the review chain's model — the switch happens first, in place.
+    #[test]
+    fn an_opencode_reviewer_is_switched_before_the_packet() {
+        let text = CONFIG
+            .replace(
+                "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
+                "[temps]\nkind = \"opencode\"\nprofile = \"opencode\"",
+            )
+            + "\n[models.switch.\"gpt-6.1-sol\"]\npicker = \"GPT-6.1 Sol\"\nbar = \"GPT-6.1 Sol\"\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        // The reviewer starts on another model.
+        herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".to_string());
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            ("/model".into(), "  Search\n  Recent\n  GPT-6.1 Sol  OpenAI".into()),
+            ("GPT-6.1 Sol".into(), "Build auto · GPT-6.1 Sol OpenAI · high".into()),
+        ];
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert!(first.started.is_empty(), "the packet waits for the model: {first:?}");
+
+        let mut delivered = false;
+        for tick in 0..6 {
+            let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30 + tick).unwrap();
+            if !report.started.is_empty() {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "the reviewer starts once the bar confirms");
+        // The packet is delivered once, and the reviewer was started once.
+        let deliveries: Vec<_> = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::AgentStart { .. }))
+            .collect();
+        assert_eq!(deliveries.len(), 1, "{:?}", herdr.calls);
+        let commands: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands.iter().filter(|c| *c == "/model").count(), 1, "{commands:?}");
+        assert!(commands.iter().any(|c| c == "GPT-6.1 Sol"), "{commands:?}");
     }
 
     #[test]

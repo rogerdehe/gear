@@ -229,6 +229,7 @@ fn result(candidate: &str, gate: Option<BaseGate>) -> SendArgs {
         contract: Some(1),
         candidate: Some(candidate.into()),
         verdict: None,
+        blocking: None,
         base: gate,
         about: None,
         to: None,
