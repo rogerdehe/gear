@@ -16,7 +16,7 @@ The general lane rules in `ops/CONVENTIONS.md` apply (English only, git limits, 
    - findings with severity, `file:line`, and why it matters — **P0** wrong data, lost work, broken contract or safety rule; **P1** wrong behaviour in a case normal operation reaches (one fault at a time: one restart, one captain action); stacked coincidences are P3 with their likelihood; **P2** fragile or misleading code likely to cause a bug; **P3** style/wording;
    - what you considered and set aside, with the reason (nothing dropped silently);
    - questions only the captain can decide;
-   - verdict: any failed fact or any P0/P1/P2 → `fail`; otherwise `pass` (P3s listed, never blocking).
+   - verdict: judged against the **current milestone's done-sentence** (the `# Milestone` block of the latest plan in `ops/plan/`), not against perfection. `fail` = a failed mechanical fact, a P0, or a finding that breaks that sentence; everything else is listed with its severity and does not block (`pass`). You review one screw; the milestone sentence says how tight the ship needs it now.
 4. **Re-review** (same task, resumed session): check every previous finding is resolved, review only the delta, and still report anything new.
 
 ## Delivering

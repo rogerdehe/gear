@@ -124,6 +124,22 @@ pub struct Totals {
     pub done: usize,
     pub in_progress: usize,
     pub waiting: usize,
+    /// The attempts of the whole project that reached a hand-in.
+    pub handed_in: usize,
+    /// The hand-ins a review sent back.
+    pub rejected: usize,
+}
+
+/// How well never-stop is going for one lane (docs/field-notes/decomposition.md):
+/// how often its hand-ins come back, and how long since it last got a task.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rework {
+    /// The attempts that reached a hand-in: submitted, accepted or rejected.
+    pub handed_in: usize,
+    /// The hand-ins a review sent back.
+    pub rejected: usize,
+    /// The age of the lane's last Deliver op; `None` when it never got one.
+    pub last_task_age_s: Option<i64>,
 }
 
 /// One lane and its queue, in plan order.
@@ -131,6 +147,8 @@ pub struct Totals {
 pub struct LaneBoard {
     pub lane: String,
     pub tasks: Vec<TaskBoard>,
+    /// The lane's never-stop measures.
+    pub rework: Rework,
 }
 
 /// One task of a lane's queue.
@@ -226,7 +244,7 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
     }
     let mut lanes: Vec<LaneBoard> = order
         .into_iter()
-        .map(|lane| LaneBoard { lane, tasks: Vec::new() })
+        .map(|lane| LaneBoard { lane, tasks: Vec::new(), rework: Rework::default() })
         .collect();
 
     let mut totals = Totals::default();
@@ -246,12 +264,68 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
         let line = TaskBoard { id: task.id.clone(), state: task.state };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
-            None => lanes.push(LaneBoard { lane: name, tasks: vec![line] }),
+            None => lanes.push(LaneBoard {
+                lane: name,
+                tasks: vec![line],
+                rework: Rework::default(),
+            }),
         }
     }
     // Every registered lane stays in the model, even with nothing queued: an
     // empty lane is exactly what the captain has to see to refill it (the
     // review of T-9).
+
+    // The never-stop measures: per lane, the hand-ins a review sent back and
+    // the time since the lane last received a task.
+    //
+    // An attempt belongs to the seat that made it, not to the lane its task
+    // sits on now: tasks move between lanes (the review of T-16).
+    let mut attempts: Vec<(String, gear_model::AttemptState)> = Vec::new();
+    for task in &tasks {
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            attempts.push((attempt.seat.clone(), attempt.state));
+        }
+    }
+    // The project totals: every attempt of the project, whatever its seat —
+    // a temp worker's hand-in counts too (F2 of the T-16 review).
+    for (_, state) in &attempts {
+        match state {
+            gear_model::AttemptState::Rejected => {
+                totals.rejected += 1;
+                totals.handed_in += 1;
+            }
+            gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted => {
+                totals.handed_in += 1;
+            }
+            _ => {}
+        }
+    }
+    for lane in &mut lanes {
+        let seat_id = format!("{project}:{}", lane.lane);
+        let mut handed_in = 0;
+        let mut rejected = 0;
+        for (seat, state) in &attempts {
+            if *seat != seat_id {
+                continue;
+            }
+            match state {
+                gear_model::AttemptState::Rejected => {
+                    rejected += 1;
+                    handed_in += 1;
+                }
+                gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted => {
+                    handed_in += 1;
+                }
+                _ => {}
+            }
+        }
+        let last = tx.last_op(&format!("{project}:{}", lane.lane), OpKind::Deliver)?;
+        lane.rework = Rework {
+            handed_in,
+            rejected,
+            last_task_age_s: last.map(|op| (now - op.created).max(0)),
+        };
+    }
 
     // The open tasks as a dependency tree (the other view of the plan).
     let deps = deps::tree(&tasks);
@@ -334,11 +408,13 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
     let mut lines = vec![
         format!("project {}", project.project),
         format!(
-            "Totals: {} tasks · {} done · {} in progress · {} waiting",
+            "Totals: {} tasks · {} done · {} in progress · {} waiting · rework {}/{}",
             project.totals.tasks,
             project.totals.done,
             project.totals.in_progress,
-            project.totals.waiting
+            project.totals.waiting,
+            project.totals.rejected,
+            project.totals.handed_in
         ),
     ];
     match view {
@@ -346,7 +422,7 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
             if !project.lanes.is_empty() {
                 lines.push(String::new());
                 for lane in &project.lanes {
-                    lines.push(format!("Lane {}", lane.lane));
+                    lines.push(format!("Lane {}{}", lane.lane, lane_measures(&lane.rework)));
                     if lane.tasks.is_empty() {
                         // A registered lane with nothing queued: the captain
                         // sees it and can refill it.
@@ -417,6 +493,19 @@ fn human_age(seconds: i64) -> String {
     }
 }
 
+/// The never-stop segment of a lane line: ` · rework 1/3 · last task 12m ago`.
+fn lane_measures(rework: &Rework) -> String {
+    match rework.last_task_age_s {
+        Some(age) => format!(
+            " · rework {}/{} · last task {} ago",
+            rework.rejected,
+            rework.handed_in,
+            human_age(age)
+        ),
+        None => format!(" · rework {}/{} · no task yet", rework.rejected, rework.handed_in),
+    }
+}
+
 /// The board's word for a task state (PRD §15): the states of the plan, plus
 /// the two ways a task can end without a result. The captain's home page
 /// uses the same words (T-9).
@@ -446,9 +535,16 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "done": project.totals.done,
                     "in_progress": project.totals.in_progress,
                     "waiting": project.totals.waiting,
+                    "handed_in": project.totals.handed_in,
+                    "rejected": project.totals.rejected,
                 },
                 "lanes": project.lanes.iter().map(|lane| serde_json::json!({
                     "lane": lane.lane,
+                    "rework": {
+                        "handed_in": lane.rework.handed_in,
+                        "rejected": lane.rework.rejected,
+                        "last_task_age_s": lane.rework.last_task_age_s,
+                    },
                     "tasks": lane.tasks.iter().map(|task| serde_json::json!({
                         "id": task.id,
                         "state": state_word(task.state),
