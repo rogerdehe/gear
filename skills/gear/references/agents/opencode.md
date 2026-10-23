@@ -67,6 +67,18 @@ herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --auto
 # then, when the status bar is not on the wanted model: /model, filter, Enter, check the bar
 ```
 
+## Model and variant through the service API (preferred)
+
+The model and its variant belong to the session on the background service (OpenCode source: packages/protocol/src/groups/session.ts). Verified on 2.1.2:
+
+```bash
+opencode api session.create -d '{"location":{"directory":"<worktree>"},"agent":"build","model":{"providerID":"minimax-cn","id":"MiniMax-M3.1-Flash"}}'
+opencode api session.switchModel --param sessionID=<id> -d '{"model":{"providerID":"opencode-go","id":"deepseek-v4.1-flash","variant":"max"}}'
+opencode api GET /api/session/<id>          # check .model
+```
+
+Start the TUI on that session with `opencode --session <id>`. No keystrokes and no change to the machine-wide `model.json`. The model picker command is `/models` (not `/model`); a typed slash command only runs when chosen from its autocomplete, a pasted one is sent as a chat message.
+
 ## Find the session id
 
 Herdr does not report it. Sessions are listed per repository (all worktrees of a repo share one list), so match on the directory:
