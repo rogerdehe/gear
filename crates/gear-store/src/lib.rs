@@ -57,6 +57,8 @@ pub struct SeatRow {
     pub state: SeatState,
     pub state_since: Ts,
     pub state_reason: Option<String>,
+    /// The task a temp seat is bound to for life (None for every other seat).
+    pub task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +229,22 @@ pub struct VerdictRow {
     pub candidate: String,
     pub passed: bool,
     pub evidence: Option<String>,
+    pub by_seat: String,
+    pub created: Ts,
+}
+
+/// The review verdict a temp reviewer handed in for one attempt (design/08,
+/// conventions §8). One record per (project, task, attempt).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewVerdictRow {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    /// `true` = pass, `false` = fail.
+    pub passed: bool,
+    /// The findings: a path or the text itself.
+    pub findings: String,
+    /// The temp seat that handed the verdict in.
     pub by_seat: String,
     pub created: Ts,
 }
@@ -579,8 +597,8 @@ impl<'s> Tx<'s> {
         self.tx
             .execute(
                 "INSERT INTO seats
-                   (id, project, role, name, profile, generation, state, state_since, state_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                   (id, project, role, name, profile, generation, state, state_since, state_reason, task_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     row.id,
                     row.project,
@@ -591,6 +609,7 @@ impl<'s> Tx<'s> {
                     row.state.as_str(),
                     row.state_since,
                     row.state_reason,
+                    row.task_id,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -657,6 +676,19 @@ impl<'s> Tx<'s> {
             .execute(
                 "UPDATE seats SET generation=?2 WHERE id=?1",
                 params![seat_id, generation],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "seat", seat_id)
+    }
+
+    /// Bind a seat to the one task it works on (a temp seat for life).
+    /// Raw write: the caller checks that the seat is a temp seat.
+    pub fn set_seat_task(&self, seat_id: &str, task: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE seats SET task_id=?2 WHERE id=?1",
+                params![seat_id, task],
             )
             .map_err(map_sqlite)?;
         require_written(changed, "seat", seat_id)
@@ -1458,6 +1490,73 @@ impl<'s> Tx<'s> {
         }
         Ok(verdicts)
     }
+
+    // ---- review verdicts (T-2)
+
+    /// Store the review verdict of one attempt. One record per (project, task,
+    /// attempt): a second one for the same attempt is a constraint violation.
+    pub fn insert_review_verdict(&self, row: &ReviewVerdictRow) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO review_verdicts
+                   (project, task, attempt, passed, findings, by_seat, created)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    row.project,
+                    row.task,
+                    row.attempt,
+                    row.passed as i64,
+                    row.findings,
+                    row.by_seat,
+                    row.created,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// The review verdict of one attempt, if there is one.
+    pub fn get_review_verdict(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Option<ReviewVerdictRow>> {
+        let row: Option<ReviewVerdictRow> = self
+            .tx
+            .query_row(
+                "SELECT project, task, attempt, passed, findings, by_seat, created
+                 FROM review_verdicts WHERE project=?1 AND task=?2 AND attempt=?3",
+                params![project, task, attempt],
+                review_verdict_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// The review verdicts of a task, ordered by attempt.
+    pub fn review_verdicts_of_task(
+        &self,
+        project: &str,
+        task: &str,
+    ) -> GearResult<Vec<ReviewVerdictRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, task, attempt, passed, findings, by_seat, created
+                 FROM review_verdicts WHERE project=?1 AND task=?2 ORDER BY attempt",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task], review_verdict_from_row)
+            .map_err(map_sqlite)?;
+        let mut verdicts = Vec::new();
+        for row in rows {
+            verdicts.push(row.map_err(map_sqlite)?);
+        }
+        Ok(verdicts)
+    }
 }
 
 /// Test helpers (enable with feature-less `cfg(test)` in this crate or via
@@ -1493,6 +1592,7 @@ pub mod testing {
             state: SeatState::Active,
             state_since: now,
             state_reason: None,
+            task_id: None,
         };
         tx.insert_seat(&seat)?;
         let binding = BindingRow {
@@ -1507,6 +1607,23 @@ pub mod testing {
             created: now,
         };
         tx.insert_binding(&binding)?;
+        Ok(seat)
+    }
+
+    /// Insert a temp seat bound to `task` (the one task it works on for life),
+    /// Active at generation 1 with an Active binding. The project must exist.
+    pub fn seed_temp_seat(
+        tx: &Tx<'_>,
+        project: &str,
+        name: &str,
+        task: &str,
+        pane_id: &str,
+        kind: &str,
+        now: Ts,
+    ) -> GearResult<SeatRow> {
+        let mut seat = seed_active_seat(tx, project, name, SeatRole::Temp, pane_id, kind, now)?;
+        tx.set_seat_task(&seat.id, task)?;
+        seat.task_id = Some(task.to_string());
         Ok(seat)
     }
 
@@ -1628,7 +1745,7 @@ fn binding_status_from_str(s: &str) -> GearResult<BindingStatus> {
 
 fn seat_select(tail: &str) -> String {
     format!(
-        "SELECT id, project, role, name, profile, generation, state, state_since, state_reason
+        "SELECT id, project, role, name, profile, generation, state, state_since, state_reason, task_id
          FROM seats{tail}"
     )
 }
@@ -1747,6 +1864,18 @@ fn verdict_from_row(row: &rusqlite::Row) -> rusqlite::Result<VerdictRow> {
     })
 }
 
+fn review_verdict_from_row(row: &rusqlite::Row) -> rusqlite::Result<ReviewVerdictRow> {
+    Ok(ReviewVerdictRow {
+        project: row.get(0)?,
+        task: row.get(1)?,
+        attempt: row.get(2)?,
+        passed: row.get::<_, i64>(3)? != 0,
+        findings: row.get(4)?,
+        by_seat: row.get(5)?,
+        created: row.get(6)?,
+    })
+}
+
 fn project_from_row(row: &rusqlite::Row) -> rusqlite::Result<ProjectRow> {
     Ok(ProjectRow {
         id: row.get(0)?,
@@ -1774,6 +1903,7 @@ fn seat_from_row(row: &rusqlite::Row) -> rusqlite::Result<SeatRow> {
         state: state.parse::<SeatState>().map_err(as_sqlite_error)?,
         state_since: row.get(7)?,
         state_reason: row.get(8)?,
+        task_id: row.get(9)?,
     })
 }
 
@@ -1897,6 +2027,7 @@ mod tests {
                 state: SeatState::Starting,
                 state_since: 0,
                 state_reason: None,
+                task_id: None,
             })?;
             tx.insert_binding(&BindingRow {
                 seat: "p:heat".into(),

@@ -11,7 +11,7 @@ const NOW: i64 = 1_800_000_000;
 
 fn seat(state: SeatState, role: SeatRole) -> SeatRow {
     SeatRow { id: "p:heat".into(), project: "p".into(), role, name: "heat".into(), profile: "opencode".into(),
-        generation: 1, state, state_since: NOW - 1000, state_reason: None }
+        generation: 1, state, state_since: NOW - 1000, state_reason: None, task_id: None }
 }
 
 fn obs(state: SeatState, idle: bool, flags: &[ScreenFlag]) -> SeatObs {

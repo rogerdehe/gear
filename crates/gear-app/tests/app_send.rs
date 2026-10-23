@@ -59,6 +59,7 @@ fn args(kind: MsgKind) -> SendArgs {
         attempt: None,
         contract: None,
         candidate: None,
+        verdict: None,
         about: None,
         to: None,
         reply_to: None,

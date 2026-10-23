@@ -1,8 +1,8 @@
 //! Contract for the slice-2 store methods: plans, tasks, contracts (T-33);
 //! attempts, verdicts (T-34). Raw reads/writes; state rules live in gear-app.
 
-use gear_model::{AttemptState, ErrorCode, TaskState};
-use gear_store::{testing, AttemptRow, ContractRow, PlanRow, Store, TaskRow, VerdictRow};
+use gear_model::{AttemptState, ErrorCode, SeatRole, TaskState};
+use gear_store::{testing, AttemptRow, ContractRow, PlanRow, ReviewVerdictRow, Store, TaskRow, VerdictRow};
 
 const NOW: i64 = 1_800_000_000;
 
@@ -111,4 +111,33 @@ fn open_attempts_include_submitted() {
     }).unwrap();
     let got: Vec<String> = s.read(|tx| tx.open_attempts_of_seat("p:heat")).unwrap().into_iter().map(|a| a.task).collect();
     assert_eq!(got, vec!["T-2", "T-3"]);
+}
+
+#[test]
+fn review_verdicts_roundtrip_one_per_attempt() {
+    let mut s = store();
+    let v = |attempt: i64, passed: bool| ReviewVerdictRow { project: "p".into(), task: "T-1".into(), attempt,
+        passed, findings: "ops/reviews/T-1.md".into(), by_seat: "p:r-1".into(), created: NOW };
+    s.write(|tx| { tx.insert_review_verdict(&v(2, true))?; tx.insert_review_verdict(&v(1, false)) }).unwrap();
+    assert_eq!(s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap(), Some(v(1, false)));
+    assert_eq!(s.read(|tx| tx.get_review_verdict("p", "T-1", 3)).unwrap(), None);
+    let got: Vec<(i64, bool)> = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap()
+        .into_iter().map(|r| (r.attempt, r.passed)).collect();
+    assert_eq!(got, vec![(1, false), (2, true)]);
+    // One record per attempt.
+    assert_eq!(s.write(|tx| tx.insert_review_verdict(&v(1, true))).unwrap_err().code, ErrorCode::BadFormat);
+}
+
+#[test]
+fn a_temp_seat_is_bound_to_its_task() {
+    let mut s = store();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+        testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w1:p3", "opencode", NOW)
+    }).unwrap();
+    let temp = s.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+    assert_eq!(temp.role, SeatRole::Temp);
+    assert_eq!(temp.task_id.as_deref(), Some("T-1"));
+    let lane = s.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(lane.task_id, None);
 }
