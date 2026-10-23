@@ -134,6 +134,24 @@ pub struct Models {
     pub captain: Vec<String>,
     pub on_quota: OnQuota,
     pub quota_reset_h: u32,
+    /// How a model is found in its CLI's model picker and recognised on the
+    /// status bar, keyed by the model id (T-33): `[models.switch."<id>"]`
+    /// with `picker` and `bar` (and an optional `variant`).
+    #[serde(default)]
+    pub switch: BTreeMap<String, ModelSwitch>,
+}
+
+/// The texts an in-place model switch needs (T-33): what to type into the
+/// picker (specific enough to pick the wanted entry, L-29) and what the status
+/// bar must show afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSwitch {
+    pub picker: String,
+    pub bar: String,
+    /// The answer to a "Select variant" dialog; default `high`.
+    #[serde(default)]
+    pub variant: Option<String>,
 }
 
 impl Default for Models {
@@ -144,6 +162,7 @@ impl Default for Models {
             captain: Vec::new(),
             on_quota: OnQuota::default(),
             quota_reset_h: 5,
+            switch: BTreeMap::new(),
         }
     }
 }

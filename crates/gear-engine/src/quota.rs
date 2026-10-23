@@ -104,8 +104,11 @@ pub fn apply_quota_policy(
         ) {
             continue;
         }
-        // 1. count the consecutive quota ticks.
-        let quota = obs.flags.contains(&ScreenFlag::Quota);
+        // 1. count the consecutive quota ticks. A marker left on the screen
+        //    from before (after a model switch the old limit line stays in the
+        //    tail) is not a new fact, and a working agent is never parked on
+        //    screen text (M-266): only a stopped agent counts.
+        let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;
         let ticks = count_quota_tick(store, &seat.id, quota)?;
         if !quota || ticks < i64::from(profile.confirm_rounds) {
             continue;
@@ -120,10 +123,53 @@ pub fn apply_quota_policy(
         };
         match next {
             Some(next) => {
-                if let Some(line) =
-                    begin_restart(store, herdr, seat, profile, Some(&next), now)?
-                {
-                    report.events.push(line);
+                // T-33: switch the model in place — no exit, no restart, the
+                // conversation stays — when the config names the picker and the
+                // status-bar text for it.
+                let labels = config.models.switch.get(&next);
+                let outcome = match labels {
+                    Some(labels) => crate::switch::switch_in_place(
+                        store,
+                        herdr,
+                        &seat.id,
+                        profile,
+                        Some(obs),
+                        labels,
+                        now,
+                    )?,
+                    None => {
+                        // No labels: the old path (exit keys, then a start on
+                        // the new model) is the only one that can switch.
+                        if let Some(line) =
+                            begin_restart(store, herdr, seat, profile, Some(&next), now)?
+                        {
+                            report.events.push(line);
+                        }
+                        continue;
+                    }
+                };
+                match outcome {
+                    crate::switch::SwitchOutcome::Done
+                    | crate::switch::SwitchOutcome::Already => {
+                        let line = finish_switch(store, project, seat, &next, now)?;
+                        report.events.push(line);
+                    }
+                    // Working or a first failure: the next tick tries again.
+                    crate::switch::SwitchOutcome::Waiting => {}
+                    crate::switch::SwitchOutcome::Failed => {
+                        park_for_human(
+                            store,
+                            seat,
+                            &format!(
+                                "the model switch to {next} did not confirm twice; the seat needs a check"
+                            ),
+                            now,
+                        )?;
+                        report.events.push(format!(
+                            "{}: model switch to {next} failed twice — needs check",
+                            seat.id
+                        ));
+                    }
                 }
             }
             // The chain is exhausted, or the policy is to wait: park until the
@@ -227,6 +273,41 @@ fn begin_restart(
         seat.id,
         model.unwrap_or("the first model")
     )))
+}
+
+/// A successful in-place switch (T-33): record the model, reset the quota
+/// counter so the stale limit line does not climb again, continue the lane's
+/// open task on the new model, and tell the captain in one line.
+fn finish_switch(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    model: &str,
+    now: Ts,
+) -> GearResult<String> {
+    meta_set(store, &meta_key("model", &seat.id), model)?;
+    meta_set(store, &meta_key("quota", &seat.id), "0")?;
+    let text = continue_text(store, &seat.id)?;
+    if let Some((task, attempt)) = open_attempt(store, &seat.id)? {
+        store.write(|tx| {
+            tx.insert_op(&NewOp {
+                project: project.to_string(),
+                seat: seat.id.clone(),
+                generation: seat.generation,
+                kind: OpKind::Deliver,
+                task: Some(task),
+                attempt: Some(attempt),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": text }),
+                created: now,
+            })?;
+            Ok(())
+        })?;
+    }
+    let line = format!("{}: switched to {model} in place (provider limit)", seat.id);
+    tell_captain(store, project, seat, &line, now)?;
+    Ok(line)
 }
 
 /// The model a restart in progress starts on, if there is one. The meta has no
@@ -1219,6 +1300,87 @@ quota_reset_h = 5
     /// already starts T-1 attempt 1.
     fn open_attempt_for(_store: &mut Store) -> (String, i64) {
         ("T-1".to_string(), 1)
+    }
+
+    /// T-33: the quota fallback switches the model in place — no exit keys, no
+    /// agent start — and delivers one Continue once the status bar confirms.
+    #[test]
+    fn the_quota_fallback_switches_the_model_in_place() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The switch was typed, but the fake's screen has not changed yet.
+        assert!(deliveries(&mut store).is_empty(), "no continue before the bar confirms");
+
+        // The status bar now shows the new model.
+        herdr.set_screen(PANE, "Build auto · DeepSeek V4.1 Flash · high");
+        tick_quota(&mut store, &mut herdr, true, T0 + 30);
+
+        // In place: no exit keys (the profile's ctrl+c), no agent start.
+        let exit_keys = gear_herdr::builtin("opencode").unwrap().exit_keys;
+        let sent: Vec<Vec<String>> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::SendKeys { keys, .. } => Some(keys.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            sent.iter().flatten().all(|key| !exit_keys.contains(key)),
+            "no exit keys: {sent:?}"
+        );
+        assert!(starts(&herdr).is_empty(), "no restart: {:?}", starts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "/model"), "{:?}", texts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "DeepSeek V4.1 Flash"), "{:?}", texts(&herdr));
+        // One Continue, on the new model.
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(meta_get(&mut store, &meta_key("model", "p:heat")).unwrap().as_deref(), Some("deepseek/deepseek-flash"));
+    }
+
+    /// M-266: a stale limit line on a **working** agent is not a quota turn: it
+    /// is never parked (or switched) on screen text alone.
+    #[test]
+    fn a_working_lane_with_a_stale_limit_line_is_not_parked() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        let seat = lane_seat(&mut store);
+        let mut busy = observed(&seat, true);
+        busy[0].idle = false;
+        busy[0].status = Some(gear_herdr::AgentStatus::Working);
+
+        for tick in 0..5 {
+            apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &busy, T0 + 10 + tick).unwrap();
+        }
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Active, "a working lane is not parked");
+        assert!(exits(&herdr).is_empty(), "and not taken off its model");
+    }
+
+    fn texts(herdr: &FakeHerdr) -> Vec<String> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// A Submitted delivery at the edge of the check budget.
