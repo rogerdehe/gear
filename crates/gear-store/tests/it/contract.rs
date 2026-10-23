@@ -344,3 +344,22 @@ fn a_seat_profile_is_written_and_read_back() {
         ErrorCode::NoTarget
     );
 }
+
+#[test]
+fn a_captain_quota_episode_survives_reopening_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quota.db");
+    let state = gear_store::CaptainQuota {
+        generation: 7, detected_at: 100, reset_at: 200, bar: "5h 100% ↻01:10".into(),
+        wake_op: Some("O-1".into()), views_before_wake: 3, resumed: false,
+    };
+    {
+        let mut store = Store::open(&path).unwrap();
+        store.write(|tx| tx.set_captain_quota("p", Some(&state))).unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.read(|tx| tx.captain_quota("p")).unwrap(), Some(state));
+    assert!(store.read(|tx| tx.captain_quota_paused("p")).unwrap());
+    store.write(|tx| tx.set_captain_quota("p", None)).unwrap();
+    assert!(!store.read(|tx| tx.captain_quota_paused("p")).unwrap());
+}

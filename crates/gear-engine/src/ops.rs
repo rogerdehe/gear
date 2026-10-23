@@ -76,6 +76,19 @@ pub fn execute_intended(
         let ops = tx.ops_in_state(project, OpState::Intended)?;
         let mut prepared = Vec::new();
         for op in ops {
+            if tx.captain_quota_paused(project)? {
+                let seat = tx.get_seat(&op.seat)?;
+                if seat.as_ref().is_some_and(|seat| seat.role == gear_model::SeatRole::Captain)
+                    && op.payload.get("captain_quota_wake").and_then(|v| v.as_bool()) != Some(true)
+                { continue; }
+                if op.kind == OpKind::Deliver && seat.as_ref().is_some_and(|seat| seat.role == gear_model::SeatRole::Lane) {
+                    if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                        if tx.get_attempt(project, task, n)?.is_some_and(|a| a.state == gear_model::AttemptState::Delivered) {
+                            continue;
+                        }
+                    }
+                }
+            }
             if !matches!(op.kind, OpKind::Doorbell | OpKind::Deliver) {
                 // Onboard/release/title/notify have no text yet.
                 continue;
@@ -313,6 +326,11 @@ pub fn confirm_pending(
                     confirmed.push(op.id.clone());
                     continue;
                 }
+                let captain_paused = tx.get_seat(&op.seat)?.is_some_and(|seat| seat.role == gear_model::SeatRole::Captain)
+                    && tx.captain_quota_paused(project)?;
+                if captain_paused || op.payload.get("captain_quota_wake").and_then(|v| v.as_bool()) == Some(true) {
+                    continue;
+                }
                 // Liveness (L-69): a doorbell never holds the seat's slot for
                 // more than DOORBELL_EXPIRY_S. Whatever kept it from being
                 // confirmed, it expires; if items still wait, the next tick
@@ -353,6 +371,11 @@ pub const DOORBELL_EXPIRY_S: i64 = 300;
 /// next doorbell. Tying confirmation to the ids left the captain deaf twice
 /// (L-66, L-69): an id no view would show held the seat's slot forever.
 fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<Option<Ts>> {
+    if op.payload.get("captain_quota_wake").and_then(|v| v.as_bool()) == Some(true) {
+        let before = op.payload.get("views_before").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        return Ok(tx.views_since(&op.seat, op.generation, 0)?.iter().skip(before)
+            .filter(|view| view.ts >= op.created).map(|view| view.ts).min());
+    }
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
     if let Some(ts) = views.iter().map(|view| view.ts).min() {
         return Ok(Some(ts));
