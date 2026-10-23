@@ -1,3 +1,4 @@
 //! All integration tests of gear-store in one binary: each test binary is scanned by macOS on its first run, so one binary per crate keeps the gate fast.
 mod contract;
 mod slice2_contract;
+mod time_contract;

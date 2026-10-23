@@ -31,6 +31,7 @@ Scope; explicitly out of scope: ...
 ## T-31 [now] lane=heat milestone=M2 required
 goal: Fix the iOS login crash
 accept: Repro case passes; regression tests all green
+estimate: 90
 evidence-files: notes/T-31-repro.md
 evidence-due: 60
 deps: -
@@ -59,8 +60,8 @@ V-9 keep plan=12: dependency unresolved, keep the order; next=2026-10-21T16:00Z
 Rules:
 
 - The block order in `# Queue` determines rank; `[now|must|should|could|wont]` is an independent priority field, and neither overrides the readiness gate (dependencies, capacity, write resources, authorization). Non-terminal tasks that do not appear in the draft **keep their state and relative order** (placed after the tasks listed in the draft) and are listed as "not mentioned" in the result. Deletion can only be written as `state=cancelled`.
-- Allowed fields: `goal`, `accept`, `evidence-files`, `evidence-due` (minutes), `deps`, `state`, `followup-of`, `reopen` (required only for DONE→READY); block headers allow `lane=`, `milestone=`, `required`. **Any unknown field or disallowed state value → the whole draft is `BAD_FORMAT`**. `state=` only allows `ready` and `cancelled`.
-- New tasks are written `## NEW [should] lane=…` and are assigned `T-<n>` at apply time.
+- Allowed fields: `goal`, `accept`, `estimate` (the planned time in minutes), `evidence-files`, `evidence-due` (minutes), `deps`, `state`, `followup-of`, `reopen` (required only for DONE→READY); block headers allow `lane=`, `milestone=`, `required`. **Any unknown field or disallowed state value → the whole draft is `BAD_FORMAT`**. `state=` only allows `ready` and `cancelled`.
+- New tasks are written `## NEW [should] lane=…` and are assigned `T-<n>` at apply time. A `NEW` block needs `estimate:` (minutes): the time the task is planned to take, which the time report compares with what it really took. An existing task may keep the estimate it has; a draft that gives one changes it.
 - **Completion only through `# Verdicts`**: each line names the task, attempt, contract version, and candidate.
   - `pass`: must match the candidate submitted by that attempt and its adopted contract, and that contract must equal the current contract after this transaction's proposed apply; and there must be passing evidence (12 evidence header, result=pass).
   - `fail`: targets the candidate and contract originally submitted by that attempt under verification, gives a `rework=` reason, does not require equality with the task's latest contract, and does not require an evidence header; the original attempt becomes REJECTED, the task READY, the next attempt adopts the latest valid contract, and old results and evidence are kept. An old-contract candidate may be explicitly sent back, but cannot complete a new contract.

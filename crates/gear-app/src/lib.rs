@@ -22,6 +22,7 @@ pub mod review;
 pub mod seats;
 pub mod skill;
 pub mod tasks;
+pub mod time;
 
 use gear_model::GearCtx;
 
