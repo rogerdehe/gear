@@ -1,5 +1,7 @@
 # GEAR MVP Technical Plan
 
+> **Status 2026-10-22.** The walking skeleton described here runs end to end on a real Herdr (Rust, not Python). Further work follows [PRD v0.9](PRD.md) and is driven by GEAR itself; this document is kept as history.
+
 Basis: [PRD v0.8](PRD.md). Status: to be implemented; this document is the skeleton and effort estimate for the first landing step and does not claim real-machine verification. Previous version: [archive/TECH-MVP-v0.7.md](archive/TECH-MVP-v0.7.md).
 
 ## 1. What the MVP must achieve

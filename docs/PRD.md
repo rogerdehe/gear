@@ -1,12 +1,26 @@
 # GEAR Product Plan: Continuous Multi-Agent Collaboration on Herdr
 
-Version: v0.8 (2026-10-21). Status: complete product plan; to be revised from real run evidence after the MVP lands. Previous version: [archive/PRD-v0.7.md](archive/PRD-v0.7.md).
+Version: v0.9 (2026-10-22). Status: revised after the walking skeleton ran end to end on a real Herdr; the user re-aligned positioning, kickoff, the work loop, the board and the runtime form (§0, §8a, §10, §15, §16). Previous version: [archive/PRD-v0.7.md](archive/PRD-v0.7.md).
 
-Project name GEAR (**G**oals **E**xecuted through **A**gent **R**elay); Herdr plugin ID `herdr-gear`; CLI `gear`. Not yet implemented.
+Project name GEAR (**G**oals **E**xecuted through **A**gent **R**elay); Herdr plugin ID `herdr-gear`; CLI `gear`. The walking skeleton runs; GEAR is now developed with GEAR itself.
 
 This document describes the **final form** and aims to be comprehensive; what lands first is in [TECH-MVP.md](TECH-MVP.md). Reference projects and trade-offs are in [research/2026-10-21/references.md](research/2026-10-21/references.md); Firstmate is the most important comparable reference and can be borrowed from heavily, but it is not the final form we want.
 
 ---
+
+## 0. Positioning
+
+GEAR is for work that is **all** of:
+
+1. **big and long-running** — hours to days, more than one context window;
+2. **multi-agent** — several agents of possibly different kinds (Claude, OpenCode, Codex …) in Herdr working together;
+3. **re-planned while it runs** — the plan is living: the captain adjusts order, scope and staffing at any time, instead of writing everything up front and stopping for confirmation on every change (the BMAD failure mode).
+
+For anything else, talk to an agent directly; GEAR adds nothing.
+
+Why it works where a long chat does not: the plan, the task states and the messages live in GEAR's store, not in anyone's conversation. The captain reads `gear` (a bounded page) when woken, so it can re-plan without its context filling up, getting compacted and forgetting.
+
+GEAR is not a planning method. Requirements and technical design may come from BMAD, Superpowers or plain conversation; GEAR starts at **execution** — dispatching work to other agents (not in-process subagents), keeping them working, reviewing in parallel, and merging. Methods are tools the captain may use; they never decide for it.
 
 ## 1. Problems to solve
 
@@ -35,7 +49,8 @@ The user runs several projects in Herdr at once; each project has a captain (the
 | C-08 | Messages may be merged and summarized, but original facts are not lost; messages are not reduced by hiding anomalies |
 | C-09 | The system does not rely on Agent self-discipline or any one CLI's proprietary hooks to keep running; unclear state is shown as such |
 | C-10 | Project differences live in configuration and task contracts; no more copying a set of scripts per project |
-| C-11 | The plugin adds only **one resident process** (the engine); the `gear` commands that Agents call are short-lived processes and do not count |
+| C-11 | The plugin adds only **one resident process** (the engine), running in the background with no pane; any `gear` call starts it when it is not running. The `gear` commands that Agents call are short-lived processes and do not count |
+| C-13 | **No popups after kickoff.** Everything that needs the user's choice is asked once, at kickoff, in as few dialogs as possible. After that no agent — captain, lane or reviewer — opens a dialog: a dialog in the captain's pane freezes the doorbell; a dialog in a lane needs the captain to notice, read and answer it. Lanes ask through `gear send --kind question`; a lane caught in a native dialog is reported to the captain by the engine |
 | C-12 | Lightweight: few commands, little code; complexity is controlled by "bounded scenarios", not solved by "piling up detection systems" |
 
 ## 3. Roles and objects
@@ -115,6 +130,18 @@ The task, attempt, and session generation come from the registered context; `--a
   - When the previous turn is confirmed to have ended normally, there is still a handleable review item, and there is no delivery that needs check, remind within budget, initially at most twice; do not force it in on schedule when working, waiting for authorization, or the send result is unclear. If there is still no progress, show it persistently and notify the user; a review must not be marked complete because the reminder count ran out.
 - **The captain is also supervised by the engine**: if it has pending items but is stopped, it gets woken.
 
+## 8a. Kickoff (the only alignment with the user)
+
+Before execution starts the captain proposes an **execution plan** (distinct from the work plan) and the user corrects it in one pass:
+
+1. **Captain**: the current agent, or a new one GEAR starts.
+2. **Agents available**: the kinds installed in Herdr (detected, not typed).
+3. **Lanes**: how many long-lived lanes and how many temp slots (e.g. OpenCode × 6: 2 long-lived, 4 temp); each lane's **name** — `<project>-<meaning>`, e.g. `gear-data`, `gear-runtime` — and the work items it owns.
+4. **Models per role**: development on a fast/cheap model (tasks are cut small and concrete); review on a stronger model that differs from the writer's — a stronger model of the same vendor is acceptable when only one vendor is available.
+5. **Quota policy** per model chain: **wait** for the reset (most vendors reset every 5 hours; GEAR parks the lane and resumes it at reset) or **fall back** to the next model in the chain (e.g. MiniMax → DeepSeek).
+
+Kickoff ends with `gear admin init`; from then on the run needs no dialogs (C-13).
+
 ## 9. Staffing management
 
 **Long-lived lanes**
@@ -134,6 +161,7 @@ The task, attempt, and session generation come from the registered context; `--a
 - **Temp worker worktree lifecycle**: when the same work needs the temp worker back (rework, resume), its worktree is reopened with `herdr worktree open --branch <task-branch>`; after its result is merged, `herdr worktree remove` removes the checkout and workspace and keeps the branch.
 - **resume rule** (user decision 2026-10-21): the mechanism must support bringing back the original temp worker. **New work opens a new temp worker; when the same piece of work needs it back midway (rework, follow-up questions, supplementary material), resume the original session.** Quota is reapplied for; when resume is unavailable, a new session reads the task packet to do the rework and is explicitly marked "new-session recovery".
 - The captain is no longer asked on a timer "should I close this one" — closing is the default, and bringing back is a routine operation.
+- **Quota exhausted**: the engine recognises the agent's quota marker and applies the kickoff policy — park until the reset time and resume, or switch the lane to the next model in its chain. Neither needs the captain or the user.
 
 **Leaving without notice and handover**
 
@@ -146,6 +174,15 @@ The task, attempt, and session generation come from the registered context; `--a
 - **Replacing the captain (normal brand change)**: not by same name. "Captain" is a project role bound to the execution host, session, pane, session reference, and generation. Handover: freeze → invalidate old generation → classify item by item → handover packet → activate after the new captain confirms.
 
 ## 10. Output supervision and acceptance
+
+**The work loop runs in parallel, not in series.**
+
+1. A lane works through its queue: finishes a task, pushes its branch, hands in a result, and **immediately starts its next task** — it does not wait for review.
+2. The engine starts a temp reviewer on the pushed branch (review model ≠ writer model); the reviewer pushes its findings to a review branch.
+3. Verdict: pass → merged into `dev`; fail → the task goes back to the same lane as rework, ahead of its next item.
+
+The captain decides only what the loop cannot: plan changes, questions, disputes, and acceptance of milestones.
+
 
 - **Evidence points**: when dispatching, agree on the next evidence point (a small diff + test results, a reproduction record, investigation notes, experiment results …). Small commits are a means, not the only legitimate output.
 - **Output sampling** (program, no tokens spent): periodically compare each lane's worktree changes and evidence files. If expected evidence is still missing after the evidence point → create a "needs check" item, without directly ruling that no work was done; changes also do not mean the direction is right. Set a cap on "longest time without anyone looking", so tasks that are constantly changing also get checked.
@@ -172,7 +209,7 @@ Herdr is the foundation; GEAR only adds the "work layer" Herdr lacks (tasks, pla
 
 | GEAR needs | Herdr capability |
 |---|---|
-| Host the engine and board | Plugin manifest `[[panes]]`; the engine runs in a plugin pane |
+| Host the board | Plugin `[[panes]]` opened by a plugin action bound to a key (`[[keys.command]]`); the engine is a background process, not a pane |
 | User shortcuts | Plugin `[[actions]]` + Herdr key bindings (actions take no parameters and are async; only fixed entry points, not an Agent business interface) |
 | Open lanes, change people | `pane split` / `tab create`, `agent start --kind`, `worktree create/open/remove` |
 | Dispatch, continuation, doorbell | `agent prompt` (types text + Enter into the pane terminal) |
@@ -197,19 +234,27 @@ Day-to-day business has only 4 entry points (lanes only need to remember the fir
 
 Reading the home page or details with `gear` does not close items. `plan apply --keep` must still link the plan version it is based on, the review item, and the next checkpoint, and does not close unlisted messages or items that arrived later.
 
-There are also install/ops entry points (such as `gear run`, which starts the engine) that Agents do not need to learn. The user mainly looks at the board in the plugin pane.
+There are also install/ops entry points (`gear admin init`, `gear admin stop`; `gear run` only for debugging) that Agents do not need to learn. The user mainly looks at the board, opened by a hotkey.
 
 ## 15. Visibility and human intervention
 
-- Board/home page: task view, lane view, inbox, engine health (last successful scan, observation failures, running code and configuration version), and the difference between plan and reality.
+- **Board** — what the user and the captain look at. Opened and closed by a Herdr hotkey (plugin action, like the file viewer), never a pane that must stay open. It shows the **plan**, not agent liveness (Herdr's own agent panel shows working/idle):
+  - totals: how many tasks/stories, how many done;
+  - per lane: its tasks and their state (e.g. `gear-data`: T-1 done, T-2 in review, T-3 queued);
+  - items waiting for the captain or the user;
+  - temp slots in use / quota;
+  - later: the task dependency graph.
+  - A single warning line only when the engine is down or observation fails.
+- Home page (`gear`): the role-specific view for agents.
+- **Engine log**: `engine.log` next to the database, timestamped, verbose while GEAR is in development — the first place to look when something goes wrong.
 - By default the user is sought only in these cases: out-of-authority requests, budget exhausted, captain unavailable, supervision anomalies, resource handovers needing manual checking, project acceptance. The user can step in on their own at any time.
 - All decisions and operations have audit records.
 
 ## 16. Runtime form
 
-- The plugin's single tab hosts the single engine. Switching tabs, hiding the view, or disconnecting the local remote client does not terminate the loop on the target; actually closing the hosting tab stops the engine, and the next open checks and recovers. Without an external observer, no automatic revival or instant alerting is promised. While the engine is stopped, `gear send` can still write to inboxes, and doorbells are sent after recovery.
+- The engine is a **background process with no pane**: any `gear` call starts it when its lock is free; tabs, panes and clients do not affect it; `gear admin stop` stops it (upgrade, uninstall). If it dies, the next `gear` call restarts it and the recovery checks run. While it is down, `gear send` still writes to inboxes and doorbells follow after recovery. The user never runs or watches it.
 - A project is bound to an execution host and session; running code and configuration versions are queryable, and changes are switched explicitly; changing a file does not mean it is in effect.
-- Initialization dialogue (final form): discover the Agents available on the execution host → the captain proposes a team plan (number and type mix of long-lived lanes, temp quota and purposes) → the user adjusts it through dialogue → after confirming each lane's role and CLI type, capacity, and configuration version, it is put into effect.
+- Initialization: the kickoff of §8a.
 
 ## 17. Invariants (enforced by the engine, not relying on Agents having read instructions)
 
@@ -256,6 +301,8 @@ Multiple supervisor layers; the core choosing technologies on its own or replaci
 **Metrics**: number of manual nudges, number of manual coordination interventions, number of unsupervised unfinished tasks, duplicate dispatches, mistaken reclamations, wrong unblocks, drift detection latency, urgent task start latency, captain message backlog and oldest wait. These must be judged together with false nudges, missed items, and wrong completions.
 
 ## 20. Change log
+
+- v0.9 (2026-10-22): after the walking skeleton ran on a real Herdr. Added positioning (§0), kickoff and the no-popup rule (§8a, C-13), the quota policy (wait for reset / fall back), the parallel develop–review–merge loop (§10), the plan-centred hotkey board and the engine log (§15), the background engine (§16, C-11).
 
 - v0.8 (2026-10-21): rewritten after 10+ rounds of Claude × Codex discussion. Added plan distortion and the living plan, keeping the captain from drowning (synchronous send + threaded inbox + doorbell), engine-scheduled reviews, watching output, long-lived lane standby and park, temp worker release on delivery, leaving without notice and quota exhaustion, multiple projects and identity generations, Herdr role verification, 4 daily commands; SQLite as the single authoritative state, CLI writes directly in transactions, engine owns Herdr side effects exclusively; trade-offs for Firstmate and other reference projects listed separately.
 - v0.7 and earlier: see [archive/PRD-v0.7.md](archive/PRD-v0.7.md).

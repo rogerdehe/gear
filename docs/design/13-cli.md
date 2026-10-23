@@ -42,6 +42,8 @@ Total length limit ~120 lines; overflow is written as "N more, `gear --show …`
 
 ## Board (plugin pane, `board.py`)
 
+> Superseded 2026-10-22 by PRD §15: the board shows the plan (totals, per-lane tasks, items waiting, temp slots), opened by a hotkey; no agent liveness or heartbeat (Herdr shows those).
+
 Text refreshed every tick: one block per project — captain state, each lane's state and task, temp workers (in use/quota/queued/resumable), pending count and oldest wait, due reviews, engine heartbeat, observation failures. Read-only, accepts no keyboard input (MVP). Does not update the pane title every tick (only when state changes).
 
 ## Test points
