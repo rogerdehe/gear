@@ -312,6 +312,15 @@ pub fn confirm_pending(
                     confirmed.push(op.id.clone());
                     continue;
                 }
+                // Liveness (L-69): a doorbell never holds the seat's slot for
+                // more than DOORBELL_EXPIRY_S. Whatever kept it from being
+                // confirmed, it expires; if items still wait, the next tick
+                // rings again. No state may keep the captain deaf.
+                if op.kind == OpKind::Doorbell && now - op.created >= DOORBELL_EXPIRY_S {
+                    tx.set_op_state(project, &op.id, OpState::Confirmed, Some("expired: rung again if items still wait"), now)?;
+                    confirmed.push(op.id.clone());
+                    continue;
+                }
                 // A seat the screen shows on a provider limit is not failing:
                 // its agent cannot answer until the quota comes back, so its
                 // budget is not spent and it is not flagged (T-15: a quota
@@ -332,36 +341,39 @@ pub fn confirm_pending(
     })
 }
 
-/// The time of the view that shows every message id the doorbell covers that
-/// is still open (Open/Waiting), if any. Ids closed another way need no view;
-/// when none is left open the doorbell is settled at `now`. Only a view of the
-/// seat's current generation, at or after the op's `created` time, counts.
+/// The longest a doorbell may wait for its answer before it expires and the
+/// seat can be rung again (L-69).
+pub const DOORBELL_EXPIRY_S: i64 = 300;
+
+/// The time of the first view of the seat (current generation) at or after the
+/// doorbell, if any. A doorbell asks the seat to run `gear`; any view after it
+/// is that answer. Whether the view listed every covered id does not matter:
+/// the inbox batch caps what one view shows, and items still unseen ring the
+/// next doorbell. Tying confirmation to the ids left the captain deaf twice
+/// (L-66, L-69): an id no view would show held the seat's slot forever.
 fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<Option<Ts>> {
-    let covers: Vec<&str> = op
+    let views = tx.views_since(&op.seat, op.generation, op.created)?;
+    if let Some(ts) = views.iter().map(|view| view.ts).min() {
+        return Ok(Some(ts));
+    }
+    // No view yet, but every item it rang for was closed another way: nothing
+    // is left to answer.
+    let ids: Vec<&str> = op
         .payload
         .get("covers")
         .and_then(|c| c.as_array())
         .map(|ids| ids.iter().filter_map(|id| id.as_str()).collect())
         .unwrap_or_default();
-    if covers.is_empty() {
-        // Nothing to show: no view can be linked to this op.
+    if ids.is_empty() {
         return Ok(None);
     }
-    let mut open = Vec::new();
-    for id in covers {
+    for id in ids {
         match tx.get_message(project, id)? {
             Some(msg) if !matches!(msg.state, gear_model::MsgState::Open | gear_model::MsgState::Waiting) => {}
-            _ => open.push(id),
+            _ => return Ok(None),
         }
     }
-    if open.is_empty() {
-        return Ok(Some(now));
-    }
-    let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    Ok(views
-        .iter()
-        .find(|view| open.iter().all(|id| view.shown_msgs.iter().any(|shown| shown == id)))
-        .map(|view| view.ts))
+    Ok(Some(now))
 }
 
 /// The time the reviewer's verdict on the reviewed attempt was stored, if it
