@@ -58,6 +58,7 @@ fn queued_seat(tx: &Tx<'_>) -> gear_model::GearResult<()> {
         state: SeatState::Queued,
         state_since: T0,
         state_reason: None,
+        task_id: None,
     })?;
     Ok(())
 }

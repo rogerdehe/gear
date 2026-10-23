@@ -24,6 +24,7 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Run no write comma
   - `blocked` — you cannot continue at all: use the exact command in your task packet (it names task, attempt and contract); waiting on another task is `--about T-<x> --need "<what you wait on>"`;
   - `result` — use the exact command in your task packet.
 - Answer a captain instruction with `gear send --kind ack --reply-to M-<n> "<text>"`.
+- A temp reviewer hands in its verdict with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`; it reaches the captain and settles nothing by itself.
 - In slice 1 (this version) a lane can report only `progress` and `question`; `blocked`, `result`, `ack` and `--about` arrive with slice 2 and return `BAD_FORMAT` until then.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id` it printed; never resend it reworded.
 - Do not edit the plan or the task packets GEAR renders — report through `gear send`; do not start background jobs that keep writing after your turn ends. (While a project runs GEAR by hand, its own `ops/CONVENTIONS.md` may let a lane update its packet's status and lane record.)

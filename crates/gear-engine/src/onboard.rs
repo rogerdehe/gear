@@ -335,6 +335,7 @@ profile = "opencode"
                     state: SeatState::Queued,
                     state_since: T0,
                     state_reason: Some("registered".into()),
+                    task_id: None,
                 })?;
                 Ok(())
             })
