@@ -20,3 +20,4 @@ mod slice1_messaging;
 mod slice2_dispatch;
 mod stall_contract;
 mod hand_in_notifications;
+mod station_contract;
