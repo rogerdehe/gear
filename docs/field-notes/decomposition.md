@@ -29,6 +29,29 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 - **Steer, don't swerve.** The captain adjusts course continuously from what it sees, like a helmsman: a big reversal (hard left to hard right) can happen but should be rare; most corrections are small, so the rowers keep rowing.
 - Offered as experience to weigh, not a rule.
 
+## Rework root causes (user, 2026-10-22: rework is not the reviewer being strict — the lanes only execute, so every miss is a constraint the captain did not hand down)
+
+Seven reworks out of fifteen hand-ins so far. Each traces to something the captain knew, or the system had, that was not in the packet:
+
+| Rework | What the packet did not say | Kind |
+|---|---|---|
+| T-3 board rows drift | prove it in a real terminal (PTY) | proof |
+| T-5 reviewer stuck after restart | the engine may restart between any two steps | environment |
+| T-6 config/roster race | the engine runs concurrently with `gear` commands | environment |
+| T-9 empty lane hidden | why the snapshot exists: the captain must see a lane that ran dry | purpose |
+| T-13 engine-wide halt | the captain cancels/changes contracts mid-flow; the version rule; one item's error must not stop the tick | invariants, adversarial |
+| T-15 new conversation on restart | the known OpenCode fact: resume needs `-s <session id>`, Herdr does not report it | known facts |
+| T-10 read-only command starts the engine | every `gear` call starts the engine — a hidden behaviour the captain itself added | hidden system behaviour |
+
+**Contract checklist (try on every new task from now on, measure the rework rate):**
+
+1. **Purpose** — why the task exists, who uses the result and for what (lets the lane judge cases the contract does not list).
+2. **Environment** — what runs at the same time (engine ticks, other `gear` commands), and where it may be interrupted (restart between steps).
+3. **Invariants to keep** — the system rules this code must not break (version rule, read-only, one error never stops the tick, never retype into a busy agent…).
+4. **Adversarial cases** — empty data, the captain changes state mid-flow (cancel, new contract, duplicate), restart, an error in one item: one test each.
+5. **Real-environment proof** — the command the writer runs before handing in (PTY, scratch store with the built binary, scratch git repo).
+6. **Facts to read first** — the SOP or design section that already holds the answer (e.g. `gear --skill agent:opencode`).
+
 ## Emerging principles (candidates for the skill)
 
 1. Queue depth is a mechanical check, not a memory.
@@ -37,6 +60,7 @@ Two measures to watch, per lane: **idle time with no startable task** and **rewo
 4. The contract states the role's limits up front; changing a contract mid-attempt is expensive.
 5. Rework goes first in its lane.
 6. Value over occupancy: no busywork; an idle lane is a planning signal, answered with real work.
+8. Rework is a contract defect first: when a task is sent back, find which checklist item was missing and fix the packet template, not only the code.
 7. Rolling horizon: 3–5 independent, stable steps per lane; re-plan a lane when its horizon runs down, with small course corrections rather than reversals.
 
 ## Open questions
