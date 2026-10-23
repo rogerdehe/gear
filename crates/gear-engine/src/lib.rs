@@ -146,16 +146,23 @@ fn doorbell_inputs(
             continue;
         };
 
-        let actionable = tx.actionable_for(project, &seat.id, now)?;
-        let urgent = actionable.iter().filter(|m| m.urgent).count();
-        let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
-
-        // Reply/Instruction messages this generation has not shown yet.
+        // What this generation has already been shown: an open item it has
+        // seen does not ring again (lesson L-42) — it waits for the seat's own
+        // next `gear`.
         let shown: BTreeSet<String> = tx
             .views_since(&seat.id, seat.generation, 0)?
             .into_iter()
             .flat_map(|view| view.shown_msgs)
             .collect();
+        let actionable: Vec<_> = tx
+            .actionable_for(project, &seat.id, now)?
+            .into_iter()
+            .filter(|m| !shown.contains(&m.id))
+            .collect();
+        let urgent = actionable.iter().filter(|m| m.urgent).count();
+        let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
+
+        // Reply/Instruction messages this generation has not shown yet.
         let unshown: Vec<String> = tx
             .messages_to_since(project, &seat.id, 0)?
             .into_iter()
