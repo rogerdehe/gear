@@ -46,11 +46,17 @@ pub struct EngineCfg {
     pub profiles: std::collections::BTreeMap<String, gear_herdr::Profile>,
     /// The store path agents get as `GEAR_DB` when onboarded (slice 3).
     pub db_path: String,
+    /// Settle review verdicts without the captain (T-13). OFF by default
+    /// (L-57): until the captain's gate (T-23: blocking vs logged findings,
+    /// a round cap) and the engine merge (T-12) exist, an automatic pass marks
+    /// a task done that is not merged, and an automatic fail sends back every
+    /// finding round after round. With it off a verdict stays a captain item.
+    pub auto_settle: bool,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false }
     }
 }
 
@@ -100,9 +106,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     //     task's dependants and a fail puts the rework at the head of the
     //     lane's queue in this same tick. It needs no Herdr, so it runs even
     //     when the observation fails.
-    let (settled, settle_failed) = settle_reviews(store, now)?;
-    report.settled = settled;
-    report.settle_failed = settle_failed;
+    if cfg.auto_settle {
+        let (settled, settle_failed) = settle_reviews(store, now)?;
+        report.settled = settled;
+        report.settle_failed = settle_failed;
+    }
 
     let projects = store.read(|tx| tx.project_ids())?;
 
