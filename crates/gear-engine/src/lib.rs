@@ -15,6 +15,7 @@
 //! directly with an injected `now` and a `FakeHerdr`.
 
 
+pub mod captain_quota;
 mod attention;
 pub mod busy;
 pub mod dispatch;
@@ -154,6 +155,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
+
+        captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
@@ -299,6 +302,9 @@ fn doorbell_inputs(
     let mut inputs = Vec::new();
     for seat_obs in observed {
         let seat = &seat_obs.seat;
+        if seat.role == gear_model::SeatRole::Captain && tx.captain_quota_paused(project)? {
+            continue;
+        }
         // A seat without an active binding has no pane to ring.
         let Some(binding) = tx
             .get_binding(&seat.id, seat.generation)?

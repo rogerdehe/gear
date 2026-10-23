@@ -17,6 +17,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],
+        quota_bar: None,
         auth_markers: vec![],
         tail_lines: 16,
         confirm_rounds: 2,

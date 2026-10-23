@@ -182,3 +182,17 @@ busy_markers = ["BUSY"]
     let opencode = table.get("opencode").expect("built in");
     assert_eq!(opencode.tail_lines, gear_herdr::builtin("opencode").unwrap().tail_lines);
 }
+
+#[test]
+fn a_profile_can_configure_its_footer_quota_bar() {
+    let text = config_with(r#"
+[profiles.claude.quota_bar]
+footer_prefix = "⏵⏵ bypass permissions on"
+separator_prefix = "─"
+windows = ["5h", "7d"]
+"#);
+    let parsed = config::parse(&text).unwrap();
+    let table = config::profile_table(&gear_herdr::builtins(), &parsed).unwrap();
+    assert_eq!(table["claude"].quota_bar, Some(gear_herdr::QuotaBar::claude()));
+    assert!(table["codex"].quota_bar.is_none(), "unverified status formats stay disabled");
+}
