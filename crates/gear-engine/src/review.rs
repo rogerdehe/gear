@@ -538,6 +538,22 @@ fn start_reviewer(
         }
     };
 
+    // The chain's model before the reviewer gets any work (T-33, F5): OpenCode
+    // ignores the start environment through its shared service, so the status
+    // bar decides. Waiting keeps the start pending; the packet waits with it.
+    if kind == "opencode" {
+        if let Some(model) = model {
+            match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)? {
+                crate::switch::ModelGate::Ready => {}
+                crate::switch::ModelGate::Waiting => return Ok(Started::NotYet),
+                crate::switch::ModelGate::Failed(reason) => {
+                    park(store, &seat.id, &reason, now)?;
+                    return Ok(Started::NotYet);
+                }
+            }
+        }
+    }
+
     // 5. the seat is up and has its packet: one transaction. A crash between
     //    the two would leave a live reviewer that every later tick skips (an
     //    Active temp is not started again) and that never gets a job.
@@ -1528,6 +1544,59 @@ review = ["gpt-6.1-sol"]
         // the text from the rework note and the packet, not from the branch.
         assert!(text.contains("keeps the text of your findings"), "{text}");
         assert!(!text.contains("git show"), "no branch pointer in the packet:\n{text}");
+    }
+
+    /// T-33 (F5): an OpenCode reviewer gets no packet until its status bar
+    /// shows the review chain's model — the switch happens first, in place.
+    #[test]
+    fn an_opencode_reviewer_is_switched_before_the_packet() {
+        let text = CONFIG
+            .replace(
+                "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
+                "[temps]\nkind = \"opencode\"\nprofile = \"opencode\"",
+            )
+            + "\n[models.switch.\"gpt-6.1-sol\"]\npicker = \"GPT-6.1 Sol\"\nbar = \"GPT-6.1 Sol\"\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        // The reviewer starts on another model.
+        herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".to_string());
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            ("/model".into(), "  Search\n  Recent\n  GPT-6.1 Sol  OpenAI".into()),
+            ("GPT-6.1 Sol".into(), "Build auto · GPT-6.1 Sol OpenAI · high".into()),
+        ];
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert!(first.started.is_empty(), "the packet waits for the model: {first:?}");
+
+        let mut delivered = false;
+        for tick in 0..6 {
+            let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30 + tick).unwrap();
+            if !report.started.is_empty() {
+                delivered = true;
+                break;
+            }
+        }
+        assert!(delivered, "the reviewer starts once the bar confirms");
+        // The packet is delivered once, and the reviewer was started once.
+        let deliveries: Vec<_> = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::AgentStart { .. }))
+            .collect();
+        assert_eq!(deliveries.len(), 1, "{:?}", herdr.calls);
+        let commands: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands.iter().filter(|c| *c == "/model").count(), 1, "{commands:?}");
+        assert!(commands.iter().any(|c| c == "GPT-6.1 Sol"), "{commands:?}");
     }
 
     #[test]
