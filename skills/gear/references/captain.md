@@ -189,3 +189,33 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 - You never change the board by hand: the plan draft is the only way in.
 - You never leave a lane without its next step, and you never wait for a review to give a lane more work — lanes hand in and take the next task.
 - You never decide something you cannot write in one line. If it takes a paragraph, it is a plan change or a question to the user.
+
+### Station decisions (T-49)
+
+The engine opens a one-line station item at 25%, 50% and 75% of a voyage's ETA,
+and at each third completed task. It uses the same measured pace, projection,
+remaining estimates and slowest task as the voyage report. Simultaneous/missed
+checkpoints coalesce into one item per voyage/tick; persisted markers prevent
+repeat reports after a restart. A watched voyage can send its final task-count
+station; old voyages already finished before monitoring starts are skipped.
+
+Answer by applying a plan decision naming the exact message ID:
+
+```markdown
+# Decisions
+- station M-123: keep course current scope still fits
+- station M-124: time-box keep only the core
+- station M-125: cut remove optional polish
+- station M-126: move defer the remaining feature to the next voyage
+```
+
+These are four independent examples. Only the named station item closes, with
+the decision retained in the plan and on the item. Retaining a historical station
+decision in later plans is safe. Ordinary resolve/wait replies are rejected;
+a note can add context but keeps the item open. The home footer points to the
+voyage plan when the first inbox item is a station. The decision records the
+choice; include any resulting queue/estimate/scope edits in the same plan.
+
+ETA checkpoints accept relative durations such as `20h`, `2.5 hours`, `90m` or
+`1h30m`. An unknown ETA skips time checkpoints while task-count stations still
+work; unknown measured values remain `-` rather than invented measurements.

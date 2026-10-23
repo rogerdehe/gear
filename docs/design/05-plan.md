@@ -32,3 +32,11 @@ exact reporting commands. `gear board` displays the plan. Rendering lives in
 ## Test points
 
 Line numbers for format errors; an illegal state rejects the whole draft; stale base; dependency cycle; unmentioned tasks keep relative order; Verdict with mismatched candidate/contract is rejected; evidence file exists but verdict fail does not allow DONE; resume used for a new task is rejected; the same Staff target applied multiple times does not open twice; resubmitting a historical Verdict does not settle twice; fail needs no evidence header; changing the contract and accepting in the same apply validates against the final contract.
+
+### Station decisions (T-49)
+
+A decision `- station M-123: keep course|time-box|cut|move [reason]` closes the
+named station action item in the same transaction as the plan apply. The four
+forms are alternatives. An invalid action or non-station/unknown reference
+rejects the entire plan; a retained decision for an already resolved station is
+a no-op. Reply resolve/wait cannot close or defer a station; notes keep it open.

@@ -104,6 +104,7 @@ pub fn apply(
             // queue so the task count at departure is the plan's.
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, now)?;
+            crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
                     ErrorCode::BadFormat,
