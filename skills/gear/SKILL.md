@@ -23,23 +23,25 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Run no write comma
   - `question` — you need a decision; say Question / Options / Context / Default (conventions §7), then continue with other ready work if there is any;
   - `blocked` — you cannot continue at all: use the exact command in your task packet (it names task, attempt and contract); waiting on another task is `--about T-<x> --need "<what you wait on>"`;
   - `result` — use the exact command in your task packet.
-- Answer a captain instruction with `gear send --kind ack --reply-to M-<n> "<text>"`.
+- Answer a captain instruction with `gear send --kind progress --reply-to M-<n> "<text>"` (the `ack` kind is not available in this version).
 - A temp reviewer hands in its verdict with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`; it reaches the captain and settles nothing by itself.
-- In slice 1 (this version) a lane can report only `progress` and `question`; `blocked`, `result`, `ack` and `--about` arrive with slice 2 and return `BAD_FORMAT` until then.
+- In this version a lane reports `progress`, `question` and `result`; the captain sends `instruction`; a temp reviewer sends `review`. `blocked`, `ack` and `--about` are not available yet and return `BAD_FORMAT`.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id` it printed; never resend it reworded.
-- Do not edit the plan or the task packets GEAR renders — report through `gear send`; do not start background jobs that keep writing after your turn ends. (While a project runs GEAR by hand, its own `ops/CONVENTIONS.md` may let a lane update its packet's status and lane record.)
+- Do not edit the plan or the task packets GEAR renders — report through `gear send`; do not start background jobs that keep writing after your turn ends. (A project that runs GEAR by hand may let a lane update its packet's status and lane record; that is the project's own convention, not GEAR's.)
 
 ## 4. Captain
 
 - `gear` shows the inbox batch: answer with `gear reply M-<n> … -m "<text>"` (`--resolve` default, `--wait <who> --until +2h`, `--note`). Close exactly the ids you handled.
 - `gear send --to <seat> --kind instruction "<text>"` gives a lane an instruction.
-- Plan, staffing and acceptance go through a plan draft and `gear plan apply` (slice 2; the topics `captain` and `plan-format` ship with it).
-- You decide; you do not review code yourself. Reviews are done by temp reviewers on a model other than the writer's (conventions §8).
+- Plan, staffing and acceptance go through a plan draft and `gear plan apply`; the captain's guide (kickoff, plan format, daily loop) is `gear --skill captain`.
+- You decide; you do not review code yourself. Reviews are done by temp reviewers on a model other than the writer's; what a reviewer must deliver is `gear --skill review`.
 - Ask the user only what is theirs: release to main, money, scope, destructive acts on things you did not create.
 
 ## 5. Default working conventions
 
-Names, branches, worktrees, the task loop, review and merge: `gear --skill conventions`. Breaking a goal into tasks: `gear --skill decompose`. Driving a specific agent CLI (start, resume, switch model, quota signs): `gear --skill agent:<kind>`, e.g. `agent:opencode`.
+Names, branches, worktrees, the task loop, review and merge: `gear --skill conventions`. Breaking a goal into tasks: `gear --skill decompose`. The captain's guide: `gear --skill captain`. What a reviewer must deliver: `gear --skill review`. Driving a specific agent CLI (start, resume, switch model, quota signs): `gear --skill agent:<kind>`, e.g. `agent:opencode`.
+
+The user installs this skill into an agent CLI with `gear admin install-skill --agent <claude|codex|opencode>`; the installed copy is only a pointer — the text `gear --skill` prints for the running binary is the one that counts.
 
 ## 6. Errors
 

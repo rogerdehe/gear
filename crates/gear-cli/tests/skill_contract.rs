@@ -50,6 +50,46 @@ fn reference_topics_print_their_file() {
     assert_eq!(stdout(&o), skill_file("references/agents/opencode.md"));
 }
 
+/// T-30: the review rules, the captain's guide and the Claude Code SOP are
+/// topics of the skill, not files of the gear repo.
+#[test]
+fn the_new_topics_print_their_file() {
+    for (topic, rel) in [
+        ("review", "references/review.md"),
+        ("captain", "references/captain.md"),
+        ("agent:claude", "references/agents/claude.md"),
+    ] {
+        let o = gear(&["--skill", topic]);
+        assert!(o.status.success(), "{topic}: {}", stderr(&o));
+        assert_eq!(stdout(&o), skill_file(rel), "{topic}");
+    }
+}
+
+/// T-30: the knowledge ships with the binary. No topic may point at a file
+/// of the gear repo — a project that runs GEAR has no such files.
+#[test]
+fn no_topic_names_a_file_of_the_gear_repo() {
+    for topic in [
+        "main",
+        "conventions",
+        "decompose",
+        "review",
+        "captain",
+        "agent:opencode",
+        "agent:codex",
+        "agent:claude",
+    ] {
+        let o = gear(&["--skill", topic]);
+        assert!(o.status.success(), "{topic}: {}", stderr(&o));
+        let text = stdout(&o);
+        assert!(!text.contains("ops/"), "the {topic} topic names an ops/ path:\n{text}");
+        assert!(
+            !text.contains("docs/design/"),
+            "the {topic} topic names a design path:\n{text}"
+        );
+    }
+}
+
 #[test]
 fn unknown_topic_is_bad_format_and_lists_topics() {
     let o = gear(&["--skill", "nope"]);
