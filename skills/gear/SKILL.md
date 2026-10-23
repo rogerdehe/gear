@@ -39,7 +39,7 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Run no write comma
 
 ## 5. Default working conventions
 
-Names, branches, worktrees, the task loop, review and merge: `gear --skill conventions`. Breaking a goal into tasks: `gear --skill decompose`. Driving a specific agent CLI (start, resume, switch model, quota signs): `gear --skill agent:<kind>`, e.g. `agent:opencode`.
+Names, branches, worktrees, the task loop, review and merge: `gear --skill conventions`. Breaking a goal into tasks: `gear --skill decompose`. Driving a specific agent CLI (start, resume, switch model, quota signs): `gear --skill agent:<kind>`: `agent:claude`, `agent:codex`, `agent:opencode`, `agent:grok`.
 
 ## 6. Errors
 
