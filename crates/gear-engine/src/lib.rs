@@ -15,6 +15,7 @@
 //! directly with an injected `now` and a `FakeHerdr`.
 
 
+mod attention;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -53,7 +54,7 @@ pub struct EngineCfg {
     /// (L-57): until the captain's gate (T-23: blocking vs logged findings,
     /// a round cap) and the engine merge (T-12) exist, an automatic pass marks
     /// a task done that is not merged, and an automatic fail sends back every
-    /// finding round after round. With it off a verdict stays a captain item.
+    /// finding round after round. With it off verdicts remain stored without automatic settlement.
     pub auto_settle: bool,
 }
 
@@ -106,8 +107,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
     // 0b. settle: a review verdict that arrived settles its task without the
     //     captain (T-13) — before the dispatch below, so a pass frees the
-    //     task's dependants and a fail puts the rework at the head of the
-    //     lane's queue in this same tick. It needs no Herdr, so it runs even
+    //     task's dependants. Failing verdicts wait for the captain's judgement.
+    //     Settlement needs no Herdr, so it runs even
     //     when the observation fails.
     if cfg.auto_settle {
         let (settled, settle_failed) = settle_reviews(store, now)?;
@@ -160,6 +161,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             ops::confirm_pending(store, &project, cfg.doorbell_check_budget, now)?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
+
+        attention::promote(store, &project, now)?;
 
         // 3. decide (pure): who should be rung now.
         let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
@@ -289,18 +292,23 @@ fn doorbell_inputs(
         };
 
         // What this generation has already been shown: an open item it has
-        // seen does not ring again (lesson L-42) — it waits for the seat's own
-        // next `gear`.
+        // seen normally waits for the seat's next `gear` (L-42). Stale
+        // captain items are the exception: one reminder per configured period.
         let shown: BTreeSet<String> = tx
             .views_since(&seat.id, seat.generation, 0)?
             .into_iter()
             .flat_map(|view| view.shown_msgs)
             .collect();
-        let actionable: Vec<_> = tx
-            .actionable_for(project, &seat.id, now)?
-            .into_iter()
-            .filter(|m| !shown.contains(&m.id))
-            .collect();
+        let period = attention::period(tx, project)?;
+        let mut actionable = Vec::new();
+        for message in tx.actionable_for(project, &seat.id, now)? {
+            let include = if seat.role == gear_model::SeatRole::Captain {
+                attention::should_show(tx, &message, shown.contains(&message.id), period, now)?
+            } else {
+                !shown.contains(&message.id)
+            };
+            if include { actionable.push(message); }
+        }
         let urgent = actionable.iter().filter(|m| m.urgent).count();
         let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
 
