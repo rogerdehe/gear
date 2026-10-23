@@ -1,6 +1,6 @@
 //! Contract for `gear send --kind review` (T-2): a temp reviewer hands in a
 //! verdict on one attempt. The verdict is stored on the attempt's review
-//! record and reaches the captain as an action item; it settles nothing.
+//! record; fails are actionable and passes are information. Sending settles nothing.
 
 use gear_app::home;
 use gear_app::identity::Fingerprint;
@@ -8,7 +8,7 @@ use gear_app::mail::{self, SendArgs};
 use gear_app::review::Outcome;
 use gear_app::tasks::{on_delivery_confirmed, start_attempt};
 use gear_app::Env;
-use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, SeatRole, TaskState};
+use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, RequestOutcome, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -64,18 +64,13 @@ fn a_temp_review_is_stored_and_reaches_the_captain() {
     assert_eq!(record.findings, "P1: the row drifts right");
     assert_eq!(record.by_seat, "p:r-1");
 
-    // The captain's inbox holds it as an open item, with the verdict in it.
-    let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap();
-    assert_eq!(inbox.len(), 1);
-    assert_eq!(inbox[0].kind, MsgKind::Review);
-    assert_eq!(inbox[0].task.as_deref(), Some("T-1"));
-    assert!(inbox[0].body.contains("pass"), "{}", inbox[0].body);
-    assert!(inbox[0].body.contains("P1: the row drifts right"), "{}", inbox[0].body);
-
-    // The captain sees it on the home page.
+    // A passing review is retained without an action item or home-page work.
+    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    let message = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    assert_eq!((message.kind, message.state), (MsgKind::Review, MsgState::Info));
+    assert!(message.body.contains("pass") && message.body.contains("P1: the row drifts right"));
     let home = home::build(&mut s, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), T0 + 7).unwrap();
-    assert!(home.text.contains("P1: the row drifts right"), "{}", home.text);
-    assert!(home.text.contains("INBOX"), "{}", home.text);
+    assert!(!home.text.contains("INBOX"), "{}", home.text);
 
     // The task packet shows the review record.
     let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
