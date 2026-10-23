@@ -57,17 +57,17 @@ pub struct SendResult {
 /// - default recipient = project captain; `--to` only for the captain and
 ///   only with kind `instruction` (design/07:21);
 ///   `--reply-to M-x` → the sender of M-x;
-/// - Progress → Info; Question/Blocked/Result/Instruction → Open;
+/// - Progress/Result/passing Review → Info; Question/Instruction/failing Review → Open;
 ///   Reply-kind is produced by `reply()`, not by `send`;
 /// - thread: reply_to inherits; otherwise new thread `<task or seat>:<seq>` (seq = next unused number for that prefix, design/07);
 /// - Result (T-45): `task`, `attempt`, `contract` and `candidate` required (else
 ///   BadFormat); in the same transaction `tasks::submit_result(…, body as report)`
-///   — its errors abort the send; the message goes to the captain as usual.
+///   — its errors abort the send; the captain gets a silent information record.
 /// - Review (T-2): `task`, `attempt` and `verdict` required (else BadFormat);
 ///   only a temp seat bound to that task may send one (Forbidden/NoTarget);
 ///   in the same transaction `review::submit_review(…)` stores the verdict on
 ///   the attempt's review record — it settles nothing; the item goes to the
-///   captain with the verdict in its first line.
+///   captain with the verdict in its first line (a fail is actionable, a pass is information).
 /// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
 pub fn send(
@@ -172,7 +172,7 @@ pub fn send(
                 ),
             ));
         }
-        // A verdict is an action item for the captain: it is not addressed to
+        // A verdict is recorded for the captain: it is not addressed to
         // a seat and it does not continue another thread.
         if args.kind == MsgKind::Review && (args.to.is_some() || args.reply_to.is_some()) {
             return Err(GearError::new(
@@ -214,7 +214,8 @@ pub fn send(
         };
 
         let state = match args.kind {
-            MsgKind::Progress => MsgState::Info,
+            MsgKind::Progress | MsgKind::Result => MsgState::Info,
+            MsgKind::Review if args.verdict == Some(crate::review::Outcome::Pass) => MsgState::Info,
             _ => MsgState::Open,
         };
 
@@ -575,10 +576,11 @@ pub struct ReplyResult {
 }
 
 /// `gear reply` (captain only). Each id must be in this project, addressed to
-/// the captain, Open or Waiting. Resolve → Resolved; Wait → Waiting until
+/// the captain, Open or Waiting (Info may only be resolved). Resolve → Resolved; Wait → Waiting until
 /// wait_until (required; wait_on is an optional label); Note → state unchanged.
 /// Writes one Reply (state Info) per (original sender, thread) into that
-/// sender's inbox. Never changes task state.
+/// sender's inbox for actionable items. Info and Result records never send an
+/// answer to the original sender. Never changes task state.
 ///
 /// Slice 1 rules:
 /// - a repeated id is handled once; `handled` lists every id once;
@@ -653,7 +655,10 @@ pub fn reply(
                         ),
                     ));
                 }
-                if message.state != MsgState::Open && message.state != MsgState::Waiting {
+                if message.state != MsgState::Open
+                    && message.state != MsgState::Waiting
+                    && !(message.state == MsgState::Info && args.mode == ReplyMode::Resolve)
+                {
                     return Err(GearError::new(
                         ErrorCode::BadTransition,
                         format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
@@ -699,6 +704,12 @@ pub fn reply(
                     )?;
                 }
                 handled.push((original.id.clone(), new_state.as_str().to_string()));
+
+                // Information is bookkeeping, not a conversation. Legacy
+                // open Result records must not echo resolve text either.
+                if original.state == MsgState::Info || original.kind == MsgKind::Result {
+                    continue;
+                }
 
                 // One answer per thread of the sender, in the thread of the message.
                 let key = (original.sender.clone(), original.thread.clone());
