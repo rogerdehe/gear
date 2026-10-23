@@ -36,13 +36,13 @@ owns = ["crates/gear-board/", "herdr-plugin.toml", "bin/"]
 kind = "opencode"
 profile = "opencode"
 
-[temps]
-kind = "opencode"
-profile = "opencode"
+[temps]                  # reviewers: Codex (user, 2026-10-22, mid-run change)
+kind = "codex"
+profile = "codex"
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
-review = ["minimax-cn/MiniMax-M3", "deepseek/deepseek-v4-pro"]
+review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane model
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
 
