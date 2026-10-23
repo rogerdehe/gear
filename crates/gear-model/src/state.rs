@@ -62,6 +62,7 @@ string_enum!(SeatState {
 string_enum!(MsgKind {
     Progress => "progress", Question => "question", Blocked => "blocked", Result => "result",
     Ack => "ack", Instruction => "instruction", Reply => "reply", System => "system",
+    Review => "review",
 });
 
 string_enum!(MsgState { Open => "open", Waiting => "waiting", Resolved => "resolved", Info => "info" });

@@ -358,6 +358,7 @@ mod tests {
                 state: State::Active,
                 state_since: NOW - 1000,
                 state_reason: None,
+                task_id: None,
             },
             presence: Presence::Present,
             status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),

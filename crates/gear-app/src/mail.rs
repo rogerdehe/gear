@@ -23,6 +23,8 @@ pub struct SendArgs {
     pub contract: Option<i64>,
     /// Result only: the commit (or other checkable ref) handed in.
     pub candidate: Option<String>,
+    /// Review only (T-2): the verdict a temp reviewer hands in.
+    pub verdict: Option<crate::review::Outcome>,
     /// Upstream task to ask (must be a registered dependency) — slice 2.
     pub about: Option<String>,
     /// Captain only: seat name to instruct.
@@ -55,6 +57,11 @@ pub struct SendResult {
 /// - Result (T-45): `task`, `attempt`, `contract` and `candidate` required (else
 ///   BadFormat); in the same transaction `tasks::submit_result(…, body as report)`
 ///   — its errors abort the send; the message goes to the captain as usual.
+/// - Review (T-2): `task`, `attempt` and `verdict` required (else BadFormat);
+///   only a temp seat bound to that task may send one (Forbidden/NoTarget);
+///   in the same transaction `review::submit_review(…)` stores the verdict on
+///   the attempt's review record — it settles nothing; the item goes to the
+///   captain with the verdict in its first line.
 /// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
 pub fn send(
@@ -92,12 +99,31 @@ pub fn send(
                     ));
                 }
             }
+            MsgKind::Review => {
+                // A review names the exact attempt it is about and carries a
+                // verdict (T-2); the body holds the findings.
+                if args.task.is_none() || args.attempt.is_none() || args.verdict.is_none() {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        "a review needs `--task`, `--attempt` and `--verdict pass|fail`",
+                    ));
+                }
+            }
             other => {
                 return Err(GearError::new(
                     ErrorCode::BadFormat,
                     format!("kind {} is not available yet", other.as_str()),
                 ))
             }
+        }
+        if args.verdict.is_some() && args.kind != MsgKind::Review {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--verdict` belongs to a review, not to {}",
+                    args.kind.as_str()
+                ),
+            ));
         }
         if args.about.is_some() {
             return Err(GearError::new(
@@ -118,6 +144,14 @@ pub fn send(
                     "`--to` addresses a seat with an instruction, not with {}",
                     args.kind.as_str()
                 ),
+            ));
+        }
+        // A verdict is an action item for the captain: it is not addressed to
+        // a seat and it does not continue another thread.
+        if args.kind == MsgKind::Review && (args.to.is_some() || args.reply_to.is_some()) {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "a review goes to the captain: no `--to`, no `--reply-to`",
             ));
         }
 
@@ -158,8 +192,29 @@ pub fn send(
             _ => MsgState::Open,
         };
 
+        // The review the verdict belongs to (a review names its task, attempt
+        // and verdict; the body holds the findings).
+        let review = match (args.kind, args.verdict) {
+            (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
+                project: ctx.project.clone(),
+                task: args.task.clone().unwrap_or_default(),
+                attempt: args.attempt.unwrap_or_default(),
+                outcome: verdict,
+                findings: args.body.clone(),
+                by_seat: seat.id.clone(),
+            }),
+            _ => None,
+        };
+
+        // The body of a review is the findings; the captain reads the verdict
+        // in the first line of the item (design/07: the inbox shows the body).
+        let body = match &review {
+            Some(review) => format!("{}\n{}", crate::review::headline(review), review.findings),
+            None => args.body.clone(),
+        };
+
         let args_key = format!(
-            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
             ctx.project,
             ctx.seat,
             ctx.generation,
@@ -169,6 +224,7 @@ pub fn send(
             args.attempt,
             args.contract,
             args.candidate,
+            args.verdict.map(|verdict| verdict.as_str()),
             args.about,
             args.to,
             args.reply_to,
@@ -199,6 +255,13 @@ pub fn send(
                 )?;
             }
 
+            // A review stores the verdict on the attempt's review record
+            // before the item reaches the captain (T-2). It settles nothing:
+            // the task and the attempt keep their state.
+            if let Some(review) = &review {
+                crate::review::submit_review(tx, review, now)?;
+            }
+
             // The thread of a new message is numbered here, after the replay
             // check: a replay returns the stored result and numbers nothing.
             let thread = match &inherited_thread {
@@ -219,7 +282,7 @@ pub fn send(
                 recipient: recipient.clone(),
                 kind: args.kind,
                 urgent: args.urgent,
-                body: args.body.clone(),
+                body: body.clone(),
                 reply_to: args.reply_to.clone(),
                 needs_ack: false,
                 state,

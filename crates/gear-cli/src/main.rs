@@ -35,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Report: progress | question | blocked | result | ack | instruction.
+    /// Report: progress | question | blocked | result | ack | instruction | review.
     Send(SendCmd),
     /// Captain: handle exact message ids.
     Reply(ReplyCmd),
@@ -75,6 +75,9 @@ struct SendCmd {
     urgent: bool,
     #[arg(long)]
     candidate: Option<String>,
+    /// Review only: the verdict a temp reviewer hands in (pass|fail).
+    #[arg(long)]
+    verdict: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -550,6 +553,12 @@ fn run_send(
         contract: c.contract,
         // A result's candidate (T-45): the commit or ref handed in.
         candidate: c.candidate.clone(),
+        // A review's verdict (T-2): pass or fail.
+        verdict: c
+            .verdict
+            .as_deref()
+            .map(gear_app::review::Outcome::parse)
+            .transpose()?,
         about: c.about.clone(),
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
@@ -644,7 +653,8 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Blocked
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Ack
-        | gear_model::MsgKind::Instruction => Ok(kind),
+        | gear_model::MsgKind::Instruction
+        | gear_model::MsgKind::Review => Ok(kind),
         gear_model::MsgKind::Reply | gear_model::MsgKind::System => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!("--kind {text} is not a `gear send` kind"),
@@ -1070,6 +1080,7 @@ mod tests {
             reply_to: None,
             urgent: false,
             candidate: None,
+            verdict: None,
             preempted: None,
             saved: None,
             request_id: Some("r-1".into()),
@@ -1278,6 +1289,110 @@ mod tests {
         assert!(out.contains("Delivered to p:captain"), "{out}");
         let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
         assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
+    }
+
+    // --- T-2: a temp reviewer hands in a verdict ---
+
+    const TEMP_PANE: &str = "w1:p3";
+
+    /// A world with a task, a started attempt and a temp reviewer bound to it.
+    fn review_world() -> (Store, FakeHerdr) {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "r-1", "T-7", TEMP_PANE, "opencode", T0)?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-7".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    updated: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
+                Ok(())
+            })
+            .unwrap();
+        herdr.add_agent(TEMP_PANE, "opencode", AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    fn review_cmd(verdict: &str) -> SendCmd {
+        let mut c = send_cmd("review");
+        c.task = Some("T-7".into());
+        c.attempt = Some(1);
+        c.verdict = Some(verdict.into());
+        c
+    }
+
+    #[test]
+    fn send_review_stores_the_verdict_and_reaches_the_captain() {
+        let (mut store, mut herdr) = review_world();
+
+        let out = run_send(
+            &mut store,
+            &env("r-1", TEMP_PANE),
+            &mut herdr,
+            &review_cmd("pass"),
+            "ops/reviews/T-7.md".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("Delivered to p:captain"), "{out}");
+        let record = store.read(|tx| tx.get_review_verdict("p", "T-7", 1)).unwrap().unwrap();
+        assert!(record.passed);
+        assert_eq!(record.findings, "ops/reviews/T-7.md");
+        assert_eq!(record.by_seat, "p:r-1");
+        // The captain's inbox holds the item.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 2)).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert!(inbox[0].body.contains("pass"), "{}", inbox[0].body);
+    }
+
+    #[test]
+    fn send_review_with_a_bad_verdict_is_bad_format() {
+        let (mut store, mut herdr) = review_world();
+        let err = run_send(
+            &mut store,
+            &env("r-1", TEMP_PANE),
+            &mut herdr,
+            &review_cmd("maybe"),
+            "ops/reviews/T-7.md".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("verdict"), "{}", err.detail);
+    }
+
+    #[test]
+    fn send_review_from_a_lane_seat_is_forbidden() {
+        let (mut store, mut herdr) = review_world();
+        let err = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &review_cmd("pass"),
+            "ops/reviews/T-7.md".into(),
+            T0 + 1,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+        assert!(store.read(|tx| tx.get_review_verdict("p", "T-7", 1)).unwrap().is_none());
     }
 
     #[test]
