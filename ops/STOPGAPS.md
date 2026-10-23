@@ -5,10 +5,10 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| captain switches a lane from MiniMax (OpenCode) to Codex gpt-6.1-sol medium by hand on a quota stop | the config chain cannot cross CLIs yet | M2 steady S1 (cross-CLI fallback) lands | captain |
 
 ## Removed
 
+- 2026-10-23 captain switches a lane from MiniMax (OpenCode) to Codex gpt-6.1-sol medium by hand on a quota stop: the engine closes the agent and starts codex in the same pane and worktree (T-35, the cross-CLI fallback).
 - 2026-10-23 `merge-task.sh`, `switch-model.sh`, `timer.sh`: the engine merges (T-12), switches models in place (T-33) and waits for quota (T-15).
 - 2026-10-23 GEAR_DB exported by hand: `gear` defaults to `~/.local/state/gear/gear.db`.
 
