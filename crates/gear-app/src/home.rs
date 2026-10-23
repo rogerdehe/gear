@@ -35,6 +35,13 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
         let seat_id = seat.id.clone();
 
         let mut lines: Vec<String> = Vec::new();
+        if seat.role == SeatRole::Captain {
+            lines.extend(gear_board::voyage::reports(tx, &ctx.project, now)?
+                .iter().flat_map(|v| v.lines()));
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+        }
         lines.push(format!(
             "seat {seat_id} · {} · generation {}",
             seat.role.as_str(),
