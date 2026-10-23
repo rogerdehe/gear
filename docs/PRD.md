@@ -188,6 +188,12 @@ Kickoff ends with `gear admin init`; from then on the run needs no dialogs (C-13
 
 The captain decides only what the loop cannot: plan changes, questions, disputes, and acceptance of milestones.
 
+**What the engine decides alone, and what it never does** (2026-10-23). Mechanical and reversible steps belong to the engine; judgement that changes scope belongs to the captain.
+- Pass → the engine merges the exact reviewed commit behind a hard gate (build + tests); a wrong merge can be reverted. The captain samples passed tasks during direction reviews to catch reviewer misses.
+- Objective failure (build/tests fail, does not merge, a P0) → automatic rework on the same lane, first in its queue.
+- Other findings: each is marked blocking (it must name the part of the milestone's done-sentence or bar it breaks) or logged. Blocking findings → automatic rework with only those; logged findings → the milestone backlog. After the round cap the task goes to the captain.
+Automatic settlement is on by default; it may only be switched off while these safeguards are missing.
+
 
 - **Evidence points**: when dispatching, agree on the next evidence point (a small diff + test results, a reproduction record, investigation notes, experiment results …). Small commits are a means, not the only legitimate output.
 - **Output sampling** (program, no tokens spent): periodically compare each lane's worktree changes and evidence files. If expected evidence is still missing after the evidence point → create a "needs check" item, without directly ruling that no work was done; changes also do not mean the direction is right. Set a cap on "longest time without anyone looking", so tasks that are constantly changing also get checked.

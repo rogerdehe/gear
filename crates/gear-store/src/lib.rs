@@ -249,6 +249,26 @@ pub struct ReviewVerdictRow {
     pub created: Ts,
 }
 
+/// A milestone as a voyage (T-22): its one-sentence `done`, the quality `bar`
+/// of its phase, the planned `eta`, and where it departed from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoyageRow {
+    pub project: String,
+    /// The milestone id the plan uses (`M1`, `M2`, …).
+    pub milestone: String,
+    pub title: String,
+    /// None until the plan describes the voyage (a milestone whose tasks
+    /// predate its first block has a departure and no words yet).
+    pub done: Option<String>,
+    pub bar: Option<String>,
+    pub eta: Option<String>,
+    /// When the milestone's first task was created; None while it has none.
+    pub departure: Option<Ts>,
+    /// How many tasks the milestone had at departure.
+    pub departure_tasks: Option<i64>,
+    pub updated: Ts,
+}
+
 /// One applied plan version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanRow {
@@ -497,6 +517,23 @@ impl<'s> Tx<'s> {
             )
             .map_err(map_sqlite)?;
         Ok(RequestOutcome::Executed(result))
+    }
+
+    /// The stored result of a request id, with the hash of its arguments:
+    /// `(args_hash, result json)`. A caller that runs a side effect before its
+    /// transaction (T-19: the hand-in's git check) can replay a committed
+    /// request's receipt without repeating the side effect.
+    pub fn get_request(&self, request_id: &str) -> GearResult<Option<(String, String)>> {
+        let stored: Option<(String, String)> = self
+            .tx
+            .query_row(
+                "SELECT args_hash, result FROM requests WHERE id=?1",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(stored)
     }
 
     pub fn get_meta(&self, key: &str) -> GearResult<Option<String>> {
@@ -1546,6 +1583,97 @@ impl<'s> Tx<'s> {
         Ok(verdicts)
     }
 
+    // ---- voyages (T-22)
+
+    /// Store or update a milestone as a voyage. The departure is fixed once: a
+    /// later apply may change the fields but never moves the departure.
+    pub fn upsert_voyage(&self, row: &VoyageRow) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO voyages
+                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(project, milestone) DO UPDATE SET
+                   title=excluded.title, done=excluded.done, bar=excluded.bar, eta=excluded.eta,
+                   departure=COALESCE(voyages.departure, excluded.departure),
+                   departure_tasks=COALESCE(voyages.departure_tasks, excluded.departure_tasks),
+                   updated=excluded.updated",
+                params![
+                    row.project,
+                    row.milestone,
+                    row.title,
+                    row.done,
+                    row.bar,
+                    row.eta,
+                    row.departure,
+                    row.departure_tasks,
+                    row.updated,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Fix the departure of a milestone whose first tasks are created now: the
+    /// row is created (words NULL) when the plan has no block for it yet, and
+    /// an existing departure is never moved (design of T-22, review R1/R2).
+    pub fn set_voyage_departure(
+        &self,
+        project: &str,
+        milestone: &str,
+        departure: Ts,
+        tasks: i64,
+        now: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO voyages
+                   (project, milestone, title, done, bar, eta, departure, departure_tasks, updated)
+                 VALUES (?1, ?2, '', NULL, NULL, NULL, ?3, ?4, ?5)
+                 ON CONFLICT(project, milestone) DO UPDATE SET
+                   departure=COALESCE(voyages.departure, excluded.departure),
+                   departure_tasks=COALESCE(voyages.departure_tasks, excluded.departure_tasks),
+                   updated=excluded.updated",
+                params![project, milestone, departure, tasks, now],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// One milestone's voyage, if it has one.
+    pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
+        let row: Option<VoyageRow> = self
+            .tx
+            .query_row(
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                 FROM voyages WHERE project=?1 AND milestone=?2",
+                params![project, milestone],
+                voyage_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// The voyages of a project, in milestone-id order.
+    pub fn voyages_of_project(&self, project: &str) -> GearResult<Vec<VoyageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, milestone, title, done, bar, eta, departure, departure_tasks, updated
+                 FROM voyages WHERE project=?1 ORDER BY milestone",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], voyage_from_row)
+            .map_err(map_sqlite)?;
+        let mut voyages = Vec::new();
+        for row in rows {
+            voyages.push(row.map_err(map_sqlite)?);
+        }
+        Ok(voyages)
+    }
+
     // ---- review verdicts (T-2)
 
     /// Store the review verdict of one attempt. One record per (project, task,
@@ -1804,6 +1932,12 @@ fn fnv1a_hex(data: &[u8]) -> String {
     format!("{:016x}", fnv1a_64(data))
 }
 
+/// The hash [`Tx::run_request`] stores for a request's arguments, so a caller
+/// can recognise an identical committed request before its transaction (T-19).
+pub fn args_hash(args_key: &str) -> String {
+    fnv1a_hex(args_key.as_bytes())
+}
+
 fn binding_status_str(status: BindingStatus) -> &'static str {
     match status {
         BindingStatus::Pending => "pending",
@@ -1928,6 +2062,20 @@ fn attempt_from_row(row: &rusqlite::Row) -> rusqlite::Result<AttemptRow> {
         safe_point: row.get(11)?,
         started: row.get(12)?,
         updated: row.get(13)?,
+    })
+}
+
+fn voyage_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageRow> {
+    Ok(VoyageRow {
+        project: row.get(0)?,
+        milestone: row.get(1)?,
+        title: row.get(2)?,
+        done: row.get(3)?,
+        bar: row.get(4)?,
+        eta: row.get(5)?,
+        departure: row.get(6)?,
+        departure_tasks: row.get(7)?,
+        updated: row.get(8)?,
     })
 }
 
