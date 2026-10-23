@@ -9,6 +9,11 @@
 //! is working or idle, so the board has no agent state and no heartbeat
 //! (PRD §15). It also never writes: the plan is read, not touched.
 //!
+//! The board does not start the engine either: it reads the engine's lock
+//! file to know whether the engine is down. A view that revived what it
+//! reports on could never show that the engine is down; the next `gear`
+//! call starts it (PRD §16).
+//!
 //! This crate is a library. It builds the board from the store and draws it
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
