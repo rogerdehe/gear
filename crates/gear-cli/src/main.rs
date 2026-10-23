@@ -48,6 +48,11 @@ enum Cmd {
         #[arg(long)]
         deps: bool,
     },
+    /// Captain: reports about the project.
+    Report {
+        #[command(subcommand)]
+        op: ReportOp,
+    },
     /// User: run the engine loop (plugin pane entrypoint).
     Run,
     /// User: project/seat administration.
@@ -129,6 +134,21 @@ enum PlanOp {
         next: Option<String>,
         #[arg(long = "request-id")]
         request_id: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ReportOp {
+    /// The time accounting: per task and per voyage (estimate, dev time,
+    /// review time, the wait for the captain, merge time, rework rounds and
+    /// their time, actual over estimate).
+    Time {
+        /// Only this task (T-n).
+        #[arg(long)]
+        task: Option<String>,
+        /// Only this voyage (milestone), e.g. M2.
+        #[arg(long)]
+        voyage: Option<String>,
     },
 }
 
@@ -228,6 +248,9 @@ fn run(cli: Cli) -> GearResult<()> {
             }
         },
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
+        Some(Cmd::Report { op }) => match op {
+            ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+        },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
@@ -245,6 +268,8 @@ fn run(cli: Cli) -> GearResult<()> {
 /// - `run` *is* the engine, and `admin stop` stops it;
 /// - `board` only observes — starting the engine would hide the "engine down"
 ///   warning it exists to show (PRD §15, the review of T-3);
+/// - `report time` only observes (the time accounting of what the store
+///   already knows);
 /// - `admin kickoff` only reads — starting the engine would open (and migrate)
 ///   the store, and a kickoff runs before the project exists (the review of
 ///   T-10). `--skill` and `--help` never get here.
@@ -256,6 +281,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Admin { op: AdminOp::Kickoff })
             | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
             | Some(Cmd::Board { .. })
+            | Some(Cmd::Report { .. })
     )
 }
 
@@ -526,6 +552,38 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     };
     let mut out = std::io::stdout();
     gear_board::run(&mut store, &opts, &mut out)
+}
+
+/// `gear report time`: where the time went (T-38). The captain's view of the
+/// project's time accounting: per task and per voyage — estimate, dev time,
+/// review time, the wait for the captain, merge time, rework rounds and their
+/// time, and actual over estimate.
+///
+/// Read-only, so it starts no engine.
+fn cmd_report_time(task: Option<String>, voyage: Option<String>, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let filter = gear_app::time::Filter { task, voyage };
+    let out = run_report_time(&mut store, &env, &mut herdr, &filter, json)?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear report time` body, over injected state.
+fn run_report_time(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    filter: &gear_app::time::Filter,
+    json: bool,
+) -> GearResult<String> {
+    let fp = gear_app::identity::observe(env, herdr)?;
+    let report = gear_app::time::build(store, env, fp.as_ref(), filter)?;
+    if json {
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    Ok(gear_app::time::render(&report))
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
@@ -1436,7 +1494,7 @@ mod tests {
     }
 
     fn plan_draft() -> String {
-        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
             .to_string()
     }
 
@@ -1491,7 +1549,7 @@ mod tests {
     fn plan_apply_rewrites_the_voyage_file() {
         let (mut store, mut herdr) = world();
         let draft = format!(
-            "<!-- gear-plan project=p base=0 -->\n# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n"
+            "<!-- gear-plan project=p base=0 -->\n# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n# Verdicts\n"
         );
         let path = write_draft(&draft);
 
@@ -1524,7 +1582,7 @@ mod tests {
     fn a_second_apply_of_the_rewritten_file_does_nothing() {
         let (mut store, mut herdr) = world();
         let draft = format!(
-            "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n"
+            "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n# Verdicts\n"
         );
         let path = write_draft(&draft);
         run_plan(
@@ -1609,6 +1667,99 @@ mod tests {
         assert!(err.detail.contains("not in slice 2"), "{}", err.detail);
     }
 
+    /// T-38: `gear report time` is the captain's view of the time accounting.
+    #[test]
+    fn report_time_prints_the_durations_and_the_ratio() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-7".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M2".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(60),
+                    updated: T0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some("abc".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::Started, T0)?;
+                tx.set_attempt_time(
+                    "p",
+                    "T-7",
+                    1,
+                    gear_store::AttemptStep::HandedIn,
+                    T0 + 10 * 60,
+                )?;
+                tx.set_attempt_time(
+                    "p",
+                    "T-7",
+                    1,
+                    gear_store::AttemptStep::Verdict,
+                    T0 + 15 * 60,
+                )?;
+                tx.set_attempt_time(
+                    "p",
+                    "T-7",
+                    1,
+                    gear_store::AttemptStep::Settled,
+                    T0 + 20 * 60,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("Time report · project p"), "{out}");
+        assert!(out.contains("T-7 · estimate 60m"), "{out}");
+        assert!(out.contains("dev 10m · review 5m · wait 5m"), "{out}");
+        assert!(out.contains("actual 20m"), "{out}");
+        assert!(out.contains("ratio 0.33"), "{out}");
+        assert!(out.contains("Voyage M2"), "{out}");
+
+        // A lane may not read the report.
+        let err = run_report_time(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+    }
+
     #[test]
     fn send_candidate_reaches_mail() {
         let (mut store, mut herdr) = world();
@@ -1630,6 +1781,7 @@ mod tests {
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
@@ -1685,6 +1837,7 @@ mod tests {
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
@@ -2167,6 +2320,7 @@ mod tests {
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {

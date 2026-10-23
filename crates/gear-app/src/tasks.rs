@@ -9,7 +9,7 @@ use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatState,
     TaskState, Ts,
 };
-use gear_store::{AttemptRow, NewMessage, NewOp, Tx, VerdictRow};
+use gear_store::{AttemptRow, AttemptStep, NewMessage, NewOp, Tx, VerdictRow};
 
 /// Create attempt `n = last + 1` for `task` on `seat_id` (state Delivered,
 /// `contract_version = adopted_version =` the task's current contract version).
@@ -91,6 +91,9 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
         updated: now,
     };
     tx.insert_attempt(&row)?;
+    // The delivery has its own time (T-38): it is the moment the attempt
+    // reached the lane, and no later step may move it.
+    tx.set_attempt_time(project, task, n, AttemptStep::Delivered, now)?;
     Ok(row)
 }
 
@@ -124,6 +127,8 @@ pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now
     attempt.state = AttemptState::Started;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
+    // The work has begun (T-38): the dev time of the round runs from here.
+    tx.set_attempt_time(project, task, n, AttemptStep::Started, now)?;
     task_row.state = TaskState::Running;
     task_row.updated = now;
     tx.update_task(&task_row)?;
@@ -220,6 +225,9 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     attempt.pending_update = None;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
+    // The hand-in has its own time (T-38): the dev time ends here, the review
+    // time begins.
+    tx.set_attempt_time(project, task, n, AttemptStep::HandedIn, now)?;
     task_row.state = TaskState::Verifying;
     task_row.updated = now;
     tx.update_task(&task_row)?;
@@ -380,6 +388,8 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     attempt.state = attempt_state;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
+    // The captain decided (T-38): the wait for the captain ends here.
+    tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Settled, now)?;
 
     task_row.state = task_state;
     if !v.pass {
@@ -447,6 +457,9 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             attempt_row.state = AttemptState::Rejected;
             attempt_row.updated = now;
             tx.update_attempt(&attempt_row)?;
+            // The attempt is closed (T-38): it has its settle time even
+            // though nobody had to decide anything.
+            tx.set_attempt_time(project, task, attempt, AttemptStep::Settled, now)?;
         }
         let line = format!(
             "{task}: review arrived on a {} task — attempt {attempt} closed, nothing settled",
@@ -515,6 +528,8 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
     attempt_row.state = attempt_state;
     attempt_row.updated = now;
     tx.update_attempt(&attempt_row)?;
+    // The attempt is settled (T-38): the wait for the captain ends here.
+    tx.set_attempt_time(project, task, attempt, AttemptStep::Settled, now)?;
 
     // The acceptance verdict is the task's history (design/06 `settle`): the
     // reviewer's verdict is recorded like any other, so a later captain
