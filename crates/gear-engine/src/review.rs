@@ -85,7 +85,17 @@ pub fn start_reviews(
             // rather than building a new worktree (17 §8a).
             None => match free_seat(store, project)? {
                 Some(seat) => take_seat(store, &seat, &task.task, now)?,
-                None => create_temp_seat(store, project, &task.task, &temps.profile, now)?,
+                // No warm seat free: a new one only while the quota has room.
+                // Otherwise the job waits for a seat instead of building a
+                // cold extra worktree (finding 2 of the T-18 review).
+                None => match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
+                    true => create_temp_seat(store, project, &task.task, &temps.profile, now)?,
+                    false => {
+                        report.waiting.push(task.task.clone());
+                        tell_captain(store, project, &task, now)?;
+                        continue;
+                    }
+                },
             },
         };
 
@@ -211,6 +221,18 @@ fn free_seat(store: &mut Store, project: &str) -> GearResult<Option<SeatRow>> {
             .seats_of_project(project)?
             .into_iter()
             .find(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Released))
+    })
+}
+
+/// Whether the project may add a seat: fewer seats exist than the quota allows.
+fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResult<bool> {
+    store.read(|tx| {
+        let seats = tx
+            .seats_of_project(project)?
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count() as i64;
+        Ok(seats < quota)
     })
 }
 
@@ -463,7 +485,9 @@ fn start_reviewer(
                 return Ok(Started::NotYet);
             };
             if let Outcome::Ok(()) = herdr.pane_run(&pane, &checkout_for(&path)) {
-                // the checkout took the job's branch
+                // The checkout is pinned to the candidate (`-f -B <branch>
+                // <candidate>`): a failure stops the chain, so the agent would
+                // start on the branch the checkout left behind.
             } else {
                 // The pane is not ready yet: the next tick tries again.
                 return Ok(Started::NotYet);
@@ -1070,10 +1094,13 @@ review = ["gpt-6.1-sol"]
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
         assert!(worktrees(&herdr).is_empty());
         assert!(starts(&herdr).is_empty());
-        // The reviewer waits in a queued seat, and the captain is told once.
-        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Queued);
-        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        // No seat is built for a job that cannot start: the quota has no room
+        // and a cold extra seat is exactly what finding 2 forbids.
+        assert!(
+            store.read(|tx| tx.get_seat("p:review-1")).unwrap().is_none(),
+            "no seat is created while the quota is full"
+        );
+        // The captain is told once.
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
         assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
         assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
