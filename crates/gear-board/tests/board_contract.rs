@@ -68,6 +68,25 @@ fn the_board_shows_the_totals_and_every_lane_queue() {
 }
 
 #[test]
+fn a_lane_with_no_tasks_is_shown_as_idle() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
+
+    // A registered lane with no tasks stays visible: the captain refills it.
+    assert!(text.contains("Totals: 0 tasks"), "{text}");
+    assert!(text.contains("Lane data\n  idle"), "{text}");
+}
+
+#[test]
 fn the_board_names_the_project_it_shows() {
     let mut store = world();
     let board = build(&mut store, &options(), T0).unwrap();
