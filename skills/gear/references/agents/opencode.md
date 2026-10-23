@@ -13,9 +13,10 @@ Verified on: OpenCode v2.1.2, Herdr 0.9.1 (protocol 22), macOS, 2026-10-22.
 | Resume flag | `-s <session-id>` |
 | Herdr reports `agent_session` | no — find the id yourself (below) |
 | Exit | one `ctrl+c` |
-| Model / effort / context | switched inside the agent: `/model`, `/effort`, `/clear`; never start flags |
+| Model / effort / context | switched inside the agent: `/model`, `/effort`, `/clear`; the model can also be fixed at start (see "Start on a chosen model") |
 | Status bar (bottom, above the input) | `Build auto · <model> <provider> · <effort>` — `auto` confirms the unattended flag |
 | Busy sign | `esc interrupt` at the bottom-left while a turn runs |
+| Private server flag | `--standalone` — needed to start on a model that comes from the environment |
 
 ## Before anything: check the pane
 
@@ -36,6 +37,33 @@ herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --auto
 ```
 
 Check: reply `"type":"agent_started"`; status bar shows `Build auto · …`.
+
+## Start on a chosen model
+
+OpenCode has no `--model` flag in the TUI (only `opencode run` has one, and `run` is a one-shot, not the long-lived agent Herdr drives). The model comes from its config, and the only config source a *client* can carry is the environment variable `OPENCODE_CONFIG_CONTENT` (a JSON object, `{"model":"<provider/model>"}`).
+
+Verified 2026-10-22 on **OpenCode v2.1.2** (Herdr 0.9.1, macOS) in a scratch pane, with `deepseek/deepseek-v4-pro` as the wanted model:
+
+| Start | Model carried by | Result |
+|---|---|---|
+| `opencode --auto` (shared background service) | the environment line | **ignored** — status bar stayed `Build auto · MiniMax-M3.1-Flash MiniMax (minimax.cn)` |
+| `opencode --standalone --auto` (private server) | the environment line | **applied** — status bar `Build auto · DeepSeek V4 Pro DeepSeek · high`; the session record shows `providerID: deepseek`, `model: deepseek-v4-pro` |
+| `opencode --auto` (shared background service) | `opencode.json` in the working directory | **applied** — status bar `Build auto · DeepSeek V4 Pro DeepSeek · high` |
+| `opencode run` (shared service, no TUI) | the environment line | **ignored** — the session ran on `opencode/flint-40b-free` |
+| `opencode run --standalone` (private server) | the environment line | **applied** — the session record shows `providerID: deepseek`, `model: deepseek-v4-pro` |
+
+Two private servers with different models ran at the same time and each kept its own model (`minimax-cn/MiniMax-M3.1-Flash` and `deepseek/deepseek-v4-pro`): a private server per agent is what isolates them.
+
+Why: the config is loaded by the *server* process (`role=server` in `~/.local/share/opencode/log/opencode.log`), not by the TUI client. The shared background service was started long before the export, so its own environment does not have the variable. A private server inherits the environment of the pane it is started in; a project `opencode.json` is re-read by the server when it changes.
+
+So, to start an agent on a chosen model:
+
+```bash
+herdr pane run <pane> "export OPENCODE_CONFIG_CONTENT='{\"model\":\"<provider/model>\"}'"
+herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --standalone --auto
+```
+
+Check: the status bar shows the wanted model, not the one used last. Resume keeps the model: `herdr agent start <name> --kind opencode --pane <pane> --timeout 60000 -- --standalone --auto -s <session-id>`.
 
 ## Find the session id
 
@@ -121,4 +149,5 @@ herdr pane read <pane> --source visible          # OpenCode start screen, "Ask a
 - **Same display name, different provider.** The `/model` picker lists e.g. `DeepSeek V4.1 Flash 1017` (DeepSeek) and `DeepSeek V4.1 Flash Free` (OpenCode free tier). Filter with and verify the full label; a prefix can pick the wrong one.
 
 - Typing a shell command into a pane that hosts OpenCode submits it as a prompt and the agent starts working on it. Check the occupant first; if it happened, `herdr agent send-keys <name> esc` stops the turn.
+- `OPENCODE_CONFIG_CONTENT` exported in the pane is ignored when the agent runs against the shared background service: it is read by the service process, which was started with a different environment. Use `--standalone` (or a project `opencode.json`).
 - `herdr agent prompt … --wait` returns when the agent settles; a settled agent is not necessarily finished with the task — read its task packet / screen.
