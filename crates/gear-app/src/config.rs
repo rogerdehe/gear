@@ -320,6 +320,8 @@ pub struct Timing {
     pub review_timer_min: u32,
     /// Promote and remind open captain items once per this many minutes.
     pub captain_item_stale_min: u32,
+    /// Working with no attempt in development while ready work waits.
+    pub lane_busy_idle_min: u32,
 }
 
 impl Default for Timing {
@@ -330,6 +332,7 @@ impl Default for Timing {
             sample_min: 20,
             review_timer_min: 45,
             captain_item_stale_min: 15,
+            lane_busy_idle_min: 10,
         }
     }
 }
@@ -592,6 +595,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
 
     if cfg.timing.captain_item_stale_min == 0 {
         issues.push(issue("timing.captain_item_stale_min", "must be at least one minute".to_string()));
+    }
+
+    if cfg.timing.lane_busy_idle_min == 0 {
+        issues.push(issue("timing.lane_busy_idle_min", "must be at least one minute".to_string()));
     }
 
     // ---- models (17 §0): empty chains mean models are not managed
