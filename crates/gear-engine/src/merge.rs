@@ -320,8 +320,16 @@ fn merge_one(
     let dir = Path::new(&worktree.path);
     let integration = config.conventions.integration.clone();
     let branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
-    let review = op.payload["review"].as_str().unwrap_or_default().to_string();
+    // The op may come from `tasks::settle_review`, which names the branch and
+    // the candidate but not the review branch: derive it, and merge it only
+    // when it exists (F5 of the T-12 review).
     let task = op.task.clone().unwrap_or_default();
+    let review = op
+        .payload
+        .get("review")
+        .and_then(|review| review.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| review_branch(&task));
 
     // 1. a clean base: the remote integration branch, whatever an interrupted
     //    earlier run left behind.
@@ -367,7 +375,11 @@ fn merge_one(
     // 2. the two merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
     //    cannot slip an unreviewed commit in.
-    for pinned in [candidate.clone(), format!("origin/{review}")] {
+    let mut pinned_refs = vec![candidate.clone()];
+    if git(dir, &["rev-parse", "--verify", &format!("origin/{review}")]).is_ok() {
+        pinned_refs.push(format!("origin/{review}"));
+    }
+    for pinned in pinned_refs {
         if let Err(reason) = git(
             dir,
             &[
@@ -838,6 +850,26 @@ gate = "{gate}"
         let branches = scratch.origin_branches();
         assert!(branches.contains("heat/t5"), "{branches}");
         assert!(branches.contains("review/t5"), "{branches}");
+    }
+
+    #[test]
+    fn a_settled_review_op_without_a_review_key_still_merges() {
+        // F5 of the review: `tasks::settle_review` queues the op with `branch`
+        // and `candidate` only. The missing review branch must be derived, and
+        // merged only when it exists — never `git merge --no-ff origin/`.
+        let scratch = Scratch::new("settled");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut settled = op(&candidate);
+        settled.payload = serde_json::json!({ "branch": "heat/t5", "candidate": candidate.clone() });
+
+        let line = merge_one(&worktree, &config("true"), &settled).unwrap();
+
+        assert!(line.contains("merged T-5"), "{line}");
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "{log}");
+        // The review branch exists in this fixture, so it was merged too.
+        assert!(log.contains("review"), "{log}");
     }
 
     #[test]
