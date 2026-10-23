@@ -3,7 +3,7 @@
 Files: `gear/engine/loop.py`, `observe.py`, `ops.py`. Budget 220–280 lines.
 Invariants upheld: the only process that executes Herdr side effects; an unknown outcome is not resent; an observation failure is not treated as "nothing happened"; single instance.
 
-## Startup (`gear run`, run by the plugin pane)
+## Startup (`gear run`, started in the background by any `gear` call — design/14)
 
 1. Single-instance lock: `<state_dir>/engine.lock` (`fcntl.flock` non-blocking). If it cannot be taken → print "engine already running (pid, heartbeat, pane)" and exit, leaving no second resident process.
 2. Open the DB, check the schema version, read all project configs and display the effective values.

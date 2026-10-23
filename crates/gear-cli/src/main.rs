@@ -125,6 +125,8 @@ enum PlanOp {
 #[derive(Subcommand, Debug)]
 enum AdminOp {
     Init { config: std::path::PathBuf },
+    /// Stop the background engine (it starts again on the next `gear` call).
+    Stop,
     Seat {
         #[command(subcommand)]
         op: SeatOp,
@@ -171,6 +173,9 @@ fn run(cli: Cli) -> GearResult<()> {
     if let Some(topic) = cli.skill.as_deref() {
         return print_skill(topic);
     }
+    if !matches!(cli.cmd, Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop })) {
+        ensure_engine();
+    }
     match cli.cmd {
         None => cmd_home(cli.show.as_deref(), cli.diff, cli.all, cli.json),
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
@@ -182,6 +187,7 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
+        Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
         Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
 }
@@ -737,13 +743,126 @@ fn cmd_run() -> GearResult<()> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_default();
-    let _lock = take_engine_lock(&dir)?; // held for the life of the loop
+    let mut lock = take_engine_lock(&dir)?; // held for the life of the loop
+    {
+        // The holder's pid, for `gear admin stop`.
+        use std::io::Write as _;
+        let _ = lock.set_len(0);
+        let _ = writeln!(lock, "{}", std::process::id());
+    }
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     // The agents get the same database as `GEAR_DB` (design/03).
     let cfg = engine_cfg(&db.to_string_lossy());
     let mut clock = now_ts;
-    run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut std::io::stdout())
+    let mut out = Stamped { inner: std::io::stdout(), at_line_start: true };
+    let _ = std::io::Write::write_fmt(&mut out, format_args!("engine start pid={} db={}\n", std::process::id(), db.to_string_lossy()));
+    run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
+}
+
+/// Prefixes every engine log line with a UTC time, so `engine.log` can be
+/// read back when something goes wrong.
+struct Stamped<W: std::io::Write> {
+    inner: W,
+    at_line_start: bool,
+}
+
+impl<W: std::io::Write> std::io::Write for Stamped<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for line in buf.split_inclusive(|b| *b == b'\n') {
+            if self.at_line_start {
+                self.inner.write_all(format!("{} ", utc(now_ts())).as_bytes())?;
+            }
+            self.inner.write_all(line)?;
+            self.at_line_start = line.ends_with(b"\n");
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for unix seconds (civil-from-days, no extra crate).
+fn utc(ts: i64) -> String {
+    let (days, secs) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
+}
+
+/// The engine's directory: next to `GEAR_DB`; `None` when it is not set.
+fn engine_dir() -> Option<std::path::PathBuf> {
+    let db = std::env::var_os(gear_model::ctx::ENV_DB)?;
+    Some(std::path::Path::new(&db).parent().map(std::path::Path::to_path_buf).unwrap_or_default())
+}
+
+/// Start the engine in the background when nobody holds its lock. Every
+/// `gear` call does this, so no one has to run the engine in a pane; a
+/// failure here never fails the caller's command.
+fn ensure_engine() {
+    let Some(dir) = engine_dir() else { return };
+    match take_engine_lock(&dir) {
+        Ok(lock) => drop(lock), // free: release it for the engine we start
+        Err(_) => return,       // already running (or unusable: `gear run` reports it)
+    }
+    match spawn_engine(&dir) {
+        Ok(pid) => eprintln!("gear: engine started in the background (pid {pid}, log {})", dir.join("engine.log").display()),
+        Err(e) => eprintln!("gear: could not start the engine: {e}"),
+    }
+}
+
+/// `gear run` detached from the caller: own session, no terminal, output to
+/// `engine.log`. Two racing starts are fine: the loser fails on the lock.
+fn spawn_engine(dir: &std::path::Path) -> std::io::Result<u32> {
+    use std::os::unix::process::CommandExt as _;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("engine.log"))?;
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    cmd.arg("run")
+        .env_remove(gear_model::ctx::ENV_CTX)
+        .env_remove(gear_model::ctx::ENV_ADMIN)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    // SAFETY: setsid is async-signal-safe; it only detaches from the terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    Ok(cmd.spawn()?.id())
+}
+
+/// `gear admin stop`: signal the engine named in its lock file.
+fn cmd_admin_stop() -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() {
+        return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not stop the engine"));
+    }
+    let dir = engine_dir().ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    if let Ok(lock) = take_engine_lock(&dir) {
+        drop(lock);
+        println!("engine not running");
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(dir.join("engine.lock")).unwrap_or_default();
+    let pid: i32 = text.trim().parse().map_err(|_| {
+        GearError::new(gear_model::ErrorCode::NoTarget, "engine is running but its pid is unknown")
+    })?;
+    // SAFETY: plain kill(2) on a pid read from our own lock file.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("cannot stop pid {pid}")));
+    }
+    println!("engine stopped (pid {pid})");
+    Ok(())
 }
 
 /// The engine's configuration: the defaults, every built-in agent profile and
@@ -1256,6 +1375,12 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("gear-lock-{}-{tag}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn utc_formats_known_instants() {
+        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(utc(1_761_143_045), "2025-10-22T14:24:05Z");
     }
 
     #[test]
