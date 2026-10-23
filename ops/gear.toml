@@ -46,6 +46,17 @@ review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane mode
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
 
+# The in-place model switch (T-33): what `/model` shows in the picker and what
+# the status bar says once the model is on. Required for an OpenCode lane or
+# reviewer on that model — without it the seat is flagged, never closed.
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash  MiniMax"
+bar = "MiniMax-M3.1-Flash MiniMax"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+
 [conventions]
 integration = "dev"
 release = "main"

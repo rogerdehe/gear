@@ -171,7 +171,14 @@ pub fn onboard_queued(
         for seat in seats {
             // Only lanes are onboarded by the engine in this cut; the captain
             // and the temps get their pane elsewhere.
-            if seat.role != SeatRole::Lane || seat.state != SeatState::Queued {
+            if seat.role != SeatRole::Lane {
+                continue;
+            }
+            // A lane whose start is waiting on its model (T-33, F5) is resumed:
+            // the switch plan is durable, so an engine restart continues it.
+            let resuming =
+                seat.state == SeatState::Starting && crate::switch::pending(store, &seat.id)?.is_some();
+            if seat.state != SeatState::Queued && !resuming {
                 continue;
             }
             // A lane the snapshot's config does not name is not parked: the
@@ -181,7 +188,9 @@ pub fn onboard_queued(
             }
             match onboard_seat(store, herdr, cfg, &seat, &config, &profiles, now) {
                 // The seat is Active now.
-                Ok(()) => active.push(seat.id.clone()),
+                Ok(true) => active.push(seat.id.clone()),
+                // The start waits for the model switch: the next tick continues.
+                Ok(false) => {}
                 // A failed step parks the seat; it is never retried blindly.
                 Err(reason) => park(store, &seat.id, &reason, now)?,
             }
@@ -201,7 +210,7 @@ fn onboard_seat(
     config: &gear_app::config::ProjectConfig,
     profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     now: Ts,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // 1. the kind of the lane comes from the project config; the profile is
     //    the one the seat was registered with.
     let lane = config
@@ -238,6 +247,14 @@ fn onboard_seat(
         .clone()
         .ok_or_else(|| "a lane gets a worktree, but the plan has none".to_string())?;
 
+    // A start that is waiting on its model (T-33, F5): continue the switch and
+    // finish onboarding only once the status bar confirms.
+    if seat.state == SeatState::Starting
+        && crate::switch::pending(store, &seat.id).map_err(|e| e.detail)?.is_some()
+    {
+        return resume_start(store, herdr, seat, profile, config, now);
+    }
+
     // 3. the worktree, with the root pane the agent starts in. A lane's home
     // worktree is long-lived (17 §3): reopen it when its branch exists (a
     // restart, or a lane GEAR takes over), create it otherwise.
@@ -271,12 +288,79 @@ fn onboard_seat(
         other => return Err(step_failure("agent_start", &other)),
     };
 
-    // 6. the agent is there: the binding becomes Active and so does the seat.
+    // 6. an OpenCode agent runs on the chain's model before the seat is marked
+    //    started (T-33, F5): the shared service ignores the start environment,
+    //    so the status bar decides here. Waiting keeps the start pending.
+    if plan.kind == "opencode" {
+        if let Some(model) = lane_primary(lane, &config.models.lanes) {
+            match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)
+                .map_err(|e| format!("model check: {}", e.detail))?
+            {
+                crate::switch::ModelGate::Ready => {}
+                crate::switch::ModelGate::Waiting => return Ok(false),
+                crate::switch::ModelGate::Failed(reason) => return Err(reason),
+            }
+        }
+    }
+
+    // 7. the agent is there on the right model: the binding becomes Active and
+    //    so does the seat.
     let session_ref = started.agent_session.as_ref().map(|session| session.value.as_str());
     store
         .write(|tx| gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now))
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
-    Ok(())
+    Ok(true)
+}
+
+/// Continue a lane's pending model switch and finish its onboarding when the
+/// status bar confirms (T-33, F5): no task is dispatched before that.
+fn resume_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    profile: &gear_herdr::Profile,
+    config: &gear_app::config::ProjectConfig,
+    now: Ts,
+) -> Result<bool, String> {
+    let Some(plan) = crate::switch::pending(store, &seat.id).map_err(|e| e.detail)? else {
+        return Ok(false);
+    };
+    let Some(labels) = config
+        .models
+        .switch
+        .iter()
+        .find(|(_, labels)| labels.bar == plan.to)
+        .map(|(_, labels)| labels.clone())
+    else {
+        crate::switch::clear_pending(store, &seat.id).map_err(|e| e.detail)?;
+        return Err(format!(
+            "the switch target {:?} has no [models.switch] labels any more",
+            plan.to
+        ));
+    };
+    match crate::switch::switch_in_place(store, herdr, &seat.id, profile, None, &labels, now)
+        .map_err(|e| format!("model switch: {}", e.detail))?
+    {
+        crate::switch::SwitchOutcome::Done | crate::switch::SwitchOutcome::Already => {}
+        crate::switch::SwitchOutcome::Waiting => return Ok(false),
+        crate::switch::SwitchOutcome::Failed => {
+            return Err(format!("the model switch to {:?} did not confirm twice", plan.to))
+        }
+    }
+    // The session reference the start reported, when Herdr still shows it.
+    let pane = store
+        .read(|tx| tx.get_binding(&seat.id, seat.generation))
+        .map_err(|e| e.detail)?
+        .map(|binding| binding.pane_id);
+    let session_ref = pane
+        .and_then(|pane| herdr.agent_get(&pane).ok().flatten())
+        .and_then(|info| info.agent_session.map(|session| session.value));
+    store
+        .write(|tx| {
+            gear_app::seats::finish_onboard(tx, &seat.id, seat.generation, session_ref.as_deref(), now)
+        })
+        .map_err(|e| format!("finish_onboard: {}", e.detail))?;
+    Ok(true)
 }
 
 /// Park a seat in NeedsCheck with the reason. It is never retried
@@ -379,6 +463,10 @@ profile = "opencode"
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash"
+bar = "MiniMax-M3.1-Flash"
 "#;
 
     /// The same project, but the lane brings its own chain.
@@ -407,6 +495,14 @@ models = ["deepseek/deepseek-v4-pro"]
 
 [models]
 lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+
+[models.switch."deepseek/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro"
+bar = "DeepSeek V4 Pro"
+
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash"
+bar = "MiniMax-M3.1-Flash"
 "#;
 
     /// An engine that knows the opencode profile.
@@ -510,10 +606,13 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
     fn the_lane_model_is_carried_by_the_environment_line() {
         let mut store = world(CONFIG_WITH_MODELS);
         let mut herdr = FakeHerdr::new();
+        // An OpenCode lane must start on the chain's model (T-33, F5).
+        herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".into());
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
-        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(active, vec!["toy:heat".to_string()], "state {:?}: {:?}", seat.state, seat.state_reason);
         let env = env_line(&herdr);
         assert!(
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
@@ -525,10 +624,79 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
         assert!(!start_args(&herdr).contains(&"--standalone".to_string()), "no --standalone (L-56): {:?}", start_args(&herdr));
     }
 
+    /// T-33 (F5): a lane that starts on the wrong model is switched in place
+    /// before it is marked Active; no work is dispatched until the bar says so.
+    #[test]
+    fn a_lane_that_starts_on_the_wrong_model_switches_before_it_is_active() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        // The agent comes up on another model.
+        herdr.start_screen = Some("Build auto · Flint-40B Free OpenCode · high".to_string());
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  MiniMax-M3.1-Flash  MiniMax".into(),
+            ),
+            ("MiniMax-M3.1-Flash".into(), "Build auto · MiniMax-M3.1-Flash MiniMax · high".into()),
+        ];
+
+        // Tick 1: the agent starts, the check finds another model, esc is sent.
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+        assert!(active.is_empty(), "the seat is not started yet");
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "the start stays pending");
+        assert!(crate::switch::pending(&mut store, "toy:heat").unwrap().is_some());
+
+        // The next ticks continue the switch; the seat becomes Active only when
+        // the bar confirms.
+        let mut active = Vec::new();
+        for tick in 0..5 {
+            active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2 + tick).unwrap();
+            if !active.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let sent: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                gear_herdr::fake::Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent.iter().filter(|c| *c == "/model").count(), 1, "{sent:?}");
+        assert!(sent.iter().any(|c| c == "MiniMax-M3.1-Flash"), "{sent:?}");
+        assert!(herdr.started_agents.len() == 1, "the agent is started once: {:?}", herdr.started_agents);
+    }
+
+    /// T-33 (F5): a lane already on the chain's model sends nothing.
+    #[test]
+    fn a_lane_already_on_its_model_is_not_touched() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("Build auto · MiniMax-M3.1-Flash MiniMax · high".to_string());
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let sent: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                gear_herdr::fake::Call::PaneRun { command, .. } => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(!sent.iter().any(|c| c == "/model"), "nothing typed into the agent: {sent:?}");
+    }
+
     #[test]
     fn the_lane_own_model_wins_over_the_lane_chain() {
         let mut store = world(CONFIG_WITH_LANE_MODELS);
         let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("Build auto · DeepSeek V4 Pro DeepSeek · high".into());
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
