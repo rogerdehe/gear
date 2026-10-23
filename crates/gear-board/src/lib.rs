@@ -474,10 +474,9 @@ pub fn to_json(board: &Board) -> GearResult<String> {
 
 /// Show the board until the user quits (`q`).
 ///
-/// The board is a full-screen view: it redraws every [`Options::refresh`]
-/// seconds and `q` leaves it. Without a terminal — a pipe, a test — the
-/// board is printed once and the command returns: a full-screen view must not
-/// hang a caller that cannot see it.
+/// Without a terminal — a pipe, a test — the board is printed once and the
+/// command returns: a full-screen view must not hang a caller that cannot
+/// see it. [`run_with`] draws the frames.
 pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write) -> GearResult<()> {
     if opts.json || !screen::is_terminal() {
         let board = build(store, opts, now_ts())?;
