@@ -1,4 +1,4 @@
-# GEAR's own project config (kickoff agreed with the user 2026-10-22).
+# GEAR's own project config. M2 kickoff confirmed by the user 2026-10-23.
 # Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
 
 [project]
@@ -16,35 +16,36 @@ kind = "claude"
 profile = "claude"
 
 [[lanes]]
-name = "runtime"
-duty = "Engine side: the automatic parallel review loop (result -> reviewer -> merge or rework) and the quota policy (fallback model / wait for reset)"
+name = "steady"
+duty = "Stability, so GEAR never stops: cross-CLI model fallback, the captain's quota, merging beside the tick, finishing a lane's retirement, early low-queue warnings, a hand-in that does not ring the captain"
 owns = ["crates/gear-engine/", "crates/gear-herdr/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "data"
-duty = "Store, app rules and commands: kickoff (detect agents, models, quota policy into the config), model fields, admin commands"
-owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-cli/"]
+name = "course"
+duty = "Holding the course: per-attempt timestamps and time accounting, the voyage report, drift signals found in practice, stale-item re-alerts, the tail declaration, board wording"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "board"
-duty = "The plan board opened by a Herdr hotkey (totals, per-lane tasks, items waiting, temp slots) and the plugin packaging/install"
-owns = ["crates/gear-board/", "herdr-plugin.toml", "bin/"]
+name = "base"
+duty = "The base for other users: store schema version, gear --version, the kickoff skeleton, the deletion pass, the install path"
+owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/"]
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex (user, 2026-10-22, mid-run change)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; fallback Claude Code claude-sonnet-5-5 --effort high (cross-CLI, steady S1)
 kind = "codex"
 profile = "codex"
 
 [models]
-lanes = ["minimax-cn/MiniMax-M3.1-Flash", "opencode-go/deepseek-v4.1-flash"]   # 2026-10-23 user: MiniMax first again, DeepSeek as fallback
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]   # M2: official MiniMax; fallback Codex gpt-6.1-sol reasoning medium (cross-CLI, steady S1)
 review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane model
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
+# Until steady S1 lands a chain cannot cross CLIs: a lane out of MiniMax quota parks and the captain switches it by hand (ops/STOPGAPS.md).
 
 # The in-place model switch (T-33): what `/model` shows in the picker and what
 # the status bar says once the model is on. Required for an OpenCode lane or
@@ -52,10 +53,6 @@ quota_reset_h = 5
 [models.switch."minimax-cn/MiniMax-M3.1-Flash"]
 picker = "MiniMax-M3.1-Flash  MiniMax"
 bar = "MiniMax-M3.1-Flash MiniMax"
-
-[models.switch."opencode-go/deepseek-v4.1-flash"]
-picker = "DeepSeek V4.1 Flash OpenCode Go"
-bar = "DeepSeek V4.1 Flash OpenCode Go"
 
 [conventions]
 integration = "dev"

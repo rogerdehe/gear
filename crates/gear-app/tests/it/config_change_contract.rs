@@ -132,6 +132,21 @@ fn a_dropped_lane_is_refused_and_named() {
     assert!(s.read(|tx| tx.get_seat("oxford:pricing")).unwrap().is_none());
 }
 
+/// A retired lane may leave the config: a new voyage starts with new lanes.
+#[test]
+fn a_retired_lane_may_be_dropped() {
+    let mut s = Store::open_in_memory().unwrap();
+    init(&mut s, &admin(), &config(), T0).unwrap();
+    s.write(|tx| tx.set_seat_state("oxford:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)).unwrap();
+
+    let fewer = config_with(PRICING, "\"minimax-cn/MiniMax-M3.1-Flash\"");
+    init(&mut s, &admin(), &fewer, T0 + 2).unwrap();
+
+    let row = s.read(|tx| tx.get_project("oxford")).unwrap().unwrap();
+    assert_eq!(row.config_version, 2);
+    assert!(s.read(|tx| tx.get_seat("oxford:pricing")).unwrap().is_some());
+}
+
 #[test]
 fn an_invalid_config_is_refused_and_nothing_is_written() {
     let mut s = Store::open_in_memory().unwrap();
