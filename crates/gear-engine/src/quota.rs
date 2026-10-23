@@ -301,7 +301,7 @@ fn finish_restart(
             );
             let mut args = profile.unattended_args.clone();
             if let Some(model) = model.as_deref() {
-                if let Some(start) = crate::onboard::model_start(&binding.kind, model) {
+                if let Some(start) = crate::model::model_start(&binding.kind, model) {
                     if !start.env.is_empty() {
                         env_command = format!("{env_command}; {}", start.env);
                     }
