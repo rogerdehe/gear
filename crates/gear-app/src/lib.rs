@@ -20,6 +20,7 @@ pub mod mail;
 pub mod plan;
 pub mod review;
 pub mod seats;
+pub mod skill;
 pub mod tasks;
 
 use gear_model::GearCtx;
