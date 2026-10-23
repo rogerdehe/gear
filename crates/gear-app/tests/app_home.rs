@@ -9,8 +9,8 @@
 use gear_app::home;
 use gear_app::identity::Fingerprint;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, Ts};
-use gear_store::{testing, NewMessage, Store};
+use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState, Ts};
+use gear_store::{testing, NewMessage, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -295,6 +295,106 @@ fn record_view_persists() {
     let views = s.read(|tx| tx.views_since("p:captain", 1, 0)).unwrap();
     assert_eq!(views.len(), 1, "one view row");
     assert_eq!(views[0], home.view);
+}
+
+#[test]
+fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
+    let mut s = world();
+    // A second lane and four tasks: heat is on T-1, runtime has two queued.
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", NOW)?;
+        for (id, rank, lane, state) in [
+            ("T-1", 1, "heat", TaskState::Running),
+            ("T-2", 2, "heat", TaskState::Ready),
+            ("T-3", 3, "runtime", TaskState::Ready),
+            ("T-4", 4, "runtime", TaskState::Ready),
+        ] {
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: id.into(),
+                rank,
+                state,
+                priority: "must".into(),
+                lane: Some(lane.into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: Vec::new(),
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                updated: NOW,
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    ask(&mut s, "Schema v1 or v2?", NOW);
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    // The snapshot: totals, both lanes with their current task and queue,
+    // the deliveries in flight and the temp slots.
+    assert!(
+        home.text.contains("SNAPSHOT 4 tasks · 0 done · 1 in progress · 0 waiting"),
+        "{}",
+        home.text
+    );
+    assert!(home.text.contains("heat · T-1 in progress · 1 queued"), "{}", home.text);
+    assert!(home.text.contains("runtime · idle · 2 queued"), "{}", home.text);
+    assert!(
+        home.text.contains("deliveries not confirmed: 0 · temps 0/2"),
+        "{}",
+        home.text
+    );
+
+    // And it is before the inbox.
+    let snapshot = home.text.find("SNAPSHOT").expect("the snapshot");
+    let inbox = home.text.find("INBOX").expect("the inbox");
+    assert!(snapshot < inbox, "the snapshot comes first: {}", home.text);
+}
+
+#[test]
+fn a_lane_with_nothing_queued_is_still_in_the_snapshot() {
+    let mut s = world();
+    // A registered lane that has no tasks at all: the captain has to see it
+    // to refill it (the review of T-9).
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", NOW)
+    })
+    .unwrap();
+
+    let home = home::build(
+        &mut s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(home.text.contains("runtime · idle · 0 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · idle · 0 queued"), "{}", home.text);
+}
+
+#[test]
+fn the_lane_home_has_no_snapshot() {
+    let mut s = world();
+    let home = home::build(
+        &mut s,
+        &seat_env("heat", LANE_PANE),
+        Some(&fp(LANE_PANE, "opencode")),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(!home.text.contains("SNAPSHOT"), "the snapshot is the captain's: {}", home.text);
 }
 
 #[test]

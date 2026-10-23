@@ -300,6 +300,9 @@ const REFUSED_CODES: &[&str] = &[
     "workspace_not_found",
     // `worktree.open` on a branch with no worktree (seen on 0.9.1).
     "worktree_not_found",
+    // A prompt to an agent Herdr has not registered yet (right after
+    // `agent.start`, seen 2026-10-23): nothing was typed; retry next tick.
+    "agent_not_ready",
 ];
 
 /// Protocol error codes that answer "there is no agent in that pane": an
