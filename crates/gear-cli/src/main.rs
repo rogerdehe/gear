@@ -515,7 +515,13 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     let request_id = announce_request_id(c.request_id.clone());
     let c = SendCmd { request_id: Some(request_id), ..c };
     let mut herdr = open_herdr()?;
-    let out = run_send(&mut store, &env, &mut herdr, &c, body, now_ts(), json)?;
+    // A hand-in must contain the project's current integration branch (T-19);
+    // the gate is built here, from this process's worktree and config.
+    let base = match parse_kind(&c.kind)? {
+        gear_model::MsgKind::Result => Some(gear_app::base::gate_for(&mut store, &env)?),
+        _ => None,
+    };
+    let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
     println!("{out}");
     Ok(())
 }
@@ -665,6 +671,7 @@ fn run_send(
     herdr: &mut dyn gear_herdr::HerdrRead,
     c: &SendCmd,
     body: String,
+    base: Option<gear_app::base::BaseGate>,
     now: i64,
     json: bool,
 ) -> GearResult<String> {
@@ -673,8 +680,9 @@ fn run_send(
         ("--preempted", c.preempted.is_some()),
         ("--saved", c.saved.is_some()),
     ])?;
+    let kind = parse_kind(&c.kind)?;
     let args = gear_app::mail::SendArgs {
-        kind: parse_kind(&c.kind)?,
+        kind,
         body,
         task: c.task.clone(),
         attempt: c.attempt,
@@ -687,6 +695,8 @@ fn run_send(
             .as_deref()
             .map(gear_app::review::Outcome::parse)
             .transpose()?,
+        // A hand-in's gate (T-19): set by the caller for a result.
+        base,
         about: c.about.clone(),
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
@@ -1300,6 +1310,7 @@ mod tests {
             &mut herdr,
             &c,
             "Schema v1 or v2?".into(),
+            None,
             T0 + 1,
             false,
         )
@@ -1321,6 +1332,7 @@ mod tests {
             &mut herdr,
             &send_cmd("nonsense"),
             "x".into(),
+            None,
             T0 + 1,
             false,
         )
@@ -1342,7 +1354,7 @@ mod tests {
             let mut c = send_cmd("question");
             set(&mut c);
             let err =
-                run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), T0 + 1, false)
+                run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), None, T0 + 1, false)
                     .unwrap_err();
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
             assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
@@ -1469,6 +1481,7 @@ mod tests {
             &mut herdr,
             &c,
             "done, see abc123".into(),
+            None,
             T0 + 2,
             false,
         )
@@ -1533,6 +1546,7 @@ mod tests {
             &mut herdr,
             &review_cmd("pass"),
             "ops/reviews/T-7.md".into(),
+            None,
             T0 + 1,
             false,
         )
@@ -1558,6 +1572,7 @@ mod tests {
             &mut herdr,
             &review_cmd("maybe"),
             "ops/reviews/T-7.md".into(),
+            None,
             T0 + 1,
             false,
         )
@@ -1575,6 +1590,7 @@ mod tests {
             &mut herdr,
             &review_cmd("pass"),
             "ops/reviews/T-7.md".into(),
+            None,
             T0 + 1,
             false,
         )
@@ -1592,6 +1608,7 @@ mod tests {
             &mut herdr,
             &send_cmd("progress"),
             "working".into(),
+            None,
             T0 + 1,
             true,
         )
@@ -1612,6 +1629,7 @@ mod tests {
             &mut herdr,
             &send_cmd("question"),
             "v1 or v2?".into(),
+            None,
             T0 + 1,
             false,
         )

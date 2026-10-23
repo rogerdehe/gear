@@ -87,7 +87,7 @@ fn a_review_verdict_settles_the_task_in_the_tick() {
     // The lane's agent is in its pane (a missing agent alerts the captain, L-56).
     herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
 
-    let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 10).unwrap();
+    let report = tick(&mut s, &mut herdr, &auto(), T0 + 10).unwrap();
     assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
 
     assert_eq!(
@@ -111,7 +111,7 @@ fn a_review_verdict_settles_the_task_in_the_tick() {
     assert_eq!(info.len(), 1, "{info:?}");
 
     // A second tick settles nothing again.
-    let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 30).unwrap();
+    let report = tick(&mut s, &mut herdr, &auto(), T0 + 30).unwrap();
     assert!(report.settled.is_empty(), "{report:?}");
     assert_eq!(
         s.read(|tx| tx.ops_in_state("p", OpState::Intended)).unwrap().len(),
@@ -127,7 +127,7 @@ const LANE_PANE: &str = "w1:p2";
 const BOARD_PANE: &str = "w1:p3";
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut c = EngineCfg { db_path: "/state/gear.db".into(), auto_settle: true, ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
@@ -228,4 +228,19 @@ fn a_failing_settlement_does_not_abort_the_tick() {
     let t3 = s.read(|tx| tx.get_attempt("p", "T-3", 1)).unwrap();
     assert!(t3.is_some(), "the tick went on: {report:?}");
     assert_eq!(herdr.prompts_to(BOARD_PANE).len(), 1);
+}
+
+
+/// Automatic settlement is opt-in (L-57).
+fn auto() -> EngineCfg {
+    EngineCfg { auto_settle: true, ..Default::default() }
+}
+
+#[test]
+fn without_auto_settle_a_verdict_waits_for_the_captain() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
+    let report = tick(&mut s, &mut herdr, &EngineCfg::default(), T0 + 10).unwrap();
+    assert!(report.settled.is_empty(), "{report:?}");
 }
