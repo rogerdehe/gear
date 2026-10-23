@@ -1,4 +1,7 @@
-# GEAR development ledger (manual stand-in for GEAR's PLAN view)
+# GEAR development ledger — RETIRED 2026-10-22
+
+> The gear project now runs on GEAR itself: plan in GEAR's store (`ops/plan/*.md` drafts, applied with `gear plan apply`), lanes onboarded by the engine. This file is history; T-numbers below are the old manual series and do not match GEAR's T-1….
+
 
 Goal: GEAR MVP. Current milestone: **M1 skeleton + slice 1 (messaging loop)**.
 Done when: `cargo test --workspace` passes, including `crates/gear-engine/tests/slice1_messaging.rs`.
@@ -311,3 +314,4 @@ Single writer: the captain (`ops/CAPTAIN.md`). Rows are each lane's queue in ord
 - 2026-10-22 R-59 on T-64: P1 = admin init needs GEAR_DB (design's targets.toml not built) — for the skeleton the user's shell sets GEAR_DB explicitly, logged; P2 = not-yet test now uses `admin seat confirm`. Merged T-64.
 - 2026-10-22 R-60 pass; T-62 merged. **Walking-skeleton code complete** — next: first real run on the toy repo (captain).
 - 2026-10-22 **FIRST REAL RUN — the MVP loop closes on a real Herdr** (toy repo `gear-toy`, state `gear-toy-state/`): `gear admin init` → `gear run` onboarded lane `toy-work` by itself (Herdr worktree `home/work`, GEAR_CTX, OpenCode `--auto`) → captain `gear plan apply` created T-1 → engine delivered once, delivery confirmed by the lane's view → lane implemented, committed, `gear send --kind result` (attempt Submitted, task Verifying, M-1 to captain) → captain verified (`python3 tests/test_calc.py` OK) and applied a pass verdict → T-1 Done, attempt Accepted. Observed gaps: captain not rung (no profile for kind `claude`; captain polled `gear`); delivery text's branch `work/t1` vs packet wording; lane tried to push (toy has no remote); an OpenCode toast about an unavailable free model at start (harmless); `plan apply` with only verdicts lists the task as "not mentioned".
+- 2026-10-22 **Self-hosting**: user re-aligned positioning and the full form (PRD v0.9). Engine moved to the background (any `gear` call starts it). Kickoff for gear approved: lanes gear-runtime / gear-data / gear-board, 3 review temps, model chains, quota fallback-then-wait (`ops/gear.toml`). Manual lanes exited; `gear admin init` + engine onboarded all three (reopening the existing home worktrees). Plan v1 applied in GEAR (T-1…T-5); engine delivered T-1/T-2/T-3 at once. Old ledger retired.
