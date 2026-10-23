@@ -174,6 +174,9 @@ pub fn onboard_queued(
             if seat.role != SeatRole::Lane {
                 continue;
             }
+            if crate::restart::pending(store, &seat.id)?.is_some() {
+                continue;
+            }
             // A lane whose start is waiting on its model (T-33, F5) is resumed:
             // the switch plan is durable, so an engine restart continues it.
             let resuming =
@@ -212,20 +215,33 @@ fn onboard_seat(
     now: Ts,
 ) -> Result<bool, String> {
     // 1. the kind of the lane comes from the project config; the profile is
-    //    the one the seat was registered with.
+    //    the one that drives it.
     let lane = config
         .lanes
         .iter()
         .find(|lane| lane.name == seat.name)
         .ok_or_else(|| format!("lane {} is not in the project config", seat.name))?;
-    let profile = profiles
-        .get(&seat.profile)
-        .ok_or_else(|| format!("profile {} is not configured", seat.profile))?;
+    // The chain entry of the lane's model: its own chain first, else the lane
+    // chain (17 §0).
+    let entry = lane_primary(lane, &config.models.lanes);
+    // The CLI that runs the model (T-35): the entry names it, else the lane's
+    // own kind. The profile is the one that drives that CLI.
+    let kind = entry
+        .and_then(|entry| entry.cli())
+        .unwrap_or(lane.kind.as_str())
+        .to_string();
+    let selected = if kind == lane.kind {
+        profiles.get(&seat.profile).map(|profile| (seat.profile.as_str(), profile))
+    } else {
+        crate::restart::profile_for_kind(profiles, &kind)
+    };
+    let (profile_name, profile) = selected
+        .ok_or_else(|| format!("no profile drives the CLI {kind:?}"))?;
 
     // 2. the plan: worktree, environment line, agent name and start args.
     let mut plan = plan_onboard(
         seat,
-        &lane.kind,
+        &kind,
         profile,
         seat.generation + 1,
         &config.project.repo,
@@ -234,13 +250,14 @@ fn onboard_seat(
         None,
     )?;
     // The lane's model goes into the environment line, so the agent GEAR
-    // starts runs on the model GEAR chose (17 §0): the lane's own chain
-    // first, else the lane chain.
-    if let Some(model) = lane_primary(lane, &config.models.lanes) {
-        if let Some(start) = model_start(&lane.kind, model) {
+    // starts runs on the model GEAR chose (17 §0), and the entry's own
+    // arguments follow the model flag (T-35).
+    if let Some(entry) = entry {
+        if let Some(start) = model_start(&kind, entry.model()) {
             plan.env_command = format!("{}; {}", plan.env_command, start.env);
             plan.args.extend(start.args);
         }
+        plan.args.extend(entry.args().iter().cloned());
     }
     let worktree = plan
         .worktree
@@ -272,10 +289,20 @@ fn onboard_seat(
         other => return Err(step_failure("worktree_open", &other)),
     };
     let pane = created.pane_id;
+    // The worktree's path is kept: a fallback to another CLI may have to trust
+    // it (grok asks before its first start in a directory, T-32).
+    store
+        .write(|tx| tx.set_meta(&worktree_path_key(&seat.id), &created.path))
+        .map_err(|e| format!("worktree path: {}", e.detail))?;
 
-    // 4. the seat moves to Starting with a pending binding for the pane.
+    // 4. the seat moves to Starting with a pending binding for the pane. The
+    //    seat's profile follows the CLI that runs its model (T-35).
     let generation = store
-        .write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, &lane.kind, now))
+        .write(|tx| {
+            let generation = gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now)?;
+            tx.set_seat_profile(&seat.id, profile_name)?;
+            Ok(generation)
+        })
         .map_err(|e| format!("begin_onboard: {}", e.detail))?;
 
     // 5. the environment in the pane, then the agent itself.
@@ -306,8 +333,8 @@ fn onboard_seat(
     //    started (T-33, F5): the shared service ignores the start environment,
     //    so the status bar decides here. Waiting keeps the start pending.
     if plan.kind == "opencode" {
-        if let Some(model) = lane_primary(lane, &config.models.lanes) {
-            match crate::switch::ensure_model(store, herdr, seat, profile, config, model, now)
+        if let Some(entry) = lane_primary(lane, &config.models.lanes) {
+            match crate::switch::ensure_model(store, herdr, seat, profile, config, entry.model(), now)
                 .map_err(|e| format!("model check: {}", e.detail))?
             {
                 crate::switch::ModelGate::Ready => {}
@@ -318,10 +345,17 @@ fn onboard_seat(
     }
 
     // 7. the agent is there on the right model: the binding becomes Active and
-    //    so does the seat.
+    //    so does the seat. The model the seat runs on is recorded: the review
+    //    must never run the writer's current model (T-35).
     let session_ref = started.agent_session.as_ref().map(|session| session.value.as_str());
     store
-        .write(|tx| gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now))
+        .write(|tx| {
+            gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
+            if let Some(entry) = lane_primary(lane, &config.models.lanes) {
+                tx.set_meta(&crate::model::model_meta_key(&seat.id), entry.model())?;
+            }
+            Ok(())
+        })
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
     Ok(true)
 }
@@ -381,6 +415,12 @@ fn resume_start(
 /// how long to wait between tries.
 const PANE_BUSY_RETRIES: u32 = 5;
 const PANE_BUSY_WAIT_MS: u64 = 1000;
+
+/// The key of a seat's worktree path in the engine's meta (the seat row has
+/// no field for it).
+pub(crate) fn worktree_path_key(seat: &str) -> String {
+    format!("engine.worktree_path.{seat}")
+}
 
 /// Park a seat in NeedsCheck with the reason. It is never retried
 /// automatically (design/10): a human decides what happens next. The

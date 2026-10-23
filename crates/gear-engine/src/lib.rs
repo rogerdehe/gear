@@ -25,6 +25,7 @@ pub mod onboard;
 pub mod ops;
 pub mod quota;
 pub mod release;
+pub mod restart;
 pub mod review;
 pub mod switch;
 pub mod trust;
