@@ -1,100 +1,86 @@
 # GEAR
 
-GEAR keeps a fleet of AI agents working under one captain: lanes take tasks
-from a living plan, hand in results, and the captain decides. The user looks
-at one thing — the plan.
+GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herdr) under one captain. Lanes (long-lived developer agents) take tasks from a living plan, hand in results, and keep going; reviewers on another model check each hand-in; the engine merges what passes and sends back what does not. The captain re-plans while the work runs; you watch one thing — the plan board.
 
-This repository is GEAR itself: the `gear` command, the engine that runs in
-the background, and the store they share. The design is in `docs/` (the
-product plan is `docs/PRD.md`, the working conventions are
-`docs/design/17-conventions.md`).
+**Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-## Install as a Herdr plugin
+> **Status:** v0.1.0 is being prepared. The prebuilt release (no Rust needed) is published with it — until the v0.1.0 release appears under [Releases](https://github.com/rogerdehe/gear/releases), the steps below do not work yet.
 
-The plugin adds the plan board to Herdr: a pane that shows the plan of the
-project, and a key that opens it. The board is a view, not a process to keep
-open — `q` leaves it.
+## Requirements
 
-### 1. Build the binary
+- Herdr 0.9.1 or later, on macOS (Apple silicon or Intel) or Linux x86_64
+- at least one agent CLI: OpenCode, Codex or Claude Code
+- git; your project in a git repository with an integration branch (e.g. `dev`)
 
-```bash
-cargo build --release
-```
+You do **not** need Rust: the plugin downloads a prebuilt `gear`.
 
-Herdr builds a plugin it *installs* from GitHub, but not one you *link*: for
-a linked plugin the working tree is built by you. The binary lands in
-`target/release/gear`.
-
-### 2. Link the plugin
+## Install
 
 ```bash
-herdr plugin link /path/to/gear
+herdr plugin install rogerdehe/gear
 ```
 
-The plugin id is `herdr-gear`. Check that Herdr sees it:
+Put the `gear` command on PATH (the agents call it by name):
 
 ```bash
-herdr plugin list
-herdr plugin action list --plugin herdr-gear
+export PATH="$(herdr plugin config-dir herdr-gear)/../../github/rogerdehe/gear/bin:$PATH"   # adjust to where Herdr installed the plugin
 ```
 
-### 3. Bind a key
-
-Add this to `~/.config/herdr/config.toml`:
+Bind a key for the plan board in `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
-key = "prefix+b"
+key = "prefix+g"
 type = "plugin_action"
 command = "herdr-gear.open-board"
-description = "open the GEAR board in a split"
-
-[[keys.command]]
-key = "prefix+shift+b"
-type = "plugin_action"
-command = "herdr-gear.open-board-tab"
-description = "open the GEAR board in a tab"
+description = "GEAR plan board"
 ```
 
-Then reload the config and press the key:
+## Start a project
 
-```bash
-herdr server reload-config
-```
+1. **Kickoff** — see what this machine offers and get a config draft:
 
-### 4. Open the board without a key
+   ```bash
+   gear admin kickoff > gear.toml
+   ```
 
-The two actions are the ones the keys are bound to:
+   Edit `gear.toml`: the project, the captain's pane, the lanes (`<project>-<duty>` names, what each owns), the review slots, the models (developers on a fast model, reviewers on a different, stronger one) and what happens when a quota runs out (switch to the next model, or wait for the reset).
 
-```bash
-herdr plugin action invoke herdr-gear.open-board        # a split beside the current work
-herdr plugin action invoke herdr-gear.open-board-tab    # its own tab
-```
+2. **Register it** (in your own shell, not inside an agent):
 
-### 5. Put `gear` on PATH for the agents
+   ```bash
+   GEAR_ADMIN=1 gear admin init gear.toml
+   ```
 
-The agents call `gear` by name, so the plugin's wrapper has to be reachable:
+   The engine starts by itself in the background and brings the lanes up in their own Herdr worktrees.
 
-```bash
-export PATH="/path/to/gear/bin:$PATH"
-```
+3. **Give the captain its instructions** — the captain agent reads the GEAR skill:
 
-(or link `bin/gear` into a directory that is already on PATH). The wrapper
-runs the release binary from any working directory and finds the store:
-`GEAR_DB` when it is set, otherwise `~/.local/state/gear/gear.db`.
+   ```bash
+   gear --skill            # print it; install it as a skill for your captain's CLI
+   ```
 
-## The commands
+4. **Plan** — the captain writes a plan draft and applies it: `gear plan apply plan.md`. Lanes start working at once.
+
+## Day to day
+
+- `prefix+g` opens the plan board; `q` closes it.
+- The captain is rung when something needs it; it runs `gear`, answers with `gear reply`, and changes the plan with `gear plan apply`.
+- Reviews, verdicts and merges run by themselves.
+- Stop the engine (upgrade, uninstall): `gear admin stop`. Any later `gear` call starts it again.
+- Something wrong? Read `engine.log` next to the store (`~/.local/state/gear/` by default).
+
+## Commands
 
 | Command | Who | What it does |
 |---|---|---|
-| `gear` | every seat | the home page: what waits for you, what you have not seen |
-| `gear send` | lanes, the captain | report progress, a question, a block, a result |
-| `gear reply` | the captain | answer exact message ids |
-| `gear plan apply` | the captain | apply a plan draft |
-| `gear board` | the user | the plan, full screen; `q` leaves it |
-| `gear run` | the user | the engine in the foreground (normally started for you) |
-| `gear admin …` | the user | project, seat and captain administration |
+| `gear` | everyone | your home page: what waits for you |
+| `gear send` | lanes, captain | report progress, a question, a block, a result |
+| `gear reply` | captain | answer messages |
+| `gear plan apply` | captain | apply a plan draft |
+| `gear board` | you | the plan, full screen |
+| `gear admin kickoff / init / stop` | you | set up, register, stop |
 
-Every `gear` call starts the engine in the background when it is not running
-already, so nobody has to watch it. The engine writes `engine.log` next to
-the database.
+## Developing GEAR
+
+GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The product plan is `docs/PRD.md`; the working conventions are `docs/design/17-conventions.md`.
