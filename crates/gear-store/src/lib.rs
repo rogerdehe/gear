@@ -576,6 +576,32 @@ impl<'s> Tx<'s> {
         rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
     }
 
+    /// Replace the mutable fields of a registered project (raw write): the
+    /// config text, its version and the quotas. `id` and `created` stay.
+    /// Missing → NoTarget.
+    pub fn update_project(&self, row: &ProjectRow) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE projects
+                 SET herdr_session=?2, config_toml=?3, config_version=?4, quota_lanes=?5,
+                     quota_temps=?6, quota_includes_captain=?7, plan_version=?8
+                 WHERE id=?1",
+                params![
+                    row.id,
+                    row.herdr_session,
+                    row.config_toml,
+                    row.config_version,
+                    row.quota_lanes,
+                    row.quota_temps,
+                    row.quota_includes_captain as i64,
+                    row.plan_version,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "project", &row.id)
+    }
+
     pub fn get_project(&self, id: &str) -> GearResult<Option<ProjectRow>> {
         let row: Option<ProjectRow> = self
             .tx
@@ -676,6 +702,19 @@ impl<'s> Tx<'s> {
             .execute(
                 "UPDATE seats SET generation=?2 WHERE id=?1",
                 params![seat_id, generation],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "seat", seat_id)
+    }
+
+    /// The profile a seat is observed and onboarded with (the project config
+    /// owns it). Raw write: the caller checks the seat.
+    pub fn set_seat_profile(&self, seat_id: &str, profile: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE seats SET profile=?2 WHERE id=?1",
+                params![seat_id, profile],
             )
             .map_err(map_sqlite)?;
         require_written(changed, "seat", seat_id)
@@ -1394,13 +1433,16 @@ impl<'s> Tx<'s> {
     /// The seat's non-terminal attempts — in progress plus Submitted
     /// (Delivered/Started/Stopped/Unknown/Submitted) — ordered by (task, n).
     /// The engine's lane view (design/09) reads the current attempt from here.
+    /// The seat's open attempts, the one being worked on first: handed-in
+    /// (Submitted) attempts wait for review in the background and come last
+    /// (never-stop, L-45).
     pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
         let mut stmt = self
             .tx
             .prepare(&attempt_select(
                 " WHERE seat=?1
                    AND state IN ('delivered', 'started', 'stopped', 'unknown', 'submitted')
-                 ORDER BY task, n",
+                 ORDER BY state = 'submitted', task, n",
             ))
             .map_err(map_sqlite)?;
         let rows = stmt
