@@ -73,6 +73,10 @@ pub fn start_reviews(
         return Ok(report);
     }
 
+    // A reviewer that the old activation/delivery pair could leave without its
+    // packet gets it before anything else is started.
+    report.started.extend(recover_missing_packets(store, project, &config, now)?);
+
     for task in tasks_to_review(store, project)? {
         // 1. the reviewer seat: created once and bound to the task for life.
         let seat = match temp_seat_of(store, project, &task.task)? {
@@ -370,45 +374,60 @@ fn start_reviewer(
             args.extend(start.args);
         }
     }
-    let started = match herdr.agent_start(&label, &kind, &pane, &args) {
-        Outcome::Ok(info) => info,
-        Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
-            // The shell of a fresh worktree is still starting: the next tick
-            // tries again (the seat keeps its binding).
+    // The pane may already hold this reviewer: an engine restart can cut the
+    // start between Herdr accepting it and the seat being marked Active (the
+    // captain restarts the engine on every merge, so this is the common case,
+    // not an exotic one). Adopt that agent — a second `agent start` would be
+    // refused and the live reviewer would be parked without its job.
+    let already = match herdr.agent_get(&pane) {
+        Ok(Some(info)) if info.agent.as_deref() == Some(kind.as_str()) => Some(info),
+        Ok(Some(_)) => {
+            // Another agent is in the pane: do not start, and never take the
+            // pane from it. A human decides.
+            park(
+                store,
+                &seat.id,
+                "the reviewer's pane is held by another agent",
+                now,
+            )?;
             return Ok(Started::NotYet);
         }
-        other => {
-            park(store, &seat.id, &step_failure("agent_start", &other), now)?;
+        Ok(None) => None,
+        Err(error) => {
+            // The pane could not be looked at: never start on a guess.
+            park(
+                store,
+                &seat.id,
+                &format!("agent_get: {}", error.0),
+                now,
+            )?;
             return Ok(Started::NotYet);
         }
     };
+    let started = match already {
+        // The start was accepted before the restart: adopt it.
+        Some(info) => info,
+        None => match herdr.agent_start(&label, &kind, &pane, &args) {
+            Outcome::Ok(info) => info,
+            Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+                // The shell of a fresh worktree is still starting: the next
+                // tick tries again (the seat keeps its binding).
+                return Ok(Started::NotYet);
+            }
+            other => {
+                park(store, &seat.id, &step_failure("agent_start", &other), now)?;
+                return Ok(Started::NotYet);
+            }
+        },
+    };
 
-    // 5. the seat is up.
+    // 5. the seat is up and has its packet: one transaction. A crash between
+    //    the two would leave a live reviewer that every later tick skips (an
+    //    Active temp is not started again) and that never gets a job.
     let session_ref = started.agent_session.as_ref().map(|session| session.value.as_str());
-    store
-        .write(|tx| gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now))
-        .map_err(|e| GearError::new(e.code, format!("finish_onboard: {}", e.detail)))?;
-
-    // 6. the review packet.
-    let (goal, accept) = store.read(|tx| {
-        let attempt = tx.get_attempt(&config.project.id, &task.task, task.attempt)?;
-        let version = attempt.map(|attempt| attempt.adopted_version).unwrap_or(1);
-        let contract = tx.get_contract(&config.project.id, &task.task, version)?;
-        Ok(match contract {
-            Some(contract) => (contract.goal, contract.accept),
-            None => (String::new(), String::new()),
-        })
-    })?;
-    let packet = review_packet(
-        &task.task,
-        task.attempt,
-        &goal,
-        &accept,
-        &task.candidate,
-        &config.conventions.integration,
-        &branch,
-    );
+    let packet = review_packet_for(store, config, &task.task, task.attempt, &task.candidate)?;
     store.write(|tx| {
+        gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.insert_op(&NewOp {
             project: config.project.id.clone(),
             seat: seat.id.clone(),
@@ -422,8 +441,97 @@ fn start_reviewer(
             created: now,
         })?;
         Ok(())
-    })?;
+    })
+    .map_err(|e| GearError::new(e.code, format!("finish_onboard: {}", e.detail)))?;
     Ok(Started::Yes)
+}
+
+/// The review packet of an attempt: the contract's goal and accept, the
+/// candidate, the diff range, the rules and the verdict command.
+fn review_packet_for(
+    store: &mut Store,
+    config: &ProjectConfig,
+    task: &str,
+    attempt: i64,
+    candidate: &str,
+) -> GearResult<String> {
+    let (goal, accept) = store.read(|tx| {
+        let version = tx
+            .get_attempt(&config.project.id, task, attempt)?
+            .map(|row| row.adopted_version)
+            .unwrap_or(1);
+        match tx.get_contract(&config.project.id, task, version)? {
+            Some(contract) => Ok((contract.goal, contract.accept)),
+            None => Ok((String::new(), String::new())),
+        }
+    })?;
+    Ok(review_packet(
+        task,
+        attempt,
+        &goal,
+        &accept,
+        candidate,
+        &config.conventions.integration,
+        &review_branch(task),
+    ))
+}
+
+/// Reviewers that are up but never got their packet — the state an engine
+/// restart could leave behind before the activation and the delivery were one
+/// transaction. Each one gets its packet here, once: the absence of any
+/// Deliver op for that seat is the guard, so the next tick adds nothing.
+fn recover_missing_packets(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut recovered = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Active {
+            continue;
+        }
+        let Some(task) = seat.task_id.clone() else {
+            continue;
+        };
+        if store
+            .read(|tx| tx.last_op(&seat.id, OpKind::Deliver))?
+            .is_some()
+        {
+            // It has its packet, or it is sending it.
+            continue;
+        }
+        let Some(attempt) = store
+            .read(|tx| tx.attempts_of_task(project, &task))?
+            .into_iter()
+            .last()
+        else {
+            continue;
+        };
+        let Some(candidate) = attempt.candidate.clone() else {
+            continue;
+        };
+        let packet = review_packet_for(store, config, &task, attempt.n, &candidate)?;
+        let generation = seat.generation;
+        store.write(|tx| {
+            tx.insert_op(&NewOp {
+                project: project.to_string(),
+                seat: seat.id.clone(),
+                generation,
+                kind: OpKind::Deliver,
+                task: Some(task.clone()),
+                attempt: Some(attempt.n),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": packet }),
+                created: now,
+            })?;
+            Ok(())
+        })?;
+        recovered.push(seat.id.clone());
+    }
+    Ok(recovered)
 }
 
 /// The review branch of a task: `review/t<n>` (conventions 17 §3: the
@@ -953,5 +1061,114 @@ review = ["gpt-6.1-sol"]
         assert!(worktrees(&herdr).is_empty(), "no second worktree");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
+    }
+
+    #[test]
+    fn an_accepted_start_is_adopted_not_repeated() {
+        // P1 #1 of the review: an engine restart can cut the start between
+        // Herdr accepting it and the seat going Active. The pane then holds a
+        // live reviewer with a Pending binding; the tick must adopt it, never
+        // start a second one (a second start is refused and would park a live
+        // reviewer without its job).
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let pane = "wt1:p1";
+        herdr.add_shell(pane);
+        // Herdr accepted the start: the codex agent is in the pane.
+        herdr.add_agent(pane, "codex", gear_herdr::AgentStatus::Idle);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:r-1".into(),
+                    project: "p".into(),
+                    role: SeatRole::Temp,
+                    name: "r-1".into(),
+                    profile: "codex".into(),
+                    generation: 1,
+                    state: SeatState::Starting,
+                    state_since: T0,
+                    state_reason: Some("onboarding".into()),
+                    task_id: Some("T-1".into()),
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:r-1".into(),
+                    generation: 1,
+                    session: "sess".into(),
+                    pane_id: pane.into(),
+                    kind: "codex".into(),
+                    session_ref: Some("ses_reviewer".into()),
+                    status: BindingStatus::Pending,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
+
+        assert_eq!(report.reviewers, vec!["p:r-1".to_string()]);
+        // No second start: the agent that was already there is adopted.
+        assert!(starts(&herdr).is_empty(), "no second agent_start: {:?}", starts(&herdr));
+        assert!(worktrees(&herdr).is_empty(), "the worktree was already made");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active);
+        // … and it got its packet (the tick executes the delivery).
+        let prompts = herdr.prompts_to(pane);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert!(prompts[0].starts_with("Review T-1 attempt 1."), "{}", prompts[0]);
+        let in_flight = store.read(|tx| tx.slot_ops("p:r-1")).unwrap();
+        assert_eq!(in_flight.len(), 1, "{in_flight:?}");
+    }
+
+    #[test]
+    fn a_live_reviewer_without_its_packet_gets_it_on_the_next_tick() {
+        // P1 #2 of the review: before activation and the delivery were one
+        // transaction, a restart could leave an Active reviewer with no
+        // packet — and an Active temp is never started again, so it would sit
+        // in the slot forever. The next tick gives it the packet once.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let pane = "wt1:p1";
+        herdr.add_agent(pane, "codex", gear_herdr::AgentStatus::Idle);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "p:r-1".into(),
+                    project: "p".into(),
+                    role: SeatRole::Temp,
+                    name: "r-1".into(),
+                    profile: "codex".into(),
+                    generation: 1,
+                    state: SeatState::Active,
+                    state_since: T0,
+                    state_reason: Some("onboarded".into()),
+                    task_id: Some("T-1".into()),
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:r-1".into(),
+                    generation: 1,
+                    session: "sess".into(),
+                    pane_id: pane.into(),
+                    kind: "codex".into(),
+                    session_ref: Some("ses_reviewer".into()),
+                    status: BindingStatus::Active,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
+        assert_eq!(report.reviewers, vec!["p:r-1".to_string()]);
+        // One packet reached the live reviewer, and it was not started again.
+        assert_eq!(herdr.prompts_to(pane).len(), 1, "{:?}", herdr.prompts_to(pane));
+        assert!(starts(&herdr).is_empty());
+
+        // The next tick adds nothing: the packet is the guard.
+        let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 20).unwrap();
+        assert!(report.reviewers.is_empty(), "{:?}", report.reviewers);
+        assert_eq!(herdr.prompts_to(pane).len(), 1);
     }
 }

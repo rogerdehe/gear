@@ -284,8 +284,19 @@ pub fn confirm_pending(
                         state.as_str(),
                         "confirmed",
                     )?;
-                    // design/08: confirm(op, evidence) — keep the pointer.
-                    let evidence = format!("view {}/{} @ {view_ts}", op.seat, op.generation);
+                    // design/08: confirm(op, evidence) — keep the pointer. A
+                    // review delivery is settled by a verdict row, not by a
+                    // view: say so, so the stored explanation can be traced
+                    // (P3 of the T-5 review).
+                    let evidence = if op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)? {
+                        format!(
+                            "verdict {} attempt {} @ {view_ts}",
+                            op.task.as_deref().unwrap_or("-"),
+                            op.attempt.unwrap_or(0)
+                        )
+                    } else {
+                        format!("view {}/{} @ {view_ts}", op.seat, op.generation)
+                    };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
                     if op.kind == OpKind::Deliver {
                         // Design/06: the confirmed delivery starts the attempt.
