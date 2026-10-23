@@ -23,7 +23,7 @@ Everything here is for the binary you are running. `gear --skill <topic>` prints
    | **STRICT** | e.g. finance | severe issues must be fixed, medium ones are the captain's call | more rounds, each approved by the captain; the higher time and cost are accepted up front |
 
    The bar is agreed at kickoff and never raised mid-voyage.
-3. **Write the config** (TOML) and register the project:
+3. **Write the config** (TOML) at `gear/gear.toml` in the project repo, and register it:
 
    ```toml
    [project]
@@ -63,23 +63,38 @@ Everything here is for the binary you are running. `gear --skill <topic>` prints
    ```
 
    ```bash
-   GEAR_ADMIN=1 gear admin init config.toml
+   GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
    `init` registers the project and its seats; the engine then onboards the lanes (worktree, branch, first delivery). It is a **user** command: the user's own shell runs it, never an agent. `init` refuses a config with a lane without a duty or paths, with two lanes owning the same path, or with a review model that is also a lane's primary — every issue is listed at once.
 4. **After the kickoff, no popups.** Everything else is decided by the plan and the milestone. Ask the user only what is theirs: a release to `main`, money, scope, destructive acts on things you did not create.
 
-## 2. The plan draft
+## 2. The plan file
 
-The plan is the only way the board changes. You write a draft file and apply it:
+The plan is the only way the board changes, and there is **one plan file per voyage**, edited in place:
 
-```bash
-gear plan apply plan-v1.md
+```
+gear/gear.toml               # the project config (section 1)
+gear/voyages/<milestone>.md  # the voyage's plan, e.g. gear/voyages/M1.md
 ```
 
-The format is strict: one unknown section, field or value rejects the whole draft (`BAD_FORMAT`, with the line number) and nothing is written.
+You edit `gear/voyages/M1.md` and apply it:
 
-### A complete first plan (it applies on a fresh project)
+```bash
+gear plan apply gear/voyages/M1.md
+```
+
+After a successful apply GEAR rewrites that same file (a temp file, then a rename), so it stays the current plan:
+
+- the header's `base=` becomes the version just applied;
+- every `## NEW` block header becomes `## T-<id>` with the id the apply gave it, in order;
+- the `# Verdicts` section is removed — verdicts live in the store, so a re-applied file settles nothing.
+
+Re-applying the rewritten file is a no-op for tasks and contracts: it only starts the next plan version. Everything else in the file stays as you wrote it. When a voyage lands, keep its file as the voyage's record and never edit it again; the next voyage gets its own `gear/voyages/<milestone>.md`.
+
+The format is strict: one unknown section, field or value rejects the whole draft (`BAD_FORMAT`, with the line number) and nothing is written — the file is left untouched.
+
+### A complete first plan (`gear/voyages/M1.md`, it applies on a fresh project)
 
 ```markdown
 <!-- gear-plan project=acme base=0 -->
