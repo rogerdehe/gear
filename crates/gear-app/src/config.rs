@@ -424,6 +424,24 @@ pub fn profile_table(
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
+    // ---- quota policy: a fallback needs a next model (L-74). A one-model
+    // chain with `fallback` is really "park for quota_reset_h hours" — say so
+    // at kickoff instead of finding out when every lane stops.
+    for (field, chain, policy) in [
+        ("models.lanes", &cfg.models.lanes, &cfg.models.on_quota.lanes),
+        ("models.review", &cfg.models.review, &cfg.models.on_quota.review),
+    ] {
+        if *policy == QuotaPolicy::Fallback && chain.len() == 1 {
+            issues.push(issue(
+                field,
+                format!(
+                    "on_quota is \"fallback\" but {field} has no next model: a quota stop would park for {}h. Add a fallback model, or set on_quota to \"wait\"",
+                    cfg.models.quota_reset_h
+                ),
+            ));
+        }
+    }
+
     // ---- project
     if !is_name(&cfg.project.id) {
         issues.push(issue(
