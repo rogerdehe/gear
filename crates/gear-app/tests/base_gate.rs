@@ -75,6 +75,8 @@ impl Drop for Scratch {
 /// A bare origin with two commits on `dev`, and a clone for the lane.
 struct Repos {
     _root: Scratch,
+    /// The repo that pushes to the bare origin (the "captain's" side).
+    seed: PathBuf,
     lane: PathBuf,
     /// The commit before the current `origin/dev` tip.
     older: String,
@@ -85,6 +87,8 @@ fn repos() -> Repos {
     let origin = root.path.join("origin.git");
     std::fs::create_dir(&origin).unwrap();
     git(&origin, &["init", "-q", "--bare", "--initial-branch=dev"]);
+    // Let a test delete dev on the remote (the bare clone's HEAD would forbid it).
+    git(&origin, &["config", "receive.denyDeleteCurrent", "ignore"]);
 
     let seed = root.path.join("seed");
     std::fs::create_dir(&seed).unwrap();
@@ -96,7 +100,7 @@ fn repos() -> Repos {
 
     let lane = root.path.join("lane");
     git(&root.path, &["clone", "-q", origin.to_str().unwrap(), lane.to_str().unwrap()]);
-    Repos { _root: root, lane, older }
+    Repos { _root: root, seed, lane, older }
 }
 
 impl Repos {
@@ -104,6 +108,13 @@ impl Repos {
     fn candidate(&self, branch: &str, from: &str, text: &str) -> String {
         git(&self.lane, &["switch", "-q", "-c", branch, from]);
         commit(&self.lane, &format!("{}.txt", branch.replace('/', "-")), text)
+    }
+
+    /// Advance `dev` on the remote (a commit pushed from the seed clone).
+    fn advance_dev(&self, text: &str) {
+        git(&self.seed, &["switch", "-q", "dev"]);
+        commit(&self.seed, &format!("{}.txt", text.replace(' ', "-")), text);
+        git(&self.seed, &["push", "-q", "origin", "dev"]);
     }
 }
 
@@ -124,11 +135,10 @@ fn a_candidate_behind_the_integration_branch_is_refused() {
     let err = require_current_base(&r.lane, "dev", &stale).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
-        err.detail.contains("merge dev into your branch, build, then hand in again"),
+        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
         "{}",
         err.detail
     );
-    assert!(err.detail.contains("origin/dev"), "{}", err.detail);
 }
 
 #[test]
@@ -138,7 +148,13 @@ fn a_failing_fetch_is_refused_not_ignored() {
     git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
     let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("cannot fetch origin"), "{}", err.detail);
+    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+    // The reason, not only git's boilerplate last line (review F4).
+    assert!(
+        err.detail.contains("nowhere.git") || err.detail.contains("does not appear to be a git repository"),
+        "{}",
+        err.detail
+    );
 }
 
 #[test]
@@ -253,4 +269,66 @@ fn a_current_candidate_is_accepted() {
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate.as_deref()), (AttemptState::Submitted, Some(current.as_str())));
     assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------- R1 fixes
+
+/// F1: a lane clone whose `remote.origin.fetch` is restricted to another branch
+/// fetches `origin/dev` explicitly, so a stale candidate cannot pass.
+#[test]
+fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
+    let r = repos();
+    // The candidate is based on the dev the lane has cached.
+    let cached = git(&r.lane, &["rev-parse", "origin/dev"]);
+    let stale = r.candidate("data/stale", &cached, "old work");
+    // The remote advances on dev and carries another branch the lane fetches.
+    r.advance_dev("new work");
+    git(&r.seed, &["push", "-q", "origin", "dev:other"]);
+    git(
+        &r.lane,
+        &["config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"],
+    );
+
+    let err = require_current_base(&r.lane, "dev", &stale).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("merge origin/dev into your branch"), "{}", err.detail);
+}
+
+/// F1: a deleted remote integration branch is refused, not verified against a
+/// cached ref.
+#[test]
+fn a_deleted_remote_integration_branch_is_refused() {
+    let r = repos();
+    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    git(&r.seed, &["push", "-q", "origin", "--delete", "dev"]);
+
+    let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
+}
+
+/// F2: a committed request replays its receipt even when the remote is now
+/// unreachable; the attempt and the message stay exactly as they were.
+#[test]
+fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
+    let r = repos();
+    let current = r.candidate("data/t19", "origin/dev", "my work");
+    let mut s = world();
+    let (env, fp) = lane();
+    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+
+    let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
+    assert!(!first.replayed);
+
+    // The remote goes away; the identical request (same id) must still replay.
+    git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
+    let again = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 6).unwrap();
+    assert!(again.replayed, "{again:?}");
+    assert_eq!(again.msg_id, first.msg_id);
+    assert_eq!(again.thread, first.thread);
+
+    // Nothing was stored twice, and the attempt is still the one submitted.
+    assert_eq!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 7)).unwrap().len(), 1);
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Submitted);
 }
