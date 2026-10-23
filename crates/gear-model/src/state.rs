@@ -70,7 +70,7 @@ string_enum!(MsgState { Open => "open", Waiting => "waiting", Resolved => "resol
 string_enum!(OpKind {
     Onboard => "onboard", Deliver => "deliver", Doorbell => "doorbell",
     Release => "release", Title => "title", Notify => "notify",
-    // integrating a passed task into the integration branch (T-12)
+    // Merge a passed task's branches into the integration branch (T-12/T-13).
     Merge => "merge",
 });
 

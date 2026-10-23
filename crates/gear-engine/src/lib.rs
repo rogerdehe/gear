@@ -22,6 +22,7 @@ pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod release;
 pub mod review;
 
 use gear_herdr::HerdrAct;
@@ -64,8 +65,16 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// `project:task/attempt` of the review verdicts that settled a task this
+    /// tick (T-13).
+    pub settled: Vec<String>,
+    /// `project:task/attempt: CODE: detail` of the review verdicts whose
+    /// settlement failed this tick. Reported, never fatal (review R-67).
+    pub settle_failed: Vec<String>,
     /// Reviewer seats started this tick (a lane handed a result in).
     pub reviewers: Vec<String>,
+    /// Reviewer seats released this tick (their task left review).
+    pub released: Vec<String>,
     /// Tasks merged into the integration branch this tick (`task @ branch`).
     pub merged: Vec<String>,
 }
@@ -77,6 +86,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
     report.onboarded = onboard::onboard_queued(store, herdr, cfg, now)?;
+
+    // 0b. settle: a review verdict that arrived settles its task without the
+    //     captain (T-13) — before the dispatch below, so a pass frees the
+    //     task's dependants and a fail puts the rework at the head of the
+    //     lane's queue in this same tick. It needs no Herdr, so it runs even
+    //     when the observation fails.
+    let (settled, settle_failed) = settle_reviews(store, now)?;
+    report.settled = settled;
+    report.settle_failed = settle_failed;
 
     let projects = store.read(|tx| tx.project_ids())?;
 
@@ -130,6 +148,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
 
+        // 6c. release: a reviewer whose task left review frees its slot (T-17).
+        let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
+        report.released.extend(releases.released);
+
         // 6b. merge: a passed task goes into the integration branch, after the
         //     gate and before the branches are closed (T-12).
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
@@ -140,6 +162,31 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)
+}
+
+/// Settle every review verdict whose attempt is still handed in (T-13), in
+/// every project. One `settle_review` call per verdict; a verdict that already
+/// settled its attempt, or whose task is finished, is not listed.
+///
+/// A settlement that fails is reported with its verdict (`settle_failed`) and
+/// does **not** abort the tick: one obsolete or malformed review must never
+/// stop the dispatch of unrelated work (review R-67, P1).
+fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<String>)> {
+    let mut settled = Vec::new();
+    let mut failed = Vec::new();
+    for project in store.read(|tx| tx.project_ids())? {
+        for review in store.read(|tx| tx.reviews_to_settle(&project))? {
+            let label = format!("{project}:{}/{}", review.task, review.attempt);
+            match store.write(|tx| {
+                gear_app::tasks::settle_review(tx, &project, &review.task, review.attempt, now)
+            }) {
+                Ok(()) => settled.push(label),
+                // Logged in the tick report; the rest of the tick goes on.
+                Err(e) => failed.push(format!("{label}: {}: {}", e.code, e.detail)),
+            }
+        }
+    }
+    Ok((settled, failed))
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
