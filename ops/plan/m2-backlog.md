@@ -5,3 +5,5 @@
 - T-12 review: failed-merge retry/duplicate items, remote cleanup errors, Unknown merge ops of cancelled tasks, Executing before the gate.
 - T-17 review: R2 slot freed one tick late, R3 exit keys repeated after a restart.
 - Deletion pass after M1 (old manual scripts and ledger, Python-era design docs, duplicate notes, dead code).
+- T-13 review R2-1: a review item the captain deferred (Waiting) survives settlement.
+- T-7 review R1 (lane runs dry again: alert waits for the 10-minute window), R2 (deferring an alert creates another item).
