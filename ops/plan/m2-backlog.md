@@ -44,3 +44,4 @@
 - Static lane binding: a ready task waits behind its lane's current task while another lane is idle (T-23 behind T-33). The engine could offer such a task to an idle lane that may own its paths.
 - T-23 review F3 (escalation repeats its info every tick), F4 (blocking ids not part of a verdict's identity): logged.
 - T-32 review R7: concurrent trust registrations of the same path append duplicate tables; exit_command in the grok profile has no caller (remove or use).
+- v0.1.0 install test: `gear admin kickoff` skeleton header still says `GEAR_DB=… gear admin init gear.toml` (should be `gear admin init gear/gear.toml`, no GEAR_DB); `gear --version` is missing. Not tested: `herdr plugin install rogerdehe/gear` itself (this machine links the checkout) and a live first engine start for a new project.
