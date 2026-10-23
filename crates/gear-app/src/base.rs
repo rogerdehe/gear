@@ -52,11 +52,17 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
 /// before its transaction, so a stale hand-in stores nothing at all.
 pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str) -> GearResult<()> {
     let where_ = worktree.display();
-    // 1. the fetch: without it the comparison would be against a stale ref.
+    // 1. the fetch: the configured source explicitly, into its own tracking ref.
+    //    A plain `git fetch origin` follows `remote.origin.fetch`, which a lane's
+    //    clone may restrict to another branch — the fetch would succeed and leave
+    //    `origin/<integration>` stale (review F1). A remote branch that does not
+    //    exist makes this fetch fail, and the hand-in is refused.
+    let reference = format!("refs/remotes/origin/{integration}");
+    let refspec = format!("+refs/heads/{integration}:{reference}");
     let fetched = Command::new("git")
         .arg("-C")
         .arg(worktree)
-        .args(["fetch", "--quiet", "origin"])
+        .args(["fetch", "--quiet", "origin", &refspec])
         .output();
     match fetched {
         Ok(out) if out.status.success() => {}
@@ -64,8 +70,8 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
-                    "cannot fetch origin in {where_}, so the hand-in cannot be checked: {}",
-                    tail(&out.stderr)
+                    "cannot fetch origin/{integration} in {where_}, so the hand-in cannot be checked: {}",
+                    excerpt(&out.stderr)
                 ),
             ))
         }
@@ -77,8 +83,8 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
         }
     }
 
-    // 2. the candidate must contain the integration branch as origin has it.
-    let reference = format!("origin/{integration}");
+    // 2. the candidate must contain the refreshed integration branch.
+    let short = format!("origin/{integration}");
     let checked = Command::new("git")
         .arg("-C")
         .arg(worktree)
@@ -87,19 +93,20 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
     match checked {
         // 0: the reference is an ancestor of the candidate — current.
         Ok(out) if out.status.success() => Ok(()),
-        // 1: it is not — the hand-in is stale.
+        // 1: it is not — the hand-in is stale. The instruction names the remote
+        //    ref: a lane's local branch may lag behind the fetch (review F3).
         Ok(out) if out.status.code() == Some(1) => Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "{candidate} does not contain the current {reference}: merge {integration} into your branch, build, then hand in again"
+                "{candidate} does not contain the current {short}: merge {short} into your branch, build, then hand in again"
             ),
         )),
         // Anything else (unknown revision, not a repository, …): unverifiable.
         Ok(out) => Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "cannot check {candidate} against {reference} in {where_}: {}",
-                tail(&out.stderr)
+                "cannot check {candidate} against {short} in {where_}: {}",
+                excerpt(&out.stderr)
             ),
         )),
         Err(e) => Err(GearError::new(
@@ -109,12 +116,32 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
     }
 }
 
-/// The last non-empty line of a command's stderr, for a short detail.
-fn tail(stderr: &[u8]) -> String {
+/// A bounded excerpt of a command's stderr: the `fatal:`/`error:` lines (the
+/// reason), else the last lines — never only the boilerplate last sentence
+/// (review F4). At most four lines, at most ~400 characters.
+fn excerpt(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
-    text.lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .map(|line| line.trim().to_string())
-        .unwrap_or_else(|| "no output".to_string())
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut picked: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("fatal:") || line.starts_with("error:"))
+        .collect();
+    if picked.is_empty() {
+        picked = lines.iter().rev().take(2).copied().collect::<Vec<_>>();
+        picked.reverse();
+    }
+    picked.truncate(4);
+    let joined = picked.join(" / ");
+    if joined.is_empty() {
+        "no output".to_string()
+    } else if joined.len() > 400 {
+        format!("{}…", &joined[..400])
+    } else {
+        joined
+    }
 }

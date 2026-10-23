@@ -75,6 +75,30 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
+    // A request that already committed replays its receipt before the hand-in
+    // gate: the hand-in happened, only the receipt was lost, and an outage
+    // must not report it as failed (T-19 review F2). An identical args key is
+    // the same seat and generation with the same arguments (design/13).
+    if let Some(ctx) = &env.ctx {
+        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
+        if let Some((stored_hash, stored)) = store.read(|tx| tx.get_request(&args.request_id))? {
+            if stored_hash == gear_store::args_hash(&key) {
+                let value: serde_json::Value =
+                    serde_json::from_str(&stored).map_err(|e| {
+                        GearError::new(
+                            ErrorCode::BadFormat,
+                            format!("stored send result for {} is broken: {e}", args.request_id),
+                        )
+                    })?;
+                return Ok(SendResult {
+                    msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
+                    thread: value["thread"].as_str().unwrap_or_default().to_string(),
+                    recipient: value["recipient"].as_str().unwrap_or_default().to_string(),
+                    replayed: true,
+                });
+            }
+        }
+    }
     // The hand-in gate (T-19) runs before the transaction: a candidate that
     // does not contain the current integration branch is refused and nothing —
     // no message, no attempt change — is stored.
@@ -228,23 +252,7 @@ pub fn send(
             None => args.body.clone(),
         };
 
-        let args_key = format!(
-            "{}|{}:{}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
-            ctx.project,
-            ctx.seat,
-            ctx.generation,
-            args.kind.as_str(),
-            args.body,
-            args.task,
-            args.attempt,
-            args.contract,
-            args.candidate,
-            args.verdict.map(|verdict| verdict.as_str()),
-            args.about,
-            args.to,
-            args.reply_to,
-            args.urgent
-        );
+        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
             // A result submits the attempt before the message is stored; an
@@ -320,6 +328,26 @@ pub fn send(
         let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
         Ok(SendResult { msg_id, thread, recipient, replayed })
     })
+}
+
+/// The args key of a send: the same seat and generation with the same
+/// arguments is the same request (design/13), whether it is checked before the
+/// transaction (to replay a committed receipt) or inside it.
+fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
+    format!(
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+        args.kind.as_str(),
+        args.body,
+        args.task,
+        args.attempt,
+        args.contract,
+        args.candidate,
+        args.verdict.map(|verdict| verdict.as_str()),
+        args.about,
+        args.to,
+        args.reply_to,
+        args.urgent
+    )
 }
 
 /// The next unused sequence number of a thread with this prefix.
