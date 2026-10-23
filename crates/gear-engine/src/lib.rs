@@ -21,6 +21,7 @@ pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod release;
 pub mod review;
 
 use gear_herdr::HerdrAct;
@@ -65,6 +66,8 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Reviewer seats started this tick (a lane handed a result in).
     pub reviewers: Vec<String>,
+    /// Reviewer seats released this tick (their task left review).
+    pub released: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -126,6 +129,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
         report.reviewers.extend(reviews.started);
+
+        // 6c. release: a reviewer whose task left review frees its slot (T-17).
+        let releases = release::release_finished_reviews(store, herdr, cfg, &project, now)?;
+        report.released.extend(releases.released);
 
         // 7. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
