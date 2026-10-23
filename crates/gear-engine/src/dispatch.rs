@@ -319,6 +319,9 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
         let obs = observed.iter().find(|o| o.seat.id == seat.id).cloned();
         let view = lane_view(tx, &seat, obs, now)?;
         let action = decide(&view, cfg, now);
+        let action = if matches!(action, Action::Assign { .. }) && tx.captain_quota_paused(project)? {
+            none("captain quota: current tasks may finish; new tasks are paused")
+        } else { action };
         decisions.push((seat, action));
     }
     Ok(decisions)
@@ -335,6 +338,7 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
     for (seat, action) in actions {
         match action {
             Action::Assign { task } => {
+                if tx.captain_quota_paused(project)? { continue; }
                 // The attempt exists before the delivery that announces it.
                 let attempt =
                     gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?;

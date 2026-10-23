@@ -10,6 +10,7 @@ gear-store = { workspace = true }
 gear-herdr = { workspace = true }
 gear-app = { workspace = true }
 serde_json = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

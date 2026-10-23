@@ -104,6 +104,7 @@ pub struct ProjectBoard {
     /// The same voyage measurements shown first on the captain home page.
     pub voyages: Vec<voyage::VoyageReport>,
     pub project: String,
+    pub captain_quota: Option<CaptainQuotaBoard>,
     pub totals: Totals,
     /// The lanes that have work, in seat order; a lane a task names but no
     /// seat carries comes last.
@@ -118,6 +119,14 @@ pub struct ProjectBoard {
     /// page shows them, because a delivery that is not confirmed is a lane
     /// that may not have started.
     pub unconfirmed_deliveries: usize,
+}
+
+/// A captain quota pause, as shown to the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptainQuotaBoard {
+    pub reset_at: Ts,
+    pub remaining_s: i64,
+    pub awaiting_view: bool,
 }
 
 /// The counts of the whole plan.
@@ -372,6 +381,10 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
     Ok(ProjectBoard {
         voyages: voyage::reports(tx, project, now)?,
         project: project.to_string(),
+        captain_quota: tx.captain_quota(project)?.filter(|state| !state.resumed).map(|state| CaptainQuotaBoard {
+            reset_at: state.reset_at, remaining_s: (state.reset_at - now).max(0),
+            awaiting_view: state.wake_op.is_some(),
+        }),
         totals,
         lanes,
         deps,
@@ -426,6 +439,16 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
         voyage_lines.push(String::new());
         voyage_lines.append(&mut lines);
         lines = voyage_lines;
+    }
+    if let Some(quota) = &project.captain_quota {
+        let status = if quota.awaiting_view {
+            "quota back — waiting for the captain to run gear".to_string()
+        } else if quota.remaining_s == 0 {
+            "reset reached — waiting to wake the captain".to_string()
+        } else {
+            format!("out — reset in {} min", (quota.remaining_s + 59) / 60)
+        };
+        lines.push(format!("Captain quota: {status}; new tasks paused, current work/reviews/merges continue"));
     }
     match view {
         View::Lanes => {
@@ -574,6 +597,10 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "waits": node.waits,
                     "depth": node.depth,
                 })).collect::<Vec<_>>(),
+                "captain_quota": project.captain_quota.as_ref().map(|quota| serde_json::json!({
+                    "reset_at": quota.reset_at, "remaining_s": quota.remaining_s,
+                    "awaiting_view": quota.awaiting_view,
+                })),
                 "captain_waiting": {
                     "count": project.waiting.count,
                     "oldest_age_s": project.waiting.oldest_age_s,
