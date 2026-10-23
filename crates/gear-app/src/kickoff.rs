@@ -366,6 +366,24 @@ pub fn skeleton(inventory: &Inventory) -> String {
             .to_string(),
         "quota_reset_h = 5".to_string(),
     ];
+    // A kind Herdr can start but GEAR has no built-in profile for (T-31): the
+    // user fills the block in — the comment says which fields matter.
+    for installed in &inventory.installed {
+        if gear_herdr::builtin(&installed.kind).is_some() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(format!(
+            "# [profiles.{}]                 # this kind has no built-in profile: fill it in",
+            installed.kind
+        ));
+        lines.push(format!("# kind = \"{}\"", installed.kind));
+        lines.push("# unattended_args = [\"--auto\"]   # required: no permission dialogs, or the agent stops".to_string());
+        lines.push("# busy_markers = []             # the screen text of a running turn".to_string());
+        lines.push("# quota_markers = []            # the screen text of a provider limit".to_string());
+        lines.push("# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string());
+        lines.push("# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed".to_string());
+    }
     lines.push(String::new());
     lines.join("\n")
 }
