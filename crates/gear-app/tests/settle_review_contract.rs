@@ -16,6 +16,8 @@ use gear_store::{testing, ContractRow, NewMessage, ReviewVerdictRow, Store, Task
 const T0: i64 = 1_800_000_000;
 const CANDIDATE: &str = "abc1234";
 const FINDINGS: &str = "ops/reviews/T-1.md";
+/// Findings with ids, as the review packet asks for (T-23).
+const FINDINGS_WITH_IDS: &str = "F1: the store forgets the verdict\nF2: the wording of a comment";
 
 fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
     TaskRow {
@@ -41,6 +43,12 @@ fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
 /// queued tasks for `heat` (T-1 is handed in, T-2/T-3 are waiting) and the
 /// review of T-1 attempt 1 in the captain's inbox. `passed` picks the verdict.
 fn world(passed: bool) -> Store {
+    world_with(passed, FINDINGS, "")
+}
+
+/// The world with the findings and the ids the reviewer named as blocking
+/// (T-23).
+fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
@@ -77,10 +85,13 @@ fn world(passed: bool) -> Store {
             task: "T-1".into(),
             attempt: 1,
             passed,
-            findings: FINDINGS.into(),
+            findings: findings.into(),
             by_seat: "p:r-1".into(),
             created: T0 + 2,
         })?;
+        if !blocking.is_empty() {
+            tx.set_review_blocking("p", "T-1", 1, blocking, T0 + 2)?;
+        }
         tx.insert_message(&NewMessage {
             project: "p".into(),
             thread: "T-1:1".into(),
@@ -91,7 +102,10 @@ fn world(passed: bool) -> Store {
             recipient: "p:captain".into(),
             kind: MsgKind::Review,
             urgent: false,
-            body: format!("review {} on T-1 attempt 1\n{FINDINGS}", if passed { "pass" } else { "fail" }),
+            body: format!(
+                "review {} on T-1 attempt 1\n{findings}",
+                if passed { "pass" } else { "fail" }
+            ),
             reply_to: None,
             needs_ack: false,
             state: MsgState::Open,
@@ -161,16 +175,17 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
 
 #[test]
 fn a_fail_puts_the_rework_first_in_the_lane_queue() {
-    let mut s = world(false);
+    let mut s = world_with(false, FINDINGS_WITH_IDS, "F1");
 
     s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
 
     assert_eq!(attempt_state(&mut s), AttemptState::Rejected);
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Ready);
-    // The rework note points the lane at the findings on the review branch.
+    // The rework note carries the blocking finding only (T-23).
     let row = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     let note = row.rework_note.unwrap_or_default();
-    assert!(note.contains(FINDINGS), "{note}");
+    assert!(note.contains("F1: the store forgets the verdict"), "{note}");
+    assert!(!note.contains("F2"), "the logged finding is not a rework: {note}");
     // The rework comes before the lane's other ready tasks.
     let ready: Vec<TaskRow> = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     let other_heat: Vec<i64> = ready
@@ -242,6 +257,7 @@ fn send_review(outcome: Outcome, rid: &str) -> SendArgs {
         contract: None,
         candidate: None,
         verdict: Some(outcome),
+        blocking: None,
         base: None,
         about: None,
         to: None,
@@ -342,4 +358,92 @@ fn an_obsolete_review_closes_the_attempt_and_settles_nothing() {
     let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
     assert_eq!(info.len(), 1, "{info:?}");
     assert!(info[0].body.contains("cancelled"), "{}", info[0].body);
+}
+
+/// T-23: a fail without a blocking finding is not justified — it settles as a
+/// pass, and the findings become one information item for the captain.
+#[test]
+fn a_fail_without_a_blocking_finding_settles_as_a_pass() {
+    let mut s = world_with(false, FINDINGS_WITH_IDS, "");
+
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+
+    assert_eq!(attempt_state(&mut s), AttemptState::Accepted);
+    assert_eq!(task_state(&mut s, "T-1"), TaskState::Done);
+    assert_eq!(ops(&mut s).len(), 1, "the merge is queued");
+    assert_eq!(ops(&mut s)[0].kind, OpKind::Merge);
+    // The findings are information for the captain, in one item.
+    assert!(captain_inbox(&mut s).is_empty(), "no action item");
+    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    assert_eq!(info.len(), 1, "{info:?}");
+    assert!(info[0].body.contains("without a blocking finding"), "{}", info[0].body);
+    assert!(info[0].body.contains("F1: the store forgets the verdict"), "{}", info[0].body);
+    assert!(info[0].body.contains("F2: the wording of a comment"), "{}", info[0].body);
+}
+
+/// T-23: the rework rounds are capped — past the cap the captain decides and
+/// the task stays Verifying.
+#[test]
+fn the_rework_rounds_are_capped() {
+    let mut s = world_with(false, FINDINGS_WITH_IDS, "F1");
+    // Four rounds of rework: over the default cap of three.
+    s.write(|tx| {
+        for n in 2..=4 {
+            tx.insert_attempt(&gear_store::AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Rejected,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+
+    // Nothing is settled: the task stays Verifying and the attempt handed in.
+    assert_eq!(attempt_state(&mut s), AttemptState::Submitted);
+    assert_eq!(task_state(&mut s, "T-1"), TaskState::Verifying);
+    assert!(ops(&mut s).is_empty(), "no merge, no rework");
+    // One action item for the captain.
+    let inbox = captain_inbox(&mut s);
+    assert_eq!(inbox.len(), 1, "{inbox:?}");
+    assert!(inbox[0].body.contains("cap"), "{}", inbox[0].body);
+    // A second settlement does not add another one.
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 4)).unwrap();
+    assert_eq!(captain_inbox(&mut s).len(), 1, "one action item, not one per tick");
+}
+
+/// T-23: a restart between storing the review and settling it must not settle
+/// twice: the second call changes nothing.
+#[test]
+fn a_restart_between_the_review_and_the_settlement_does_not_double_settle() {
+    let mut s = world_with(false, FINDINGS_WITH_IDS, "F1");
+
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
+    let merges = ops(&mut s).len();
+    let notes = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.clone();
+
+    // The engine restarts and settles again.
+    s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 400)).unwrap();
+
+    assert_eq!(ops(&mut s).len(), merges, "no second merge");
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.clone(),
+        notes,
+        "the same rework, not a second one"
+    );
+    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    assert_eq!(info.len(), 1, "one information line: {info:?}");
 }

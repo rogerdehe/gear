@@ -466,21 +466,36 @@ fn review_packet_for(
     attempt: i64,
     candidate: &str,
 ) -> GearResult<String> {
-    let (goal, accept) = store.read(|tx| {
+    let (goal, accept, done, bar) = store.read(|tx| {
         let version = tx
             .get_attempt(&config.project.id, task, attempt)?
             .map(|row| row.adopted_version)
             .unwrap_or(1);
-        match tx.get_contract(&config.project.id, task, version)? {
-            Some(contract) => Ok((contract.goal, contract.accept)),
-            None => Ok((String::new(), String::new())),
-        }
+        let (goal, accept) = match tx.get_contract(&config.project.id, task, version)? {
+            Some(contract) => (contract.goal, contract.accept),
+            None => (String::new(), String::new()),
+        };
+        // The voyage the task sails on (T-22): the sentence the phase is judged
+        // by and its quality bar (T-23).
+        let (done, bar) = match tx.get_task(&config.project.id, task)? {
+            Some(row) => match row.milestone.as_deref().map(|m| tx.get_voyage(&config.project.id, m)) {
+                Some(Ok(Some(voyage))) => (
+                    voyage.done.clone().unwrap_or_default(),
+                    voyage.bar.clone().unwrap_or_default(),
+                ),
+                _ => (String::new(), String::new()),
+            },
+            None => (String::new(), String::new()),
+        };
+        Ok((goal, accept, done, bar))
     })?;
     Ok(review_packet(
         task,
         attempt,
         &goal,
         &accept,
+        &done,
+        &bar,
         candidate,
         &config.conventions.integration,
         &review_branch(task),
@@ -570,6 +585,8 @@ fn review_packet(
     attempt: i64,
     goal: &str,
     accept: &str,
+    done: &str,
+    bar: &str,
     candidate: &str,
     integration: &str,
     branch: &str,
@@ -579,6 +596,8 @@ fn review_packet(
          \n\
          Goal: {goal}\n\
          Accept: {accept}\n\
+         Done (the milestone's sentence): {done}\n\
+         Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
          Diff to review: `{integration}..{candidate}`\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
@@ -587,12 +606,17 @@ fn review_packet(
          the findings with their severity, the template of `ops/reviews/{task}.md` and the \
          verdict rule.\n\
          \n\
-         Hand your verdict in with exactly:\n\
-         gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"ops/reviews/{task}.md\"\n\
+         Every finding is either blocking or logged: a blocking finding names the part of the \
+         done-sentence or the bar it breaks. Fail only for a failed mechanical fact, a P0, or a \
+         blocking finding; everything else is logged and does not block.\n\
          \n\
-         A `fail` becomes the writer's rework: write every finding so the writer can act on it \
-         without asking."
+         Hand your verdict in with exactly (the findings as text, one per line, each starting \
+         with its id; `--blocking` names the ones that block):\n\
+         gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
+         [--blocking <ids>] \"<findings>\"\n\
+         \n\
+         A `fail` with blocking findings becomes the writer's rework: only those findings go \
+         back to the lane, so write each of them so the writer can act without asking."
     )
 }
 
@@ -896,6 +920,53 @@ review = ["gpt-6.1-sol"]
             .collect()
     }
 
+    /// T-23: the packet tells the reviewer what the phase is judged by (the
+    /// milestone's done-sentence and bar), the rule (blocking or logged) and
+    /// the command with `--blocking`.
+    #[test]
+    fn the_packet_carries_the_voyage_the_rule_and_the_blocking_command() {
+        let mut store = world(CONFIG);
+        // The task sails on the milestone M1, whose voyage says what "done" is.
+        store
+            .write(|tx| {
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M1".into(),
+                    title: "delivery v0.1.0".into(),
+                    done: Some("users install v0.1.0 without Rust".into()),
+                    bar: Some("block only loop breaks and data loss".into()),
+                    eta: Some("8h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    updated: T0,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+
+        let packet = store
+            .read(|tx| tx.last_op("p:r-1", OpKind::Deliver))
+            .unwrap()
+            .unwrap()
+            .payload["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(packet.contains("users install v0.1.0 without Rust"), "{packet}");
+        assert!(packet.contains("block only loop breaks and data loss"), "{packet}");
+        assert!(packet.contains("Done (the milestone's sentence)"), "{packet}");
+        assert!(packet.contains("Bar (the quality this phase needs)"), "{packet}");
+        assert!(packet.contains("blocking"), "{packet}");
+        assert!(packet.contains("--blocking"), "{packet}");
+        assert!(packet.contains("Fail only for a failed mechanical fact"), "{packet}");
+    }
+
     #[test]
     fn a_result_in_starts_one_reviewer() {
         let mut store = world(CONFIG);
@@ -944,10 +1015,12 @@ review = ["gpt-6.1-sol"]
         assert!(text.contains("abc1234"), "{text}");
         assert!(text.contains("dev..abc1234"), "{text}");
         assert!(text.contains("ops/REVIEW.md"), "{text}");
+        // T-23: the findings are text with ids, and `--blocking` names the ones
+        // that block.
         assert!(
             text.contains(
                 "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"ops/reviews/T-1.md\""
+                 [--blocking <ids>]"
             ),
             "{text}"
         );

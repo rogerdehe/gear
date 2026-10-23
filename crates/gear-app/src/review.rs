@@ -47,6 +47,9 @@ pub struct Review {
     pub outcome: Outcome,
     /// The findings: a path or the text itself.
     pub findings: String,
+    /// The ids of the findings that block (T-23), comma separated. Empty means
+    /// every finding is only logged.
+    pub blocking: String,
     /// The seat that hands the verdict in.
     pub by_seat: String,
 }
@@ -158,6 +161,17 @@ pub fn submit_review(tx: &Tx<'_>, review: &Review, now: Ts) -> GearResult<()> {
         created: now,
     };
     tx.insert_review_verdict(&row)?;
+    // The findings that block go back to the lane as rework; the rest are
+    // information for the captain (T-23).
+    if !review.blocking.trim().is_empty() {
+        tx.set_review_blocking(
+            &review.project,
+            &review.task,
+            review.attempt,
+            review.blocking.trim(),
+            now,
+        )?;
+    }
     Ok(())
 }
 
