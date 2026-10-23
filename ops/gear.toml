@@ -41,7 +41,7 @@ kind = "codex"
 profile = "codex"
 
 [models]
-lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+lanes = ["opencode-go/deepseek-v4.1-flash", "minimax-cn/MiniMax-M3.1-Flash"]   # 2026-10-22: MiniMax plan exhausted, user moved lanes to DeepSeek V4.1 Flash (OpenCode Go)
 review = ["gpt-6.1-sol"]   # Codex, reasoning high; differs from every lane model
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
