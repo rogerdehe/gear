@@ -261,6 +261,18 @@ pub fn confirm_pending(
         let mut flagged: Vec<String> = Vec::new();
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
+                // A doorbell whose items were all closed another way has
+                // nothing left to show: no view will ever prove it, and an
+                // unsettled doorbell holds the seat's slot so no later doorbell
+                // can ring (the captain went deaf for 90 minutes).
+                if op.kind == OpKind::Doorbell
+                    && shown_in_a_view(tx, &op)?.is_none()
+                    && covers_closed(tx, project, &op)?
+                {
+                    tx.set_op_state(project, &op.id, OpState::Confirmed, Some("its items were closed"), now)?;
+                    confirmed.push(op.id.clone());
+                    continue;
+                }
                 let evidence = match op.kind {
                     // A doorbell is proven by the message ids it carried.
                     OpKind::Doorbell => shown_in_a_view(tx, &op)?,
@@ -327,6 +339,21 @@ pub fn confirm_pending(
         }
         Ok((confirmed, flagged))
     })
+}
+
+/// Whether every message a doorbell covers is closed (resolved or
+/// informational): nothing is left waiting for an answer.
+fn covers_closed(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<bool> {
+    let Some(ids) = op.payload.get("covers").and_then(|c| c.as_array()) else {
+        return Ok(false);
+    };
+    for id in ids.iter().filter_map(|id| id.as_str()) {
+        match tx.get_message(project, id)? {
+            Some(msg) if !matches!(msg.state, gear_model::MsgState::Open | gear_model::MsgState::Waiting) => {}
+            _ => return Ok(false),
+        }
+    }
+    Ok(!ids.is_empty())
 }
 
 /// The time of the view that shows every message id the op covers, if any.

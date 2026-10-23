@@ -213,14 +213,16 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
 
-        // 6b. merge: a passed task goes into the integration branch, after the
+        // 7. execute: re-check each op, call Herdr, record the outcome. Before
+        //    the merge: a merge runs the gate (minutes), and the deliveries of
+        //    this tick must not wait for it.
+        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+
+        // 7c. merge: a passed task goes into the integration branch, after the
         //     gate and before the branches are closed (T-12).
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
         }
-
-        // 7. execute: re-check each op, call Herdr, record the outcome.
-        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
