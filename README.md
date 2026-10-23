@@ -40,20 +40,21 @@ description = "GEAR plan board"
 
 ## Start a project
 
-1. **Kickoff** — see what this machine offers and get a config draft:
+1. **Kickoff** — see what this machine offers and get a config draft. GEAR keeps its files in `gear/` in your project: the config at `gear/gear.toml`, the voyage plans at `gear/voyages/<milestone>.md`:
 
    ```bash
-   gear admin kickoff > gear.toml
+   mkdir -p gear
+   gear admin kickoff > gear/gear.toml
    ```
 
-   Edit `gear.toml`: the project, the captain's pane, the lanes (`<project>-<duty>` names, what each owns), the review slots, the models (developers on a fast model, reviewers on a different, stronger one) and what happens when a quota runs out (switch to the next model, or wait for the reset).
+   Edit `gear/gear.toml`: the project, the captain's pane, the lanes (`<project>-<duty>` names, what each owns), the review slots, the models (developers on a fast model, reviewers on a different, stronger one) and what happens when a quota runs out (switch to the next model, or wait for the reset).
 
    An agent kind GEAR does not know needs a profile: `[profiles.<kind>]` sets its kind, the flags that keep it unattended, the screen markers and the exit keys — `gear admin kickoff` prints the skeleton for a kind it detects without a built-in profile.
 
 2. **Register it** (in your own shell, not inside an agent):
 
    ```bash
-   GEAR_ADMIN=1 gear admin init gear.toml
+   GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
    The engine starts by itself in the background and brings the lanes up in their own Herdr worktrees.
@@ -64,7 +65,7 @@ description = "GEAR plan board"
    gear --skill            # print it; install it as a skill for your captain's CLI
    ```
 
-4. **Plan** — the captain writes a plan draft and applies it: `gear plan apply plan.md`. Lanes start working at once.
+4. **Plan** — the captain writes the voyage's plan file, `gear/voyages/M1.md`, and applies it: `gear plan apply gear/voyages/M1.md`. After a successful apply GEAR rewrites that same file in place (`base=` becomes the applied version, each `## NEW` block gets its id, the `# Verdicts` section goes), so the captain keeps editing it. A landed voyage's file is kept as its record; the next voyage gets a new `gear/voyages/<milestone>.md`. Lanes start working at once.
 
 ## Day to day
 
