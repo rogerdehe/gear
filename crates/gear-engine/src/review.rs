@@ -226,7 +226,13 @@ fn free_seat(store: &mut Store, project: &str) -> GearResult<Option<SeatRow>> {
         Ok(tx
             .seats_of_project(project)?
             .into_iter()
-            .find(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Released))
+            // Only a warm seat of the new kind (`review-<k>`): legacy per-task
+            // seats (`r-<n>`) are retired and never reused.
+            .find(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.state == SeatState::Released
+                    && seat.name.starts_with("review-")
+            }))
     })
 }
 
@@ -236,7 +242,7 @@ fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResul
         let seats = tx
             .seats_of_project(project)?
             .into_iter()
-            .filter(|seat| seat.role == SeatRole::Temp)
+            .filter(|seat| seat.role == SeatRole::Temp && seat.state != SeatState::Retired)
             .count() as i64;
         Ok(seats < quota)
     })
