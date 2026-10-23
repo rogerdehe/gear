@@ -586,12 +586,15 @@ fn review_packet(
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
          the findings with their severity, the review template and the verdict rule.\n\
          \n\
+         Write the review in your worktree at the path your project uses for reviews, commit it \
+         on `{branch}` and push it (the candidate stays untouched).\n\
+         \n\
          Hand your verdict in with exactly:\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"<your review file, or the text>\"\n\
+         \"<the path to your review file>\"\n\
          \n\
-         GEAR keeps the text of your findings, so the writer reads them from GEAR — your worktree \
-         and your file may be gone afterwards.\n\
+         The findings stay in the repository on `{branch}`; the writer's rework note names the \
+         `git show origin/{branch}:<path>` command that reads them, so keep the branch pushed.\n\
          \n\
          A `fail` becomes the writer's rework: write every finding so the writer can act on it \
          without asking."
@@ -952,10 +955,13 @@ review = ["gpt-6.1-sol"]
         assert!(
             text.contains(
                 "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"<your review file, or the text>\""
+                 \"<the path to your review file>\""
             ),
             "{text}"
         );
+        // The findings stay on the review branch (T-30 rework, F1): the packet
+        // names the branch and the command the rework note gives the writer.
+        assert!(text.contains("git show origin/review/t1:<path>"), "{text}");
     }
 
     #[test]

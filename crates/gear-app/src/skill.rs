@@ -61,6 +61,11 @@ pub const TOPICS: &[Topic] = &[
         file: "references/agents/claude.md",
         text: include_str!("../../../skills/gear/references/agents/claude.md"),
     },
+    Topic {
+        name: "agent:grok",
+        file: "references/agents/grok.md",
+        text: include_str!("../../../skills/gear/references/agents/grok.md"),
+    },
 ];
 
 /// The name of the skill: the directory it is installed as, and the name in
@@ -73,11 +78,12 @@ pub enum SkillAgent {
     Claude,
     Codex,
     OpenCode,
+    Grok,
 }
 
 impl SkillAgent {
     pub const ALL: &'static [SkillAgent] =
-        &[SkillAgent::Claude, SkillAgent::Codex, SkillAgent::OpenCode];
+        &[SkillAgent::Claude, SkillAgent::Codex, SkillAgent::OpenCode, SkillAgent::Grok];
 
     /// The name the user writes.
     pub fn as_str(self) -> &'static str {
@@ -85,6 +91,7 @@ impl SkillAgent {
             SkillAgent::Claude => "claude",
             SkillAgent::Codex => "codex",
             SkillAgent::OpenCode => "opencode",
+            SkillAgent::Grok => "grok",
         }
     }
 
@@ -94,6 +101,7 @@ impl SkillAgent {
             "claude" => Ok(SkillAgent::Claude),
             "codex" => Ok(SkillAgent::Codex),
             "opencode" => Ok(SkillAgent::OpenCode),
+            "grok" => Ok(SkillAgent::Grok),
             other => {
                 let known = SkillAgent::ALL
                     .iter()
@@ -112,12 +120,14 @@ impl SkillAgent {
     ///
     /// Verified on this machine (2026-10-23): Claude Code reads
     /// `~/.claude/skills/<name>/SKILL.md`, Codex `~/.codex/skills/<name>/SKILL.md`,
-    /// OpenCode `~/.config/opencode/skills/<name>/SKILL.md`.
+    /// OpenCode `~/.config/opencode/skills/<name>/SKILL.md`, Grok
+    /// `~/.grok/skills/<name>/SKILL.md` (its user-guide, `08-skills.md`).
     pub fn skills_root(self, home: &Path) -> PathBuf {
         match self {
             SkillAgent::Claude => home.join(".claude").join("skills"),
             SkillAgent::Codex => home.join(".codex").join("skills"),
             SkillAgent::OpenCode => home.join(".config").join("opencode").join("skills"),
+            SkillAgent::Grok => home.join(".grok").join("skills"),
         }
     }
 }
@@ -187,6 +197,10 @@ mod tests {
         assert_eq!(
             SkillAgent::OpenCode.skills_root(&home),
             home.join(".config").join("opencode").join("skills")
+        );
+        assert_eq!(
+            SkillAgent::Grok.skills_root(&home),
+            home.join(".grok").join("skills")
         );
         std::fs::remove_dir_all(&home).ok();
     }
