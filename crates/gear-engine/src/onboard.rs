@@ -161,15 +161,13 @@ pub fn onboard_queued(
 ) -> GearResult<Vec<String>> {
     let mut active = Vec::new();
     for project in store.read(|tx| tx.project_ids())? {
-        // The project's config: the repo, the integration branch and the kind
-        // of every lane. A registered project always parses; if it does not,
-        // its lanes are parked instead of retried.
-        let row = match store.read(|tx| tx.get_project(&project))? {
-            Some(row) => row,
-            None => continue,
-        };
-        let config = match gear_app::config::parse(&row.config_toml) {
+        // The project's **latest** config (T-6): the repo, the integration
+        // branch and the kind of every lane. A registered project always
+        // parses; if it does not, its lanes are parked instead of retried.
+        let config = match gear_app::config::latest(store, &project) {
             Ok(config) => config,
+            // The project is gone between the two reads: nothing to do.
+            Err(e) if e.code == gear_model::ErrorCode::NoTarget => continue,
             Err(e) => {
                 park_queued_lanes(
                     store,

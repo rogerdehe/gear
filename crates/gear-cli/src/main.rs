@@ -236,7 +236,9 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
     if json {
         println!("{}", serde_json::to_string(&r).unwrap_or_default());
     } else {
-        println!("registered project {} (config v{})", r.project, r.config_version);
+        // The project is registered with this config version; a re-init
+        // stores the next one (T-6).
+        println!("project {} (config v{})", r.project, r.config_version);
         for seat in &r.seats {
             println!("seat {seat}");
         }
