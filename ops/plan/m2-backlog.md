@@ -28,3 +28,4 @@
 - T-30 review logged: F3 complete plan example + review-conclusion reference, F4 keep bar separate from done in the verdict rule, F5 review branch delivery convention in review.md.
 - Quota detection reads stale lines: after a switch the old 2056 errors stay on screen and the engine parks working lanes. Match only output newer than the last switch, or only while the agent is idle after the error (fix with T-33).
 - T-21 round 2 (captain passed): a missing findings path with spaces is stored as text instead of BAD_FORMAT (reviewer said P0; two coincidences, no data loss).
+- Review text in the store is a WORKING copy for the rework loop; git (ops/reviews/T-n.md merged with the task, earlier rounds in its history) is the long-term record. After a task is done and merged, drop the store's copy and keep only the path (sizes 2026-10-23: 20 reviews = 121 KB, store 1.4 MB).
