@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.1.0 is being prepared. The prebuilt release is published with it — until the v0.1.0 release appears under [Releases](https://github.com/rogerdehe/gear/releases), the steps below do not work yet.
+> **Status:** v0.1.0 is released — prebuilt `gear` for macOS (Apple silicon, Intel) and Linux x86_64 under [Releases](https://github.com/rogerdehe/gear/releases).
 
 ## Requirements
 
@@ -20,7 +20,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 herdr plugin install rogerdehe/gear
 ```
 
-*Not verifiable here:* there is no v0.1.0 release yet (this machine links the checkout with `herdr plugin link`). The plugin downloads a prebuilt `gear` and puts it in its own directory.
+*Verified (v0.1.0, macOS arm64):* the plugin's build step downloaded the prebuilt `gear` from the release and verified its SHA-256 with no Rust on PATH. The plugin puts it in its own directory.
 
 Put the `gear` wrapper on PATH — agents call it by name. The wrapper is in the plugin's `bin`; `herdr plugin list --json` prints its `plugin_root` (`~/.config/herdr/plugins/github/herdr-gear-<hash>` for a released plugin):
 
