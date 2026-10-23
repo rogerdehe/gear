@@ -20,7 +20,7 @@ use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
     TaskState, Ts,
 };
-use gear_store::{NewMessage, NewOp, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, NewMessage, NewOp, SeatRow, Store, Tx};
 
 use crate::model::model_start;
 use crate::model::review_model;
@@ -81,12 +81,17 @@ pub fn start_reviews(
         // 1. the reviewer seat: created once and bound to the task for life.
         let seat = match temp_seat_of(store, project, &task.task)? {
             Some(seat) => seat,
-            None => create_temp_seat(store, project, &task.task, &temps.profile, now)?,
+            // A seat that finished its last job is warm: the job takes it
+            // rather than building a new worktree (17 §8a).
+            None => match free_seat(store, project)? {
+                Some(seat) => take_seat(store, &seat, &task.task, now)?,
+                None => create_temp_seat(store, project, &task.task, &temps.profile, now)?,
+            },
         };
 
         // 2. a seat that is already up needs nothing; a seat that was parked
         //    (unknown, needs check, missing) is never retried (design/10).
-        if !matches!(seat.state, SeatState::Queued | SeatState::Starting) {
+        if !matches!(seat.state, SeatState::Queued | SeatState::Starting | SeatState::Released) {
             continue;
         }
 
@@ -94,7 +99,8 @@ pub fn start_reviews(
         //    carries on; a queued one waits, and the captain is told once
         //    (design/10: QUEUED happens only when the quota is exhausted; the
         //    quota is the project config's `[quota].temps`).
-        if !occupies_quota(seat.state)
+        if seat.state != SeatState::Released
+            && !occupies_quota(seat.state)
             && !has_free_slot(store, project, i64::from(config.quota.temps))?
         {
             report.waiting.push(task.task.clone());
@@ -197,6 +203,25 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
     })
 }
 
+/// A seat that finished its last job and holds no live one: a warm worktree
+/// with its build cache waiting for the next review (17 §8a).
+fn free_seat(store: &mut Store, project: &str) -> GearResult<Option<SeatRow>> {
+    store.read(|tx| {
+        Ok(tx
+            .seats_of_project(project)?
+            .into_iter()
+            .find(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Released))
+    })
+}
+
+/// Bind a free seat to the new job. The seat keeps its worktree and its
+/// cache; only the job it serves changes.
+fn take_seat(store: &mut Store, seat: &SeatRow, task: &str, now: Ts) -> GearResult<SeatRow> {
+    store.write(|tx| tx.set_seat_task(&seat.id, task))?;
+    let _ = now;
+    Ok(SeatRow { task_id: Some(task.to_string()), ..seat.clone() })
+}
+
 /// Create the temp seat bound to `task`: one transaction, so two ticks cannot
 /// create two seats for the same task.
 ///
@@ -230,13 +255,13 @@ fn create_temp_seat(
     })
 }
 
-/// The next free temp seat name: `r-1`, `r-2`, … (the R-number of the temp
-/// request, as in the plan's staff lines).
+/// The next free seat name: `review-1`, `review-2`, … (a warm review seat,
+/// conventions 17 §8a).
 fn next_temp_name(tx: &Tx<'_>, project: &str) -> GearResult<String> {
     let seats = tx.seats_of_project(project)?;
     let mut n = 1;
     loop {
-        let name = format!("r-{n}");
+        let name = format!("review-{n}");
         if !seats.iter().any(|seat| seat.name == name) {
             return Ok(name);
         }
@@ -300,7 +325,11 @@ fn start_reviewer(
     now: Ts,
 ) -> GearResult<Started> {
     let repo = &config.project.repo;
+    // The job's branch, and the seat's own anchor (its workspace label is
+    // long-lived; the agent of a job is named after its task).
     let branch = review_branch(&task.task);
+    let seat_branch = format!("home/{}", seat.name);
+    let seat_label = format!("{}-{}", config.project.id, seat.name);
     let label = agent_name(config, &task.task);
     let kind = config
         .temps
@@ -308,17 +337,22 @@ fn start_reviewer(
         .map(|temps| temps.kind.clone())
         .unwrap_or_default();
 
-    // 1. the pane: the one of the seat's binding (a reviewer that was not
-    //    started yet), else the worktree of the branch — opened, or created
-    //    at the candidate the writer handed in.
+    // 1. the pane: the seat's, from its binding (an interrupted start or a new
+    //    job on a warm seat), else the seat's worktree — opened, or created
+    //    once at the integration branch.
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-    let (pane, generation) = match binding {
-        Some(binding) => (binding.pane_id, seat.generation),
+    let pane = match binding.as_ref().map(|binding| binding.pane_id.clone()) {
+        Some(pane) => pane,
         None => {
-            let worktree = match herdr.worktree_open(repo, &branch, &label) {
+            let worktree = match herdr.worktree_open(repo, &seat_branch, &seat_label) {
                 Outcome::Ok(worktree) => worktree,
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
-                    match herdr.worktree_create(repo, &branch, &task.candidate, &label) {
+                    match herdr.worktree_create(
+                        repo,
+                        &seat_branch,
+                        &config.conventions.integration,
+                        &seat_label,
+                    ) {
                         Outcome::Ok(worktree) => worktree,
                         other => {
                             park(store, &seat.id, &step_failure("worktree_create", &other), now)?;
@@ -331,54 +365,57 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
-            let pane = worktree.pane_id;
-            let generation = seat.generation + 1;
-
-            // 2. the environment: the call context, and the model when the
-            //    CLI takes one. It is set before the agent starts, so the
-            //    agent inherits it.
-            let mut env_command = format!(
-                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
-            );
-            let mut args = profile.unattended_args.clone();
-            if let Some(model) = model {
-                if let Some(start) = model_start(&kind, model) {
-                    if !start.env.is_empty() {
-                        env_command = format!("{env_command}; {}", start.env);
-                    }
-                    args.extend(start.args);
-                }
-            }
-            if let Outcome::Ok(()) = herdr.pane_run(&pane, &env_command) {
-                // the environment is set
-            } else {
-                park(
-                    store,
-                    &seat.id,
-                    "pane_run: the environment could not be set",
-                    now,
-                )?;
-                return Ok(Started::NotYet);
-            }
-
-            // 3. the binding: the seat's first generation.
-            if let Err(reason) =
-                store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now))
-            {
-                park(
-                    store,
-                    &seat.id,
-                    &format!("begin_onboard: {}", reason.detail),
-                    now,
-                )?;
-                return Ok(Started::NotYet);
-            }
-            (pane, generation)
+            store.write(|tx| tx.set_meta(&path_key(&seat.id), &worktree.path))?;
+            worktree.pane_id
         }
     };
 
-    // 4. the agent. Its args carry the model when the CLI takes one.
+    // 2. a new job is a new generation of the seat: the previous binding is
+    //    voided and a pending one is opened on the same pane. An interrupted
+    //    start keeps the pending binding it already has.
+    let pending = binding.as_ref().map(|binding| binding.status == BindingStatus::Pending).unwrap_or(false);
+    let generation = if pending { seat.generation } else { seat.generation + 1 };
+    if !pending {
+        if let Err(reason) =
+            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now))
+        {
+            park(store, &seat.id, &format!("begin_onboard: {}", reason.detail), now)?;
+            return Ok(Started::NotYet);
+        }
+    }
+
+    // 3. the environment: the call context, and the model when the CLI takes
+    //    one. It is set before the agent starts, so the agent inherits it.
+    let mut env_command = format!(
+        "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
+        config.project.id, seat.name, generation, cfg.db_path
+    );
+    let mut args = profile.unattended_args.clone();
+    if let Some(model) = model {
+        if let Some(start) = model_start(&kind, model) {
+            if !start.env.is_empty() {
+                env_command = format!("{env_command}; {}", start.env);
+            }
+            args.extend(start.args);
+        }
+    }
+    if let Outcome::Ok(()) = herdr.pane_run(&pane, &env_command) {
+        // the environment is set
+    } else {
+        // A fresh worktree's shell needs a few seconds: the next tick tries.
+        return Ok(Started::NotYet);
+    }
+
+    // 4. the seat's checkout takes the job's branch at the approved candidate:
+    //    this is also where the previous job's uncommitted changes go (never
+    //    the ignored files, so `target/` and the build cache survive). It only
+    //    runs when the pane is a shell — an adopted agent is never typed into.
+    let candidate = task.candidate.clone();
+    let checkout_for = |path: &str| {
+        format!("cd {path} && git fetch origin && git checkout -f -B {branch} {candidate} && git clean -fd")
+    };
+
+    // 5. the agent. Its args carry the model when the CLI takes one.
     let mut args = profile.unattended_args.clone();
     if let Some(model) = model {
         if let Some(start) = model_start(&kind, model) {
@@ -416,20 +453,36 @@ fn start_reviewer(
         }
     };
     let started = match already {
-        // The start was accepted before the restart: adopt it.
+        // The start was accepted before the restart: adopt it, and do not type
+        // the checkout into it.
         Some(info) => info,
-        None => match herdr.agent_start(&label, &kind, &pane, &args) {
-            Outcome::Ok(info) => info,
-            Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
-                // The shell of a fresh worktree is still starting: the next
-                // tick tries again (the seat keeps its binding).
+        None => {
+            let Some(path) = worktree_path(store, &seat.id)? else {
+                // The seat's worktree was never recorded: do not check out blind.
+                park(store, &seat.id, "the seat's worktree path is unknown", now)?;
+                return Ok(Started::NotYet);
+            };
+            if let Outcome::Ok(()) = herdr.pane_run(&pane, &checkout_for(&path)) {
+                // the checkout took the job's branch
+            } else {
+                // The pane is not ready yet: the next tick tries again.
                 return Ok(Started::NotYet);
             }
-            other => {
-                park(store, &seat.id, &step_failure("agent_start", &other), now)?;
-                return Ok(Started::NotYet);
+            // A new job is a new conversation: a stale session reference goes.
+            store.write(|tx| tx.set_binding_session_ref(&seat.id, generation, ""))?;
+            match herdr.agent_start(&label, &kind, &pane, &args) {
+                Outcome::Ok(info) => info,
+                Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+                    // The shell of a fresh worktree is still starting: the next
+                    // tick tries again (the seat keeps its binding).
+                    return Ok(Started::NotYet);
+                }
+                other => {
+                    park(store, &seat.id, &step_failure("agent_start", &other), now)?;
+                    return Ok(Started::NotYet);
+                }
             }
-        },
+        }
     };
 
     // 5. the seat is up and has its packet: one transaction. A crash between
@@ -544,6 +597,16 @@ fn recover_missing_packets(
         recovered.push(seat.id.clone());
     }
     Ok(recovered)
+}
+
+/// Where a seat's worktree path is kept (the seat row has no field for it).
+fn path_key(seat: &str) -> String {
+    format!("engine.review_path.{seat}")
+}
+
+/// The seat's worktree path, once its first job created the worktree.
+fn worktree_path(store: &mut Store, seat: &str) -> GearResult<Option<String>> {
+    store.read(|tx| tx.get_meta(&path_key(seat)))
 }
 
 /// The review branch of a task: `review/t<n>` (conventions 17 §3: the
@@ -904,8 +967,8 @@ review = ["gpt-6.1-sol"]
         let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
 
         // one temp seat, bound to the task for life
-        assert_eq!(report.started, vec!["p:r-1".to_string()]);
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.role, SeatRole::Temp);
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
         assert_eq!(seat.state, SeatState::Active);
@@ -913,7 +976,7 @@ review = ["gpt-6.1-sol"]
         // one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("review/t1".to_string(), "abc1234".to_string())]
+            vec![("home/review-1".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -936,7 +999,7 @@ review = ["gpt-6.1-sol"]
         assert_eq!(ops.len(), 1, "{ops:?}");
         let op = &ops[0];
         assert_eq!(op.kind, OpKind::Deliver);
-        assert_eq!(op.seat, "p:r-1");
+        assert_eq!(op.seat, "p:review-1");
         assert_eq!(op.task.as_deref(), Some("T-1"));
         let text = op.payload.get("text").and_then(|t| t.as_str()).unwrap();
         assert!(text.contains("the goal"), "{text}");
@@ -963,7 +1026,7 @@ review = ["gpt-6.1-sol"]
 
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
-        assert_eq!(report.reviewers, vec!["p:r-1".to_string()]);
+        assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
         // The review packet reached the reviewer's pane: one delivery, sent.
         let prompts = herdr.prompts_to("wt1:p1");
         assert_eq!(prompts.len(), 1, "{prompts:?}");
@@ -1008,7 +1071,7 @@ review = ["gpt-6.1-sol"]
         assert!(worktrees(&herdr).is_empty());
         assert!(starts(&herdr).is_empty());
         // The reviewer waits in a queued seat, and the captain is told once.
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Queued);
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
@@ -1031,10 +1094,10 @@ review = ["gpt-6.1-sol"]
         store
             .write(|tx| {
                 tx.insert_seat(&SeatRow {
-                    id: "p:r-1".into(),
+                    id: "p:review-1".into(),
                     project: "p".into(),
                     role: SeatRole::Temp,
-                    name: "r-1".into(),
+                    name: "review-1".into(),
                     profile: "codex".into(),
                     generation: 1,
                     state: SeatState::Starting,
@@ -1043,7 +1106,7 @@ review = ["gpt-6.1-sol"]
                     task_id: Some("T-1".into()),
                 })?;
                 tx.insert_binding(&BindingRow {
-                    seat: "p:r-1".into(),
+                    seat: "p:review-1".into(),
                     generation: 1,
                     session: "sess".into(),
                     pane_id: pane.into(),
@@ -1053,6 +1116,8 @@ review = ["gpt-6.1-sol"]
                     handover_id: None,
                     created: T0,
                 })?;
+                // The first job recorded the seat's worktree path.
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
                 Ok(())
             })
             .unwrap();
@@ -1064,15 +1129,16 @@ review = ["gpt-6.1-sol"]
 
         assert!(report.started.is_empty(), "the agent is not up yet");
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Starting, "not parked: tried again");
         // The next tick starts the agent: the worktree and the environment are
         // already there.
         let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
-        assert_eq!(report.started, vec!["p:r-1".to_string()]);
-        assert_eq!(starts(&herdr).len(), 2, "the start was tried again");
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        // The refused call was the seat's checkout; the agent starts once.
+        assert_eq!(starts(&herdr).len(), 1, "the start happens once");
         assert!(worktrees(&herdr).is_empty(), "no second worktree");
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
     }
 
@@ -1092,10 +1158,10 @@ review = ["gpt-6.1-sol"]
         store
             .write(|tx| {
                 tx.insert_seat(&SeatRow {
-                    id: "p:r-1".into(),
+                    id: "p:review-1".into(),
                     project: "p".into(),
                     role: SeatRole::Temp,
-                    name: "r-1".into(),
+                    name: "review-1".into(),
                     profile: "codex".into(),
                     generation: 1,
                     state: SeatState::Starting,
@@ -1104,7 +1170,7 @@ review = ["gpt-6.1-sol"]
                     task_id: Some("T-1".into()),
                 })?;
                 tx.insert_binding(&BindingRow {
-                    seat: "p:r-1".into(),
+                    seat: "p:review-1".into(),
                     generation: 1,
                     session: "sess".into(),
                     pane_id: pane.into(),
@@ -1120,18 +1186,124 @@ review = ["gpt-6.1-sol"]
 
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
-        assert_eq!(report.reviewers, vec!["p:r-1".to_string()]);
+        assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
         // No second start: the agent that was already there is adopted.
         assert!(starts(&herdr).is_empty(), "no second agent_start: {:?}", starts(&herdr));
         assert!(worktrees(&herdr).is_empty(), "the worktree was already made");
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
         // … and it got its packet (the tick executes the delivery).
         let prompts = herdr.prompts_to(pane);
         assert_eq!(prompts.len(), 1, "{prompts:?}");
         assert!(prompts[0].starts_with("Review T-1 attempt 1."), "{}", prompts[0]);
-        let in_flight = store.read(|tx| tx.slot_ops("p:r-1")).unwrap();
+        let in_flight = store.read(|tx| tx.slot_ops("p:review-1")).unwrap();
         assert_eq!(in_flight.len(), 1, "{in_flight:?}");
+    }
+
+    #[test]
+    fn two_jobs_on_one_seat_reuse_the_warm_worktree() {
+        // T-18: a seat keeps its worktree and its build cache between jobs.
+        // The second job takes the released seat, uses the same worktree (no
+        // second worktree_open/create) and its agent is named after its task.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        // Job 1: T-1's result comes in.
+        let first = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        assert_eq!(first.started, vec!["p:review-1".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        let worktrees_after_first = worktrees(&herdr);
+        assert_eq!(
+            worktrees_after_first,
+            vec![("home/review-1".to_string(), "dev".to_string())]
+        );
+        // The job's agent is named after its task.
+        let names: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["p-review-t1".to_string()]);
+
+        // The job ends (T-17 releases it) and a second task is handed in.
+        store
+            .write(|tx| tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + 20))
+            .unwrap();
+        // The release exited the job's agent; the worktree and cache stay.
+        herdr.exit_agent("wt1:p1");
+        store
+            .write(|tx| {
+                // The first review passed: its task is settled.
+                let mut first = tx.get_task("p", "T-1")?.unwrap();
+                first.state = TaskState::Done;
+                tx.update_task(&first)?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 2,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-2".into(),
+                    version: 1,
+                    goal: "the second goal".into(),
+                    accept: "the second accept".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-2", 1, 1, "def5678", "ops/reports/T-2.md", T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let second = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 30).unwrap();
+
+        assert_eq!(second.started, vec!["p:review-1".to_string()], "the warm seat took the job");
+        // No second worktree: the seat's own is reused.
+        assert_eq!(worktrees(&herdr), worktrees_after_first, "one worktree in total");
+        // The second job's agent is named after the second task.
+        let names: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["p-review-t1".to_string(), "p-review-t2".to_string()]);
+        // The checkout took the second job's branch at its candidate.
+        let checkouts: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::PaneRun { command, .. } if command.starts_with("cd ") => Some(command.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checkouts.len(), 2, "{checkouts:?}");
+        assert!(checkouts[1].contains("git checkout -f -B review/t2 def5678"), "{}", checkouts[1]);
+        assert!(checkouts[1].contains("git clean -fd"), "the last job's leftovers go");
+        assert!(!checkouts[1].contains("clean -fdx"), "the build cache stays");
     }
 
     #[test]
@@ -1147,10 +1319,10 @@ review = ["gpt-6.1-sol"]
         store
             .write(|tx| {
                 tx.insert_seat(&SeatRow {
-                    id: "p:r-1".into(),
+                    id: "p:review-1".into(),
                     project: "p".into(),
                     role: SeatRole::Temp,
-                    name: "r-1".into(),
+                    name: "review-1".into(),
                     profile: "codex".into(),
                     generation: 1,
                     state: SeatState::Active,
@@ -1159,7 +1331,7 @@ review = ["gpt-6.1-sol"]
                     task_id: Some("T-1".into()),
                 })?;
                 tx.insert_binding(&BindingRow {
-                    seat: "p:r-1".into(),
+                    seat: "p:review-1".into(),
                     generation: 1,
                     session: "sess".into(),
                     pane_id: pane.into(),
@@ -1174,7 +1346,7 @@ review = ["gpt-6.1-sol"]
             .unwrap();
 
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
-        assert_eq!(report.reviewers, vec!["p:r-1".to_string()]);
+        assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
         // One packet reached the live reviewer, and it was not started again.
         assert_eq!(herdr.prompts_to(pane).len(), 1, "{:?}", herdr.prompts_to(pane));
         assert!(starts(&herdr).is_empty());
