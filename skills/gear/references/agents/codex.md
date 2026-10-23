@@ -49,7 +49,14 @@ A long first turn makes `--wait` time out; that does not mean the prompt was los
 
 ## Exit
 
-To be verified at the end of the first review (record the observed keys and screen here).
+Only when the agent is `idle`/`done`:
+
+```bash
+herdr agent send-keys <name> ctrl+c     # once
+herdr pane read <pane> --source recent-unwrapped --lines 8
+```
+
+Check: the screen shows `Token usage: …` and `To continue this session, run: codex resume <uuid>`, then the shell prompt; `herdr agent get <name>` returns `agent_not_found`. Do not press `ctrl+c` again (it would hit the shell). On a working agent the first `ctrl+c` only interrupts the turn.
 
 ## Quota
 
