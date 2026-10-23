@@ -24,3 +24,4 @@
 - Snapshot wording: `runtime · idle` means "no task in progress", not "agent idle" (the agent was working) — show the agent's Herdr state and the task state separately.
 - Stale captain items re-alert (from T-23 v2): an open captain action item older than captain_item_stale_min becomes urgent and rings again once per period; snapshot shows count and oldest age.
 - T-22 bug: a task added to an old milestone without a voyage row fails with NOT NULL voyages.done instead of being grandfathered.
+- **Store schema version (M2, high).** Stamp the schema version in meta; a binary with another version refuses to write (or migrates up, never down). Needed for users upgrading too. Lanes run their builds/tests with GEAR_DB unset (a lane's dev build created an old table in the production store, L-59).
