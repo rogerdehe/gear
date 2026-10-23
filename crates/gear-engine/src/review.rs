@@ -1355,9 +1355,13 @@ review = ["gpt-6.1-sol"]
         let config = gear_app::config::parse(&text).unwrap();
         let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+        // The first tick submits the checkout; the reviewer starts once the
+        // shell reports it (T-18's flow).
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
 
-        assert_eq!(report.started, vec!["p:r-1".to_string()], "a reviewer starts on the configured profile");
+        assert_eq!(report.started, vec!["p:review-1".to_string()], "a reviewer starts on the configured profile");
         let starts: Vec<(String, Vec<String>)> = herdr
             .calls
             .iter()
@@ -1383,6 +1387,8 @@ review = ["gpt-6.1-sol"]
         let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
 
         start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
 
         let starts: Vec<(String, Vec<String>)> = herdr
             .calls
