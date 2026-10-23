@@ -127,11 +127,43 @@ pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now
     Ok(())
 }
 
+/// The lane's view adopts the contract update of its attempt (T-8, design/06
+/// `adopt_contract`): the attempt's `adopted_version` moves to the pending
+/// version and the pending marker is cleared, so the lane works to the version
+/// it was just told about. Returns the version adopted, or `None` when there is
+/// nothing to adopt (no pending update, or one that is not newer).
+///
+/// The pending update is set by `plan apply` when it bumps the contract of a
+/// task whose attempt is in progress (design/06); an attempt that was already
+/// handed in gets none — its review and verdict follow the version rule.
+pub fn adopt_contract(tx: &Tx<'_>, project: &str, task: &str, n: i64, now: Ts) -> GearResult<Option<i64>> {
+    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no attempt {n} of task {task} in project {project}"),
+        )
+    })?;
+    let Some(pending) = attempt.pending_update else {
+        return Ok(None);
+    };
+    // Never lower the adopted version; a pending marker that is not newer is
+    // simply cleared.
+    attempt.pending_update = None;
+    if pending <= attempt.adopted_version {
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        return Ok(None);
+    }
+    attempt.adopted_version = pending;
+    attempt.updated = now;
+    tx.update_attempt(&attempt)?;
+    Ok(Some(pending))
+}
+
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
-pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_version: i64, candidate: &str, report: &str, now: Ts) -> GearResult<()> {
-    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
+pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_version: i64, candidate: &str, report: &str, now: Ts) -> GearResult<()> {    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
             format!("no attempt {n} of task {task} in project {project}"),
