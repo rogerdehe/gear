@@ -1,0 +1,14 @@
+[package]
+name = "gear-board"
+version.workspace = true
+edition.workspace = true
+description = "The GEAR plan board: a read-only full-screen view of the plan (PRD §15)."
+
+[dependencies]
+gear-model = { workspace = true }
+gear-store = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

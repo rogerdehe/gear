@@ -188,15 +188,23 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 /// - `last_deliver_at`: `created` of `last_op(seat, Deliver)`;
 /// - `ready_tasks`: tasks of the project with `lane == seat.name`, state Ready,
 ///   priority ≠ `wont`, every dep Done — in rank order;
-/// - `nudges_since_progress` 0 and `safe_for_next` false (sampling and the
-///   design/06 safe conditions come later).
+/// - `nudges_since_progress` 0; `safe_for_next` true when every open attempt
+///   is handed in (Submitted): review runs in the background (never-stop).
 pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
     let _ = now; // the design/09 cooldown uses last_deliver_at, not this tick's time
 
     // The open attempt, but only while its task may still be worked on: a
     // Waiting task (or one that is not Running/Verifying) blocks both the
     // continue and any assign (design/09, R-31).
-    let open = tx.open_attempts_of_seat(&seat.id)?;
+    // Never-stop (PRD §0, lesson L-44): a handed-in attempt (Submitted, its
+    // candidate pushed) waits for review in the background and is a safe
+    // point by definition. The attempt the lane is working on now — any open
+    // one that is not Submitted — comes first; only when every open attempt is
+    // handed in does the view carry a Submitted one, and then the next task
+    // may be assigned.
+    let mut open = tx.open_attempts_of_seat(&seat.id)?;
+    open.sort_by_key(|a| a.state == AttemptState::Submitted);
+    let safe_for_next = !open.is_empty() && open.iter().all(|a| a.state == AttemptState::Submitted);
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
@@ -218,7 +226,7 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         last_deliver_at: tx.last_op(&seat.id, OpKind::Deliver)?.map(|op| op.created),
         nudges_since_progress: 0,
         ready_tasks: ready_tasks_of(tx, seat)?,
-        safe_for_next: false,
+        safe_for_next,
     })
 }
 
