@@ -1,0 +1,25 @@
+//! All integration tests of gear-app in one binary: each test binary is scanned by macOS on its first run, so one binary per crate keeps the gate fast.
+mod admin_init_contract;
+mod adopt_contract;
+mod app_home;
+mod app_identity;
+mod app_reply;
+mod app_select_batch;
+mod app_send;
+mod base_gate;
+mod config_change_contract;
+mod config_contract;
+mod draft_contract;
+mod home_task_contract;
+mod kickoff_contract;
+mod packet_contract;
+mod plan_apply_contract;
+mod plan_staff_contract;
+mod plan_verdicts_contract;
+mod profiles_contract;
+mod result_contract;
+mod review_contract;
+mod seats_contract;
+mod settle_review_contract;
+mod tasks_contract;
+mod voyage_contract;
