@@ -375,11 +375,18 @@ fn merge_one(
     // 2. the two merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
     //    cannot slip an unreviewed commit in.
-    let mut pinned_refs = vec![candidate.clone()];
-    if git(dir, &["rev-parse", "--verify", &format!("origin/{review}")]).is_ok() {
-        pinned_refs.push(format!("origin/{review}"));
+    //    The review branch is *required*: a merge that publishes the task
+    //    without its review is a partial merge (F6 of the T-12 review). The
+    //    integration branch is not touched: the merge fails before it, so
+    //    dev stays where it was.
+    let review_ref = format!("origin/{review}");
+    if let Err(reason) = git(dir, &["rev-parse", "--verify", &review_ref]) {
+        return Err(format!(
+            "{task}: the review branch {review_ref} is missing on origin\n{reason}\n\
+             a merge publishes the approved candidate and its review branch together"
+        ));
     }
-    for pinned in pinned_refs {
+    for pinned in [candidate.clone(), review_ref] {
         if let Err(reason) = git(
             dir,
             &[
@@ -855,8 +862,8 @@ gate = "{gate}"
     #[test]
     fn a_settled_review_op_without_a_review_key_still_merges() {
         // F5 of the review: `tasks::settle_review` queues the op with `branch`
-        // and `candidate` only. The missing review branch must be derived, and
-        // merged only when it exists — never `git merge --no-ff origin/`.
+        // and `candidate` only. The missing review branch must be derived —
+        // never `git merge --no-ff origin/`.
         let scratch = Scratch::new("settled");
         let worktree = scratch.merge_worktree();
         let candidate = scratch.head_of("heat/t5");
@@ -870,6 +877,100 @@ gate = "{gate}"
         assert!(log.contains("task"), "{log}");
         // The review branch exists in this fixture, so it was merged too.
         assert!(log.contains("review"), "{log}");
+    }
+
+    #[test]
+    fn a_missing_review_branch_does_not_publish_a_partial_merge() {
+        // F6 of the review: a merge publishes the approved candidate *and* its
+        // review branch. A review branch that is gone on origin is not
+        // silently skipped: the merge fails with the git diagnostic, dev
+        // stays where it was, and nothing is pushed.
+        let scratch = Scratch::new("noreview");
+        // Only the review branch is gone; the task branch and the candidate
+        // are intact.
+        sh(&scratch.root, "git -C origin.git update-ref -d refs/heads/review/t5");
+        let worktree = scratch.merge_worktree();
+        let before = scratch.dev_log();
+
+        let error =
+            merge_one(&worktree, &config("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+
+        assert!(error.contains("review branch"), "{error}");
+        assert!(error.contains("origin/review/t5"), "{error}");
+        assert!(error.contains("rev-parse"), "the git diagnostic: {error}");
+        assert_eq!(scratch.dev_log(), before, "dev is untouched");
+        assert!(!scratch.dev_has_task_commit(), "no partial merge on dev");
+        let branches = scratch.origin_branches();
+        assert!(branches.contains("heat/t5"), "{branches}");
+        // The worktree is back at the integration branch (nothing half-merged
+        // for the next run).
+        let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
+        assert_eq!(head, "dev", "{head}");
+    }
+
+    #[test]
+    fn a_missing_review_branch_fails_the_op_and_tells_the_captain() {
+        // The public path: the engine's merge step runs, the review branch is
+        // gone on origin, so the op fails with the git diagnostic, dev is
+        // untouched and the captain gets one item (F6 of the review).
+        let scratch = Scratch::new("noreview-op");
+        sh(&scratch.root, "git -C origin.git update-ref -d refs/heads/review/t5");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-5",
+                    1,
+                    1,
+                    &candidate,
+                    "ops/reports/T-5.md",
+                    0,
+                )?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t5",
+                        "candidate": candidate,
+                        "review": "review/t5",
+                    }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let mut cfg = EngineCfg::default();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty(), "{merged:?}");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let reason = op.result.clone().unwrap_or_default();
+        assert!(reason.contains("review branch"), "{reason}");
+        assert!(reason.contains("origin/review/t5"), "{reason}");
+        // dev is untouched: no partial merge.
+        assert_eq!(scratch.dev_log(), "dev", "dev is untouched");
+        assert!(!scratch.dev_has_task_commit());
+        // One item in the captain's inbox.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 21)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
     }
 
     #[test]
