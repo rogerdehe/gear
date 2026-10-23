@@ -70,7 +70,7 @@ pub struct LaneSection {
     pub profile: String,
     /// Overrides `models.lanes` for this lane; empty = use the role chain.
     #[serde(default)]
-    pub models: Vec<String>,
+    pub models: Vec<ModelEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -129,9 +129,9 @@ pub struct OnQuota {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Models {
-    pub lanes: Vec<String>,
-    pub review: Vec<String>,
-    pub captain: Vec<String>,
+    pub lanes: Vec<ModelEntry>,
+    pub review: Vec<ModelEntry>,
+    pub captain: Vec<ModelEntry>,
     pub on_quota: OnQuota,
     pub quota_reset_h: u32,
     /// How a model is found in its CLI's model picker and recognised on the
@@ -139,6 +139,149 @@ pub struct Models {
     /// with `picker` and `bar` (and an optional `variant`).
     #[serde(default)]
     pub switch: BTreeMap<String, ModelSwitch>,
+}
+
+/// One model of a chain (T-35).
+///
+/// The **plain form** is the model id alone: the seat's own CLI runs it, with
+/// that CLI's own way of taking the model (`"minimax-cn/MiniMax-M3.1-Flash"`).
+///
+/// The **entry form** names the CLI that runs the model and the arguments it
+/// starts with:
+///
+/// ```toml
+/// { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] }
+/// ```
+///
+/// A chain of entries may cross CLIs: when the next model needs another CLI,
+/// the engine closes the agent and starts that CLI in the same pane (T-35).
+/// The reasoning effort of codex is a property of the entry, never a constant
+/// in the code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelEntry {
+    /// The plain form: the model id only.
+    Plain(String),
+    /// The entry form: the model, the CLI that runs it and its start args.
+    Entry(ModelSpec),
+}
+
+/// The entry form of a model: the model id, the CLI that runs it and the
+/// arguments that CLI starts with.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSpec {
+    /// The model id, as the CLI names it (`gpt-6.1-sol`).
+    pub model: String,
+    /// The CLI (the Herdr agent kind) that runs the model: `codex`, `claude`…
+    /// Without it the seat's own CLI runs the model.
+    #[serde(default)]
+    pub cli: Option<String>,
+    /// The arguments the CLI starts with, after the model flag: the reasoning
+    /// effort of codex, the effort of Claude Code…
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+impl ModelEntry {
+    /// The model id, trimmed.
+    pub fn model(&self) -> &str {
+        match self {
+            ModelEntry::Plain(model) => model.trim(),
+            ModelEntry::Entry(spec) => spec.model.trim(),
+        }
+    }
+
+    /// The CLI that runs the model, when the entry names one.
+    pub fn cli(&self) -> Option<&str> {
+        match self {
+            ModelEntry::Plain(_) => None,
+            ModelEntry::Entry(spec) => spec.cli.as_deref().map(str::trim).filter(|cli| !cli.is_empty()),
+        }
+    }
+
+    /// The arguments the CLI starts with, after the model flag.
+    pub fn args(&self) -> &[String] {
+        match self {
+            ModelEntry::Plain(_) => &[],
+            ModelEntry::Entry(spec) => &spec.args,
+        }
+    }
+
+    /// The entry as one line, for a log or a message: the model id, and the
+    /// CLI it runs on when the entry names one.
+    pub fn describe(&self) -> String {
+        match self.cli() {
+            Some(cli) => format!("{} ({cli})", self.model()),
+            None => self.model().to_string(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelEntry {
+    /// A model id (the plain form) or a model entry (the entry form). The
+    /// error names the field, so a wrong config is fixed without guessing.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ModelEntryVisitor)
+    }
+}
+
+/// Reads one chain entry: a string, or a table with `model`, `cli` and
+/// `args`.
+struct ModelEntryVisitor;
+
+impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
+    type Value = ModelEntry;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "a model id (\"provider/model\") or a model entry \
+             ({ model = \"…\", cli = \"…\", args = [ … ] })",
+        )
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(ModelEntry::Plain(value.to_string()))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let mut model: Option<String> = None;
+        let mut cli: Option<String> = None;
+        let mut args: Vec<String> = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "model" => {
+                    if model.is_some() {
+                        return Err(serde::de::Error::duplicate_field("model"));
+                    }
+                    model = Some(map.next_value()?);
+                }
+                "cli" => {
+                    if cli.is_some() {
+                        return Err(serde::de::Error::duplicate_field("cli"));
+                    }
+                    cli = Some(map.next_value()?);
+                }
+                "args" => args = map.next_value()?,
+                other => {
+                    return Err(serde::de::Error::unknown_field(
+                        other,
+                        &["model", "cli", "args"],
+                    ))
+                }
+            }
+        }
+        let model = model.ok_or_else(|| serde::de::Error::missing_field("model"))?;
+        Ok(ModelEntry::Entry(ModelSpec { model, cli, args }))
+    }
 }
 
 /// The texts an in-place model switch needs (T-33): what to type into the
@@ -274,7 +417,8 @@ pub fn profile_table(
 ///   if non-empty differs from both;
 /// - `timing.cooldown_s > timing.tick_s`;
 /// - `models.lanes`, `models.review`, `models.captain` and each lane's `models`
-///   hold no blank and no repeated entry (compared trimmed);
+///   hold no blank and no repeated entry (compared trimmed; an entry is the
+///   model id together with the CLI it names);
 /// - a non-empty `models.review` holds at least one model different from every
 ///   lane's primary (`models[0]`, else `models.lanes[0]`), so the reviewer
 ///   never runs the model it reviews;
@@ -471,7 +615,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let review_models: Vec<&str> = models
         .review
         .iter()
-        .map(|model| model.trim())
+        .map(|entry| entry.model())
         .filter(|model| !model.is_empty())
         .collect();
     if !review_models.is_empty() {
@@ -479,7 +623,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             cfg.lanes
                 .iter()
                 .all(|lane| match lane_primary(lane, &models.lanes) {
-                    Some(primary) => primary != *review_model,
+                    Some(primary) => primary.model() != *review_model,
                     None => true,
                 })
         });
@@ -532,28 +676,30 @@ fn agent_name_fits(project: &str, seat: &str) -> bool {
 }
 
 /// A model chain problem: no entry may be blank and no entry may repeat
-/// (both compared after trimming). Empty chains are fine.
-fn chain_problem(chain: &[String]) -> Option<String> {
-    let mut seen: Vec<&str> = Vec::new();
+/// (both compared after trimming; an entry is the model id together with the
+/// CLI it names). Empty chains are fine.
+fn chain_problem(chain: &[ModelEntry]) -> Option<String> {
+    let mut seen: Vec<(String, Option<String>)> = Vec::new();
     for entry in chain {
-        let model = entry.trim();
+        let model = entry.model();
         if model.is_empty() {
             return Some("a model chain entry is empty after trimming".to_string());
         }
-        if seen.contains(&model) {
+        let key = (model.to_string(), entry.cli().map(str::to_string));
+        if seen.contains(&key) {
             return Some(format!("the model {model:?} appears twice in one chain"));
         }
-        seen.push(model);
+        seen.push(key);
     }
     None
 }
 
 /// The primary model of a lane: its own first entry, else the lane chain's.
-fn lane_primary<'a>(lane: &'a LaneSection, lanes_chain: &'a [String]) -> Option<&'a str> {
-    lane.models
-        .first()
-        .or_else(|| lanes_chain.first())
-        .map(|model| model.trim())
+fn lane_primary<'a>(
+    lane: &'a LaneSection,
+    lanes_chain: &'a [ModelEntry],
+) -> Option<&'a ModelEntry> {
+    lane.models.first().or_else(|| lanes_chain.first())
 }
 
 /// Two path lists overlap when a path is equal to another or one is its

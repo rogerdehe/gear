@@ -1303,6 +1303,23 @@ impl<'s> Tx<'s> {
     }
 
     /// Most recent op of `kind` for `seat` (any state), for cooldowns.
+    /// Every op of `kind` for `seat`, oldest first.
+    pub fn ops_of_seat_kind(&self, seat: &str, kind: OpKind) -> GearResult<Vec<OpRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&op_select(
+                " WHERE seat=?1 AND kind=?2
+                 ORDER BY created, CAST(SUBSTR(id, INSTR(id, '-')+1) AS INTEGER)",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![seat, kind.as_str()], op_from_row)
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite)?;
+        Ok(rows)
+    }
+
     pub fn last_op(&self, seat: &str, kind: OpKind) -> GearResult<Option<OpRow>> {
         let row: Option<OpRow> = self
             .tx
