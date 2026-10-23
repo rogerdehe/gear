@@ -1,5 +1,7 @@
 # GEAR
 
+**GEAR** — **G**oals **E**xecuted through **A**gent **R**elay (goals carried out by a relay of agents).
+
 GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herdr) under one captain. Lanes (long-lived developer agents) take tasks from a living plan, hand in results, and keep going; reviewers on another model check each hand-in; the engine merges what passes and sends back what does not. The captain re-plans while the work runs; you watch one thing — the plan board.
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
