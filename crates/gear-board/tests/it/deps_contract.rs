@@ -136,7 +136,7 @@ fn the_d_key_toggles_the_view() {
     let mut out: Vec<u8> = Vec::new();
     let mut keys = Presses(vec!['d', 'q']);
 
-    run_with(&mut store, &opts, &mut out, &mut keys).unwrap();
+    run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
     // The first frame shows the queues, the second the tree.

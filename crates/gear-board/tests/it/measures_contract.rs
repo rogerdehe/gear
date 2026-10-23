@@ -79,6 +79,10 @@ fn world() -> Store {
     store
 }
 
+fn lane_header<'a>(text: &'a str, lane: &str) -> &'a str {
+    text.lines().find(|line| line.starts_with(&format!("Lane {lane} ·"))).expect("lane header")
+}
+
 fn options() -> Options {
     Options { project: Some("p".into()), ..Options::default() }
 }
@@ -90,9 +94,9 @@ fn the_board_shows_the_rework_rate_and_the_time_since_the_last_task() {
 
     // One lane: two hand-ins, one sent back, and the delivery five minutes
     // ago.
-    assert!(text.contains("Lane data · rework 1/2 · last task 5m ago"), "{text}");
+    assert!(lane_header(&text, "data").contains("rework 1/2 · last task 5m ago"), "{text}");
     // The other never received a task.
-    assert!(text.contains("Lane runtime · rework 0/0 · no task yet"), "{text}");
+    assert!(lane_header(&text, "runtime").contains("rework 0/0 · no task yet"), "{text}");
     // The project-wide rate is on the totals line.
     assert!(
         text.contains("Totals: 2 tasks · 0 done · 0 in progress · 0 waiting · rework 1/2"),
@@ -117,8 +121,8 @@ fn the_measure_follows_the_seat_that_made_the_attempt() {
 
     let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
-    assert!(text.contains("Lane data · rework 1/2"), "{text}");
-    assert!(text.contains("Lane runtime · rework 0/0"), "{text}");
+    assert!(lane_header(&text, "data").contains("rework 1/2"), "{text}");
+    assert!(lane_header(&text, "runtime").contains("rework 0/0"), "{text}");
     // And the project-wide rate counts each hand-in once.
     assert!(text.contains("rework 1/2"), "{text}");
 }
@@ -175,7 +179,7 @@ fn temp_hand_ins_count_in_the_project_rate() {
         text.contains("Totals: 2 tasks · 0 done · 0 in progress · 0 waiting · rework 1/3"),
         "{text}"
     );
-    assert!(text.contains("Lane data · rework 1/2"), "{text}");
+    assert!(lane_header(&text, "data").contains("rework 1/2"), "{text}");
 
     // The temp attempt is sent back: two rejections in three hand-ins.
     store

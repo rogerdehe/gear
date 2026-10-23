@@ -495,7 +495,10 @@ fn run_home(
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
     let fp = gear_app::identity::observe(env, herdr)?;
-    let home = gear_app::home::build(store, env, fp.as_ref(), now)?;
+    let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
+        herdr.agents().ok()
+    } else { None };
+    let home = gear_app::home::build_with_agents(store, env, fp.as_ref(), now, agents.as_deref())?;
     if json {
         let doc = serde_json::json!({
             "text": &home.text,
@@ -551,7 +554,9 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
         ..Default::default()
     };
     let mut out = std::io::stdout();
-    gear_board::run(&mut store, &opts, &mut out)
+    let mut herdr = open_herdr().ok();
+    gear_board::run(&mut store, &opts, &mut out,
+        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
 }
 
 /// `gear report time`: where the time went (T-38). The captain's view of the
@@ -1383,6 +1388,16 @@ mod tests {
             pane_id: Some(pane.into()),
             admin: false,
         }
+    }
+
+    #[test]
+    fn captain_snapshot_includes_the_observed_agent_state() {
+        let (mut store, mut herdr) = world();
+        herdr.set_status(LANE_PANE, AgentStatus::Working);
+        let mut out = Vec::new();
+        run_home(&mut store, &env("captain", CAP_PANE), &mut herdr, T0, false, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("heat · agent working · no current task · 0 queued"), "{text}");
     }
 
     fn send_cmd(kind: &str) -> SendCmd {
