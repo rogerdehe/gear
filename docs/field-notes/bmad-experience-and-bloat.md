@@ -23,6 +23,15 @@ Input for the overall retrospective (the user's experience plus this project's).
 | Docs grow with every incident | lessons L-1…L-45, field notes, SOPs — the captain adds text after each event (the user already asked for subtraction). |
 | Value per line is not measured | never-stop is measured by idle time and rework rate; nothing yet measures whether the output is worth its size. |
 
+## The captain kept the ship, not the screws (2026-10-23, after M1 slipped)
+
+User: the reviewers are not wrong — a screw minds its own tightness; the captain minds whether the ship floats. M1 slipped because the captain handed the ship's judgement to the screws:
+- the milestone had no checkable done-sentence, so "good enough" was set by the reviewer, who always asks for more;
+- the captain's filter on findings disappeared when the engine began settling verdicts itself (every finding went straight to the lane);
+- the captain had no gauge for drift (milestone age, rework rounds per task, lines added per round) and looked only when the user asked.
+
+Ideas for the retrospective (not rules yet): a checkable done-sentence per milestone that every task and finding is judged against; reviewers get the milestone's quality bar, not only the code ("skeleton: block only loop breaks and data loss; log the rest"); a captain gate in the automatic flow (P0 auto-rework, the rest triaged) and a cap on review rounds; drift gauges that alert the captain (age, rounds, growth); review slots by critical path. Applied at once to close M1 (plan v44).
+
 ## Questions for the retrospective (no answers yet)
 
 - How does review stay on direction and real defects, not on the next 1000 steps? (scope of review per task; severity calibration; a cap on rounds; who decides "good enough for the skeleton")
