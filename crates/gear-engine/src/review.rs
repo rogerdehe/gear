@@ -497,9 +497,10 @@ fn recover_missing_packets(
         };
         if store
             .read(|tx| tx.last_op(&seat.id, OpKind::Deliver))?
-            .is_some()
+            .is_some_and(|op| !matches!(op.state, gear_model::OpState::Failed | gear_model::OpState::Void))
         {
-            // It has its packet, or it is sending it.
+            // It has its packet, or it is sending it. A refused send (Failed,
+            // e.g. `agent_not_ready` right after the start) is sent again.
             continue;
         }
         let Some(attempt) = store
@@ -541,10 +542,11 @@ fn review_branch(task: &str) -> String {
 }
 
 /// The Herdr agent name (and workspace label) of a task's reviewer:
-/// `<project>-<task-id>` (conventions 17 §2).
+/// `<project>-review-<task-id>` — project prefix plus what the agent is for
+/// (kickoff naming rule, 17 §2).
 fn agent_name(config: &ProjectConfig, task: &str) -> String {
     format!(
-        "{}-{}",
+        "{}-review-{}",
         config.project.id,
         task.to_lowercase().replace('-', "")
     )
