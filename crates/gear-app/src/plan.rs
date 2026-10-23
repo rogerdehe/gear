@@ -102,6 +102,7 @@ pub fn apply(
             let result = apply_queue(tx, &ctx.project, &seat.id, ctx.generation, draft, text, now)?;
             // The milestone blocks of the draft become voyages (T-22), after the
             // queue so the task count at departure is the plan's.
+            record_tail_decisions(tx, &ctx.project, draft)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, now)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
@@ -730,6 +731,39 @@ fn utc_date(ts: i64) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Whether refill/idle warnings are suppressed by the captain's tail decision.
+pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> {
+    Ok(tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() == Some("1"))
+}
+
+/// `# Decisions` / `- tail: heat wire` replaces the named tail lanes;
+/// `- tail: -` clears the declaration. Omitted declarations keep the state.
+fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
+    for decision in &draft.decisions {
+        let Some(names) = decision.strip_prefix("tail:") else { continue; };
+        let names = names.trim();
+        let lanes: BTreeSet<_> = names.split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|s| !s.is_empty()).collect();
+        if lanes.is_empty() {
+            return Err(bad(1, "tail: needs lane names, or - to clear"));
+        }
+        let seats = tx.seats_of_project(project)?;
+        for name in &lanes {
+            if *name != "-" && !seats.iter().any(|s| s.role == SeatRole::Lane && s.name == *name) {
+                return Err(bad(1, format!("tail: unknown lane {name}")));
+            }
+        }
+        if lanes.contains("-") && lanes.len() != 1 {
+            return Err(bad(1, "tail: - cannot be combined with lane names"));
+        }
+        for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
+            tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
+                if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
+        }
+    }
+    Ok(())
 }
 
 /// Fix the departure of every milestone that has tasks and no departure yet:

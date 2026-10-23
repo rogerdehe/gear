@@ -3,20 +3,13 @@
 //! skills, and the command says where it wrote.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
+use crate::scratch;
+
+/// A `gear` call in a scratch home: never the real store (T-41).
 fn gear(home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_gear"))
-        .args(args)
-        .env("HOME", home)
-        .env_remove("GEAR_CTX")
-        // Never the real store: a `gear` call starts an engine on it
-        // (design/14). The install writes no store at all.
-        .env_remove("GEAR_DB")
-        .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_SOCKET_PATH")
-        .output()
-        .expect("run gear")
+    scratch::gear(home, args).output().expect("run gear")
 }
 
 fn stdout(o: &Output) -> String {
@@ -29,10 +22,7 @@ fn stderr(o: &Output) -> String {
 
 /// A scratch home under the temp dir (no new dependency).
 fn scratch_home(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("gear-install-{}-{tag}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    scratch::home(tag)
 }
 
 /// The skills directory of an agent CLI, under the given home.
@@ -109,11 +99,8 @@ fn an_unknown_agent_is_bad_format() {
 #[test]
 fn an_agent_never_installs_into_the_users_home() {
     let home = scratch_home("agent");
-    let o = Command::new(env!("CARGO_BIN_EXE_gear"))
-        .args(["admin", "install-skill", "--agent", "claude"])
-        .env("HOME", &home)
+    let o = scratch::gear(&home, &["admin", "install-skill", "--agent", "claude"])
         .env("GEAR_CTX", "acme:captain:1")
-        .env_remove("GEAR_DB")
         .output()
         .expect("run gear");
     assert_eq!(o.status.code(), Some(1));

@@ -114,7 +114,7 @@ fn a_review_verdict_settles_the_task_in_the_tick() {
         "no review item is left for the captain: {actionable:?}"
     );
     let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
-    assert_eq!(info.len(), 1, "{info:?}");
+    assert!(info.is_empty(), "settlement information must not enter the unshown reply queue: {info:?}");
 
     // A second tick settles nothing again.
     let report = tick(&mut s, &mut herdr, &auto(), T0 + 30).unwrap();

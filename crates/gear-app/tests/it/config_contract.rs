@@ -57,7 +57,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
         }
     );
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45 });
+    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
@@ -209,6 +209,16 @@ fn models_rules() {
     assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{zero}")).unwrap())), vec!["models.quota_reset_h"]);
     // empty chains = models not managed by GEAR: valid
     assert!(validate(&parse(MINIMAL).unwrap()).is_empty());
+}
+
+#[test]
+fn captain_stale_period_is_configurable_and_nonzero() {
+    let cfg = parse(&format!("{MINIMAL}\n[timing]\ncaptain_item_stale_min = 30\n")).unwrap();
+    assert_eq!(cfg.timing.captain_item_stale_min, 30);
+    assert!(validate(&cfg).is_empty());
+    let mut cfg = cfg;
+    cfg.timing.captain_item_stale_min = 0;
+    assert_eq!(fields(&validate(&cfg)), vec!["timing.captain_item_stale_min"]);
 }
 
 // ---- the two forms of a chain entry (T-35)

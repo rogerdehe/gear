@@ -1878,10 +1878,12 @@ mod tests {
         assert!(record.passed);
         assert_eq!(record.findings, "P1: the header count is stale");
         assert_eq!(record.by_seat, "p:r-1");
-        // The captain's inbox holds the item.
-        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 2)).unwrap();
-        assert_eq!(inbox.len(), 1);
-        assert!(inbox[0].body.contains("pass"), "{}", inbox[0].body);
+        // A passing verdict is information; the engine handles settlement.
+        assert!(store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 2)).unwrap().is_empty());
+        let history = store.read(|tx| tx.thread_messages("p", "T-7:1")).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].state, MsgState::Info);
+        assert!(history[0].body.contains("pass"), "{}", history[0].body);
     }
 
     #[test]

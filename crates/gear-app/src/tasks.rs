@@ -412,8 +412,8 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
 ///   contract than the task carries now) cannot complete the current contract
 ///   (design/06): it settles as a rework on the current contract, with the
 ///   move spelled out in the rework note;
-/// - either way every review item of that attempt in the captain's inbox is
-///   resolved and one **information line** (a Reply, state Info) says what
+/// - either way every actionable review item of that attempt in the captain's inbox is
+///   resolved and one **information line** (System, state Info) says what
 ///   happened; the captain does not have to decide anything.
 ///
 /// The verdict must exist (`NoTarget`) and the attempt must be handed in:
@@ -761,8 +761,8 @@ fn rework_rank(tx: &Tx<'_>, task: &gear_store::TaskRow) -> GearResult<i64> {
     Ok(head.map(|rank| rank - 1).unwrap_or(task.rank))
 }
 
-/// Close **every** review item of `task`/`attempt` in the captain's inbox (it is
-/// handled now) and leave one information line for the captain: a Reply in the
+/// Close **every actionable** review item of `task`/`attempt` in the captain's inbox (it is
+/// handled now) and leave one silent System/Info line for the captain in the
 /// first item's thread, or a fresh line when no item is there any more. A
 /// duplicate review submission must not survive as an action item (R-67 P1).
 fn resolve_review_items(
@@ -806,10 +806,10 @@ fn resolve_review_items(
         thread,
         task: Some(task.to_string()),
         attempt: Some(attempt),
-        sender: captain.id.clone(),
-        sender_gen: captain.generation,
+        sender: "engine".into(),
+        sender_gen: 0,
         recipient: captain.id.clone(),
-        kind: MsgKind::Reply,
+        kind: MsgKind::System,
         urgent: false,
         body: line.to_string(),
         reply_to,

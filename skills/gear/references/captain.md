@@ -179,8 +179,8 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 3. **Plan the next steps.** Write the draft, `gear plan apply`. Keep **2–3 valuable steps queued per lane** — enough to fill it, not a backlog nobody can check. A lane with nothing to start is a planning failure, not the lane's fault.
 4. **Watch the lanes.** A lane that stops with work left is asked to continue (`herdr agent prompt <agent> "run \`gear\` first"`); a lane that ran dry gets work in the next plan; a quota stop is a model switch or a park, never a finished task (read the screen first — `gear --skill agent:<kind>` says what a quota screen looks like).
 5. **Hold the course.** The milestone's `done:` and `bar:` decide what is good enough. A reviewer judges against them, not against perfection (`gear --skill review`). Do not widen the scope in the middle of a milestone: new work goes into the next milestone, and the plan says so in `# Decisions`.
-6. **Look at the time.** The home page and board show elapsed/eta, pace, projected finish, scope now/departure, rework and the slowest task. Pace uses completed tasks with known estimates and recorded start-to-last-step spans; projected finish is elapsed plus remaining estimates times pace, in minutes from departure (remaining time rounds up). Unknown measurements show `-`. Scope excludes cancelled/failed/draft tasks; departure estimates are fixed when the first tasks are applied. Older voyages recover their departure estimate from the original plan on the next apply, otherwise it stays unknown. `gear report time` says where the time went: per task and per voyage the estimate, the dev time, the review time, the wait for you, the merge time, the rework rounds and the ratio actual/estimate. Read it when the pace looks off; a task that always takes twice its estimate wants a smaller plan, not a faster lane.
-7. **Merge and close.** A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
+6. **Look at the time.** The home page and board show elapsed/eta, pace, projected finish, scope now/departure, rework and the slowest task. Pace uses completed tasks with known estimates and recorded start-to-last-step spans; projected finish is elapsed plus remaining estimates times pace, in minutes from departure (remaining time rounds up). Unknown measurements show `-`. Scope excludes cancelled/failed/draft tasks; departure estimates are fixed when the first tasks are applied. Older voyages recover their departure estimate from the original plan on the next apply, otherwise it stays unknown. `gear report time` says where the time went: per task and per voyage the estimate, the dev time, the review time, the wait for you, the merge time, the rework rounds and the ratio actual/estimate. Read it when the pace looks off; a task that always takes twice its estimate wants a smaller plan, not a faster lane. `gear report time` says where the time went: per task and per voyage the estimate, the dev time, the review time, the wait for you, the merge time, the rework rounds and the ratio actual/estimate. Read it when the pace looks off; a task that always takes twice its estimate wants a smaller plan, not a faster lane.
+7. **Merge and close.** Lane hand-ins and passing reviews are information records: the engine starts review, settles passes and queues the merge without ringing you. Failed verdicts, failed merges and alerts need your judgement. Resolving information records sends no reply to the lane. A passing review is merged by the engine. You decide on the verdict, not on the code — reading code is the reviewer's job.
 8. **The user** is asked only about what is theirs.
 
 ## 4. What you never do
@@ -189,6 +189,36 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 - You never change the board by hand: the plan draft is the only way in.
 - You never leave a lane without its next step, and you never wait for a review to give a lane more work — lanes hand in and take the next task.
 - You never decide something you cannot write in one line. If it takes a paragraph, it is a plan change or a question to the user.
+
+### Early attention and the voyage tail (T-40)
+
+`[timing].captain_item_stale_min` defaults to 15 (minimum 1). An open action
+item at that age becomes urgent and can ring again once per period, including
+when you have already viewed it. The clock survives engine restarts. Deliberately
+Waiting, resolved and informational messages retain their normal behavior;
+the doorbell still waits for an idle reachable captain and a free slot.
+
+A lane's remaining ready/current work is forecast using its measured average
+start-to-hand-in duration (rework attempts are samples too). At about one average
+task left, one `lane X runs dry in ~N min` item opens. With no measured history,
+the ready-count fallback remains. Acknowledgment does not recreate the same
+shortage every tick. A measured warning escalates when its remaining time halves,
+then at actual idle; starting the last queued task with the same remaining time
+is silent. Without measurements, losing the last queued task is the next stage.
+Refilling closes the warning.
+Stale open shortage items still follow the captain reminder period above.
+
+Declare intentional finishing work in the plan:
+
+```markdown
+# Decisions
+- tail: course base
+```
+
+Only these named lanes stop raising refill/idle warnings; existing feed warnings
+close. This persists when a later draft omits the decision. A new `tail:` line
+replaces the list; `- tail: -` clears it and resumes monitoring. Unknown lane names
+reject the plan atomically. Dispatch and work already on the lanes continue.
 
 ### Station decisions (T-49)
 
