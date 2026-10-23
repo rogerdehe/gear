@@ -201,6 +201,7 @@ dependencies = [
 name = "gear-board"
 version = "0.1.0"
 dependencies = [
+ "gear-herdr",
  "gear-model",
  "gear-store",
  "libc",
