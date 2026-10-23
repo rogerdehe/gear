@@ -102,10 +102,11 @@ pub fn plan_onboard(
 /// walking skeleton; captain and temps are not onboarded by the engine yet).
 ///
 /// The config text and the seat roster of a project are read in **one** read
-/// transaction: a config change (T-6) commits between ticks, never between the
-/// two reads, so every lane in the roster is in the config of the same
-/// snapshot. A lane seat whose lane is not in the config is skipped this tick —
-/// it is never parked for a config that may be about to arrive (R-63).
+/// transaction, so both see the same snapshot: a config change (T-6) is either
+/// entirely visible to this tick or not at all, even when another connection
+/// commits while the engine runs. A lane seat whose lane the snapshot's config
+/// does not name is skipped this tick — it is never parked for a config that
+/// may be about to arrive (R-63).
 ///
 /// Per seat, in this order:
 /// 1. the project's config (`config_toml`, `gear_app::config::parse`, outside
