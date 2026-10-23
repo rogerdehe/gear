@@ -1,15 +1,10 @@
 //! Keep the lanes fed (the soul of GEAR: lanes never stop).
 //!
-//! Each tick, for every lane that may take work, count its ready tasks.
-//! Fewer than two is the danger zone: the lane stops soon unless the captain
-//! adds work. The captain gets one action item in the inbox — "lane <x> has
-//! <n> ready tasks left", or "lane <x> is IDLE" when it has nothing left and
-//! nothing running — so the doorbell rings before the lane stops.
-//!
-//! One item per lane, found by its thread, so a second tick or a restarted
-//! engine creates no duplicate. The item is updated while the condition
-//! lasts and closed when the queue is refilled. A lane that is parked, held
-//! or retiring is not warned about: it is not supposed to take work.
+//! Forecast the remaining ready/current work using measured lane development
+//! time; warn within about one average task. Without measurements, retain the
+//! ready-count warning. One active item per lane, with persistent severity:
+//! repeats stay quiet even after acknowledgment; worsening gets a fresh id.
+//! Recovery, parked/held lanes and the captain's tail declaration close it.
 
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{MessageRow, NewMessage, Store, Tx};
@@ -48,7 +43,11 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         }
         // A lane that is parked or held must not keep a warning: close it
         // (R3 of the T-7 review).
-        if !matches!(seat.state, SeatState::Active | SeatState::Standby) {
+        let state_key = format!("feed-severity:{}", seat.id);
+        if !matches!(seat.state, SeatState::Active | SeatState::Standby)
+            || gear_app::plan::lane_in_tail(tx, project, &seat.name)?
+        {
+            tx.set_meta(&state_key, "0")?;
             if close(
                 tx,
                 project,
@@ -73,22 +72,49 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 ready += 1;
             }
         }
-        let working = !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty();
-        if ready >= ENOUGH_READY {
-            if close(
-                tx,
-                project,
-                &seat.name,
-                &captain.id,
-                &format!("the queue is refilled ({ready} ready)"),
-                now,
-            )? {
+        let current = tx.in_progress_attempts_of_seat(&seat.id)?;
+        let working = !current.is_empty();
+        let average = average_task_seconds(tx, project, &seat.id)?;
+        let horizon = match average {
+            Some(average) => {
+                let mut seconds = ready as i64 * average;
+                for attempt in &current {
+                    let times = tx.attempt_times(project, &attempt.task, attempt.n)?;
+                    let elapsed = times.started.map(|start| (now - start).max(0)).unwrap_or(0);
+                    seconds += (average - elapsed).max(0);
+                }
+                Some(seconds)
+            }
+            None => None,
+        };
+        let recovered = ready >= ENOUGH_READY
+            || horizon.zip(average).is_some_and(|(left, average)| left > average);
+        if recovered {
+            tx.set_meta(&state_key, "0")?;
+            if close(tx, project, &seat.name, &captain.id,
+                &format!("the queue is refilled ({ready} ready)"), now)? {
                 changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
             }
             continue;
         }
+        let severity = if ready == 0 && !working {
+            3
+        } else if let (Some(left), Some(average)) = (horizon, average) {
+            // Taking the final queued task does not itself shorten the
+            // forecast. Escalate when runway halves, then when actually idle.
+            if left <= average / 2 { 2 } else { 1 }
+        } else if ready == 0 {
+            2
+        } else {
+            1
+        };
+        let previous = tx.get_meta(&state_key)?.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+        // The captain may resolve an alert without refilling immediately. The
+        // same condition stays acknowledged until it worsens or recovers.
         let body = if ready == 0 && !working {
             format!("lane {} is IDLE", seat.name)
+        } else if let Some(seconds) = horizon {
+            format!("lane {} runs dry in ~{} min", seat.name, (seconds + 59) / 60)
         } else {
             format!(
                 "lane {} has {} ready {} left",
@@ -97,35 +123,61 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 if ready == 1 { "task" } else { "tasks" }
             )
         };
-        match open_item(tx, project, &seat.name, &captain.id)? {
-            Some(item) => {
-                if item.body != body {
+        if severity <= previous {
+            if severity < previous {
+                // Improve the existing description silently; only worsening
+                // is a new fact that needs another doorbell.
+                if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
                     tx.update_message_body(project, &item.id, &body)?;
-                    changes.push(FeedChange { lane: seat.name.clone(), action: "updated" });
                 }
+                tx.set_meta(&state_key, &severity.to_string())?;
             }
-            None => {
-                tx.insert_message(&NewMessage {
-                    project: project.to_string(),
-                    thread: thread(&seat.name),
-                    task: None,
-                    attempt: None,
-                    sender: "engine".to_string(),
-                    sender_gen: 0,
-                    recipient: captain.id.clone(),
-                    kind: MsgKind::System,
-                    urgent: false,
-                    body,
-                    reply_to: None,
-                    needs_ack: false,
-                    state: MsgState::Open,
-                    created: now,
-                })?;
-                changes.push(FeedChange { lane: seat.name.clone(), action: "opened" });
+            continue;
+        }
+        let mut action = "opened";
+        if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
+            if previous == 0 {
+                // An alert from an older engine is the same incident.
+                if item.body != body { tx.update_message_body(project, &item.id, &body)?; }
+                tx.set_meta(&state_key, &severity.to_string())?;
+                continue;
+            }
+            // A worsening must have a fresh id: a view of the earlier alert
+            // must not hide the new fact from the captain's doorbell.
+            tx.update_message_state(project, &item.id, MsgState::Resolved,
+                Some("the shortage worsened"), None, None, now)?;
+            action = "updated";
+        }
+        tx.insert_message(&NewMessage {
+            project: project.to_string(), thread: thread(&seat.name),
+            task: None, attempt: None, sender: "engine".to_string(), sender_gen: 0,
+            recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,
+            body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+        })?;
+        tx.set_meta(&state_key, &severity.to_string())?;
+        changes.push(FeedChange { lane: seat.name.clone(), action });
+    }
+    Ok(changes)
+}
+
+/// Average measured lane work per handed-in attempt. Review/captain waiting
+/// does not consume a lane's development capacity; rework is another sample.
+fn average_task_seconds(tx: &Tx<'_>, project: &str, seat: &str) -> GearResult<Option<i64>> {
+    let mut total = 0;
+    let mut samples = 0;
+    for task in tx.tasks_of_project(project)? {
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            if attempt.seat != seat { continue; }
+            let times = tx.attempt_times(project, &task.id, attempt.n)?;
+            if let (Some(start), Some(end)) = (times.started, times.handed_in) {
+                if end > start {
+                    total += end - start;
+                    samples += 1;
+                }
             }
         }
     }
-    Ok(changes)
+    Ok((samples > 0).then(|| (total + samples - 1) / samples))
 }
 
 /// The thread one lane's item lives in.

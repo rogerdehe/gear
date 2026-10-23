@@ -179,6 +179,12 @@ fn an_older_database_gains_the_columns() {
              ALTER TABLE voyages DROP COLUMN departure_estimate_min;",
         )
         .unwrap();
+        // The old shape predates v2. Restore its stamp too, so this fixture
+        // represents an older store rather than a corrupt current store.
+        conn.execute(
+            "UPDATE meta SET value=?1 WHERE key='schema_version'",
+            [gear_store::OLDEST_VERSION.to_string()],
+        ).unwrap();
     }
 
     // Opening it migrates it up: the columns are back and the rows are there.

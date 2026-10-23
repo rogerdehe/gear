@@ -21,3 +21,4 @@ mod slice2_dispatch;
 mod stall_contract;
 
 mod captain_quota_contract;
+mod hand_in_notifications;
