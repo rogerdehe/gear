@@ -215,9 +215,10 @@ fn re_register(
         ));
     }
 
-    // Every registered lane is still in the config.
+    // Every registered lane is still in the config — except a retired one: a
+    // new voyage may start with new lanes once the old ones are reclaimed.
     for seat in tx.seats_of_project(&project_id)? {
-        if seat.role != SeatRole::Lane {
+        if seat.role != SeatRole::Lane || seat.state == gear_model::SeatState::Retired {
             continue;
         }
         if !config.lanes.iter().any(|lane| lane.name == seat.name) {
