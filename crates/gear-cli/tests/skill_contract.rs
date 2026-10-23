@@ -58,6 +58,7 @@ fn the_new_topics_print_their_file() {
         ("review", "references/review.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
+        ("agent:grok", "references/agents/grok.md"),
     ] {
         let o = gear(&["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
@@ -78,6 +79,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "agent:opencode",
         "agent:codex",
         "agent:claude",
+        "agent:grok",
     ] {
         let o = gear(&["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));

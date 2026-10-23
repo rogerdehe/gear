@@ -26,7 +26,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | review | captain | agent:opencode | agent:codex | agent:claude.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | decompose | review | captain | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -537,7 +537,7 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin install-skill --agent <claude|codex|opencode>`: write the
+/// `gear admin install-skill --agent <claude|codex|opencode|grok>`: write the
 /// skill (SKILL.md and its references) into the directory the agent CLI loads
 /// its skills from, and say where it was written.
 ///
