@@ -759,6 +759,95 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
     })
 }
 
+
+/// Rewrite a draft after a successful apply, so the file stays the current
+/// plan of its voyage (T-34):
+///
+/// - the header's `base=` becomes the applied version;
+/// - every `## NEW` block header becomes `## T-<id>`, in draft order (the ids
+///   the apply assigned);
+/// - the `# Verdicts` section is dropped: verdicts live in the store, and a
+///   re-applied file must settle nothing.
+///
+/// Everything else — comments, sections, field lines, spacing — is kept as the
+/// captain wrote it, so the file is edited in place and re-applied as is.
+pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut ids = created.iter();
+    let mut dropping = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if dropping {
+            // The section ends at the next `# ` header (which is kept) or at
+            // the end of the file.
+            if trimmed.starts_with("# ") {
+                dropping = false;
+            } else {
+                continue;
+            }
+        }
+        if is_section_named(trimmed, "Verdicts") {
+            dropping = true;
+            continue;
+        }
+        if trimmed
+            .strip_prefix("## ")
+            .and_then(|rest| rest.split_whitespace().next())
+            == Some("NEW")
+        {
+            if let Some(id) = ids.next() {
+                let indent = &line[..line.len() - line.trim_start().len()];
+                let rest = trimmed["## NEW".len()..].trim_start();
+                let header = if rest.is_empty() {
+                    format!("{indent}## {id}")
+                } else {
+                    format!("{indent}## {id} {rest}")
+                };
+                lines.push(header);
+                continue;
+            }
+        }
+        lines.push(line.to_string());
+    }
+    // The dropped section may have been the last one: do not leave the blank
+    // lines that separated it behind.
+    if dropping {
+        while lines.last().map(|line| line.trim().is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+    }
+    // The header is the first non-empty line; its `base=` is the version just
+    // applied.
+    if let Some(header) = lines.iter_mut().find(|line| !line.trim().is_empty()) {
+        let trimmed = header.trim();
+        if trimmed.starts_with("<!--") && trimmed.ends_with("-->") {
+            let parts: Vec<String> = trimmed
+                .split_whitespace()
+                .map(|token| {
+                    if token.starts_with("base=") {
+                        format!("base={version}")
+                    } else {
+                        token.to_string()
+                    }
+                })
+                .collect();
+            *header = parts.join(" ");
+        }
+    }
+    let mut out = lines.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// Is this line the `# <name>` section header (not `# <name>s`, not a
+/// value line)?
+fn is_section_named(line: &str, name: &str) -> bool {
+    let Some(rest) = line.strip_prefix("# ") else { return false };
+    rest == name || rest.starts_with(&format!("{name} "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +858,39 @@ mod tests {
         let err = parse(text).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat);
         err.detail
+    }
+
+
+    #[test]
+    fn an_applied_draft_is_rewritten_in_place() {
+        let text = format!(
+            "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
+        );
+        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()]);
+        assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
+        assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
+        assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
+        assert!(!rewritten.contains("NEW"), "{rewritten}");
+        assert!(!rewritten.contains("# Verdicts"), "{rewritten}");
+        assert!(!rewritten.contains("T-9 attempt"), "{rewritten}");
+        // Everything else is untouched, including the sections after the
+        // dropped one.
+        assert!(rewritten.contains("# Goal\nthe goal"), "{rewritten}");
+        assert!(rewritten.contains("goal: A\naccept: a\ndeps: -"), "{rewritten}");
+        assert!(rewritten.contains("# Staff\n- hold heat reason=test"), "{rewritten}");
+        // And the result still parses as a draft with those ids.
+        let again = parse(&rewritten).unwrap();
+        assert_eq!(again.base, 7);
+        assert_eq!(again.queue.iter().map(|item| item.id.clone()).collect::<Vec<_>>(), vec![Some("T-1".into()), Some("T-2".into())]);
+        assert!(again.verdicts.is_empty(), "the verdicts are gone");
+    }
+
+    #[test]
+    fn a_verdicts_section_at_the_end_leaves_no_tail() {
+        let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()]);
+        assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
+        assert!(!rewritten.contains("Verdicts"), "{rewritten}");
     }
 
     #[test]
