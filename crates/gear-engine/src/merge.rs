@@ -139,32 +139,40 @@ pub fn merge_passed(
                     branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
                 });
             }
+            Err(reason) if reason.starts_with(RACE) => {
+                // Lost a push race: try again next tick, a few times.
+                let used = store.write(|tx| tx.bump_op_check_budget(project, &op.id, now))?;
+                if used < RACE_RETRIES {
+                    continue;
+                }
+                fail_merge(store, project, &op, &reason[RACE.len()..], now)?;
+            }
             Err(reason) => {
-                store.write(|tx| {
-                    let from = tx.get_op(project, &op.id)?.map(|op| op.state).unwrap_or(OpState::Intended);
-                    if from == OpState::Intended {
-                        tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
-                        tx.set_op_state(project, &op.id, OpState::Failed, Some(&reason), now)?;
-                    } else {
-                        // Unknown from a restart: it goes straight to Failed.
-                        tx.set_op_state(project, &op.id, OpState::Failed, Some(&reason), now)?;
-                    }
-                    Ok(())
-                })?;
-                let task = op.task.clone().unwrap_or_default();
-                tell_captain(
-                    store,
-                    project,
-                    &format!(
-                        "merge of {task} failed: {reason}\nnothing was pushed; {task} needs a rework that merges dev in"
-                    ),
-                    now,
-                )?;
+                fail_merge(store, project, &op, &reason, now)?;
             }
         }
     }
     let _ = cfg;
     Ok(merged)
+}
+
+/// A push rejected because the integration branch moved meanwhile.
+const RACE: &str = "push race: ";
+/// How many ticks a merge that lost a push race is retried before it fails.
+const RACE_RETRIES: i64 = 5;
+
+/// Fail a merge op once and tell the captain once.
+fn fail_merge(store: &mut Store, project: &str, op: &OpRow, reason: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        let from = tx.get_op(project, &op.id)?.map(|op| op.state).unwrap_or(OpState::Intended);
+        if from == OpState::Intended {
+            tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
+        }
+        // Unknown from a restart goes straight to Failed.
+        tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)
+    })?;
+    let task = op.task.clone().unwrap_or_default();
+    tell_captain(store, project, &format!("merge of {task} failed: {reason}\nnothing was pushed"), now)
 }
 
 /// Whether the op still merges what was passed: its attempt is the task's
@@ -433,7 +441,15 @@ fn merge_one(
     }
 
     // 5. push, then close the branches on origin.
-    git(dir, &["push", "origin", &format!("HEAD:{integration}")])?;
+    // A push the remote rejects because the integration branch moved (the
+    // captain or another merge pushed meanwhile) is a race, not a failure: the
+    // next tick starts again from the new tip.
+    if let Err(reason) = git(dir, &["push", "origin", &format!("HEAD:{integration}")]) {
+        if reason.contains("non-fast-forward") || reason.contains("fetch first") {
+            return Err(format!("{RACE}{reason}"));
+        }
+        return Err(reason);
+    }
     let _ = Command::new("git")
         .args(["push", "origin", "--delete", &branch, &review])
         .current_dir(dir)
@@ -797,6 +813,23 @@ gate = "{gate}"
         let branches = scratch.origin_branches();
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// A push rejected because dev moved during the gate (the captain pushed)
+    /// is a race the next tick retries, not a failed merge.
+    #[test]
+    fn dev_moving_during_the_gate_is_a_race() {
+        let scratch = Scratch::new("race");
+        let worktree = scratch.merge_worktree();
+        let racer = format!(
+            "cd {} && git fetch -q origin && git switch -q dev && git reset -q --hard origin/dev && echo x >> other.txt && git add other.txt && git -c user.email=a@b -c user.name=a commit -qm racer && git push -q origin dev",
+            scratch.work.display()
+        );
+
+        let error = merge_one(&worktree, &config(&racer), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+
+        assert!(error.starts_with(RACE), "{error}");
+        assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
     }
 
     /// L-67: a failed merge is not queued again tick after tick (it filed 120
