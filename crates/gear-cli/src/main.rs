@@ -280,6 +280,17 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
     })?;
     let mut store = open_store()?;
     let r = gear_app::admin::init(&mut store, &env, &text, now_ts())?;
+    // This store becomes the Herdr session's GEAR target (design/14, L-54).
+    if let (Ok(socket), Ok(db), Some(home)) = (
+        std::env::var("HERDR_SOCKET_PATH"),
+        std::env::var(gear_model::ctx::ENV_DB),
+        std::env::var_os("HOME"),
+    ) {
+        let registry = targets_path_in(std::path::Path::new(&home));
+        if let Err(e) = register_store(&registry, &socket, &canonical(&db)) {
+            eprintln!("gear: could not register the store in {}: {e}", registry.display());
+        }
+    }
     if json {
         println!("{}", serde_json::to_string(&r).unwrap_or_default());
     } else {
@@ -822,6 +833,9 @@ fn now_ts() -> i64 {
 }
 
 fn cmd_run() -> GearResult<()> {
+    if let Err(why) = engine_target_ok() {
+        return Err(GearError::new(gear_model::ErrorCode::Forbidden, why));
+    }
     // The single-instance lock lives next to the database (design/08 startup).
     let db = std::env::var_os("GEAR_DB").ok_or_else(|| {
         GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set")
@@ -894,7 +908,66 @@ fn engine_dir() -> Option<std::path::PathBuf> {
 /// Start the engine in the background when nobody holds its lock. Every
 /// `gear` call does this, so no one has to run the engine in a pane; a
 /// failure here never fails the caller's command.
+/// The machine's registry of GEAR targets (design/14): one line per Herdr
+/// session, `<HERDR_SOCKET_PATH>\t<database path>`, written by `gear admin
+/// init`. An engine runs only on the store registered for the Herdr session it
+/// is connected to — a scratch or test store must never drive real panes
+/// (L-54: a lane's scratch store started an engine that closed real panes and
+/// removed a real worktree).
+fn targets_path_in(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".config/gear/targets.tsv")
+}
+
+/// The store registered for `socket` in the registry at `path`.
+fn registered_store(path: &std::path::Path, socket: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(s, _)| *s == socket)
+        .map(|(_, db)| db.to_string())
+}
+
+/// Register `db` as the store of `socket` (one line per socket).
+fn register_store(path: &std::path::Path, socket: &str, db: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut lines: Vec<String> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.split_once('\t').map(|(s, _)| s != socket).unwrap_or(false))
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("{socket}\t{db}"));
+    std::fs::write(path, lines.join("\n") + "\n")
+}
+
+/// A path in its canonical form when it exists (symlinks, `..`).
+fn canonical(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Whether the engine may run on `GEAR_DB` here: a Herdr session is known and
+/// `GEAR_DB` is the store registered for it. `Err` says why not.
+fn engine_target_ok() -> Result<(), String> {
+    let socket = std::env::var("HERDR_SOCKET_PATH").map_err(|_| "not inside Herdr (HERDR_SOCKET_PATH unset)".to_string())?;
+    let db = std::env::var(gear_model::ctx::ENV_DB).map_err(|_| "GEAR_DB is not set".to_string())?;
+    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+    let registry = targets_path_in(std::path::Path::new(&home));
+    match registered_store(&registry, &socket) {
+        Some(reg) if canonical(&reg) == canonical(&db) => Ok(()),
+        Some(reg) => Err(format!("{db} is not this Herdr session's GEAR store ({reg} is); an engine never runs on another store")),
+        None => Err(format!("no GEAR store is registered for this Herdr session ({}): run `gear admin init`", registry.display())),
+    }
+}
+
 fn ensure_engine() {
+    // Only the registered store gets an engine (L-54); others are silent.
+    if engine_target_ok().is_err() {
+        return;
+    }
     let Some(dir) = engine_dir() else { return };
     match take_engine_lock(&dir) {
         Ok(lock) => drop(lock), // free: release it for the engine we start
@@ -1568,6 +1641,18 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!("gear-lock-{}-{tag}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn the_registry_keeps_one_store_per_herdr_session() {
+        let dir = lock_dir("targets");
+        let path = dir.join("targets.tsv");
+        assert_eq!(registered_store(&path, "/s/orch.sock"), None);
+        register_store(&path, "/s/orch.sock", "/state/a.db").unwrap();
+        register_store(&path, "/s/other.sock", "/state/b.db").unwrap();
+        register_store(&path, "/s/orch.sock", "/state/c.db").unwrap();
+        assert_eq!(registered_store(&path, "/s/orch.sock").as_deref(), Some("/state/c.db"));
+        assert_eq!(registered_store(&path, "/s/other.sock").as_deref(), Some("/state/b.db"));
     }
 
     #[test]
