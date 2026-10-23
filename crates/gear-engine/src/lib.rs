@@ -16,6 +16,7 @@
 
 
 mod attention;
+pub mod busy;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -99,6 +100,8 @@ pub struct TickReport {
     pub feed: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
+    /// Lanes alerted for being Working without their own development attempt.
+    pub busy_lanes: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -131,6 +134,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.
     let Ok(agents) = observe::snapshot(herdr) else {
+        // No evidence of continuous work across a failed observation.
+        for project in &projects {
+            store.write(|tx| busy::observation_lost(tx, project))?;
+        }
         report.observe_failed = projects;
         return Ok(report);
     };
@@ -146,6 +153,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the

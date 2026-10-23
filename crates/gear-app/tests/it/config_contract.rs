@@ -57,7 +57,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
         }
     );
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15 });
+    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
@@ -282,4 +282,14 @@ fn a_broken_model_entry_is_bad_format() {
         assert_eq!(err.code, ErrorCode::BadFormat, "{bad}");
         assert!(!err.detail.is_empty(), "{bad}");
     }
+}
+
+#[test]
+fn busy_idle_period_is_configurable_and_nonzero() {
+    let cfg = parse(&format!("{MINIMAL}\n[timing]\nlane_busy_idle_min = 5\n")).unwrap();
+    assert_eq!(cfg.timing.lane_busy_idle_min, 5);
+    assert!(validate(&cfg).is_empty());
+    let mut cfg = cfg;
+    cfg.timing.lane_busy_idle_min = 0;
+    assert_eq!(fields(&validate(&cfg)), vec!["timing.lane_busy_idle_min"]);
 }
