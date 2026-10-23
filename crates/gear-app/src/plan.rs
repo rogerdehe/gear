@@ -47,7 +47,8 @@ pub struct ApplyResult {
 ///    seat) in draft order, in the same transaction — any error aborts the whole
 ///    apply; settled lines are listed in `settled`;
 /// 5. validation, nothing written on failure (`BadFormat`, detail names the task/line):
-///    - an existing id must exist; a `NEW` block needs `lane`, `goal` and `accept`;
+///    - an existing id must exist; a `NEW` block needs `lane`, `goal`, `accept`
+///      and `estimate` (the planned time in minutes, T-38);
 ///    - every dep names an existing task or a task of this draft; no cycle;
 ///    - `state=` only on existing tasks: `cancelled` from any non-terminal state,
 ///      `ready` only from Draft (DONE→READY with `reopen` comes with verdicts);
@@ -55,7 +56,8 @@ pub struct ApplyResult {
 ///    task whose goal/accept/evidence differs from its current contract → new
 ///    contract version; rank = position in the draft (1, 2, …), unmentioned
 ///    non-terminal tasks keep their relative order after them; lane, milestone,
-///    required, priority and deps as written; `insert_plan(version = base + 1)`;
+///    required, priority, deps and the planned time (`estimate:`, T-38) as
+///    written; `insert_plan(version = base + 1)`;
 ///    an existing task's block: absent `goal`/`accept` keep the current text
 ///    (they cannot be empty), absent `evidence-files`/`evidence-due` mean none —
 ///    an exported draft always writes every field (R-33 decision);
@@ -215,6 +217,15 @@ fn apply_queue(
                 if item.accept.is_none() {
                     return Err(bad(item.line, "a NEW block needs `accept:`"));
                 }
+                // The time of a new task is planned, not guessed later (T-38):
+                // a NEW block without an estimate is refused. An existing task
+                // may keep the estimate it has.
+                if item.estimate.is_none() {
+                    return Err(bad(
+                        item.line,
+                        "a NEW block needs `estimate:` (the planned time in minutes)",
+                    ));
+                }
                 if item.state.is_some() {
                     return Err(bad(item.line, "`state=` is only for existing tasks"));
                 }
@@ -271,6 +282,9 @@ fn apply_queue(
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    // The planned time of the task (T-38); a NEW block must
+                    // carry it (checked above).
+                    estimate_min: item.estimate.map(i64::from),
                     updated: now,
                 };
                 tx.insert_task(&task)?;
@@ -300,6 +314,11 @@ fn apply_queue(
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
                 task.deps = item.deps.clone();
+                // The planned time (T-38): the draft may change it; a draft
+                // that says nothing keeps the estimate the task has.
+                if let Some(estimate) = item.estimate {
+                    task.estimate_min = Some(i64::from(estimate));
+                }
                 match item.state.as_deref() {
                     Some("cancelled") => task.state = TaskState::Cancelled,
                     Some("ready") => task.state = TaskState::Ready,
@@ -620,7 +639,7 @@ mod tests {
         let mut s = world();
         run(
             &mut s,
-            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nevidence-due: 60\ndeps: -\n"),
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nevidence-due: 60\ndeps: -\n"),
             "r1",
         )
         .unwrap();
@@ -643,7 +662,7 @@ mod tests {
         let mut s = world();
         run(
             &mut s,
-            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nevidence-files: notes/x.md\ndeps: -\n"),
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nevidence-files: notes/x.md\ndeps: -\n"),
             "r1",
         )
         .unwrap();
@@ -663,7 +682,7 @@ mod tests {
     #[test]
     fn a_stale_base_is_reported_before_an_unsupported_section() {
         let mut s = world();
-        run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"), "r1").unwrap();
+        run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"), "r1").unwrap();
 
         let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n";
         let draft = parse(text).unwrap();
@@ -860,6 +879,10 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         adopted,
         row.state.as_str()
     ));
+    // The planned time of the task (T-38): the lane knows its budget.
+    if let Some(minutes) = row.estimate_min {
+        text.push_str(&format!("Estimate: {minutes} minutes\n"));
+    }
     // The voyage this task sails on (T-22): the one sentence the phase is
     // judged by, its quality bar, the planned landing and where it departed.
     if let Some(milestone) = row.milestone.as_deref() {

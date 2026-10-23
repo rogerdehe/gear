@@ -38,6 +38,7 @@ fn world_verdict(passed: bool) -> Store {
             wait_on: None,
             wait_cond: None,
             rework_note: None,
+            estimate_min: None,
             updated: T0,
         })?;
         tx.insert_contract(&ContractRow {
@@ -176,6 +177,7 @@ fn world_with_ready_work() -> Store {
                 wait_on: None,
                 wait_cond: None,
                 rework_note: None,
+                estimate_min: None,
                 updated: T0,
             })?;
         }

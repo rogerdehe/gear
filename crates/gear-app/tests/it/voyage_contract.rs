@@ -47,7 +47,7 @@ fn run(s: &mut Store, text: &str, rid: &str, now: i64) -> gear_model::GearResult
 /// A draft with one milestone block (body as given) and two tasks on it.
 fn plan(base: i64, body: &str) -> String {
     format!(
-        "<!-- gear-plan project=p base={base} -->\n# Milestone M1: delivery v0.1.0\n{body}\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: -\n"
+        "<!-- gear-plan project=p base={base} -->\n# Milestone M1: delivery v0.1.0\n{body}\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n"
     )
 }
 
@@ -133,7 +133,7 @@ fn an_untouched_old_milestone_keeps_applying() {
     let mut s = world();
     // A plan with tasks on M1 but no milestone block: no voyage is created and
     // nothing is rejected — old plans keep applying (grandfathered).
-    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n";
+    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, text, "r1", NOW).unwrap();
     let tasks = s.read(|tx| tx.tasks_of_project("p")).unwrap();
     assert_eq!(tasks.len(), 1);
@@ -161,7 +161,7 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
     assert_eq!((voyage.departure, voyage.departure_tasks), (None, None), "no task yet: no departure");
 
     // base 1: only the queue, one task on M1 — the milestone departs now.
-    let first_task = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n";
+    let first_task = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first_task, "r2", NOW + 10).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
@@ -169,7 +169,7 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
 
     // base 2: the block again plus a second task — the words update, the
     // departure stays.
-    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: -\n";
+    let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
     run(&mut s, more, "r3", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
@@ -182,10 +182,10 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
 fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     let mut s = world();
     // T-1 is created on M1 with no block at all.
-    let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n";
+    let first = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     // Much later the block arrives together with T-2.
-    let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: -\n";
+    let block = "<!-- gear-plan project=p base=1 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
     run(&mut s, block, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
@@ -213,7 +213,7 @@ fn the_snapshot_shows_the_voyage_that_has_work() {
             "# Milestone {id}: voyage {id}\ndone: {id} done\nbar: {id} bar\neta: 8h\n"
         ));
     }
-    text.push_str("# Queue\n## NEW [must] lane=heat milestone=M4\ngoal: A\naccept: a\ndeps: -\n");
+    text.push_str("# Queue\n## NEW [must] lane=heat milestone=M4\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n");
     run(&mut s, &text, "r1", NOW).unwrap();
 
     let (env, fp) = cap();

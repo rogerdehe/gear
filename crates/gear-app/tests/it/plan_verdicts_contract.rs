@@ -31,7 +31,7 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p3", "opencode", T0)?;
         Ok(())
     }).unwrap();
-    run(&mut s, "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n## NEW [must] lane=wire\ngoal: B\naccept: b\ndeps: -\n", "v1").unwrap();
+    run(&mut s, "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [must] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n", "v1").unwrap();
     s.write(|tx| {
         for (t, seat, c) in [("T-1", "p:heat", "c1"), ("T-2", "p:wire", "c2")] {
             start_attempt(tx, "p", t, seat, 1, T0)?;
