@@ -36,6 +36,7 @@ fn world() -> Store {
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: T0,
                 })?;
             }

@@ -29,6 +29,9 @@ pub struct QueueItem {
     pub evidence_files: Vec<String>,
     /// minutes
     pub evidence_due: Option<u32>,
+    /// The planned time of the task in minutes (T-38): `estimate: 90`.
+    /// A NEW block must carry it; an existing task may keep the one it has.
+    pub estimate: Option<u32>,
     /// `deps: -` → empty
     pub deps: Vec<String>,
     /// only `ready` or `cancelled`
@@ -438,6 +441,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         accept: None,
         evidence_files: Vec::new(),
         evidence_due: None,
+        estimate: None,
         deps: Vec::new(),
         state: None,
         followup_of: None,
@@ -462,6 +466,7 @@ fn parse_queue_field(
         "accept" => "accept",
         "evidence-files" => "evidence-files",
         "evidence-due" => "evidence-due",
+        "estimate" => "estimate",
         "deps" => "deps",
         "state" => "state",
         "followup-of" => "followup-of",
@@ -479,6 +484,11 @@ fn parse_queue_field(
         "evidence-due" => {
             item.evidence_due = Some(value.parse::<u32>().map_err(|_| {
                 bad(line, format!("`evidence-due` is a number of minutes, got {value:?}"))
+            })?)
+        }
+        "estimate" => {
+            item.estimate = Some(value.parse::<u32>().map_err(|_| {
+                bad(line, format!("`estimate` is a number of minutes, got {value:?}"))
             })?)
         }
         "deps" => {
