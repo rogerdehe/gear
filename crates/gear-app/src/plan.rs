@@ -105,6 +105,7 @@ pub fn apply(
             record_tail_decisions(tx, &ctx.project, draft)?;
             fix_departures(tx, &ctx.project, now)?;
             record_voyages(tx, &ctx.project, draft, now)?;
+            crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
                 GearError::new(
                     ErrorCode::BadFormat,

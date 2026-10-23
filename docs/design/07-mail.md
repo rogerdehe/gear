@@ -59,3 +59,11 @@ WAITING tasks/items are re-evaluated by the engine when: the awaited upstream ta
 ## Test points
 
 Ten items, one handled; two questions on the same task, only one answered; under an urgent flood the reserved ordinary place is not squeezed out by the same sender; a single sender flooding many threads is capped; new arrivals after fetching are not closed; replies do not trigger infinite confirmation; ack only closes listed items; stored during handover without ringing; an unconfirmed doorbell is not resent even after cooldown; replay after a lost receipt post-COMMIT.
+
+### Station action items (T-49)
+
+System messages from `engine` in `station:<milestone>` threads are immutable
+course snapshots. They ring through the ordinary doorbell path but stay open
+until an applied plan decision names their message ID. `gear reply --resolve`
+and `--wait` reject these items (including mixed batches) before changing any
+message. A note adds context without handling the station.
