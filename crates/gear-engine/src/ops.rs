@@ -2,7 +2,7 @@
 
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 
 /// Reason stored with an op that the engine found Executing after a restart.
@@ -205,9 +205,13 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
             return void("the deliver op names no task or attempt".to_string());
         };
-        let open = tx.open_attempts_of_seat(&op.seat)?;
-        if !open.iter().any(|a| a.task == task && a.n == attempt) {
-            return void(format!("task {task} attempt {attempt} is not the seat's open attempt"));
+        // A review delivery is the exception: it goes to a temp reviewer and
+        // names the attempt it reviews, which is not the reviewer's own.
+        if !is_reviewer(tx, &op.seat)? {
+            let open = tx.open_attempts_of_seat(&op.seat)?;
+            if !open.iter().any(|a| a.task == task && a.n == attempt) {
+                return void(format!("task {task} attempt {attempt} is not the seat's open attempt"));
+            }
         }
     }
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
@@ -218,6 +222,14 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         pane_id: binding.pane_id.clone(),
         text: text.to_string(),
     })
+}
+
+/// Whether the seat is a temp reviewer (design/10).
+fn is_reviewer(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
+    Ok(tx
+        .get_seat(seat)?
+        .map(|seat| seat.role == SeatRole::Temp)
+        .unwrap_or(false))
 }
 
 /// Settle Submitted/Unknown doorbell ops using ViewRecords: an op is Confirmed
@@ -248,6 +260,17 @@ pub fn confirm_pending(
                 let evidence = match op.kind {
                     // A doorbell is proven by the message ids it carried.
                     OpKind::Doorbell => shown_in_a_view(tx, &op)?,
+                    // A review delivery is proven by the verdict the reviewer
+                    // hands in — the review packet is not on the reviewer's
+                    // home page. A review takes longer than the check budget
+                    // of a doorbell, so it spends none (like a kind without an
+                    // evidence rule, R-46).
+                    OpKind::Deliver if is_reviewer(tx, &op.seat)? => {
+                        match review_verdict(tx, &op)? {
+                            Some(created) => Some(created),
+                            None => continue,
+                        }
+                    }
                     // A delivery is proven by the task/attempt it announced.
                     OpKind::Deliver => shown_delivery(tx, &op)?,
                     // Onboard/release/title/notify have no evidence rule yet:
@@ -307,6 +330,17 @@ fn shown_in_a_view(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
                 .all(|id| view.shown_msgs.iter().any(|shown| shown == id))
         })
         .map(|view| view.ts))
+}
+
+/// The time the reviewer's verdict on the reviewed attempt was stored, if it
+/// is there: a review delivery is proven by the verdict, not by a view.
+fn review_verdict(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(None);
+    };
+    Ok(tx
+        .get_review_verdict(&op.project, task, attempt)?
+        .map(|verdict| verdict.created))
 }
 
 /// The time of the view that shows the delivery's task and attempt, if any.
@@ -390,6 +424,63 @@ mod tests {
         tx.set_op_state("p", &op.id, OpState::Executing, None, T0).unwrap();
         tx.set_op_state("p", &op.id, OpState::Submitted, None, T0).unwrap();
         op.id
+    }
+
+    #[test]
+    fn a_review_delivery_is_confirmed_by_the_verdict() {
+        // The review packet is not on the reviewer's home page: the delivery
+        // is proven by the verdict the reviewer hands in, and it spends no
+        // check budget while it waits (a review takes longer than a tick).
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w1:p3", "codex", T0)?;
+                let op = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:r-1".into(),
+                        generation: 1,
+                        kind: OpKind::Deliver,
+                        task: Some("T-1".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "Review T-1 attempt 1." }),
+                        created: T0,
+                    })
+                    .unwrap();
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 10).unwrap();
+        assert!(confirmed.is_empty());
+        assert!(flagged.is_empty(), "a review waits for its verdict, it flags nothing");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(op.check_budget, 0, "no budget is spent while it waits");
+
+        // The verdict arrives: the delivery is confirmed.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ops/reviews/T-1.md".into(),
+                    by_seat: "p:r-1".into(),
+                    created: T0 + 20,
+                })
+            })
+            .unwrap();
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
     }
 
     #[test]
