@@ -108,6 +108,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # A tag with a suffix (v0.1.0-rc.1) is a pre-release.
+          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease";; esac
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes $pre
           gh release upload "$GITHUB_REF_NAME" release/* --clobber --repo "$GITHUB_REPOSITORY"
