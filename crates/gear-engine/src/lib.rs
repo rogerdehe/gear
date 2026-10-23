@@ -94,6 +94,8 @@ pub struct TickReport {
     /// Lane items for the captain opened, updated or closed this tick
     /// (`lane:action`), from the keep-lanes-fed watch.
     pub feed: Vec<String>,
+    /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
+    pub stations: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -116,6 +118,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
 
     let projects = store.read(|tx| tx.project_ids())?;
+    // Station facts need no Herdr observation. Enqueue them before deciding
+    // doorbells, including when a previous outage delayed a checkpoint.
+    for project in &projects {
+        let ids = store.write(|tx| gear_app::station::checkpoints(tx, project, now))?;
+        report.stations.extend(ids.into_iter().map(|id| format!("{project}:{id}")));
+    }
 
     // 1. observe: one agents() call for the whole session. If it fails, every
     //    project is marked and nothing at all is decided this tick.

@@ -659,6 +659,12 @@ pub fn reply(
                         format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
                     ));
                 }
+                if crate::station::is_station(&message) && args.mode != ReplyMode::Note {
+                    return Err(GearError::new(ErrorCode::BadFormat, format!(
+                        "station {} needs a plan # Decisions line: station {}: keep course|time-box|cut|move",
+                        message.id, message.id,
+                    )));
+                }
                 originals.push(message);
             }
 
