@@ -207,7 +207,9 @@ fn begin_restart(
         }
     }
     meta_set(store, &meta_key("restart", &seat.id), model.unwrap_or("-"))?;
-    meta_set(store, &meta_key("quota", &seat.id), "0")?;
+    // The counter is not reset here: the old agent's screen still shows the
+    // limit, and while it does the seat must not be flagged (F2 of the T-15
+    // review). It goes back to zero when the screen does.
     let from = current_model(store, &seat.id, &[]).unwrap_or_else(|| "-".to_string());
     Ok(Some(format!(
         "{}: quota limit, restarting on {} (was {from})",
@@ -248,41 +250,80 @@ fn finish_restart(
     let raw = restart_model(store, &seat.id)?.unwrap_or_default();
     let model = if raw.is_empty() { None } else { Some(raw) };
 
-    // 1. the environment line: the call context and the model.
-    let mut env_command = format!(
-        "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-        project, seat.name, seat.generation, cfg.db_path
-    );
-    let mut args = profile.unattended_args.clone();
-    if let Some(model) = model.as_deref() {
-        if let Some(start) = crate::onboard::model_start(&binding.kind, model) {
-            if !start.env.is_empty() {
-                env_command = format!("{env_command}; {}", start.env);
+    // 1. the pane: a shell accepts the environment line; an agent of this
+    //    seat's kind means the start was accepted before the engine died, so
+    //    it is adopted rather than started twice; anything else is parked (F3).
+    let holder = match herdr.agent_get(&binding.pane_id) {
+        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str()) => Some(info),
+        Ok(Some(_)) => {
+            park_for_human(store, seat, "another agent holds the lane's pane", now)?;
+            return Ok(None);
+        }
+        Ok(None) => None,
+        Err(error) => {
+            park_for_human(store, seat, &format!("agent_get: {}", error.0), now)?;
+            return Ok(None);
+        }
+    };
+
+    let _started = match holder {
+        Some(info) => info,
+        None => {
+            // 2. the session id: without it the restart would begin a new
+            //    conversation, which is not a restart. Take the binding's, or
+            //    the one the CLI printed on exit (the SOP's exit line), and
+            //    park when there is none (F1).
+            let session = match binding.session_ref.clone() {
+                Some(session) if !session.is_empty() => session,
+                _ => match session_from_pane(herdr, &binding.pane_id) {
+                    Some(session) => {
+                        store.write(|tx| {
+                            tx.set_binding_session_ref(&seat.id, seat.generation, &session)
+                        })?;
+                        session
+                    }
+                    None => {
+                        park_for_human(
+                            store,
+                            seat,
+                            "quota: no session id to resume; not restarting blind",
+                            now,
+                        )?;
+                        return Ok(None);
+                    }
+                },
+            };
+
+            // 3. the environment line: the call context and the model.
+            let mut env_command = format!(
+                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
+                project, seat.name, seat.generation, cfg.db_path
+            );
+            let mut args = profile.unattended_args.clone();
+            if let Some(model) = model.as_deref() {
+                if let Some(start) = crate::onboard::model_start(&binding.kind, model) {
+                    if !start.env.is_empty() {
+                        env_command = format!("{env_command}; {}", start.env);
+                    }
+                    args.extend(start.args);
+                }
             }
-            args.extend(start.args);
+            // 4. the same conversation: the profile's resume args and the id.
+            if let Some(resume) = profile.resume_args.as_ref() {
+                args.extend(resume.iter().map(|arg| arg.replace("{session}", &session)));
+            }
+            if let Outcome::Ok(()) = herdr.pane_run(&binding.pane_id, &env_command) {
+                // the environment is set
+            } else {
+                return Ok(None);
+            }
+            match herdr.agent_start(&agent_name(config, seat), &binding.kind, &binding.pane_id, &args) {
+                Outcome::Ok(info) => info,
+                // The pane may still be exiting: the next tick tries again.
+                _ => return Ok(None),
+            }
         }
-    }
-    // 2. the resume args continue the conversation when the CLI reports a
-    //    session reference (the binding has it).
-    if let Some(session) = binding.session_ref.as_deref() {
-        if let Some(resume) = profile.resume_args.as_ref() {
-            args.extend(resume.iter().map(|arg| arg.replace("{session}", session)));
-        }
-    }
-    if let Outcome::Ok(()) = herdr.pane_run(&binding.pane_id, &env_command) {
-        // the environment is set
-    } else {
-        return Ok(None);
-    }
-    // 3. the agent. A pane that is still exiting refuses: the next tick tries
-    //    again, and the exit keys are not sent again.
-    if let Outcome::Ok(_) =
-        herdr.agent_start(&agent_name(config, seat), &binding.kind, &binding.pane_id, &args)
-    {
-        // started
-    } else {
-        return Ok(None);
-    }
+    };
 
     // 4. the seat is working again, on the new model.
     store.write(|tx| {
@@ -390,6 +431,49 @@ fn park(
         )
     })?;
     meta_set(store, &meta_key("resume", &seat.id), &until.to_string())
+}
+
+/// The session id an OpenCode agent prints on exit (`Continue  opencode -s
+/// <id>`, see `skills/gear/references/agents/opencode.md`): the last `-s` token
+/// of the pane's tail.
+fn session_from_pane(herdr: &mut dyn HerdrAct, pane: &str) -> Option<String> {
+    let tail = herdr.read_tail(pane, 40).ok()?;
+    let mut found = None;
+    for line in tail.lines() {
+        let mut parts = line.split_whitespace();
+        while let Some(word) = parts.next() {
+            if word == "-s" {
+                if let Some(id) = parts.next() {
+                    found = Some(id.trim_matches(|c: char| c == '`' || c == ',' || c == ';').to_string());
+                }
+            }
+        }
+    }
+    found.filter(|id| !id.is_empty())
+}
+
+/// A restart that cannot continue safely: the seat waits for a human.
+fn park_for_human(
+    store: &mut Store,
+    seat: &SeatRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let seat = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
+        if seat.state == SeatState::NeedsCheck {
+            return tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now);
+        }
+        gear_model::state::require_transition(
+            SeatState::can_transition(seat.role, seat.state, SeatState::NeedsCheck),
+            "seat",
+            seat.state.as_str(),
+            SeatState::NeedsCheck.as_str(),
+        )?;
+        tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now)
+    })
 }
 
 /// The reset deadline of a parked lane, if it was parked on quota.
@@ -856,5 +940,155 @@ quota_reset_h = 5
         }
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.check_budget, 0);
+    }
+
+    /// F1: OpenCode reports no session reference, so the restart took a fresh
+    /// conversation. The id OpenCode prints on exit is used instead, and the
+    /// binding keeps it for the next time.
+    #[test]
+    fn an_opencode_restart_resumes_the_same_conversation() {
+        let seat_row = |store: &mut Store| -> SeatRow {
+            store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap()
+        };
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        // OpenCode reports no session reference: the binding has none.
+        store
+            .write(|tx| tx.set_binding_session_ref("p:heat", 1, ""))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+
+        // Two quota ticks: the exit keys.
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The agent exits and prints its session id (the SOP's exit line).
+        herdr.exit_agent(PANE);
+        herdr.set_screen(PANE, "  Session  T-1 work\n  Continue  opencode -s ses_from_pane\n");
+        let seat = seat_row(&mut store);
+
+        // The pane is a shell: the restart types the environment there and
+        // resumes that conversation.
+        let seat_obs = gone(&seat);
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &seat_obs, T0 + 30).unwrap();
+
+        let starts: Vec<Vec<String>> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { args, .. } => Some(args.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
+        assert!(starts[0].contains(&"ses_from_pane".to_string()), "{:?}", starts[0]);
+        // … and the binding keeps it for the next restart.
+        let binding = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.session_ref.as_deref(), Some("ses_from_pane"));
+    }
+
+    /// F1, the other side: no id anywhere → the lane is not restarted blind,
+    /// it waits for a human.
+    #[test]
+    fn without_a_session_id_the_lane_is_not_restarted() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        // OpenCode reports no session reference: the binding has none.
+        store
+            .write(|tx| tx.set_binding_session_ref("p:heat", 1, ""))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        herdr.exit_agent(PANE);
+        // A shell with no exit line in its tail.
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 30).unwrap();
+
+        let starts = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::AgentStart { .. }))
+            .count();
+        assert_eq!(starts, 0, "no blind start");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck, "a human decides");
+        assert!(seat.state_reason.unwrap_or_default().contains("session id"));
+    }
+
+    /// F2: the tick that takes the lane off its model must not flag it: the
+    /// quota counter is still the reason its delivery gets no budget.
+    #[test]
+    fn the_restart_tick_does_not_flag_the_lane() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        store
+            .write(|tx| {
+                let op = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Doorbell,
+                        task: None,
+                        attempt: None,
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "x", "covers": ["M-404"] }),
+                        created: T0,
+                    })
+                    .unwrap();
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+
+        let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 1, T0 + 30).unwrap();
+        assert!(flagged.is_empty(), "the restart tick is not 'no progress'");
+    }
+
+    /// F3: the environment line is never typed into an agent. The pane is read
+    /// first; a live agent of the same kind is adopted, anything else parks.
+    #[test]
+    fn the_environment_line_is_not_typed_into_an_agent() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        // The exit has not happened yet: the old agent is still in the pane.
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let runs_before = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::PaneRun { .. }))
+            .count();
+
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 30).unwrap();
+
+        let runs_after = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::PaneRun { .. }))
+            .count();
+        assert_eq!(runs_before, runs_after, "nothing was typed into the agent");
+        let starts = herdr
+            .calls
+            .iter()
+            .filter(|call| matches!(call, Call::AgentStart { .. }))
+            .count();
+        assert_eq!(starts, 0, "the live agent is adopted, not started again");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the lane is back on its task");
     }
 }
