@@ -1433,13 +1433,16 @@ impl<'s> Tx<'s> {
     /// The seat's non-terminal attempts — in progress plus Submitted
     /// (Delivered/Started/Stopped/Unknown/Submitted) — ordered by (task, n).
     /// The engine's lane view (design/09) reads the current attempt from here.
+    /// The seat's open attempts, the one being worked on first: handed-in
+    /// (Submitted) attempts wait for review in the background and come last
+    /// (never-stop, L-45).
     pub fn open_attempts_of_seat(&self, seat: &str) -> GearResult<Vec<AttemptRow>> {
         let mut stmt = self
             .tx
             .prepare(&attempt_select(
                 " WHERE seat=?1
                    AND state IN ('delivered', 'started', 'stopped', 'unknown', 'submitted')
-                 ORDER BY task, n",
+                 ORDER BY state = 'submitted', task, n",
             ))
             .map_err(map_sqlite)?;
         let rows = stmt

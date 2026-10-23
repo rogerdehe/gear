@@ -110,7 +110,8 @@ fn open_attempts_include_submitted() {
         tx.insert_attempt(&attempt("T-5", 1, "p:wire", AttemptState::Started))
     }).unwrap();
     let got: Vec<String> = s.read(|tx| tx.open_attempts_of_seat("p:heat")).unwrap().into_iter().map(|a| a.task).collect();
-    assert_eq!(got, vec!["T-2", "T-3"]);
+    // The attempt being worked on first; a handed-in one waits for review last.
+    assert_eq!(got, vec!["T-3", "T-2"]);
 }
 
 #[test]
