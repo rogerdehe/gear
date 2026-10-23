@@ -187,7 +187,13 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
         Ok(tx
             .seats_of_project(project)?
             .into_iter()
-            .find(|seat| seat.role == SeatRole::Temp && seat.task_id.as_deref() == Some(task)))
+            // A released or retired reviewer is finished; a rework attempt
+            // (or a lost review) gets a new seat.
+            .find(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.task_id.as_deref() == Some(task)
+                    && !matches!(seat.state, SeatState::Released | SeatState::Retired)
+            }))
     })
 }
 
