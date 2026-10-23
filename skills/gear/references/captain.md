@@ -276,7 +276,8 @@ branch) and their shared files, so you can order or merge the work. File overlap
 is a warning, not a prediction that Git will conflict or a merge gate.
 
 The same pair and file set stays quiet after you acknowledge or resolve it,
-including after a restart. A changed set produces a fresh item; an overlap that
+including after a restart. These warnings are exempt from stale-item reminders.
+A changed set produces a fresh item; an overlap that
 disappears closes automatically. The check uses local and known origin tracking
 refs without fetching, so uncommitted edits and unfetched remote changes are
 not included.
