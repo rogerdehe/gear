@@ -130,6 +130,22 @@ fn an_old_store_is_migrated_up_and_keeps_its_rows() {
     assert_eq!(version_of(&mut store), SCHEMA_VERSION.to_string());
     assert_ne!(version_of(&mut store), V1);
 
+    // T-38: CREATE TABLE IF NOT EXISTS cannot add these to legacy tables.
+    let shape = shape_of(&path);
+    for (table, column) in [
+        ("tasks", "estimate_min"),
+        ("attempts", "delivered_at"),
+        ("attempts", "started_at"),
+        ("attempts", "handed_in_at"),
+        ("attempts", "verdict_at"),
+        ("attempts", "settled_at"),
+        ("attempts", "merged_at"),
+    ] {
+        assert!(shape.iter().any(|(name, columns)| name == table
+            && columns.iter().any(|(name, not_null)| name == column && !not_null)),
+            "missing nullable {table}.{column}");
+    }
+
     // The rows are still there.
     let project = store.read(|tx| tx.get_project("p")).unwrap().unwrap();
     assert_eq!(project.quota_lanes, 4);

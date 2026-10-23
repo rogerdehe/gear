@@ -21,7 +21,7 @@ fn world() -> (Store, SeatRow) {
             testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p2", "opencode", T0)?;
             tx.insert_task(&TaskRow { project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready,
                 priority: "must".into(), lane: Some("heat".into()), milestone: None, required: false, contract_version: 1,
-                deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None, updated: T0 })?;
+                deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None, updated: T0 })?;
             tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(),
                 accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
             start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
@@ -82,4 +82,27 @@ fn a_reviewer_that_handed_in_or_is_working_is_left_alone() {
     s.write(|tx| tx.insert_review_verdict(&ReviewVerdictRow { project: "p".into(), task: "T-7".into(), attempt: 1,
         passed: true, findings: "ok".into(), by_seat: seat.id.clone(), created: T0 + 5 })).unwrap();
     assert_eq!(nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, T0 + 500).unwrap(), (vec![], vec![]));
+}
+
+/// L-76: the packet's delivery stays submitted (it is confirmed only by the
+/// verdict) — when the packet or its Enter was lost, the reviewer sits idle
+/// and the nudge must still go out, carrying the packet again.
+#[test]
+fn a_lost_packet_is_sent_again_by_the_nudge() {
+    let (mut s, seat) = world();
+    s.write(|tx| {
+        // A packet that was submitted and never taken (no verdict confirms it).
+        let op = tx.insert_op(&NewOp { project: "p".into(), seat: seat.id.clone(), generation: 1, kind: OpKind::Deliver,
+            task: Some("T-7".into()), attempt: Some(1), ref_msg: None, plan_version: None,
+            payload: serde_json::json!({"text": "Review T-7 (resent packet)"}), created: T0 })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)
+    })
+    .unwrap();
+    let t = T0 + COOLDOWN + 1;
+    let (nudged, _) = nudge_stopped_reviewers(&mut s, "p", &idle(&seat), COOLDOWN, t).unwrap();
+    assert_eq!(nudged, vec![seat.id.clone()]);
+    let nudge = s.read(|tx| tx.last_op(&seat.id, OpKind::Deliver)).unwrap().unwrap();
+    let text = nudge.payload["text"].as_str().unwrap();
+    assert!(text.contains("Review T-7"), "the packet rides along: {text}");
 }

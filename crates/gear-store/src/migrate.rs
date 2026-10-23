@@ -87,6 +87,23 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
         }
     }
 
+    // T-38 time accounting: existing tables need their nullable columns
+    // added within the same versioned transaction as the rest of v1 -> v2.
+    for (table, column) in [
+        ("attempts", "delivered_at"),
+        ("attempts", "started_at"),
+        ("attempts", "handed_in_at"),
+        ("attempts", "verdict_at"),
+        ("attempts", "settled_at"),
+        ("attempts", "merged_at"),
+        ("tasks", "estimate_min"),
+    ] {
+        if !column_exists(tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} INTEGER"))
+                .map_err(map_sqlite)?;
+        }
+    }
+
     // The `slots` table is gone: its place is `seats.worktree` and
     // `resources`. Nothing has read it since the skeleton.
     tx.execute_batch("DROP TABLE IF EXISTS slots").map_err(map_sqlite)?;

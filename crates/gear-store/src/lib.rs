@@ -183,6 +183,9 @@ pub struct TaskRow {
     pub wait_on: Option<String>,
     pub wait_cond: Option<String>,
     pub rework_note: Option<String>,
+    /// The planned time of the task in minutes (T-38): the plan's `estimate:`
+    /// field. None for a task that has none.
+    pub estimate_min: Option<i64>,
     pub updated: Ts,
 }
 
@@ -219,6 +222,85 @@ pub struct AttemptRow {
     pub safe_point: Option<String>,
     pub started: Ts,
     pub updated: Ts,
+}
+
+/// One step of an attempt (T-38). Each step has its own time; a step writes
+/// its own column and never another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttemptStep {
+    /// The attempt was handed to the lane.
+    Delivered,
+    /// The lane confirmed the delivery and began to work.
+    Started,
+    /// The lane handed the candidate in.
+    HandedIn,
+    /// The reviewer handed in the verdict.
+    Verdict,
+    /// The attempt was settled (the captain decided).
+    Settled,
+    /// The candidate was merged into the integration branch.
+    Merged,
+}
+
+impl AttemptStep {
+    /// Every step, in the order they happen.
+    pub const ALL: &'static [AttemptStep] = &[
+        AttemptStep::Delivered,
+        AttemptStep::Started,
+        AttemptStep::HandedIn,
+        AttemptStep::Verdict,
+        AttemptStep::Settled,
+        AttemptStep::Merged,
+    ];
+
+    /// The column the step's time lives in.
+    pub fn column(self) -> &'static str {
+        match self {
+            AttemptStep::Delivered => "delivered_at",
+            AttemptStep::Started => "started_at",
+            AttemptStep::HandedIn => "handed_in_at",
+            AttemptStep::Verdict => "verdict_at",
+            AttemptStep::Settled => "settled_at",
+            AttemptStep::Merged => "merged_at",
+        }
+    }
+}
+
+/// The times of the steps of one attempt (T-38). A step that has not happened
+/// yet is None; the times are written by the step itself, never by a row
+/// replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttemptTimes {
+    pub delivered: Option<Ts>,
+    pub started: Option<Ts>,
+    pub handed_in: Option<Ts>,
+    pub verdict: Option<Ts>,
+    pub settled: Option<Ts>,
+    pub merged: Option<Ts>,
+}
+
+impl AttemptTimes {
+    /// The time of one step.
+    pub fn get(&self, step: AttemptStep) -> Option<Ts> {
+        match step {
+            AttemptStep::Delivered => self.delivered,
+            AttemptStep::Started => self.started,
+            AttemptStep::HandedIn => self.handed_in,
+            AttemptStep::Verdict => self.verdict,
+            AttemptStep::Settled => self.settled,
+            AttemptStep::Merged => self.merged,
+        }
+    }
+
+    /// The time of the last step that happened (the steps in their order).
+    pub fn last(&self) -> Option<Ts> {
+        self.merged
+            .or(self.settled)
+            .or(self.verdict)
+            .or(self.handed_in)
+            .or(self.started)
+            .or(self.delivered)
+    }
 }
 
 /// One acceptance verdict (append-only).
@@ -1290,6 +1372,23 @@ impl<'s> Tx<'s> {
     }
 
     /// Most recent op of `kind` for `seat` (any state), for cooldowns.
+    /// Every op of `kind` for `seat`, oldest first.
+    pub fn ops_of_seat_kind(&self, seat: &str, kind: OpKind) -> GearResult<Vec<OpRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&op_select(
+                " WHERE seat=?1 AND kind=?2
+                 ORDER BY created, CAST(SUBSTR(id, INSTR(id, '-')+1) AS INTEGER)",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![seat, kind.as_str()], op_from_row)
+            .map_err(map_sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_sqlite)?;
+        Ok(rows)
+    }
+
     pub fn last_op(&self, seat: &str, kind: OpKind) -> GearResult<Option<OpRow>> {
         let row: Option<OpRow> = self
             .tx
@@ -1363,8 +1462,8 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO tasks
                    (project, id, rank, state, priority, lane, milestone, required, contract_version,
-                    deps, followup_of, wait_on, wait_cond, rework_note, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     row.project,
                     row.id,
@@ -1380,6 +1479,7 @@ impl<'s> Tx<'s> {
                     row.wait_on,
                     row.wait_cond,
                     row.rework_note,
+                    row.estimate_min,
                     row.updated,
                 ],
             )
@@ -1425,7 +1525,7 @@ impl<'s> Tx<'s> {
                 "UPDATE tasks
                  SET rank=?3, state=?4, priority=?5, lane=?6, milestone=?7, required=?8,
                      contract_version=?9, deps=?10, followup_of=?11, wait_on=?12, wait_cond=?13,
-                     rework_note=?14, updated=?15
+                     rework_note=?14, estimate_min=?15, updated=?16
                  WHERE project=?1 AND id=?2",
                 params![
                     row.project,
@@ -1442,6 +1542,7 @@ impl<'s> Tx<'s> {
                     row.wait_on,
                     row.wait_cond,
                     row.rework_note,
+                    row.estimate_min,
                     row.updated,
                 ],
             )
@@ -1596,6 +1697,9 @@ impl<'s> Tx<'s> {
     }
 
     /// Replace every column of an existing attempt (raw write). Missing → NoTarget.
+    ///
+    /// The step times are **not** written here: they belong to the step that
+    /// happened, and a row replacement must never move or clear them.
     pub fn update_attempt(&self, row: &AttemptRow) -> GearResult<()> {
         let changed = self
             .tx
@@ -1628,6 +1732,105 @@ impl<'s> Tx<'s> {
             "attempt",
             &format!("{} {} in project {}", row.task, row.n, row.project),
         )
+    }
+
+    /// Write the time of one step of an attempt (T-38).
+    ///
+    /// Only the step's own column is written, so no step can overwrite
+    /// another's time. The first time wins: a step that is written twice
+    /// (a repeated delivery, a replayed settle) keeps the first reading.
+    /// The attempt must exist → else `NoTarget`.
+    pub fn set_attempt_time(
+        &self,
+        project: &str,
+        task: &str,
+        n: i64,
+        step: AttemptStep,
+        now: Ts,
+    ) -> GearResult<()> {
+        let column = step.column();
+        let changed = self
+            .tx
+            .execute(
+                &format!(
+                    "UPDATE attempts SET {column}=COALESCE({column}, ?4)
+                     WHERE project=?1 AND task=?2 AND n=?3"
+                ),
+                params![project, task, n, now],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "attempt",
+            &format!("{task} attempt {n} in project {project}"),
+        )
+    }
+
+    /// The step times of one attempt. A step that has not happened is None.
+    pub fn attempt_times(&self, project: &str, task: &str, n: i64) -> GearResult<AttemptTimes> {
+        let row: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>, Option<i64>)> =
+            self.tx
+                .query_row(
+                    "SELECT delivered_at, started_at, handed_in_at, verdict_at, settled_at, merged_at
+                     FROM attempts WHERE project=?1 AND task=?2 AND n=?3",
+                    params![project, task, n],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(map_sqlite)?;
+        Ok(row.map_or_else(AttemptTimes::default, |t| AttemptTimes {
+            delivered: t.0,
+            started: t.1,
+            handed_in: t.2,
+            verdict: t.3,
+            settled: t.4,
+            merged: t.5,
+        }))
+    }
+
+    /// The step times of every attempt of a task, ordered by attempt number.
+    /// An attempt with no row (never created) is not listed.
+    pub fn attempt_times_of_task(
+        &self,
+        project: &str,
+        task: &str,
+    ) -> GearResult<Vec<(i64, AttemptTimes)>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT n, delivered_at, started_at, handed_in_at, verdict_at, settled_at, merged_at
+                 FROM attempts WHERE project=?1 AND task=?2 ORDER BY n",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, task], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    AttemptTimes {
+                        delivered: row.get(1)?,
+                        started: row.get(2)?,
+                        handed_in: row.get(3)?,
+                        verdict: row.get(4)?,
+                        settled: row.get(5)?,
+                        merged: row.get(6)?,
+                    },
+                ))
+            })
+            .map_err(map_sqlite)?;
+        let mut times = Vec::new();
+        for row in rows {
+            times.push(row.map_err(map_sqlite)?);
+        }
+        Ok(times)
     }
 
     /// Append a verdict (no uniqueness: history is kept).
@@ -2115,7 +2318,7 @@ fn op_select(tail: &str) -> String {
 fn task_select(tail: &str) -> String {
     format!(
         "SELECT project, id, rank, state, priority, lane, milestone, required, contract_version,
-                deps, followup_of, wait_on, wait_cond, rework_note, updated
+                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated
          FROM tasks{tail}"
     )
 }
@@ -2157,7 +2360,8 @@ fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
         wait_on: row.get(11)?,
         wait_cond: row.get(12)?,
         rework_note: row.get(13)?,
-        updated: row.get(14)?,
+        estimate_min: row.get(14)?,
+        updated: row.get(15)?,
     })
 }
 

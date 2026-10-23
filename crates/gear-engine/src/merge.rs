@@ -27,7 +27,7 @@ use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, TaskState, Ts,
 };
-use gear_store::{NewMessage, NewOp, OpRow, Store};
+use gear_store::{AttemptStep, NewMessage, NewOp, OpRow, Store};
 
 use crate::EngineCfg;
 
@@ -132,6 +132,11 @@ pub fn merge_passed(
                         tx.set_op_state(project, &op.id, OpState::Submitted, None, now)?;
                     }
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&lines), now)?;
+                    // The merge has its own time (T-38): the attempt is merged
+                    // when the push is done, not when the op was queued.
+                    if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
+                        tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, now)?;
+                    }
                     Ok(())
                 })?;
                 merged.push(Merged {
@@ -743,6 +748,7 @@ gate = "{gate}"
                     wait_on: None,
                     wait_cond: None,
                     rework_note: None,
+                    estimate_min: None,
                     updated: 0,
                 })?;
                 tx.insert_verdict(&gear_store::VerdictRow {
@@ -1093,5 +1099,57 @@ gate = "{gate}"
             2,
             "exactly the two merge commits"
         );
+    }
+
+    /// T-38: the merge is a step of the attempt and has its own time: the
+    /// candidate landed on the integration branch then, not when the op was
+    /// queued.
+    #[test]
+    fn a_merged_attempt_gets_its_merge_time() {
+        let scratch = Scratch::new("mergetime");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-5",
+                    1,
+                    1,
+                    &candidate,
+                    "ops/reports/T-5.md",
+                    0,
+                )?;
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: "T-5".into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.clone(),
+                    passed: true,
+                    evidence: Some("ops/reviews/T-5.md".into()),
+                    by_seat: "p:captain".into(),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let mut cfg = EngineCfg::default();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        let times = store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap();
+        assert_eq!(times.merged, Some(20), "the merge has its own time");
+        // The other steps keep theirs.
+        assert_eq!(times.started, Some(0));
+        assert_eq!(times.handed_in, Some(0));
     }
 }
