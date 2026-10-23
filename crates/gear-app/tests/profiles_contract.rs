@@ -156,3 +156,27 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
     };
     assert!(!kickoff::skeleton(&known).contains("[profiles.opencode]"));
 }
+
+/// R2 (review): a new profile that sets no numeric fields gets the operational
+/// screen defaults (16 lines, two confirmation rounds), not an all-zero
+/// profile that can never see a marker.
+#[test]
+fn a_new_profile_gets_the_operational_defaults() {
+    let text = config_with(
+        r#"
+[profiles.omp]
+kind = "omp"
+unattended_args = ["--yolo"]
+busy_markers = ["BUSY"]
+"#,
+    );
+    let parsed = config::parse(&text).unwrap();
+    let table = config::profile_table(&gear_herdr::builtins(), &parsed).unwrap();
+    let omp = table.get("omp").expect("omp is configured");
+    assert_eq!(omp.tail_lines, 16, "the screen window has a real default");
+    assert_eq!(omp.confirm_rounds, 2, "a flag needs two observations");
+    assert_eq!(omp.busy_markers, vec!["BUSY".to_string()]);
+    // A built-in keeps its own values when the block leaves them out.
+    let opencode = table.get("opencode").expect("built in");
+    assert_eq!(opencode.tail_lines, gear_herdr::builtin("opencode").unwrap().tail_lines);
+}

@@ -382,6 +382,8 @@ pub fn skeleton(inventory: &Inventory) -> String {
         lines.push("# busy_markers = []             # the screen text of a running turn".to_string());
         lines.push("# quota_markers = []            # the screen text of a provider limit".to_string());
         lines.push("# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string());
+        lines.push("# tail_lines = 16                # the lines of the screen that are matched".to_string());
+        lines.push("# confirm_rounds = 2             # consecutive observations before a flag counts".to_string());
         lines.push("# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed".to_string());
     }
     lines.push(String::new());

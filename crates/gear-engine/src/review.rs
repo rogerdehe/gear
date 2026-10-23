@@ -47,6 +47,7 @@ pub fn start_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     now: Ts,
 ) -> GearResult<ReviewReport> {
@@ -65,7 +66,7 @@ pub fn start_reviews(
     let Some(temps) = config.temps.as_ref() else {
         return Ok(report);
     };
-    let Some(profile) = cfg.profiles.get(&temps.profile) else {
+    let Some(profile) = profiles.get(&temps.profile) else {
         return Ok(report);
     };
     // An unverified profile may not take over a real project (design/04).
@@ -896,12 +897,68 @@ review = ["gpt-6.1-sol"]
             .collect()
     }
 
+    /// R1 (review): the project's profile table reaches the reviewer start — a
+    /// reviewer on a profile the config defines starts with that kind.
+    #[test]
+    fn a_configured_reviewer_profile_starts_the_reviewer() {
+        let text = CONFIG
+            .replace(
+                "[temps]\nkind = \"codex\"\nprofile = \"codex\"",
+                "[temps]\nkind = \"grok\"\nprofile = \"grok\"",
+            )
+            + "\n[profiles.grok]\nkind = \"grok\"\nunattended_args = [\"--yolo\"]\ntail_lines = 16\nconfirm_rounds = 1\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        let config = gear_app::config::parse(&text).unwrap();
+        let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(report.started, vec!["p:r-1".to_string()], "a reviewer starts on the configured profile");
+        let starts: Vec<(String, Vec<String>)> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { kind, args, .. } => Some((kind.clone(), args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert_eq!(starts[0].0, "grok");
+        assert!(starts[0].1.contains(&"--yolo".to_string()), "{:?}", starts[0].1);
+    }
+
+    /// R1 (review): an override of a built-in profile reaches the start — the
+    /// custom unattended args replace the built-in's.
+    #[test]
+    fn a_builtin_reviewer_override_reaches_the_start() {
+        let text = CONFIG.to_string()
+            + "\n[profiles.codex]\nunattended_args = [\"--custom-flag\"]\n";
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        let config = gear_app::config::parse(&text).unwrap();
+        let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+
+        let starts: Vec<(String, Vec<String>)> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::AgentStart { kind, args, .. } => Some((kind.clone(), args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].1.contains(&"--custom-flag".to_string()), "{:?}", starts[0].1);
+    }
+
     #[test]
     fn a_result_in_starts_one_reviewer() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         // one temp seat, bound to the task for life
         assert_eq!(report.started, vec!["p:r-1".to_string()]);
@@ -981,8 +1038,8 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert!(report.started.is_empty(), "{:?}", report.started);
         assert_eq!(worktrees(&herdr).len(), 1);
@@ -1001,7 +1058,7 @@ review = ["gpt-6.1-sol"]
         let mut store = world(CONFIG_NO_SLOT);
         let mut herdr = FakeHerdr::new();
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert!(report.started.is_empty());
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
@@ -1015,7 +1072,7 @@ review = ["gpt-6.1-sol"]
         assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
         assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
         // The next tick does not tell the captain again.
-        start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21)).unwrap();
         assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
     }
@@ -1060,7 +1117,7 @@ review = ["gpt-6.1-sol"]
         herdr.inject_next =
             Some(gear_herdr::fake::Inject::Refuse { code: "agent_pane_busy".into() });
 
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
         assert!(report.started.is_empty(), "the agent is not up yet");
         assert_eq!(report.waiting, vec!["T-1".to_string()]);
@@ -1068,7 +1125,7 @@ review = ["gpt-6.1-sol"]
         assert_eq!(seat.state, SeatState::Starting, "not parked: tried again");
         // The next tick starts the agent: the worktree and the environment are
         // already there.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         assert_eq!(report.started, vec!["p:r-1".to_string()]);
         assert_eq!(starts(&herdr).len(), 2, "the start was tried again");
         assert!(worktrees(&herdr).is_empty(), "no second worktree");

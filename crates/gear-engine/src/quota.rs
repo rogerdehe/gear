@@ -52,6 +52,7 @@ pub fn apply_quota_policy(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
     project: &str,
     observed: &[SeatObs],
     now: Ts,
@@ -71,7 +72,7 @@ pub fn apply_quota_policy(
         if seat.role != SeatRole::Lane {
             continue;
         }
-        let Some(profile) = cfg.profiles.get(&seat.profile) else {
+        let Some(profile) = profiles.get(&seat.profile) else {
             continue;
         };
         // A restart that is already on its way finishes before anything else.
@@ -782,14 +783,14 @@ quota_reset_h = 5
     fn tick_quota(store: &mut Store, herdr: &mut FakeHerdr, quota: bool, now: Ts) -> QuotaReport {
         let seat = lane_seat(store);
         let obs = observed(&seat, quota);
-        apply_quota_policy(store, herdr, &cfg(), "p", &obs, now).unwrap()
+        apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
     }
 
     /// One tick with the agent gone (the restart continues).
     fn tick_gone(store: &mut Store, herdr: &mut FakeHerdr, now: Ts) -> QuotaReport {
         let seat = lane_seat(store);
         let obs = gone(&seat);
-        apply_quota_policy(store, herdr, &cfg(), "p", &obs, now).unwrap()
+        apply_quota_policy(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now).unwrap()
     }
 
     /// A world with an opencode agent in PANE that shows the quota screen.
@@ -1001,7 +1002,7 @@ quota_reset_h = 5
         // The pane is a shell: the restart types the environment there and
         // resumes that conversation.
         let seat_obs = gone(&seat);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &seat_obs, T0 + 30).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &seat_obs, T0 + 30).unwrap();
 
         let starts: Vec<Vec<String>> = herdr
             .calls
@@ -1037,7 +1038,7 @@ quota_reset_h = 5
         // A shell with no exit line in its tail.
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
 
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 30).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 30).unwrap();
 
         let starts = herdr
             .calls
@@ -1108,6 +1109,7 @@ quota_reset_h = 5
                 &mut store,
                 &mut herdr,
                 &cfg(),
+                &cfg().profiles,
                 "p",
                 &observed(&seat, true),
                 T0 + 30 + tick,
@@ -1135,14 +1137,14 @@ quota_reset_h = 5
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
         // The old agent is delayed: nothing happens.
         let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 25).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 25).unwrap();
         assert!(starts(&herdr).is_empty());
 
         // The old agent is gone; the pane is a shell.
         herdr.exit_agent(PANE);
         herdr.set_screen(PANE, "  Session  T-1 work\n  Continue  opencode -s ses_keep\n");
         let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 30).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 30).unwrap();
 
         let env = env_lines(&herdr);
         assert_eq!(env.len(), 1, "{env:?}");
@@ -1168,7 +1170,7 @@ quota_reset_h = 5
         // The engine restarts (recovery) while the old agent is still there.
         crate::ops::recover_on_start(&mut store, T0 + 25).unwrap();
         let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 30).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 30).unwrap();
         assert!(starts(&herdr).is_empty(), "the old agent is not adopted");
         assert!(env_lines(&herdr).is_empty());
         assert_eq!(restart_model(&mut store, "p:heat").unwrap(), Some("deepseek/deepseek-flash".into()));
@@ -1177,7 +1179,7 @@ quota_reset_h = 5
         herdr.exit_agent(PANE);
         herdr.set_screen(PANE, "  Continue  opencode -s ses_after\n");
         let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &gone(&seat), T0 + 40).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &gone(&seat), T0 + 40).unwrap();
         let starts = starts(&herdr);
         assert_eq!(starts.len(), 1, "{starts:?}");
         assert!(starts[0].contains(&"-s".to_string()), "{:?}", starts[0]);
@@ -1203,7 +1205,7 @@ quota_reset_h = 5
         // The exit is delayed: the quota counter is still the reason the
         // delivery gets no budget.
         let seat = lane_seat(&mut store);
-        apply_quota_policy(&mut store, &mut herdr, &cfg(), "p", &observed(&seat, true), T0 + 30).unwrap();
+        apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &observed(&seat, true), T0 + 30).unwrap();
         for tick in 0..4 {
             let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 2, T0 + 40 + tick).unwrap();
             assert!(flagged.is_empty(), "a quota turn never flags the seat");

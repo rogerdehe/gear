@@ -107,6 +107,20 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
 /// Any other kind → None.
+impl Profile {
+    /// The starting point for a profile the config defines (T-31): the screen
+    /// window of design/04 — the last 16 lines, a flag confirmed after two
+    /// consecutive observations. A derived `Default` (all zero) would read no
+    /// line and never see a marker (review R2).
+    pub fn for_new() -> Profile {
+        Profile {
+            tail_lines: 16,
+            confirm_rounds: 2,
+            ..Profile::default()
+        }
+    }
+}
+
 /// The fields a project config may set for a profile (T-31). Every field is
 /// optional: a field left out keeps the value the profile already has (the
 /// built-in's, when the name is a built-in).
