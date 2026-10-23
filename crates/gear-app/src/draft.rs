@@ -90,6 +90,43 @@ pub struct Draft {
     pub reviews: Vec<ReviewLine>,
 }
 
+/// The id and title of a `# Milestone <id>: <title>` block, from the header
+/// text (the part after `# Milestone `). The id is the first word without its
+/// trailing colon, as [`parse`] reads it.
+pub fn milestone_parts(header: &str) -> (&str, &str) {
+    let id = header
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(':');
+    let title = header[id.len()..].trim_start_matches(':').trim();
+    (id, title)
+}
+
+/// The fields a milestone block must carry (T-22), read from its body: `done:`
+/// (the one checkable sentence), `bar:` (the quality line of this phase) and
+/// `eta:` (the planned duration), one line each. Absent ones are None.
+pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut done = None;
+    let mut bar = None;
+    let mut eta = None;
+    for line in body.lines() {
+        let line = line.trim();
+        let (name, value) = match line.split_once(':') {
+            Some((name, value)) => (name.trim(), value.trim()),
+            None => continue,
+        };
+        let value = value.to_string();
+        match name {
+            "done" => done = Some(value),
+            "bar" => bar = Some(value),
+            "eta" => eta = Some(value),
+            _ => {}
+        }
+    }
+    (done, bar, eta)
+}
+
 /// Parse a draft. Header `<!-- gear-plan project=<id> base=<n> -->` on the
 /// first non-empty line is required. Sections may be absent; known sections
 /// only (`Goal`, `Milestone …`, `Decisions`, `Queue`, `Staff`, `Verdicts`,
