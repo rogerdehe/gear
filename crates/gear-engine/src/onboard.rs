@@ -109,11 +109,11 @@ fn lane_primary<'a>(lane: &'a LaneSection, lane_chain: &'a [String]) -> Option<&
 }
 
 /// How a CLI takes the model it starts on.
-struct ModelStart {
+pub(crate) struct ModelStart {
     /// The shell fragment that carries the model in the environment line.
-    env: String,
+    pub(crate) env: String,
     /// Start args the model needs.
-    args: Vec<String>,
+    pub(crate) args: Vec<String>,
 }
 
 /// The model of a lane, as the CLI gets it.
@@ -129,7 +129,7 @@ struct ModelStart {
 /// (`--standalone`) reads the environment of the pane it is started in, which
 /// is where GEAR exports the model. A CLI without a verified way gets
 /// nothing: its model is not managed by GEAR.
-fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
+pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
     match kind {
         "opencode" => Some(ModelStart {
             env: format!("export OPENCODE_CONFIG_CONTENT='{{\"model\":\"{model}\"}}'"),
