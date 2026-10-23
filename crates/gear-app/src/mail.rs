@@ -200,7 +200,16 @@ pub fn send(
                 task: args.task.clone().unwrap_or_default(),
                 attempt: args.attempt.unwrap_or_default(),
                 outcome: verdict,
-                findings: args.body.clone(),
+                // A path to a file in the reviewer's cwd is read into the
+                // store; a missing file fails before anything is written
+                // (T-21). Only a temp reviewer's findings are read: a lane or
+                // the captain is refused as a reviewer, and that is the error
+                // they should see.
+                findings: if seat.role == SeatRole::Temp {
+                    crate::review::findings_text(&args.body)?
+                } else {
+                    args.body.clone()
+                },
                 by_seat: seat.id.clone(),
             }),
             _ => None,
