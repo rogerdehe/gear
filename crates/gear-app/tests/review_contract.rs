@@ -55,13 +55,13 @@ fn a_temp_review_is_stored_and_reaches_the_captain() {
     let mut s = world();
 
     let sent = mail::send(&mut s, &env("r-1", TEMP_PANE), Some(&fp(TEMP_PANE, "opencode")),
-        &review(Outcome::Pass, "ops/reviews/T-1.md", "r1"), T0 + 5).unwrap();
+        &review(Outcome::Pass, "P1: the row drifts right", "r1"), T0 + 5).unwrap();
     assert_eq!(sent.recipient, "p:captain");
 
     // The verdict sits on the attempt's review record.
     let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
     assert!(record.passed);
-    assert_eq!(record.findings, "ops/reviews/T-1.md");
+    assert_eq!(record.findings, "P1: the row drifts right");
     assert_eq!(record.by_seat, "p:r-1");
 
     // The captain's inbox holds it as an open item, with the verdict in it.
@@ -70,18 +70,18 @@ fn a_temp_review_is_stored_and_reaches_the_captain() {
     assert_eq!(inbox[0].kind, MsgKind::Review);
     assert_eq!(inbox[0].task.as_deref(), Some("T-1"));
     assert!(inbox[0].body.contains("pass"), "{}", inbox[0].body);
-    assert!(inbox[0].body.contains("ops/reviews/T-1.md"), "{}", inbox[0].body);
+    assert!(inbox[0].body.contains("P1: the row drifts right"), "{}", inbox[0].body);
 
     // The captain sees it on the home page.
     let home = home::build(&mut s, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), T0 + 7).unwrap();
-    assert!(home.text.contains("ops/reviews/T-1.md"), "{}", home.text);
+    assert!(home.text.contains("P1: the row drifts right"), "{}", home.text);
     assert!(home.text.contains("INBOX"), "{}", home.text);
 
     // The task packet shows the review record.
     let packet = s.read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1")).unwrap();
     assert!(packet.contains("## Review"), "{packet}");
     assert!(packet.contains("pass"), "{packet}");
-    assert!(packet.contains("ops/reviews/T-1.md"), "{packet}");
+    assert!(packet.contains("P1: the row drifts right"), "{packet}");
 
     // Nothing is settled: the attempt and the task keep their state.
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
@@ -149,7 +149,7 @@ fn a_review_without_a_verdict_is_bad_format() {
 fn the_same_request_id_replays_without_a_second_record() {
     let mut s = world();
     let (env, fp) = (env("r-1", TEMP_PANE), fp(TEMP_PANE, "opencode"));
-    let args = review(Outcome::Pass, "ops/reviews/T-1.md", "r1");
+    let args = review(Outcome::Pass, "P1: the row drifts right", "r1");
     mail::send(&mut s, &env, Some(&fp), &args, T0 + 5).unwrap();
     let again = mail::send(&mut s, &env, Some(&fp), &args, T0 + 6).unwrap();
     assert!(again.replayed);
@@ -160,9 +160,78 @@ fn the_same_request_id_replays_without_a_second_record() {
 fn a_second_different_verdict_for_the_same_attempt_is_refused() {
     let mut s = world();
     let (env, fp) = (env("r-1", TEMP_PANE), fp(TEMP_PANE, "opencode"));
-    mail::send(&mut s, &env, Some(&fp), &review(Outcome::Pass, "ops/reviews/T-1.md", "r1"), T0 + 5).unwrap();
+    mail::send(&mut s, &env, Some(&fp), &review(Outcome::Pass, "P1: the row drifts right", "r1"), T0 + 5).unwrap();
     let err = mail::send(&mut s, &env, Some(&fp), &review(Outcome::Fail, "P1: wrong", "r2"), T0 + 6).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadTransition);
     let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
     assert!(record.passed, "the first verdict stands");
+}
+
+/// A temp findings file, as a reviewer's worktree would hold.
+fn findings_file(text: &str, tag: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "gear-findings-{}-{tag}.md",
+        std::process::id()
+    ));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn a_findings_path_is_stored_as_its_text() {
+    let mut s = world();
+    let file = findings_file("# Findings\n\nP1: the row drifts right.\n", "path");
+
+    // The lane handed the work in: the attempt is Submitted, the task
+    // Verifying — a review is about a handed-in attempt.
+    s.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "c1", "Report: c1", T0 + 4))
+        .unwrap();
+
+    mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Fail, file.to_str().unwrap(), "r-post"),
+        T0 + 5,
+    )
+    .unwrap();
+
+    // The store holds the file's text, and the rework note and the packet
+    // carry the findings — not a path (T-21).
+    let record = s.read(|tx| tx.get_review_verdict("p", "T-1", 1)).unwrap().unwrap();
+    assert!(record.findings.contains("P1: the row drifts right"), "{}", record.findings);
+    assert!(
+        !record.findings.contains(&file.display().to_string()),
+        "not the path: {}",
+        record.findings
+    );
+
+    s.write(|tx| gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 6)).unwrap();
+    let note = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.unwrap_or_default();
+    assert!(note.contains("P1: the row drifts right"), "{note}");
+    let packet = s
+        .read(|tx| gear_app::plan::render_task_packet(tx, "p", "T-1"))
+        .unwrap();
+    assert!(packet.contains("P1: the row drifts right"), "{packet}");
+
+    std::fs::remove_file(&file).ok();
+}
+
+#[test]
+fn a_findings_path_that_does_not_exist_stores_nothing() {
+    let mut s = world();
+    let before = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len();
+
+    let err = mail::send(
+        &mut s,
+        &env("r-1", TEMP_PANE),
+        Some(&fp(TEMP_PANE, "opencode")),
+        &review(Outcome::Fail, "ops/reviews/T-404.md", "r-missing"),
+        T0 + 5,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    let after = s.read(|tx| tx.review_verdicts_of_task("p", "T-1")).unwrap().len();
+    assert_eq!(before, after, "nothing is stored");
 }

@@ -171,3 +171,115 @@ pub fn headline(review: &Review) -> String {
         review.attempt
     )
 }
+
+/// The findings a reviewer hands in: a path to a file in the reviewer's
+/// working directory is read (T-21), anything else is the findings text.
+///
+/// A review's findings must live in the store, not only in a file on a review
+/// branch: the lane doing the rework has to read them from GEAR whatever
+/// happens to the reviewer, its worktree or its branch. A path that does not
+/// exist is `BAD_FORMAT` and nothing is stored.
+pub fn findings_text(arg: &str) -> GearResult<String> {
+    let trimmed = arg.trim();
+    // A path names one file: one line. Anything with line breaks is text, even
+    // if it happens to contain a slash.
+    if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
+        return Ok(arg.to_string());
+    }
+    // A file that exists is read — spaces in its name do not matter. Its text
+    // is what the store keeps, so the rework lane never needs the reviewer's
+    // worktree or branch.
+    let path = std::path::Path::new(trimmed);
+    if path.is_file() {
+        let bytes = std::fs::read(path).map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read the findings file {trimmed:?}: {e}"),
+            )
+        })?;
+        return Ok(bounded_findings(&bytes, trimmed));
+    }
+    // A path that names no file is a mistake, not findings text: the reviewer
+    // meant to hand in a file. Nothing is stored (`BAD_FORMAT`).
+    if looks_like_path(trimmed) {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "no findings file {trimmed:?} in the reviewer's working directory: hand in the text itself or a path that exists"
+            ),
+        ));
+    }
+    Ok(arg.to_string())
+}
+
+/// A single-line argument that names a file even though no such file exists:
+/// a repository path ending in a text extension (`ops/reviews/T-1.md`) or a
+/// bare `*.md`/`*.txt` name. A word such as `n/a` is not a path.
+fn looks_like_path(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.len() <= 1024
+        && !arg.contains(char::is_whitespace)
+        && (arg.ends_with(".md") || arg.ends_with(".txt") || arg.ends_with(".markdown"))
+}
+
+/// Findings are stored whole up to this many bytes; a longer file is cut with
+/// a note, so the store never carries a whole book.
+pub const FINDINGS_MAX: usize = 64 * 1024;
+
+/// The text of a findings file, bounded.
+fn bounded_findings(bytes: &[u8], path: &str) -> String {
+    let cut = bytes.len() > FINDINGS_MAX;
+    let slice = &bytes[..bytes.len().min(FINDINGS_MAX)];
+    let mut text = String::from_utf8_lossy(slice).into_owned();
+    if cut {
+        text.push_str(&format!(
+            "\n[findings cut at {FINDINGS_MAX} bytes of {}; the whole file is at {path:?}]",
+            bytes.len()
+        ));
+    }
+    text
+}
+
+#[cfg(test)]
+mod findings_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_is_read_into_the_store() {
+        let dir = std::env::temp_dir().join(format!("gear-findings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("T-1.md");
+        std::fs::write(&file, "# Findings\n\nP1: the rows drift.\n").unwrap();
+        let text = findings_text(file.to_str().unwrap()).unwrap();
+        assert!(text.contains("P1: the rows drift"), "{text}");
+        assert!(!text.contains("gear-findings"), "the path is not the findings: {text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_path_with_spaces_is_read() {
+        let dir = std::env::temp_dir().join(format!("gear-findings-sp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("T-1 draft.md");
+        std::fs::write(&file, "P2: the header is stale.\n").unwrap();
+        let text = findings_text(file.to_str().unwrap()).unwrap();
+        assert!(text.contains("P2: the header is stale"), "{text}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn text_is_kept_and_a_missing_file_is_bad_format() {
+        assert_eq!(findings_text("the rows drift right").unwrap(), "the rows drift right");
+        assert_eq!(findings_text("P1 — x\nP2 — y").unwrap(), "P1 — x\nP2 — y");
+        assert_eq!(findings_text("n/a").unwrap(), "n/a");
+        let err = findings_text("ops/reviews/T-404.md").unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat);
+        assert!(err.detail.contains("T-404.md"), "{}", err.detail);
+    }
+
+    #[test]
+    fn a_long_file_is_cut_with_a_note() {
+        let text = bounded_findings(&vec![b'x'; FINDINGS_MAX + 10], "big.md");
+        assert!(text.ends_with("the whole file is at \"big.md\"]"), "{text}");
+    }
+}
