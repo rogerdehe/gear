@@ -4,7 +4,7 @@
 use crate::identity::{require_seat, Fingerprint};
 use crate::mail;
 use crate::Env;
-use gear_model::{GearResult, SeatRole, TaskState, Ts};
+use gear_model::{GearResult, SeatRole, Ts};
 use gear_store::{Store, Tx, ViewRecord};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +30,14 @@ pub struct Home {
 /// - footer: suggested next command.
 /// "Unshown" = created after the seat's latest view that listed it.
 pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) -> GearResult<Home> {
+    build_with_agents(store, env, fp, now, None)
+}
+
+/// Build with an optional Herdr snapshot read before the store transaction.
+pub fn build_with_agents(
+    store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+) -> GearResult<Home> {
     let (text, view) = store.read(|tx| {
         let (ctx, seat) = require_seat(tx, env, fp, None, None)?;
         let seat_id = seat.id.clone();
@@ -52,7 +60,7 @@ pub fn build(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, now: Ts) ->
         // (T-9). The model is the board's, so the two views never disagree.
         if seat.role == SeatRole::Captain {
             lines.push(String::new());
-            lines.extend(snapshot(tx, &ctx.project, now)?);
+            lines.extend(snapshot(tx, &ctx.project, now, agents)?);
         }
 
         // A message counts as shown when a recorded view of this seat and
@@ -193,14 +201,14 @@ const SNAPSHOT_VOYAGES: usize = 3;
 ///
 /// The model is the board's ([`gear_board::project`]), so the two views of
 /// the plan never disagree. Read-only, like the rest of the page.
-fn snapshot(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
-    let plan = gear_board::project(tx, project, now)?;
+fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::AgentInfo]>) -> GearResult<Vec<String>> {
+    let plan = gear_board::project_with_agents(tx, project, now, agents)?;
     let mut lines = vec![format!(
         "SNAPSHOT {} tasks · {} done · {} in progress · {} waiting",
         plan.totals.tasks, plan.totals.done, plan.totals.in_progress, plan.totals.waiting
     )];
     for lane in plan.lanes.iter().take(SNAPSHOT_LANES) {
-        lines.push(lane_line(lane));
+        lines.push(format!("  {}", gear_board::lane_line(lane)));
     }
     if plan.lanes.len() > SNAPSHOT_LANES {
         lines.push(format!("+{} more lanes", plan.lanes.len() - SNAPSHOT_LANES));
@@ -231,23 +239,4 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
         ));
     }
     Ok(lines)
-}
-
-/// One lane of the snapshot: the task it is on and how much is queued.
-fn lane_line(lane: &gear_board::LaneBoard) -> String {
-    // A lane is on the task in progress; a lane whose work is in review is
-    // not idle either, so a review counts when nothing runs. A lane with a
-    // task waiting for a question is on that one, too.
-    let current = lane
-        .tasks
-        .iter()
-        .find(|task| task.state == TaskState::Running)
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Waiting))
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Verifying));
-    let current = match current {
-        Some(task) => format!("{} {}", task.id, gear_board::state_word(task.state)),
-        None => "idle".to_string(),
-    };
-    let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
-    format!("  {} · {} · {} queued", lane.lane, current, queued)
 }
