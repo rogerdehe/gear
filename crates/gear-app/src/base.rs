@@ -139,8 +139,14 @@ fn excerpt(stderr: &[u8]) -> String {
     let joined = picked.join(" / ");
     if joined.is_empty() {
         "no output".to_string()
-    } else if joined.len() > 400 {
-        format!("{}…", &joined[..400])
+    } else if joined.chars().count() > 400 {
+        // Head and tail, cut on characters and never inside one: a long
+        // multibyte path must not panic the check, and the reason at the end of
+        // git's fatal line must survive the cut (review round 2, F5).
+        let chars: Vec<char> = joined.chars().collect();
+        let head: String = chars[..300].iter().collect();
+        let tail: String = chars[chars.len() - 100..].iter().collect();
+        format!("{head}…{tail}")
     } else {
         joined
     }

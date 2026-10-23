@@ -77,27 +77,12 @@ pub fn send(
 ) -> GearResult<SendResult> {
     // A request that already committed replays its receipt before the hand-in
     // gate: the hand-in happened, only the receipt was lost, and an outage
-    // must not report it as failed (T-19 review F2). An identical args key is
-    // the same seat and generation with the same arguments (design/13).
-    if let Some(ctx) = &env.ctx {
-        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
-        if let Some((stored_hash, stored)) = store.read(|tx| tx.get_request(&args.request_id))? {
-            if stored_hash == gear_store::args_hash(&key) {
-                let value: serde_json::Value =
-                    serde_json::from_str(&stored).map_err(|e| {
-                        GearError::new(
-                            ErrorCode::BadFormat,
-                            format!("stored send result for {} is broken: {e}", args.request_id),
-                        )
-                    })?;
-                return Ok(SendResult {
-                    msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
-                    thread: value["thread"].as_str().unwrap_or_default().to_string(),
-                    recipient: value["recipient"].as_str().unwrap_or_default().to_string(),
-                    replayed: true,
-                });
-            }
-        }
+    // must not report it as failed (T-19 review F2). The caller is the live
+    // seat — identity is checked in the same read transaction as the receipt
+    // (review round 2, F6), so a stale generation or another occupant cannot
+    // replay it.
+    if let Some(receipt) = stored_receipt(store, env, fp, args)? {
+        return Ok(receipt);
     }
     // The hand-in gate (T-19) runs before the transaction: a candidate that
     // does not contain the current integration branch is refused and nothing —
@@ -327,6 +312,51 @@ pub fn send(
         let thread = value["thread"].as_str().unwrap_or_default().to_string();
         let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
         Ok(SendResult { msg_id, thread, recipient, replayed })
+    })
+}
+
+/// The receipt of a request that already committed, if the caller is the live
+/// seat that sent it: the seat, generation, binding and fingerprint are checked
+/// in the **same read transaction** that reads the stored request (review
+/// round 2, F6). No receipt, no `GEAR_CTX` or a different args key → None (the
+/// write path decides, as before); a caller that is no longer the seat gets
+/// its `NotRegistered` / `StaleGeneration` / `Forbidden` here.
+fn stored_receipt(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+) -> GearResult<Option<SendResult>> {
+    if env.ctx.is_none() {
+        return Ok(None);
+    }
+    store.read(|tx| {
+        let Some((stored_hash, stored)) = tx.get_request(&args.request_id)? else {
+            return Ok(None);
+        };
+        let (ctx, _seat) = require_seat(
+            tx,
+            env,
+            fp,
+            Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
+            Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
+        )?;
+        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
+        if stored_hash != gear_store::args_hash(&key) {
+            return Ok(None);
+        }
+        let value: serde_json::Value = serde_json::from_str(&stored).map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("stored send result for {} is broken: {e}", args.request_id),
+            )
+        })?;
+        Ok(Some(SendResult {
+            msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
+            thread: value["thread"].as_str().unwrap_or_default().to_string(),
+            recipient: value["recipient"].as_str().unwrap_or_default().to_string(),
+            replayed: true,
+        }))
     })
 }
 
