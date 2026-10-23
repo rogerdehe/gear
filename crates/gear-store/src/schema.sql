@@ -15,6 +15,13 @@ CREATE TABLE IF NOT EXISTS id_seq (project TEXT NOT NULL, kind TEXT NOT NULL, ne
 CREATE TABLE IF NOT EXISTS milestones (project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
   scope TEXT, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
+-- The findings of a review that block (T-23): the ids the reviewer named
+-- with `--blocking`. The findings themselves stay in the review record; this
+-- says which of them go back to the lane as rework.
+CREATE TABLE IF NOT EXISTS review_blocks (project TEXT NOT NULL, task TEXT NOT NULL,
+  attempt INTEGER NOT NULL, ids TEXT NOT NULL, created INTEGER NOT NULL,
+  PRIMARY KEY (project, task, attempt));
+
 -- A milestone as a voyage (T-22): the one-sentence `done` it is judged by, the
 -- quality `bar` of its phase, the planned `eta`, and where it departed from —
 -- the time its first task was created and the tasks it had then. `milestones`

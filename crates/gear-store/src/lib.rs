@@ -233,6 +233,17 @@ pub struct VerdictRow {
     pub created: Ts,
 }
 
+/// The findings of a review that block (T-23): the ids the reviewer named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewBlockRow {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    /// The ids, comma separated.
+    pub ids: String,
+    pub created: Ts,
+}
+
 /// The review verdict a temp reviewer handed in for one attempt (design/08,
 /// conventions §8). One record per (project, task, attempt).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1672,6 +1683,47 @@ impl<'s> Tx<'s> {
             voyages.push(row.map_err(map_sqlite)?);
         }
         Ok(voyages)
+    }
+
+    // ---- review blocks (T-23)
+
+    /// Record the blocking findings of a review (the ids the reviewer named).
+    pub fn set_review_blocking(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+        ids: &str,
+        now: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO review_blocks (project, task, attempt, ids, created)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project, task, attempt) DO UPDATE SET ids=excluded.ids",
+                params![project, task, attempt, ids, now],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// The blocking findings of a review, if it named any.
+    pub fn review_blocking(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+    ) -> GearResult<Option<String>> {
+        let ids: Option<String> = self
+            .tx
+            .query_row(
+                "SELECT ids FROM review_blocks WHERE project=?1 AND task=?2 AND attempt=?3",
+                params![project, task, attempt],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(ids)
     }
 
     // ---- review verdicts (T-2)
