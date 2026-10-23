@@ -50,14 +50,43 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         if seat.role != SeatRole::Lane {
             continue;
         }
-        // Only a lane that may take work is warned about.
+        // A lane that is parked or held must not keep a warning: close it
+        // (R3 of the T-7 review).
         if !matches!(seat.state, SeatState::Active | SeatState::Standby) {
+            if close(
+                tx,
+                project,
+                &seat.name,
+                &captain.id,
+                "the lane is parked or held",
+                now,
+            )? {
+                changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+            }
             continue;
         }
-        let ready = dispatch::ready_tasks_of(tx, &seat)?.len();
+        // Ready work, less what a delivery already took: a task with a
+        // Delivered/started attempt is not available any more (R4).
+        let mut ready = 0;
+        for task in dispatch::ready_tasks_of(tx, &seat)? {
+            let taken = tx
+                .attempts_of_task(project, &task.id)?
+                .iter()
+                .any(|attempt| attempt.state.occupies_seat());
+            if !taken {
+                ready += 1;
+            }
+        }
         let working = !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty();
         if ready >= ENOUGH_READY {
-            if close(tx, project, &seat.name, &captain.id, ready, now)? {
+            if close(
+                tx,
+                project,
+                &seat.name,
+                &captain.id,
+                &format!("the queue is refilled ({ready} ready)"),
+                now,
+            )? {
                 changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
             }
             continue;
@@ -147,18 +176,17 @@ fn close(
     project: &str,
     lane: &str,
     captain: &str,
-    ready: usize,
+    reason: &str,
     now: Ts,
 ) -> GearResult<bool> {
     let Some(item) = open_item(tx, project, lane, captain)? else {
         return Ok(false);
     };
-    let result = format!("the queue is refilled ({ready} ready)");
     tx.update_message_state(
         project,
         &item.id,
         MsgState::Resolved,
-        Some(&result),
+        Some(reason),
         None,
         None,
         now,

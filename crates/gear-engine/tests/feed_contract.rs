@@ -4,7 +4,7 @@
 
 use gear_engine::{feed, tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
-use gear_model::{MsgKind, MsgState, SeatRole, SeatState, TaskState};
+use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, SeatState, TaskState};
 use gear_store::{testing, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -172,4 +172,56 @@ fn an_item_from_a_previous_engine_is_not_duplicated() {
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 30).unwrap();
 
     assert_eq!(items(&mut w.store, "heat").len(), 1, "no duplicate after a restart");
+}
+
+#[test]
+fn a_task_taken_by_a_delivery_is_not_ready_work() {
+    let mut w = world(AgentStatus::Working, 2);
+    // The first task's delivery was intended: a Delivered attempt while the
+    // task is still Ready (the delivery is confirmed on a later tick).
+    w.store
+        .write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Delivered,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+
+    // One task is taken, one left: the lane is in the danger zone (R4).
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item.len(), 1, "{item:?}");
+    assert_eq!(item[0].body, "lane heat has 1 ready task left");
+}
+
+#[test]
+fn a_parked_lane_closes_its_open_warning() {
+    let mut w = world(AgentStatus::Working, 1);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Open);
+
+    // Parked while the warning is open: the warning goes (R3).
+    w.store
+        .write(|tx| tx.set_seat_state("p:heat", SeatState::Parked, Some("parked"), T0 + 2))
+        .unwrap();
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 3).unwrap();
+
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    let item = items(&mut w.store, "heat");
+    assert_eq!(item[0].state, MsgState::Resolved);
 }
