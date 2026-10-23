@@ -96,11 +96,17 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
-/// are built in: today `opencode` —
-/// busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
+/// are built in: today `opencode` and `codex` —
+/// opencode: busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
-/// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified. Any other kind → None.
+/// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
+/// codex: busy `esc to interrupt`; no quota/rate-limit/auth markers yet (the
+/// SOP says the limits are still to be recorded); tail 16 lines, confirm 2
+/// rounds; unattended `--dangerously-bypass-approvals-and-sandbox`;
+/// session_ref true (Herdr reports the session uuid); resume
+/// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
+/// Any other kind → None.
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
         "opencode" => Some(Profile {
@@ -138,6 +144,27 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             session_ref: true,
             resume_args: Some(vec!["--resume".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
+            verified: true,
+        }),
+        // Codex (verified 2026-10-22, codex-cli 0.163.0 — the SOP
+        // `gear --skill agent:codex`): busy `esc to interrupt` (the screen
+        // shows `• Working (<time> • esc to interrupt)`); no quota markers
+        // yet — the SOP says the five-hour and weekly limits are still to be
+        // recorded; unattended `--dangerously-bypass-approvals-and-sandbox`;
+        // Herdr reports the session uuid, so session_ref is true; resume is
+        // the subcommand `codex resume <uuid>`.
+        "codex" => Some(Profile {
+            kind: "codex".into(),
+            busy_markers: vec!["esc to interrupt".into()],
+            ratelimit_markers: vec![],
+            quota_markers: vec![],
+            auth_markers: vec![],
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+            session_ref: true,
+            resume_args: Some(vec!["resume".into(), "{session}".into()]),
+            exit_keys: vec!["ctrl+c".into()],
             verified: true,
         }),
         // Only kinds with a verified SOP are built in (design/04).
