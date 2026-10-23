@@ -11,3 +11,8 @@
 - T-17 review R5: cancel during a reviewer's start keeps its slot (Starting seats skipped by release).
 - Captain can scope an automatic rework (today the engine hands the lane every finding, including ones the captain would log).
 - T-18 review #4 (restart adoption types shell text into a running reviewer), #5 (re-review does not resume the reviewer's session).
+- **Captain quota (user, 2026-10-23, must be in M2).** Today nothing handles it; lanes would keep developing with no captain to steer — risky. Shape to work out in M2:
+  - Detect: never from conversation text (it may quote quota words). Read only the agent's status line, e.g. Claude Code's bottom bar `5h 1% ↻01:10 · 7d 64%` (window usage and reset time); per-kind in the profile.
+  - While the captain is out: each lane finishes its current batch (hands in), then gets no new task; reviews and merges may finish (no captain judgement needed). Shown on the board.
+  - Reset: the captain's reset period is agreed at kickoff (e.g. 5 h, or read from the status line); at reset the engine wakes the captain ("your quota is back — run `gear`") and dispatch resumes after the captain has looked.
+- Lane quota "wait 5 h for reset": in M1 via T-15 (park until now + quota_reset_h, resume the same session) — check it really works live once T-15 lands.
