@@ -17,9 +17,11 @@
 
 pub mod dispatch;
 pub mod doorbell;
+pub mod model;
 pub mod observe;
 pub mod onboard;
 pub mod ops;
+pub mod review;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -61,6 +63,8 @@ pub struct TickReport {
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
     pub onboarded: Vec<String>,
+    /// Reviewer seats started this tick (a lane handed a result in).
+    pub reviewers: Vec<String>,
 }
 
 /// Run one engine tick over every project in the store.
@@ -118,7 +122,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
-        // 6. execute: re-check each op, call Herdr, record the outcome.
+        // 6. review: a lane handed a result in → a temp reviewer starts. The
+        //    lane is not blocked; the reviewer is a seat of its own.
+        let reviews = review::start_reviews(store, herdr, cfg, &project, now)?;
+        report.reviewers.extend(reviews.started);
+
+        // 7. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
     }
     Ok(report)
