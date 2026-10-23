@@ -130,6 +130,50 @@ pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now
     Ok(())
 }
 
+/// The lane's view adopts the contract update it **showed** (T-8, design/06
+/// `adopt_contract`, review R1/R2): `shown` is the version the page displayed
+/// (`ViewRecord.shown_contract`). The attempt moves to exactly that version —
+/// never a newer one the lane did not see — and a newer pending update stays
+/// pending for its own notice. Returns the version adopted, or `None`.
+///
+/// A handed-in (Submitted) or finished attempt never changes its adopted
+/// contract: its candidate is bound to the version it was submitted under, and
+/// the verdict follows that version (R2). A page that was built before a
+/// submission and recorded after it adopts nothing.
+pub fn adopt_contract(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+    shown: i64,
+    now: Ts,
+) -> GearResult<Option<i64>> {
+    let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no attempt {n} of task {task} in project {project}"),
+        )
+    })?;
+    // A handed-in or finished attempt keeps the version it was submitted under.
+    if attempt.state == AttemptState::Submitted || attempt.state.is_terminal() {
+        return Ok(None);
+    }
+    let Some(pending) = attempt.pending_update else {
+        return Ok(None);
+    };
+    // Only a version the page actually showed can be adopted, and never one
+    // older than what the attempt already works to.
+    if shown <= attempt.adopted_version {
+        return Ok(None);
+    }
+    attempt.adopted_version = shown;
+    // A newer update the lane has not seen yet stays pending for its notice.
+    attempt.pending_update = (pending > shown).then_some(pending);
+    attempt.updated = now;
+    tx.update_attempt(&attempt)?;
+    Ok(Some(shown))
+}
+
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
@@ -171,6 +215,9 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     attempt.state = AttemptState::Submitted;
     attempt.candidate = Some(candidate.to_string());
     attempt.report = Some(report.to_string());
+    // The candidate is bound to the contract it was submitted under: a pending
+    // update is not adopted any more (R2), so it must not stay pending either.
+    attempt.pending_update = None;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
     task_row.state = TaskState::Verifying;
@@ -471,7 +518,7 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
                 review.findings
             )
         } else {
-            review.findings.clone()
+            findings_pointer(task, &review.findings)
         });
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
@@ -613,4 +660,31 @@ fn resolve_review_items(
         created: now,
     })?;
     Ok(())
+}
+
+/// The rework note for a failed review: reviewers hand in a path on their
+/// review branch (`ops/reviews/T-<n>.md`); the lane must be told where to read
+/// it, because the review worktree is gone by then (lesson L-49).
+fn findings_pointer(task: &str, findings: &str) -> String {
+    let path = findings.trim();
+    if path.ends_with(".md") && !path.contains(char::is_whitespace) {
+        let branch = format!("review/{}", task.to_lowercase().replace('-', ""));
+        format!("Review findings: `git show origin/{branch}:{path}` — fix what it lists, then hand in again.")
+    } else {
+        findings.to_string()
+    }
+}
+
+#[cfg(test)]
+mod findings_pointer_tests {
+    use super::findings_pointer;
+
+    #[test]
+    fn a_path_becomes_a_command_on_the_review_branch() {
+        assert_eq!(
+            findings_pointer("T-12", "ops/reviews/T-12.md"),
+            "Review findings: `git show origin/review/t12:ops/reviews/T-12.md` — fix what it lists, then hand in again."
+        );
+        assert_eq!(findings_pointer("T-3", "rows drift right"), "rows drift right");
+    }
 }
