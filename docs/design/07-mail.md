@@ -1,17 +1,9 @@
 # 07 Messages: Send, Inbox, Reply, Doorbell
 
-Files: `gear/mail/send.py`, `gear/mail/inbox.py`, `gear/engine/doorbell.py`. Budget 250–310 lines.
+Implementation: [mail.rs](../../crates/gear-app/src/mail.rs), [doorbell.rs](../../crates/gear-engine/src/doorbell.rs).
 Invariants upheld: messages are confirmed item by item; send success = stored in the recipient's inbox; fetching/reading/doorbell do not count as handling; one delivery needing check per lane (shared with 09).
 
 ## Send (`gear send`, via run_request)
-
-```python
-def send(conn, caller: Caller, kind: MsgKind, body: str, *,
-         task: str|None, attempt: int|None, contract: int|None,      # required for result/ack, taken from the task packet
-         about: str|None, to: str|None, reply_to: str|None, urgent: bool,
-         candidate: str|None, preempted: str|None, saved_ref: str|None,
-         request_id: str) -> SendResult
-```
 
 1. Identity (03, fixed call context); generation checked inside the transaction. An incoming captain may only submit the handover ACK.
    Arguments validated by type: `result` and `blocked` must carry the original task/attempt/contract; `ack` takes its reference from the `--reply-to` item (a handover ACK requires no task arguments); unreferenced progress/question are recorded at seat level.
@@ -39,10 +31,6 @@ def send(conn, caller: Caller, kind: MsgKind, body: str, *,
 
 ## Inbox selection (called by the captain's home page)
 
-```python
-def select_batch(conn, project, recipient, *, max_threads=6, per_sender=2) -> list[ThreadView]
-```
-
 1. Candidates: OPEN and WAITING items due for recheck.
 2. If ordinary threads are backlogged, **first reserve 1 place** for the oldest unhandled ordinary thread.
 3. Remaining places: threads containing urgent messages first, ties broken by oldest unhandled time; at most `per_sender` threads per sender (including the reserved one).
@@ -50,12 +38,6 @@ def select_batch(conn, project, recipient, *, max_threads=6, per_sender=2) -> li
 5. INFO progress is summarized in one line per lane only in the brief.
 
 ## Reply (`gear reply`, captain, via run_request)
-
-```python
-def reply(conn, caller, ids: list[str], text: str, *, mode: Literal["resolve","wait","note"],
-          wait_on: str|None, wait_until: int|None, downgrade: bool,
-          next_check: int|None, request_id: str) -> ReplyResult
-```
 
 - Only handles the exact listed IDs (this project, sent to the captain, OPEN/WAITING).
 - `resolve`: →RESOLVED and record the result; `wait`: →WAITING, recording whom it waits on and when to recheck; `note`: reply only, no state change.
@@ -69,10 +51,6 @@ def reply(conn, caller, ids: list[str], text: str, *, mode: Literal["resolve","w
 WAITING tasks/items are re-evaluated by the engine when: the awaited upstream task passes acceptance and its output version is satisfied; the linked item receives a valid reply; the recheck time arrives. An arbitrary reply or a single "done" does not unlock it.
 
 ## Doorbell (engine)
-
-```python
-def due_doorbells(snapshot) -> list[DoorbellAction]   # read-only evaluation: the caller queries state first and passes it in
-```
 
 - Conditions: the recipient has OPEN or due WAITING items, **or has new REPLY/INSTRUCTION not yet shown** (judged from view records); the recipient is observed idle (idle/done and no busy on screen); the seat has **no delivery occupying its position** (a deliver or doorbell in INTENDED/EXECUTING/SUBMITTED/UNKNOWN); time since the last doorbell was confirmed finished ≥ cooldown. Ordinary INFO replies, once shown, no longer ring and need no ACK; progress does not ring per item; needs_ack items stay OPEN even after being shown, until a valid receipt.
 - Content is one line: `You have 5 pending items (2 urgent), run gear first`; when a review is due it becomes "handle the review first" (11).

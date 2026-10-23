@@ -1,6 +1,6 @@
 # 02 Database and State Model
 
-Files: `gear/core/db.py`, `gear/core/model.py`. Budget 280–340 lines.
+Implementation: [lib.rs](../../crates/gear-store/src/lib.rs), [state.rs](../../crates/gear-model/src/state.rs).
 Invariants upheld: single authoritative state; request replay; an old generation cannot overwrite newer state (together with 03); one writer per write resource (resources table).
 
 ## Responsibilities
@@ -9,7 +9,7 @@ Invariants upheld: single authoritative state; request replay; an old generation
 - Table creation and schema version check (upgrade only, never downgrade; refuse to run on version mismatch).
   The version lives in `meta.schema_version` and is stamped when the store is created. A binary that opens a store of an older version migrates it up (one step per transaction, the version moving with the step); a store of a newer version is refused for writing with `SCHEMA_TOO_NEW`, before anything is written.
 - Transactions, ID allocation, request replay, error codes.
-- All state enums and the legal transition table (`model.py`); other modules must write state through `transition()`.
+- All state enums and the legal transition table ([state.rs](../../crates/gear-model/src/state.rs)); transitions are checked with `require_transition`.
 
 ## Not done
 
@@ -17,94 +17,11 @@ No business judgement; no Herdr calls; no ORM. Neither Herdr queries nor git sam
 
 ## External interface
 
-```python
-def connect(db_path: Path) -> sqlite3.Connection
-@contextmanager
-def tx(conn) -> Iterator[sqlite3.Connection]                 # BEGIN IMMEDIATE
-def next_id(conn, project: str, kind: str) -> str            # T/M/R/V/O
-def run_request(conn, request_id: str, caller_key: str, action: str, args: dict,
-                fn: Callable[[], dict]) -> dict
-    """args_hash = hash(project, caller identity incl. generation, action, normalized args).
-    Same id, same hash -> return original result (no re-authorization); same id, different hash -> REQUEST_CONFLICT;
-    otherwise run fn in the same transaction and save the result."""
-class GearError(Exception): code: str; detail: str
-
-class TaskState(StrEnum):    DRAFT, READY, RUNNING, WAITING, VERIFYING, DONE, FAILED, CANCELLED
-class AttemptState(StrEnum): DELIVERED, STARTED, STOPPED, SUBMITTED, ACCEPTED, REJECTED, ABANDONED, UNKNOWN
-class SeatRole(StrEnum):     CAPTAIN, LANE, TEMP
-class SeatState(StrEnum):    ACTIVE, STANDBY, PARKED, HELD, RETIRING, RETIRED, MISSING, NEEDS_CHECK,
-                             UNAVAILABLE, HANDOVER, QUEUED, STARTING, RELEASING, RELEASED, UNKNOWN
-class MsgKind(StrEnum):      PROGRESS, QUESTION, BLOCKED, RESULT, ACK, INSTRUCTION, REPLY, SYSTEM
-class MsgState(StrEnum):     OPEN, WAITING, RESOLVED, INFO
-class OpState(StrEnum):      INTENDED, EXECUTING, SUBMITTED, CONFIRMED, FAILED, UNKNOWN, VOID
-def transition(kind: str, old: str, new: str) -> None
-```
-
 **request_id**: every write entry point (send, reply, plan apply, admin write commands) goes through `run_request`. The CLI generates the ID before executing and immediately prints it to stderr (`request: R-…`), then commits; the caller may also specify it with `--request-id`. If the process dies after COMMIT, the caller reruns with that ID to get the original result back.
 
 ## Table structure
 
-```sql
-CREATE TABLE meta      (key TEXT PRIMARY KEY, value TEXT);   -- schema_version, engine_heartbeat, engine_session
-CREATE TABLE projects  (id TEXT PRIMARY KEY, herdr_session TEXT, config_toml TEXT, config_version INT,
-                        quota_lanes INT, quota_temps INT, quota_includes_captain INT,
-                        plan_version INT DEFAULT 0, goal TEXT, created INT);
-CREATE TABLE milestones(project TEXT, id TEXT, title TEXT, scope TEXT, state TEXT, PRIMARY KEY (project, id));
-CREATE TABLE seats     (id TEXT PRIMARY KEY, project TEXT, role TEXT, name TEXT, profile TEXT,
-                        generation INT, state TEXT, state_since INT, state_reason TEXT,
-                        park_until INT, park_task TEXT, hold_reason TEXT,
-                        task_id TEXT,          -- the task a temp worker is bound to (for life)
-                        worktree TEXT);        -- resources.path of the worktree Herdr created for this seat
-CREATE TABLE bindings  (seat TEXT, generation INT, session TEXT, pane_id TEXT, kind TEXT,
-                        session_ref TEXT, status TEXT,    -- pending / active / void
-                        handover_id TEXT, created INT, PRIMARY KEY (seat, generation));
-CREATE TABLE resources (path TEXT PRIMARY KEY,           -- normalized worktree path as returned by Herdr (unique across projects)
-                        project TEXT,
-                        branch TEXT,                     -- branch checked out (lane: home/<lane> or current task branch; temp: task branch)
-                        workspace_id TEXT,               -- Herdr workspace id (for worktree.remove); NULL while not open in Herdr
-                        holder_seat TEXT, state TEXT,         -- free / held / needs_check
-                        last_task TEXT, note TEXT, updated INT);
-CREATE TABLE plans     (project TEXT, version INT, draft TEXT, applied INT, by_seat TEXT, by_gen INT,
-                        PRIMARY KEY (project, version));
-CREATE TABLE tasks     (project TEXT, id TEXT, rank INT, state TEXT, priority TEXT, lane TEXT,
-                        milestone TEXT, required INT, contract_version INT, deps TEXT,
-                        followup_of TEXT, wait_on TEXT, wait_cond TEXT, rework_note TEXT,
-                        updated INT, PRIMARY KEY (project, id));
-CREATE TABLE contracts (project TEXT, task TEXT, version INT, goal TEXT, accept TEXT,
-                        evidence_files TEXT, evidence_due_min INT, body TEXT, created INT,
-                        PRIMARY KEY (project, task, version));
-CREATE TABLE attempts  (project TEXT, task TEXT, n INT, seat TEXT, generation INT,
-                        contract_version INT, adopted_version INT, pending_update INT,
-                        state TEXT, candidate TEXT, report TEXT, safe_point TEXT,
-                        started INT, updated INT,
-                        delivered_at INT, started_at INT, handed_in_at INT,  -- the time of
-                        verdict_at INT, settled_at INT, merged_at INT,         -- every step
-                        PRIMARY KEY (project, task, n));
-CREATE TABLE messages  (project TEXT, id TEXT, thread TEXT, task TEXT, attempt INT,
-                        sender TEXT, sender_gen INT, recipient TEXT, kind TEXT, urgent INT,
-                        body TEXT, reply_to TEXT, needs_ack INT,
-                        state TEXT, wait_on TEXT, wait_until INT, result TEXT,
-                        created INT, resolved INT, PRIMARY KEY (project, id));
-CREATE TABLE views     (project TEXT, seat TEXT, generation INT, ts INT,
-                        shown_msgs TEXT,                 -- JSON array of message ids actually displayed
-                        shown_ops TEXT,                  -- JSON array of operation ids whose content was displayed
-                        shown_task TEXT, shown_attempt INT, shown_contract INT);
-CREATE TABLE operations(project TEXT, id TEXT, seat TEXT, generation INT, kind TEXT,
-                        task TEXT, attempt INT, ref_msg TEXT, plan_version INT,
-                        payload TEXT, state TEXT, result TEXT, check_budget INT,
-                        created INT, updated INT, PRIMARY KEY (project, id));
-CREATE TABLE verdicts  (project TEXT, task TEXT, attempt INT, contract_version INT, candidate TEXT,
-                        passed INT, evidence TEXT, by_seat TEXT, created INT);
-CREATE TABLE reviews   (project TEXT, id TEXT, cause TEXT, state TEXT, detail TEXT,
-                        decided TEXT, plan_version INT, checkpoint INT, reminders INT,
-                        created INT, updated INT, PRIMARY KEY (project, id));
-CREATE TABLE samples   (project TEXT, seat TEXT, task TEXT, ts INT, head TEXT, status_digest TEXT,
-                        content_digest TEXT, complete INT, evidence TEXT);
-CREATE TABLE reviews_of_work (project TEXT, task TEXT, ts INT, base_head TEXT, content_digest TEXT,
-                        judgement TEXT, next_check INT, by_seat TEXT);
-CREATE TABLE requests  (id TEXT PRIMARY KEY, args_hash TEXT, result TEXT, created INT);
-CREATE TABLE audit     (ts INT, project TEXT, actor TEXT, action TEXT, detail TEXT);
-```
+See [schema.sql](../../crates/gear-store/src/schema.sql) for the table definitions, including the attempt lifecycle timestamps added by T-38.
 
 **resources**: one row per worktree. The key is the worktree path returned by Herdr `worktree.create` / `worktree.open` (04); GEAR never constructs worktree paths itself. The row records the holder seat, the branch checked out, and the Herdr workspace id. A long-lived lane's row is created once at onboarding and held long-term (its branch changes as task branches are switched inside it); a temp worker's row is created per new task; after the result is merged, `worktree.remove` removes the checkout and the Herdr workspace (the branch is kept) and `workspace_id` becomes NULL; `worktree.open` on rework sets it again (17 §4). `seats.worktree` points to the resources row of the worktree Herdr created for that seat.
 
@@ -126,3 +43,15 @@ Counter-type state (cooldown start, continuation count, reminder count, check bu
 ## Test points
 
 Exhaustive transition table; the three request replay cases, and replay does not authorize a new generation; concurrent IDs never collide; lock timeout leaves no partial writes; the same worktree cannot be held by two seats; budget counters do not reset after restart.
+
+
+### Voyage measurements (T-39)
+
+`voyages.departure_estimate_min` stores the first known total estimate at departure.
+It is nullable and migrated additively. Later plan edits preserve it; existing
+voyages recover it from the oldest applicable stored plan during a plan apply.
+Missing historical estimates remain unknown. The captain home page and board
+use the same read-only `gear_board::voyage` measurements and five-line renderer.
+Pace samples only completed tasks with both estimates and recorded attempt spans.
+Projection is elapsed + remaining estimates × pace, rounded up to whole minutes;
+the JSON view includes both minutes from departure and the projected epoch time.

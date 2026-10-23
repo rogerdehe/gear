@@ -1,49 +1,22 @@
 # 08 Engine Loop, Observation, Side Effects
 
-Files: `gear/engine/loop.py`, `observe.py`, `ops.py`. Budget 220–280 lines.
+Implementation: [lib.rs](../../crates/gear-engine/src/lib.rs), [observe.rs](../../crates/gear-engine/src/observe.rs), [ops.rs](../../crates/gear-engine/src/ops.rs).
 Invariants upheld: the only process that executes Herdr side effects; an unknown outcome is not resent; an observation failure is not treated as "nothing happened"; single instance.
 
 ## Startup (`gear run`, started in the background by any `gear` call — design/14)
 
-1. Single-instance lock: `<state_dir>/engine.lock` (`fcntl.flock` non-blocking). If it cannot be taken → print "engine already running (pid, heartbeat, pane)" and exit, leaving no second resident process.
+1. Single-instance lock: `<state_dir>/engine.lock` (non-blocking file lock). If it cannot be taken → print "engine already running (pid, heartbeat, pane)" and exit, leaving no second resident process.
 2. Open the DB, check the schema version, read all project configs and display the effective values.
 3. **Recovery check**: all `EXECUTING` operations become `UNKNOWN` (the last process died mid-execution); `SUBMITTED` deliveries stay pending check; nothing is resent. Check that the execution host/session bound in the database matches the current Herdr; refuse to run on mismatch.
 4. Enter the loop.
 
 ## Loop tick
 
-```python
-def run_forever(conn, cfg):
-    while True:
-        t0 = now()
-        snap = observe.snapshot(project_sessions)     # one agent list per session
-        for project in round_robin(projects):          # rotate through projects, each has a time budget this round
-            obs = observe.reconcile(conn, project, snap)   # seats <-> Herdr reality
-            run_due(conn, project, obs)               # 09 continuation/dispatch, 07 doorbell, 10 staff, 11 review, 12 sampling
-        ops.drain_intended(conn, budget=…)            # execute the intent queue (with concurrency limit)
-        write_heartbeat(conn); board.refresh(conn)
-        sleep(max(0, cfg.tick - (now()-t0)))         # tick default 4 seconds
-```
-
 - Low-frequency jobs: output sampling default 20 minutes, review timer check 1 minute, expired park/wait check every round.
 - A project times out this round (e.g. Herdr is slow) → remaining work is pushed to the next round, other projects proceed as usual.
 - Slow calls do not stall the main loop: long calls such as `agent_start` and `worktree_create` run in a bounded worker thread pool (concurrency ≤ 4); the main loop only registers them and collects results; neither Herdr calls nor git sampling hold the SQLite write lock.
 
-## Observation and reconciliation (`observe.py`)
-
-```python
-@dataclass
-class SeatObs:
-    seat_id: str
-    present: bool | None          # None = observation failed
-    status: str | None            # idle/working/blocked/done/unknown
-    screen_flags: set[str]        # 04 classify_screen: busy/ratelimit/quota/auth (screen read only when needed)
-    fingerprint_ok: bool          # whether the occupant matches the binding
-    since: int                    # how long this state has lasted
-
-def snapshot(sessions) -> dict[str, HerdrResult]
-def reconcile(conn, project, snap) -> dict[str, SeatObs]
-```
+## Observation and reconciliation
 
 Reconciliation rules:
 
@@ -55,16 +28,9 @@ Reconciliation rules:
 | status idle/done | read the screen once (tail N lines) to confirm no busy signature, then hand to 09 as "idle" |
 | ratelimit/quota/auth matched | confirmed only after `confirm_rounds` consecutive rounds; captain matching quota/auth → 03's UNAVAILABLE |
 
-## Side effects (`ops.py`)
+## Side effects
 
-Every side effect goes through three steps, all written to the database:
-
-```python
-def intend(conn, project, seat, generation, kind, *, task=None, attempt=None,
-           ref_msg=None, plan_version=None, payload=None) -> str   # INTENDED, fixes the values needed for checking at intent time
-def execute(conn, herdr: HerdrActor, op_id) -> None   # EXECUTING → SUBMITTED / FAILED / UNKNOWN
-def confirm(conn, op_id, evidence: str) -> None       # SUBMITTED/UNKNOWN → CONFIRMED (requires linked evidence)
-```
+Side-effect intent, execution and confirmation are recorded in the database.
 
 - kind: `onboard` (start and onboard, including resume; for a long-lived lane's first onboarding and for a temp worker's new task this includes `worktree.create`, for a temp worker's rework/resume `worktree.open`, all via Herdr, 04), `deliver` (dispatch/continuation), `doorbell`, `release` (make a temp worker exit; its worktree is kept until the result is merged, then removed with `worktree.remove`), `title`, `notify`. park/hold/retire are pure data targets completed by plan apply in its transaction and do not go through ops.
 - Before execution, check current state against the generation, task/attempt, and plan version fixed at intent time; mismatch → `VOID`.

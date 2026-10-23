@@ -39,7 +39,7 @@ pub struct Step {
 pub const STEPS: &[Step] = &[Step { from: 1, apply: step_1_to_2 }];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
-const VOYAGE_COLUMNS: [&str; 9] = [
+const VOYAGE_COLUMNS: [&str; 10] = [
     "project",
     "milestone",
     "title",
@@ -48,6 +48,7 @@ const VOYAGE_COLUMNS: [&str; 9] = [
     "eta",
     "departure",
     "departure_tasks",
+    "departure_estimate_min",
     "updated",
 ];
 
@@ -87,7 +88,7 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
         }
     }
 
-    // T-38 time accounting: existing tables need their nullable columns
+    // Time accounting (T-38/T-39): existing tables need their nullable columns
     // added within the same versioned transaction as the rest of v1 -> v2.
     for (table, column) in [
         ("attempts", "delivered_at"),
@@ -97,6 +98,7 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
         ("attempts", "settled_at"),
         ("attempts", "merged_at"),
         ("tasks", "estimate_min"),
+        ("voyages", "departure_estimate_min"),
     ] {
         if !column_exists(tx, table, column)? {
             tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} INTEGER"))
@@ -138,10 +140,10 @@ fn rebuild_voyages(tx: &Transaction<'_>) -> GearResult<()> {
         "CREATE TABLE voyages_v2 (project TEXT NOT NULL, milestone TEXT NOT NULL,
            title TEXT NOT NULL DEFAULT '',
            done TEXT, bar TEXT, eta TEXT,
-           departure INTEGER, departure_tasks INTEGER, updated INTEGER NOT NULL,
+           departure INTEGER, departure_tasks INTEGER, departure_estimate_min INTEGER, updated INTEGER NOT NULL,
            PRIMARY KEY (project, milestone));
          INSERT INTO voyages_v2 (project, milestone, title, done, bar, eta,
-                                 departure, departure_tasks, updated)
+                                 departure, departure_tasks, departure_estimate_min, updated)
            SELECT {select} FROM voyages;
          DROP TABLE voyages;
          ALTER TABLE voyages_v2 RENAME TO voyages;",

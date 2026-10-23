@@ -1,14 +1,9 @@
 # 12 Output Sampling and Acceptance
 
-File: `gear/work/evidence.py`. Budget 110–140 lines.
+Implementation: [tasks.rs](../../crates/gear-app/src/tasks.rs).
 Invariants upheld: completion is bound to the contract and the artifact version; unknown is not treated as success; file changes are only a clue.
 
 ## Output sampling (engine, every 20 minutes, once per seat; does not hold the SQLite write lock)
-
-```python
-def sample(worktree: Path, evidence_files: list[str], budget_bytes=2_000_000) -> Sample
-def judge(prev: Sample|None, cur: Sample, task_view, now) -> list[Finding]   # pure function
-```
 
 Sampling records three things separately (git subprocesses only, 10-second timeout, never walks the whole tree):
 
