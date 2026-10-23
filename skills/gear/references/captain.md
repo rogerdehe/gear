@@ -13,6 +13,16 @@ Everything here is for the binary you are running. `gear --skill <topic>` prints
    - the **model chain per role** (`lanes`, `review`, `captain`): a reviewer must run a model no lane runs as its primary;
    - the **quota policy** per role: `fallback` (switch to the next model of the chain and back after the reset) or `wait` (park until the provider resets);
    - how the user wants to be involved (release gate, questions).
+
+   **The bar is the user's choice, not yours.** Offer the three ready-made bars at kickoff and write the chosen one into the milestone's `bar:` line:
+
+   | Bar | For | What blocks | Rework |
+   |---|---|---|---|
+   | **FASTEST** | an MVP or a skeleton, small iterations of a few hours | only what breaks the chain or loses data; everything else is logged | at most one round |
+   | **DELIVERABLE** | a mature project | errors in normal use are fixed, edge cases are logged | capped; the gate is the project's own build/test command |
+   | **STRICT** | e.g. finance | severe issues must be fixed, medium ones are the captain's call | more rounds, each approved by the captain; the higher time and cost are accepted up front |
+
+   The bar is agreed at kickoff and never raised mid-voyage.
 3. **Write the config** (TOML) and register the project:
 
    ```toml
