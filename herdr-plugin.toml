@@ -1,0 +1,45 @@
+# herdr-plugin.toml — GEAR as a Herdr plugin (design/14).
+#
+# The user looks at one thing: the plan. The board is a pane, not a process
+# to keep open — it is summoned by a key, and `q` leaves it.
+#
+# The build step runs when Herdr installs the plugin from GitHub. A plugin
+# that is *linked* (`herdr plugin link`) is not built by Herdr: build the
+# working tree yourself first (see README.md).
+#
+# The field names are the ones the herdr-file-viewer plugin uses, so Herdr
+# reads this manifest the way it reads that one.
+
+id = "herdr-gear"
+name = "GEAR"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "Keep agent fleets working under one captain: the plan board in a pane."
+platforms = ["linux", "macos"]
+
+# The binary the pane runs. `cargo build --release` puts it in
+# target/release/gear; bin/gear is the wrapper that finds it.
+[[build]]
+command = ["cargo", "build", "--release"]
+
+# The board pane. The two actions below choose the placement; this is the
+# default when the pane is opened without one.
+[[panes]]
+id = "board"
+title = "GEAR board"
+placement = "tab"
+command = ["./bin/gear", "board"]
+
+# The board beside the current work: a split, like the file viewer.
+[[actions]]
+id = "open-board"
+title = "Open GEAR board"
+description = "Open the GEAR plan board in a split pane beside the current work."
+command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "board", "--placement", "split", "--focus"]
+
+# The same board in its own tab.
+[[actions]]
+id = "open-board-tab"
+title = "Open GEAR board (tab)"
+description = "Open the GEAR plan board in its own tab."
+command = ["herdr", "plugin", "pane", "open", "--plugin", "herdr-gear", "--entrypoint", "board", "--placement", "tab", "--focus"]
