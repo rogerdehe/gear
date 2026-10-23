@@ -1037,6 +1037,15 @@ impl<'s> Tx<'s> {
         require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
+    /// Promote an open action item without changing its body or lifecycle.
+    pub fn mark_message_urgent(&self, project: &str, id: &str) -> GearResult<()> {
+        let changed = self.tx.execute(
+            "UPDATE messages SET urgent=1 WHERE project=?1 AND id=?2",
+            params![project, id],
+        ).map_err(map_sqlite)?;
+        require_written(changed, "message", &format!("{id} in project {project}"))
+    }
+
     /// Messages to `recipient` in state Open, or Waiting with `wait_until <= now`.
     /// Ordered by created ascending.
     pub fn actionable_for(

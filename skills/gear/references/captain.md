@@ -189,3 +189,31 @@ In this version `temp` staff lines (starting a reviewer by hand) are **parsed bu
 - You never change the board by hand: the plan draft is the only way in.
 - You never leave a lane without its next step, and you never wait for a review to give a lane more work — lanes hand in and take the next task.
 - You never decide something you cannot write in one line. If it takes a paragraph, it is a plan change or a question to the user.
+
+
+### Early attention and the voyage tail (T-40)
+
+`[timing].captain_item_stale_min` defaults to 15 (minimum 1). An open action
+item at that age becomes urgent and can ring again once per period, including
+when you have already viewed it. The clock survives engine restarts. Deliberately
+Waiting, resolved and informational messages retain their normal behavior;
+the doorbell still waits for an idle reachable captain and a free slot.
+
+A lane's remaining ready/current work is forecast using its measured average
+start-to-hand-in duration (rework attempts are samples too). At about one average
+task left, one `lane X runs dry in ~N min` item opens. With no measured history,
+the ready-count fallback remains. Acknowledgment does not recreate the same
+shortage every tick. A worsening shortage is a new fact; refilling closes it.
+Stale open shortage items still follow the captain reminder period above.
+
+Declare intentional finishing work in the plan:
+
+```markdown
+# Decisions
+- tail: course base
+```
+
+Only these named lanes stop raising refill/idle warnings; existing feed warnings
+close. This persists when a later draft omits the decision. A new `tail:` line
+replaces the list; `- tail: -` clears it and resumes monitoring. Unknown lane names
+reject the plan atomically. Dispatch and work already on the lanes continue.

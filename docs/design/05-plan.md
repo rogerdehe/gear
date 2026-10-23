@@ -104,3 +104,12 @@ def render_task_packet(conn, project, task_id, attempt_n) -> str
 ## Test points
 
 Line numbers for format errors; an illegal state rejects the whole draft; stale base; dependency cycle; unmentioned tasks keep relative order; Verdict with mismatched candidate/contract is rejected; evidence file exists but verdict fail does not allow DONE; resume used for a new task is rejected; the same Staff target applied multiple times does not open twice; the draft is not overwritten after apply; resubmitting a historical Verdict does not settle twice; fail needs no evidence header; changing the contract and accepting in the same apply validates against the final contract.
+
+
+### Tail declaration (T-40)
+
+A decision line `- tail: heat wire` replaces the set of lanes intentionally
+finishing their queue; `- tail: -` clears that set. A draft without a tail line
+preserves it. Names must resolve to lane seats in the project; an invalid name
+rejects the whole apply. The state is persisted in `meta` under
+`lane-tail:<project>:<lane>` and suppresses feed warnings without parking lanes.
