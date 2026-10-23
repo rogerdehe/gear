@@ -1,0 +1,51 @@
+# GEAR's own project config (kickoff agreed with the user 2026-10-22).
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init ops/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 3
+temps = 3
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "runtime"
+duty = "Engine side: the automatic parallel review loop (result -> reviewer -> merge or rework) and the quota policy (fallback model / wait for reset)"
+owns = ["crates/gear-engine/", "crates/gear-herdr/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "data"
+duty = "Store, app rules and commands: kickoff (detect agents, models, quota policy into the config), model fields, admin commands"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-cli/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "board"
+duty = "The plan board opened by a Herdr hotkey (totals, per-lane tasks, items waiting, temp slots) and the plugin packaging/install"
+owns = ["crates/gear-board/", "herdr-plugin.toml", "bin/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash"]
+review = ["minimax-cn/MiniMax-M3", "deepseek/deepseek-v4-pro"]
+on_quota = { lanes = "fallback", review = "fallback" }
+quota_reset_h = 5
+
+[conventions]
+integration = "dev"
+release = "main"
