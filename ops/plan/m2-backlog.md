@@ -8,3 +8,4 @@
 - T-13 review R2-1: a review item the captain deferred (Waiting) survives settlement.
 - T-7 review R1 (lane runs dry again: alert waits for the 10-minute window), R2 (deferring an alert creates another item).
 - Hand-in check: `gear send --kind result` refuses a candidate that does not contain current origin/dev (lanes skip the rule under rework: T-13, T-15).
+- T-17 review R5: cancel during a reviewer's start keeps its slot (Starting seats skipped by release).
