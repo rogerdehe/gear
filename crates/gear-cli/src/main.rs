@@ -182,15 +182,10 @@ fn main() {
 
 fn run(cli: Cli) -> GearResult<()> {
     if let Some(topic) = cli.skill.as_deref() {
+        // The skill is compiled into the binary: no engine, no store.
         return print_skill(topic);
     }
-    if !matches!(
-        cli.cmd,
-        Some(Cmd::Run) | Some(Cmd::Admin { op: AdminOp::Stop }) | Some(Cmd::Board { .. })
-    ) {
-        // The board is the exception: it only observes. Starting the engine
-        // here would hide the "engine down" warning the board exists to show
-        // (PRD §15); the next gear call starts the engine anyway (PRD §16).
+    if starts_engine(&cli.cmd) {
         ensure_engine();
     }
     match cli.cmd {
@@ -209,6 +204,25 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
         Some(Cmd::Admin { op }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
+}
+
+/// Does this command start the engine when its lock is free (PRD §16)?
+///
+/// Most commands do: the project must keep moving. These do not:
+/// - `run` *is* the engine, and `admin stop` stops it;
+/// - `board` only observes — starting the engine would hide the "engine down"
+///   warning it exists to show (PRD §15, the review of T-3);
+/// - `admin kickoff` only reads — starting the engine would open (and migrate)
+///   the store, and a kickoff runs before the project exists (the review of
+///   T-10). `--skill` and `--help` never get here.
+fn starts_engine(cmd: &Option<Cmd>) -> bool {
+    !matches!(
+        cmd,
+        Some(Cmd::Run)
+            | Some(Cmd::Admin { op: AdminOp::Stop })
+            | Some(Cmd::Admin { op: AdminOp::Kickoff })
+            | Some(Cmd::Board { .. })
+    )
 }
 
 fn not_yet(what: &str) -> GearError {
