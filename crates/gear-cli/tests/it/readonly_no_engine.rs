@@ -8,23 +8,16 @@
 
 use std::process::Command;
 
+use crate::scratch;
+
 /// A fresh directory for a store that must stay untouched.
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "gear-readonly-{}-{tag}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    dir
+fn scratch_dir(tag: &str) -> std::path::PathBuf {
+    scratch::home(tag)
 }
 
 #[test]
 fn kickoff_starts_no_engine_and_opens_no_store() {
-    let dir = scratch("kickoff");
+    let dir = scratch_dir("kickoff");
     let db = dir.join("gear.db");
 
     // An empty PATH: no agent CLI is found, so the inventory is quick. What
@@ -35,7 +28,10 @@ fn kickoff_starts_no_engine_and_opens_no_store() {
     let out = Command::new(env!("CARGO_BIN_EXE_gear"))
         .args(["admin", "kickoff"])
         .env("PATH", &empty)
+        // The store of this call is the scratch one: never the production
+        // store (T-41).
         .env("GEAR_DB", &db)
+        .env("HOME", &dir)
         .env_remove("GEAR_CTX")
         .env_remove("HERDR_PANE_ID")
         .env_remove("GEAR_ADMIN")

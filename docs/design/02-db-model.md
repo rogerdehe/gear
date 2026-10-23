@@ -7,6 +7,7 @@ Invariants upheld: single authoritative state; request replay; an old generation
 
 - Open the single SQLite database per execution host (path determined by the registered execution host/session, see 14; WAL, busy_timeout 5000ms).
 - Table creation and schema version check (upgrade only, never downgrade; refuse to run on version mismatch).
+  The version lives in `meta.schema_version` and is stamped when the store is created. A binary that opens a store of an older version migrates it up (one step per transaction, the version moving with the step); a store of a newer version is refused for writing with `SCHEMA_TOO_NEW`, before anything is written.
 - Transactions, ID allocation, request replay, error codes.
 - All state enums and the legal transition table (`model.py`); other modules must write state through `transition()`.
 
@@ -117,7 +118,7 @@ Counter-type state (cooldown start, continuation count, reminder count, check bu
 
 ## Error codes
 
-`NOT_REGISTERED`, `STALE_GENERATION`, `STALE_VERSION`, `NO_TARGET`, `FORBIDDEN`, `BAD_FORMAT`, `BAD_TRANSITION`, `LOCKED`, `REQUEST_CONFLICT`, `QUOTA`, `UNCONFIRMED` (exit code 3), `ENGINE_DOWN` (informational only, does not block DB writes).
+`NOT_REGISTERED`, `STALE_GENERATION`, `STALE_VERSION`, `NO_TARGET`, `FORBIDDEN`, `BAD_FORMAT`, `BAD_TRANSITION`, `LOCKED`, `REQUEST_CONFLICT`, `QUOTA`, `UNCONFIRMED` (exit code 3), `ENGINE_DOWN` (informational only, does not block DB writes), `SCHEMA_TOO_NEW` (the store's schema version is newer than the binary's; nothing is written, the store is never migrated down).
 
 ## Test points
 

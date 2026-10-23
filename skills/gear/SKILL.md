@@ -59,5 +59,6 @@ The user installs this skill into an agent CLI with `gear admin install-skill --
 | `QUOTA` | no capacity for that (lanes/temps) | wait; the captain decides |
 | `ENGINE_DOWN` | the engine is not running | your write is stored; tell the user if it persists |
 | `LOCKED` | the store is busy | retry shortly |
+| `SCHEMA_TOO_NEW` | the store is newer than this binary | do not retry; tell the user to upgrade GEAR (the store is never migrated down) |
 
 A fuller `errors` topic ships with slice 2.
