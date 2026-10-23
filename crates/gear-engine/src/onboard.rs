@@ -141,10 +141,18 @@ fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
 
 /// Onboard every **Lane** seat in state Queued, in every project (slice-3
 /// walking skeleton; captain and temps are not onboarded by the engine yet).
+///
+/// The config text and the seat roster of a project are read in **one** read
+/// transaction: a config change (T-6) commits between ticks, never between the
+/// two reads, so every lane in the roster is in the config of the same
+/// snapshot. A lane seat whose lane is not in the config is skipped this tick —
+/// it is never parked for a config that may be about to arrive (R-63).
+///
 /// Per seat, in this order:
-/// 1. read the project's config (`config_toml`, `gear_app::config::parse`) for
-///    `repo`, `conventions.integration` and the lane's `kind`; the profile is
-///    `cfg.profiles[seat.profile]` (missing → seat NeedsCheck, reason says so);
+/// 1. the project's config (`config_toml`, `gear_app::config::parse`, outside
+///    the read transaction) for `repo`, `conventions.integration` and the
+///    lane's `kind`; the profile is `cfg.profiles[seat.profile]` (missing →
+///    seat NeedsCheck, reason says so);
 /// 2. `plan_onboard(seat, kind, profile, generation = seat.generation + 1, repo,
 ///    integration, cfg.db_path, None)` (Err → NeedsCheck with the reason);
 /// 3. Herdr `worktree_create` → the root pane;
@@ -161,14 +169,19 @@ pub fn onboard_queued(
 ) -> GearResult<Vec<String>> {
     let mut active = Vec::new();
     for project in store.read(|tx| tx.project_ids())? {
-        // The project's config: the repo, the integration branch and the kind
-        // of every lane. A registered project always parses; if it does not,
-        // its lanes are parked instead of retried.
-        let row = match store.read(|tx| tx.get_project(&project))? {
-            Some(row) => row,
-            None => continue,
-        };
-        let config = match gear_app::config::parse(&row.config_toml) {
+        // One snapshot: the config text and the seats it is read against.
+        let (config_text, seats) = store.read(|tx| {
+            let config_text = tx.get_project(&project)?.map(|row| row.config_toml);
+            let seats = tx.seats_of_project(&project)?;
+            Ok((config_text, seats))
+        })?;
+        // The project is gone between the two reads: nothing to do.
+        let Some(config_text) = config_text else { continue };
+
+        // Parsing happens outside the transaction: it is pure and the read
+        // snapshot is released. A registered project always parses; if it does
+        // not, its lanes are parked instead of retried.
+        let config = match gear_app::config::parse(&config_text) {
             Ok(config) => config,
             Err(e) => {
                 park_queued_lanes(
@@ -181,10 +194,15 @@ pub fn onboard_queued(
             }
         };
 
-        for seat in store.read(|tx| tx.seats_of_project(&project))? {
+        for seat in seats {
             // Only lanes are onboarded by the engine in this cut; the captain
             // and the temps get their pane elsewhere.
             if seat.role != SeatRole::Lane || seat.state != SeatState::Queued {
+                continue;
+            }
+            // A lane the snapshot's config does not name is not parked: the
+            // next tick reads a newer config (T-6, R-63).
+            if !config.lanes.iter().any(|lane| lane.name == seat.name) {
                 continue;
             }
             match onboard_seat(store, herdr, cfg, &seat, &config, now) {
