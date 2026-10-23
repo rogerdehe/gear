@@ -277,21 +277,32 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
 
     // The never-stop measures: per lane, the hand-ins a review sent back and
     // the time since the lane last received a task.
+    //
+    // An attempt belongs to the seat that made it, not to the lane its task
+    // sits on now: tasks move between lanes (the review of T-16).
+    let mut attempts: Vec<(String, gear_model::AttemptState)> = Vec::new();
+    for task in &tasks {
+        for attempt in tx.attempts_of_task(project, &task.id)? {
+            attempts.push((attempt.seat.clone(), attempt.state));
+        }
+    }
     for lane in &mut lanes {
+        let seat_id = format!("{project}:{}", lane.lane);
         let mut handed_in = 0;
         let mut rejected = 0;
-        for task in &lane.tasks {
-            for attempt in tx.attempts_of_task(project, &task.id)? {
-                match attempt.state {
-                    gear_model::AttemptState::Rejected => {
-                        rejected += 1;
-                        handed_in += 1;
-                    }
-                    gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted => {
-                        handed_in += 1;
-                    }
-                    _ => {}
+        for (seat, state) in &attempts {
+            if *seat != seat_id {
+                continue;
+            }
+            match state {
+                gear_model::AttemptState::Rejected => {
+                    rejected += 1;
+                    handed_in += 1;
                 }
+                gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted => {
+                    handed_in += 1;
+                }
+                _ => {}
             }
         }
         let last = tx.last_op(&format!("{project}:{}", lane.lane), OpKind::Deliver)?;
