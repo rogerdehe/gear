@@ -58,6 +58,15 @@ herdr pane read <pane> --source recent-unwrapped --lines 8
 
 Check: the screen shows `Token usage: …` and `To continue this session, run: codex resume <uuid>`, then the shell prompt; `herdr agent get <name>` returns `agent_not_found`. Do not press `ctrl+c` again (it would hit the shell). On a working agent the first `ctrl+c` only interrupts the turn.
 
+## Resume (re-review)
+
+```bash
+herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
+  resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> --dangerously-bypass-approvals-and-sandbox
+```
+
+Verified: `agent start` returns `idle` while the screen still says `Resuming session…`; wait until the status bar shows `Context N% used` (the old context, a few seconds) before prompting. Right after a resume `agent get` does not report `agent_session` yet. Keep the uuid from the first start (or from the exit screen).
+
 ## Quota
 
 To be recorded when first seen (the five-hour and weekly limits show on the status bar as `5h …` / `weekly N% left`).
