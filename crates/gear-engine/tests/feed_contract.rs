@@ -24,6 +24,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],
+        exit_command: None,
         verified: true,
     }
 }

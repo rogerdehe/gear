@@ -509,6 +509,16 @@ fn start_reviewer(
             // between the two must find the intent and adopt the agent it
             // asked for, and nothing else.
             record_start(store, &seat.id, generation, &pane, &kind, &label)?;
+            // A grok worktree is trusted before its agent starts: grok asks on
+            // the first start, while Herdr reports it idle, and the prompt
+            // would be lost.
+            if let Err(reason) = crate::trust::trust_worktree(&kind, &path, now) {
+                // Nothing started, so the request goes: it must not authorize
+                // the adoption of an agent that is not ours.
+                store.write(|tx| tx.set_meta(&start_key(&seat.id, generation), ""))?;
+                park(store, &seat.id, &format!("trust: {reason}"), now)?;
+                return Ok(Started::NotYet);
+            }
             match herdr.agent_start(&label, &kind, &pane, &args) {
                 Outcome::Ok(info) => info,
                 Outcome::Refused { code, .. } if code == "agent_pane_busy" => {

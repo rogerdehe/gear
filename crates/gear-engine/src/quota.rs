@@ -204,12 +204,20 @@ fn begin_restart(
     let Some(binding) = active_binding(store, seat)? else {
         return Ok(None);
     };
-    // One press per entry, never the same key twice by accident: a second
-    // `ctrl+c` would land in the shell.
-    for key in &profile.exit_keys {
-        match herdr.send_keys(&binding.pane_id, &[key.clone(), ]) {
+    // The CLI leaves: by its exit command (grok: `/exit`) or, when it has
+    // keys, one press per entry — never the same key twice by accident, a
+    // second `ctrl+c` would land in the shell.
+    if let Some(command) = &profile.exit_command {
+        match herdr.prompt(&binding.pane_id, command) {
             Outcome::Ok(()) => {}
             _ => return Ok(None),
+        }
+    } else {
+        for key in &profile.exit_keys {
+            match herdr.send_keys(&binding.pane_id, &[key.clone(), ]) {
+                Outcome::Ok(()) => {}
+                _ => return Ok(None),
+            }
         }
     }
     meta_set(store, &meta_key("restart", &seat.id), model.unwrap_or("-"))?;

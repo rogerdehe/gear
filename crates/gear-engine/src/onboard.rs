@@ -252,6 +252,10 @@ fn onboard_seat(
         Outcome::Ok(()) => {}
         other => return Err(step_failure("pane_run", &other)),
     }
+    // A grok worktree is trusted before its agent starts: grok asks on the
+    // first start, while Herdr reports it idle, and the prompt would be lost.
+    crate::trust::trust_worktree(&plan.kind, &created.path, now)
+        .map_err(|reason| format!("trust: {reason}"))?;
     let started = match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &plan.args) {
         Outcome::Ok(info) => info,
         other => return Err(step_failure("agent_start", &other)),

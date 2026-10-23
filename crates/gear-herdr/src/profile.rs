@@ -34,6 +34,10 @@ pub struct Profile {
     pub resume_args: Option<Vec<String>>,
     /// Keys that make the agent exit cleanly before a release.
     pub exit_keys: Vec<String>,
+    /// A command that makes the agent exit, sent as a prompt (grok: `/exit`,
+    /// because ctrl+c and ctrl+d do not exit it). When set, `exit_keys` is not
+    /// used: the CLI takes a command, not a key.
+    pub exit_command: Option<String>,
     /// Probe-verified. Unverified profiles may not take over real projects.
     pub verified: bool,
 }
@@ -96,7 +100,7 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
-/// are built in: today `opencode` and `codex` —
+/// are built in: today `opencode`, `claude`, `codex` and `grok` —
 /// opencode: busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
@@ -106,6 +110,9 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox`;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
+/// grok: busy `Ctrl+c:cancel`; unattended `--always-approve`; session_ref
+/// true; resume `["-r", "{session}"]`; exit by the `/exit` command
+/// (`exit_command`, no keys).
 /// Any other kind → None.
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
@@ -126,6 +133,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             session_ref: false,
             resume_args: Some(vec!["-s".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into()],
+            exit_command: None,
             verified: true,
         }),
         // Claude Code as captain (seen on 2026-10-22: Herdr reports its
@@ -144,6 +152,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             session_ref: true,
             resume_args: Some(vec!["--resume".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
+            exit_command: None,
             verified: true,
         }),
         // Codex (verified 2026-10-22, codex-cli 0.163.0 — the SOP
@@ -165,6 +174,28 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into()],
+            exit_command: None,
+            verified: true,
+        }),
+        // Grok (verified 2026-10-23, grok 1.0.62 — the SOP
+        // `gear --skill agent:grok`): busy `Ctrl+c:cancel`; unattended
+        // `--always-approve`; Herdr reports the session, so session_ref is
+        // true; resume is `-r <session>`. It exits on the `/exit` command —
+        // ctrl+c and ctrl+d do not exit it — so the profile carries an
+        // `exit_command` and no exit keys.
+        "grok" => Some(Profile {
+            kind: "grok".into(),
+            busy_markers: vec!["Ctrl+c:cancel".into()],
+            ratelimit_markers: vec![],
+            quota_markers: vec![],
+            auth_markers: vec![],
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--always-approve".into()],
+            session_ref: true,
+            resume_args: Some(vec!["-r".into(), "{session}".into()]),
+            exit_keys: vec![],
+            exit_command: Some("/exit".into()),
             verified: true,
         }),
         // Only kinds with a verified SOP are built in (design/04).
