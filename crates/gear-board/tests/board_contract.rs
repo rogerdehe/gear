@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gear_board::{build, render, run_with, to_json, EngineState, Keys, Options};
+use gear_board::{build, render, run_with, to_json, EngineState, Keys, Options, View};
 use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{testing, NewMessage, Store, TaskRow};
 
@@ -59,7 +59,7 @@ fn options() -> Options {
 fn the_board_shows_the_totals_and_every_lane_queue() {
     let mut store = world();
     let board = build(&mut store, &options(), T0 + 60).unwrap();
-    let text = render(&board);
+    let text = render(&board, View::Lanes);
 
     assert!(text.contains("Totals: 4 tasks · 1 done · 1 in progress · 1 waiting"), "{text}");
     // The lanes come in seat order, their tasks in queue order.
@@ -106,7 +106,7 @@ fn the_warning_line_is_printed_only_when_the_engine_is_down() {
 
     // The lock is free: the engine is down and the board says so.
     let opts = Options { project: Some("p".into()), db: Some(db.clone()), ..Options::default() };
-    let text = render(&build(&mut store, &opts, T0).unwrap());
+    let text = render(&build(&mut store, &opts, T0).unwrap(), View::Lanes);
     assert!(text.contains("engine down"), "{text}");
 
     // The engine holds its lock: no warning.
@@ -114,7 +114,7 @@ fn the_warning_line_is_printed_only_when_the_engine_is_down() {
     lock.try_lock().unwrap();
     let board = build(&mut store, &opts, T0).unwrap();
     assert_eq!(board.engine, EngineState::Running);
-    assert!(!render(&board).contains("engine down"), "{}", render(&board));
+    assert!(!render(&board, View::Lanes).contains("engine down"), "{}", render(&board, View::Lanes));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
         })
         .unwrap();
 
-    let text = render(&build(&mut store, &options(), T0 + 300).unwrap());
+    let text = render(&build(&mut store, &options(), T0 + 300).unwrap(), View::Lanes);
 
     assert!(text.contains("Waiting for the captain: 1 item · oldest 3m"), "{text}");
     // The project was seeded with a quota of two temp slots; one is in use.
@@ -222,7 +222,7 @@ fn a_task_in_review_is_shown_as_in_review() {
         })
         .unwrap();
 
-    let text = render(&build(&mut store, &options(), T0).unwrap());
+    let text = render(&build(&mut store, &options(), T0).unwrap(), View::Lanes);
 
     assert!(text.contains("Lane data\n  T-1 done\n  T-3 waiting\n  T-5 in review"), "{text}");
     // A task in review is not done and not running: the totals say so.
