@@ -18,7 +18,9 @@ fn opencode_is_built_in_and_verified() {
 
 #[test]
 fn unverified_kinds_are_not_built_in() {
-    for kind in ["codex", "pi", "nope"] {
+    // `codex` left this list with T-5: its SOP is verified
+    // (`gear --skill agent:codex`), so it is built in like `opencode`.
+    for kind in ["pi", "nope"] {
         assert!(builtin(kind).is_none(), "{kind}");
     }
 }
