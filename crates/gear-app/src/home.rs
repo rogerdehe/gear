@@ -197,13 +197,25 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
         plan.unconfirmed_deliveries, plan.temps.in_use, plan.temps.quota
     ));
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
-    // planned landing, so the captain sees the bar before the inbox.
-    let voyages = tx.voyages_of_project(project)?;
+    // planned landing, so the captain sees the bar before the inbox. The
+    // voyages with open work come first — the bar that matters is the one the
+    // work is judged by — and the rest follow by id (review R3).
+    let open: std::collections::BTreeSet<String> = tx
+        .tasks_of_project(project)?
+        .into_iter()
+        .filter(|task| !task.state.is_terminal())
+        .filter_map(|task| task.milestone)
+        .collect();
+    let mut voyages = tx.voyages_of_project(project)?;
+    voyages.sort_by_key(|voyage| (!open.contains(&voyage.milestone), voyage.milestone.clone()));
     for voyage in voyages.iter().take(SNAPSHOT_VOYAGES) {
         lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
     }
     if voyages.len() > SNAPSHOT_VOYAGES {
-        lines.push(format!("+{} more voyages", voyages.len() - SNAPSHOT_VOYAGES));
+        lines.push(format!(
+            "+{} more voyages (a task's packet shows its own)",
+            voyages.len() - SNAPSHOT_VOYAGES
+        ));
     }
     Ok(lines)
 }
