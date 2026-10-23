@@ -199,10 +199,10 @@ pub fn merge_passed(
             .name(format!("merge-{project}"))
             .spawn(move || {
                 let result = std::panic::catch_unwind(|| {
-                    let Some(_lock) = merge_lock(Path::new(&worktree.path))? else {
+                    let Some(lock) = merge_lock(Path::new(&worktree.path))? else {
                         return Ok(None);
                     };
-                    merge_one(&worktree, &config, &job).map(Some)
+                    merge_one_locked(&worktree, &config, &job, &lock).map(Some)
                 })
                 .unwrap_or_else(|_| Err("merge worker panicked".to_string()));
                 *output.lock().unwrap() = Some(Finished {
@@ -434,11 +434,24 @@ fn integration_worktree(
 
 /// Merge one op's task branches and run the gate. `Ok(lines)` = merged and
 /// pushed; `Err(reason)` = nothing was pushed and the worktree is clean again.
+#[cfg(test)]
 fn merge_one(
     worktree: &gear_herdr::Worktree,
     config: &ProjectConfig,
     op: &OpRow,
 ) -> Result<String, String> {
+    let lock = merge_lock(Path::new(&worktree.path))?
+        .ok_or_else(|| "merge worktree is busy".to_string())?;
+    merge_one_locked(worktree, config, op, &lock)
+}
+
+fn merge_one_locked(
+    worktree: &gear_herdr::Worktree,
+    config: &ProjectConfig,
+    op: &OpRow,
+    lock: &File,
+) -> Result<String, String> {
+    let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
     let integration = config.conventions.integration.clone();
     let branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
@@ -535,10 +548,14 @@ fn merge_one(
 
     // 4. the gate, before anything is pushed.
     let gate = config.conventions.gate.clone();
+    // The empty lock file is inherited as stdin (normally /dev/null for a
+    // gate). Keeping the same open file description in the subprocess means
+    // it still excludes recovery if the engine is killed before wait returns.
     let output = Command::new("sh")
         .arg("-c")
         .arg(&gate)
         .current_dir(dir)
+        .stdin(lock.try_clone().map_err(|error| format!("gate lock: {error}"))?)
         .output()
         .map_err(|error| format!("gate: {error}"))?;
     if !output.status.success() {
@@ -561,10 +578,7 @@ fn merge_one(
         }
         return Err(reason);
     }
-    let _ = Command::new("git")
-        .args(["push", "origin", "--delete", &branch, &review])
-        .current_dir(dir)
-        .output();
+    let _ = git(dir, &["push", "origin", "--delete", &branch, &review]);
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     Ok(format!("merged {task} into {integration}: {head}"))
@@ -572,10 +586,16 @@ fn merge_one(
 
 /// Run one git command in `dir`; the output tail comes back as the error.
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .output()
+    git_with_lock(dir, args, None)
+}
+
+fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<String, String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    if let Some(lock) = lock {
+        command.stdin(lock.try_clone().map_err(|error| format!("git lock: {error}"))?);
+    }
+    let output = command.output()
         .map_err(|error| format!("git {}: {error}", args.join(" ")))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -1181,7 +1201,6 @@ gate = "{gate}"
             pane_id: "test".into(),
             branch: "home/merge".into(),
         };
-        let _lock = merge_lock(Path::new(&worktree.path)).unwrap().unwrap();
         merge_one(
             &worktree,
             &config(&std::env::var("GEAR_TEST_MERGE_GATE").unwrap()),
@@ -1196,10 +1215,10 @@ gate = "{gate}"
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
         let started = scratch.root.join("gate-started");
         let done = scratch.root.join("gate-finished");
+        let release = scratch.root.join("release-gate");
         let gate = format!(
-            "touch '{}'; sleep 2; touch '{}'",
-            started.display(),
-            done.display()
+            "touch '{}'; for i in 1 2 3 4 5 6 7 8 9 10; do [ -e '{}' ] && break; sleep 1; done; touch '{}'",
+            started.display(), release.display(), done.display()
         );
         let candidate = scratch.head_of("heat/t5");
         let mut child = Command::new(std::env::current_exe().unwrap())
@@ -1223,6 +1242,9 @@ gate = "{gate}"
         );
         child.kill().unwrap();
         child.wait().unwrap();
+        assert!(merge_lock(&scratch.root.join("merge")).unwrap().is_none(),
+            "the surviving gate must exclude recovery until it exits");
+        fs::write(&release, "release").unwrap();
         store
             .write(|tx| tx.set_op_state("p", "O-1", OpState::Executing, None, 20))
             .unwrap();
@@ -1237,8 +1259,8 @@ gate = "{gate}"
             "{log}"
         );
         assert!(scratch.dev_has_task_commit());
-        // The orphaned test gate touches only external marker files. It has
-        // no surviving merge thread that could push its half-finished tree.
+        // The orphaned gate finishes before recovery acquires the lock.
+        // No surviving merge thread can push its half-finished tree.
         wait_file(&done);
     }
 
