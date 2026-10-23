@@ -65,7 +65,7 @@ herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
   resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> --dangerously-bypass-approvals-and-sandbox
 ```
 
-Verified: `agent start` returns `idle` while the screen still says `Resuming session…`; wait until the status bar shows `Context N% used` (the old context, a few seconds) before prompting. Right after a resume `agent get` does not report `agent_session` yet. Keep the uuid from the first start (or from the exit screen).
+Verified: `agent start` returns `idle` while the screen still says `Resuming session…`; wait until the status bar shows `Context N% used` (the old context, a few seconds) before prompting. Right after a resume `agent get` does not report `agent_session` yet — and right after a fresh start not either, so do not save it then (an empty id makes `codex resume` open its picker, and the next prompt lands in the picker's search box). Get the id from the exit screen, `agent get` after the first turn, or the session file: `grep -l <worktree> ~/.codex/sessions/*/*/*/*.jsonl` (first line `session_meta` has `id` and `cwd`).
 
 ## Quota
 
