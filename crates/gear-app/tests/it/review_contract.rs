@@ -46,7 +46,7 @@ fn fp(pane: &str, kind: &str) -> Fingerprint {
 
 fn review(outcome: Outcome, findings: &str, rid: &str) -> SendArgs {
     SendArgs { kind: MsgKind::Review, body: findings.into(), task: Some("T-1".into()), attempt: Some(1),
-        contract: None, candidate: None, verdict: Some(outcome), base: None, about: None, to: None, reply_to: None,
+        contract: None, candidate: None, verdict: Some(outcome), blocking: None, base: None, about: None, to: None, reply_to: None,
         urgent: false, request_id: rid.into() }
 }
 
@@ -187,11 +187,15 @@ fn a_findings_path_is_stored_as_its_text() {
     s.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "c1", "Report: c1", T0 + 4))
         .unwrap();
 
+    // The finding blocks (T-23), so the fail is a rework — a fail that names
+    // no blocking finding goes to the captain and settles nothing (M-295).
+    let mut args = review(Outcome::Fail, file.to_str().unwrap(), "r-post");
+    args.blocking = Some("P1".into());
     mail::send(
         &mut s,
         &env("r-1", TEMP_PANE),
         Some(&fp(TEMP_PANE, "opencode")),
-        &review(Outcome::Fail, file.to_str().unwrap(), "r-post"),
+        &args,
         T0 + 5,
     )
     .unwrap();

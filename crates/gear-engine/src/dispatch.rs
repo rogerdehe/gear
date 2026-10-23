@@ -23,6 +23,9 @@ pub struct LaneView {
     pub ready_tasks: Vec<TaskRow>,
     /// design/06 "safe conditions for taking the next item" hold for a Submitted attempt.
     pub safe_for_next: bool,
+    /// An in-place model switch is under way (T-33, F6): no prompt may land in
+    /// the agent while its picker or dialog is open.
+    pub switch_pending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +85,11 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     // 3. A delivery that is not settled yet blocks everything.
     if v.pending_op.is_some() {
         return none("a delivery for this seat is still unsettled");
+    }
+    // 3b. A model switch is typing into this agent (T-33, F6): its picker,
+    //     its variant dialog and the bar check own the pane until it confirms.
+    if v.switch_pending {
+        return none("a model switch is under way for this seat");
     }
     // 4. Never type into a working agent.
     if !obs.idle {
@@ -246,6 +254,12 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         nudges_since_progress: 0,
         ready_tasks: ready_tasks_of(tx, seat)?,
         safe_for_next,
+        // The plan is durable in meta (T-33): a switch in progress is not
+        // forgotten while the quota line is gone.
+        switch_pending: tx
+            .get_meta(&format!("engine.switch.{}", seat.id))?
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
     })
 }
 
@@ -259,6 +273,7 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
         nudges_since_progress: 0,
         ready_tasks: Vec::new(),
         safe_for_next: false,
+        switch_pending: false,
     }
 }
 
@@ -434,6 +449,7 @@ mod tests {
 
     fn view(attempt: Option<AttemptRow>) -> LaneView {
         LaneView {
+            switch_pending: false,
             obs: Some(obs(true)),
             attempt,
             pending_op: None,
