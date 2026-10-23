@@ -121,31 +121,16 @@ fn release_one(
     //    job reopens it. A pane already gone is fine.
     if seat.state == SeatState::Active {
         if let Some(pane) = pane.as_deref() {
-            // A CLI with an exit command leaves cleanly on it (grok: `/exit`,
-            // L-63 — its session stays resumable). Every other kind's pane is
-            // closed: exit keys differ per agent and fail quietly (codex needs
-            // two ctrl+c), and closing the pane ends any agent.
-            match gear_herdr::builtin(&seat.profile).and_then(|profile| profile.exit_command) {
-                Some(command) => match herdr.prompt(pane, &command) {
-                    Outcome::Ok(()) => {}
-                    Outcome::Refused { code, .. } if code == "pane_not_found" => {}
-                    Outcome::Refused { code, message } => {
-                        return Err(format!("exit command: refused ({code}): {message}"))
-                    }
-                    Outcome::Uncertain { reason } => {
-                        return Err(format!("exit command: {reason}"))
-                    }
-                },
-                None => match herdr.pane_close(pane) {
-                    Outcome::Ok(()) => {}
-                    Outcome::Refused { code, .. } if code == "pane_not_found" => {}
-                    Outcome::Refused { code, message } => {
-                        return Err(format!("pane_close: refused ({code}): {message}"))
-                    }
-                    Outcome::Uncertain { reason } => {
-                        return Err(format!("pane_close: {reason}"))
-                    }
-                },
+            // A finished reviewer's pane is always closed (herdr `pane_close`),
+            // grok included: a reviewer lives for one job, there is no session
+            // to resume, and a closed pane cannot leave a stuck slot.
+            match herdr.pane_close(pane) {
+                Outcome::Ok(()) => {}
+                Outcome::Refused { code, .. } if code == "pane_not_found" => {}
+                Outcome::Refused { code, message } => {
+                    return Err(format!("pane_close: refused ({code}): {message}"))
+                }
+                Outcome::Uncertain { reason } => return Err(format!("pane_close: {reason}")),
             }
         }
         store
@@ -480,10 +465,10 @@ profile = "codex"
     }
 
     #[test]
-    fn a_grok_reviewer_exits_by_its_command() {
-        // T-32: grok does not exit on a key (ctrl+c and ctrl+d do not exit
-        // it), so its profile carries an `exit_command` and the release sends
-        // it as a prompt.
+    fn a_grok_reviewers_pane_is_closed() {
+        // T-32 rework: a finished reviewer's pane is closed whatever its CLI
+        // is — grok included. A reviewer lives for one job, there is no session
+        // to resume, and a closed pane cannot leave a stuck slot.
         let mut herdr = FakeHerdr::new();
         let worktree = match herdr.worktree_create("/repo", "review/t1", "abc1234", "p-t1") {
             Outcome::Ok(worktree) => worktree,
@@ -495,9 +480,12 @@ profile = "codex"
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         assert!(report.released.is_empty(), "{report:?}");
-        assert_eq!(exits(&herdr), 0, "no key is pressed");
-        let prompts = herdr.prompts_to(&worktree.pane_id);
-        assert_eq!(prompts, vec!["/exit"], "the exit command is the prompt");
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call, Call::PaneClose { pane } if pane == &worktree.pane_id)),
+            "the pane is closed: {:?}",
+            herdr.calls
+        );
+        assert!(herdr.prompts_to(&worktree.pane_id).is_empty(), "no exit command is sent");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
     }
