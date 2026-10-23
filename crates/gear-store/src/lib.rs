@@ -341,7 +341,7 @@ impl Store {
         let mut store = Store { conn };
         // The version is read before the pragmas: a store of a newer version
         // is refused before a single byte of it is changed.
-        let version = store.stored_version()?;
+        let version = Self::stored_version(&store.conn)?;
         if let Version::Stamped(version) = version {
             if version > SCHEMA_VERSION {
                 return Err(GearError::new(
@@ -355,7 +355,7 @@ impl Store {
             }
         }
         store.prepare_connection()?;
-        store.apply_schema(version)?;
+        store.apply_schema()?;
         Ok(store)
     }
 
@@ -364,7 +364,7 @@ impl Store {
         let conn = Connection::open_in_memory().map_err(map_sqlite)?;
         let mut store = Store { conn };
         store.prepare_connection()?;
-        store.apply_schema(Version::Fresh)?;
+        store.apply_schema()?;
         Ok(store)
     }
 
@@ -424,54 +424,56 @@ impl Store {
         Ok(())
     }
 
-    /// Bring the store to what this binary writes: a new store is created, an
-    /// older one is migrated up, a store of the current version is left alone.
-    fn apply_schema(&mut self, version: Version) -> GearResult<()> {
-        match version {
-            // A new store: the schema and the stamp, in one transaction.
-            Version::Fresh => self.create(),
-            // The store is already what this binary writes: nothing to do.
-            Version::Stamped(version) if version == SCHEMA_VERSION => Ok(()),
-            // An older store: it is carried up, one step per transaction.
-            Version::Stamped(version) => self.migrate_up(version),
-            // A store without a stamp is older than v1: the same way up.
-            Version::Unstamped => self.migrate_up(OLDEST_VERSION),
-        }
-    }
-
-    /// A new store: the schema and the version stamp, in one transaction.
-    fn create(&mut self) -> GearResult<()> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(map_sqlite)?;
-        tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
-        set_version(&tx, SCHEMA_VERSION)?;
-        tx.commit().map_err(map_sqlite)?;
-        Ok(())
-    }
-
-    /// Carry the store from `from` up to [`SCHEMA_VERSION`]. Every step runs in
-    /// its own transaction and the version moves with it: a step that fails
-    /// leaves the store exactly where it was.
-    fn migrate_up(&mut self, from: i64) -> GearResult<()> {
-        for step in STEPS.iter().filter(|step| step.from >= from) {
+    /// Select each creation/migration step under its write lock. Another
+    /// opener may have advanced the version while this connection waited.
+    /// Schema changes and their stamp commit together, one step at a time.
+    fn apply_schema(&mut self) -> GearResult<()> {
+        loop {
             let tx = self
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(map_sqlite)?;
-            (step.apply)(&tx)?;
-            set_version(&tx, step.from + 1)?;
-            tx.commit().map_err(map_sqlite)?;
+            match Self::stored_version(&tx)? {
+                Version::Fresh => {
+                    tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
+                    set_version(&tx, SCHEMA_VERSION)?;
+                    tx.commit().map_err(map_sqlite)?;
+                    return Ok(());
+                }
+                Version::Stamped(version) if version > SCHEMA_VERSION => {
+                    return Err(GearError::new(
+                        ErrorCode::SchemaTooNew,
+                        format!(
+                            "the store has schema version {version}, but this binary writes version \
+                             {SCHEMA_VERSION}; the schema only migrates up — upgrade GEAR and try again"
+                        ),
+                    ));
+                }
+                Version::Stamped(version) if version == SCHEMA_VERSION => return Ok(()),
+                version => {
+                    let from = match version {
+                        Version::Stamped(version) => version.max(OLDEST_VERSION),
+                        Version::Unstamped => OLDEST_VERSION,
+                        Version::Fresh => unreachable!(),
+                    };
+                    let step = STEPS.iter().find(|step| step.from == from).ok_or_else(|| {
+                        GearError::new(
+                            ErrorCode::BadFormat,
+                            format!("no schema migration from version {from}"),
+                        )
+                    })?;
+                    (step.apply)(&tx)?;
+                    set_version(&tx, step.from + 1)?;
+                    tx.commit().map_err(map_sqlite)?;
+                }
+            }
         }
-        Ok(())
     }
 
     /// What the store says about its schema version. Read before anything
     /// writes.
-    fn stored_version(&self) -> GearResult<Version> {
-        let tables: i64 = self
-            .conn
+    fn stored_version(conn: &Connection) -> GearResult<Version> {
+        let tables: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
                 [],
@@ -481,8 +483,7 @@ impl Store {
         if tables == 0 {
             return Ok(Version::Fresh);
         }
-        let meta: i64 = self
-            .conn
+        let meta: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='meta'",
                 [],
@@ -492,8 +493,7 @@ impl Store {
         if meta == 0 {
             return Ok(Version::Unstamped);
         }
-        let stored: Option<String> = self
-            .conn
+        let stored: Option<String> = conn
             .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |row| {
                 row.get(0)
             })
@@ -2350,6 +2350,113 @@ fn view_from_row(row: &rusqlite::Row) -> rusqlite::Result<ViewRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Both connections see the old schema before the writer commits. The
+    // opener must choose its work from the version under BEGIN IMMEDIATE.
+    fn competing_schema_writer(fresh: bool, committed_version: i64) {
+        use std::sync::mpsc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gear.db");
+        let mut opener = Store {
+            conn: Connection::open(&path).unwrap(),
+        };
+        opener.prepare_connection().unwrap();
+        if !fresh {
+            opener
+                .conn
+                .execute_batch(
+                    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO meta VALUES ('schema_version', '1');",
+                )
+                .unwrap();
+        }
+        let observed = Store::stored_version(&opener.conn).unwrap();
+        assert_eq!(
+            observed,
+            if fresh {
+                Version::Fresh
+            } else {
+                Version::Stamped(1)
+            }
+        );
+
+        let mut writer = Connection::open(&path).unwrap();
+        let tx = writer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE slots (marker TEXT);
+             INSERT INTO slots VALUES ('preserve me');",
+        )
+        .unwrap();
+        set_version(&tx, committed_version).unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = opener.apply_schema();
+            done_tx.send(result.map_err(|e| e.code)).unwrap();
+        });
+        started_rx.recv().unwrap();
+        // The write lock is held until the competing version is committed.
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        tx.commit().unwrap();
+        let result = done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        worker.join().unwrap();
+        if committed_version > SCHEMA_VERSION {
+            assert_eq!(result, Err(ErrorCode::SchemaTooNew));
+        } else {
+            result.unwrap();
+        }
+        let version: String = writer
+            .query_row(
+                "SELECT value FROM meta WHERE key='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, committed_version.to_string());
+        let marker: String = writer
+            .query_row("SELECT marker FROM slots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            marker, "preserve me",
+            "a completed migration must not run twice"
+        );
+        let tables: i64 = writer
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2, "the waiting opener must not change the schema");
+    }
+
+    #[test]
+    fn migration_rechecks_a_newer_version_after_waiting_for_the_writer() {
+        competing_schema_writer(false, SCHEMA_VERSION + 1);
+    }
+
+    #[test]
+    fn migration_skips_a_step_already_committed_by_another_opener() {
+        competing_schema_writer(false, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn creation_rechecks_a_newer_version_after_waiting_for_the_writer() {
+        competing_schema_writer(true, SCHEMA_VERSION + 1);
+    }
+
+    #[test]
+    fn creation_skips_schema_already_committed_by_another_opener() {
+        competing_schema_writer(true, SCHEMA_VERSION);
+    }
 
     #[test]
     fn fnv1a_matches_the_reference_vectors() {
