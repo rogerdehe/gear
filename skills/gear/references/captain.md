@@ -23,6 +23,8 @@ Everything here is for the binary you are running. `gear --skill <topic>` prints
    | **STRICT** | e.g. finance | severe issues must be fixed, medium ones are the captain's call | more rounds, each approved by the captain; the higher time and cost are accepted up front |
 
    The bar is agreed at kickoff and never raised mid-voyage.
+
+   **Confirm in one question.** However the talk went, close the kickoff with ONE structured question to the user (your CLI's question/popup tool): the whole kickoff sheet — goal, done, bar (the three offered), eta as a style, lanes, the model chain with full model ids, the quota policy. Start nothing before the user confirms it. It is the only question of the voyage; the next one is at the voyage's end.
 3. **Write the config** (TOML) at `gear/gear.toml` in the project repo, and register it:
 
    ```toml
