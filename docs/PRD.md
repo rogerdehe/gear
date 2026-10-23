@@ -131,6 +131,7 @@ The task, attempt, and session generation come from the registered context; `--a
   - The captain must submit a structured conclusion: keep the plan with a reason, or specific changes and the next checkpoint (via `gear plan apply`).
   - When the previous turn is confirmed to have ended normally, there is still a handleable review item, and there is no delivery that needs check, remind within budget, initially at most twice; do not force it in on schedule when working, waiting for authorization, or the send result is unclear. If there is still no progress, show it persistently and notify the user; a review must not be marked complete because the reminder count ran out.
 - **The captain is also supervised by the engine**: if it has pending items but is stopped, it gets woken.
+- **Holding the direction is GEAR's job, not the captain's discipline** (user, 2026-10-23). Workers and reviewers each mind their own piece — a screw minds its own tightness; the captain minds whether the ship floats. GEAR holds every captain to that: each milestone has a checkable `done:` sentence and a quality `bar:` (agreed at kickoff, required by `plan apply`); review packets carry them and reviewers fail only what breaks them; findings outside the bar are logged, not reworked; review rounds are capped and then go to the captain; drift (milestone age, rounds, size per hand-in) opens a direction review the captain must conclude.
 
 ## 8a. Kickoff (the only alignment with the user)
 
