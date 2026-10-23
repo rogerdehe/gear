@@ -9,8 +9,8 @@
 //! - its own agent (the `[temps]` kind) on a model of its own: the first of
 //!   `[models].review` that differs from the writer's,
 //! - a review packet with the goal, the accept criteria, the candidate, the
-//!   diff range, the rules in `ops/REVIEW.md` and the exact command to hand
-//!   the verdict in.
+//!   diff range, the rules (`gear --skill review`) and the exact command to
+//!   hand the verdict in.
 //!
 //! The lane is never blocked: the reviewer is a seat of its own.
 
@@ -978,13 +978,19 @@ fn review_packet(
          Diff to review: `{integration}..{candidate}`\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
-         Rules: `ops/REVIEW.md` in your worktree — the mechanical acceptance you run yourself, \
-         the findings with their severity, the template of `ops/reviews/{task}.md` and the \
-         verdict rule.\n\
+         Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
+         the findings with their severity, the review template and the verdict rule.\n\
+         \n\
+         Write the review in your worktree at the path your project uses for reviews, commit it \
+         on `{branch}` and push it (the candidate stays untouched).\n\
          \n\
          Hand your verdict in with exactly:\n\
          gear send --kind review --task {task} --attempt {attempt} --verdict <pass|fail> \
-         \"ops/reviews/{task}.md\"\n\
+         \"<the path to your review file, or the text>\"\n\
+         \n\
+         GEAR reads the file and keeps the text of your findings, so the writer reads them from \
+         GEAR (the rework note and the task packet): your worktree and your branch may be gone \
+         afterwards.\n\
          \n\
          A `fail` becomes the writer's rework: write every finding so the writer can act on it \
          without asking."
@@ -1402,14 +1408,21 @@ review = ["gpt-6.1-sol"]
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
         assert!(text.contains("dev..abc1234"), "{text}");
-        assert!(text.contains("ops/REVIEW.md"), "{text}");
+        // The rules come from the binary, not from a file of the gear repo
+        // (T-30): the packet names `gear --skill review` and no `ops/` path.
+        assert!(text.contains("gear --skill review"), "{text}");
+        assert!(!text.contains("ops/"), "no gear-repo path in the packet:\n{text}");
         assert!(
             text.contains(
                 "gear send --kind review --task T-1 --attempt 1 --verdict <pass|fail> \
-                 \"ops/reviews/T-1.md\""
+                 \"<the path to your review file, or the text>\""
             ),
             "{text}"
         );
+        // The findings live in GEAR's store (T-21, shipped): the writer reads
+        // the text from the rework note and the packet, not from the branch.
+        assert!(text.contains("keeps the text of your findings"), "{text}");
+        assert!(!text.contains("git show"), "no branch pointer in the packet:\n{text}");
     }
 
     #[test]
