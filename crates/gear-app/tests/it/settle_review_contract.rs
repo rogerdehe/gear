@@ -134,6 +134,13 @@ fn captain_inbox(s: &mut Store) -> Vec<gear_store::MessageRow> {
     s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 100)).unwrap()
 }
 
+fn settlement_info(s: &mut Store) -> Vec<gear_store::MessageRow> {
+    s.read(|tx| Ok(tx.thread_messages("p", "T-1:1")?.into_iter()
+        .chain(tx.thread_messages("p", "T-1:review")?)
+        .filter(|m| m.kind == MsgKind::System && m.state == MsgState::Info)
+        .collect())).unwrap()
+}
+
 #[test]
 fn a_pass_settles_the_task_and_queues_the_merge() {
     let mut s = world(true);
@@ -157,11 +164,9 @@ fn a_pass_settles_the_task_and_queues_the_merge() {
 
     // The review item is no longer an action item; the captain got one line.
     assert!(captain_inbox(&mut s).is_empty(), "no action item is left");
-    let info: Vec<gear_store::MessageRow> = s
-        .read(|tx| tx.messages_to_since("p", "p:captain", 0))
-        .unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "{info:?}");
-    assert_eq!((info[0].kind, info[0].state), (MsgKind::Reply, MsgState::Info));
+    assert_eq!((info[0].kind, info[0].state), (MsgKind::System, MsgState::Info));
     assert!(info[0].body.contains("pass"), "{}", info[0].body);
     assert!(info[0].body.contains("merge"), "{}", info[0].body);
 
@@ -207,7 +212,7 @@ fn a_fail_puts_the_rework_first_in_the_lane_queue() {
     assert!(ops(&mut s).is_empty());
     // Same line to the captain, no action item.
     assert!(captain_inbox(&mut s).is_empty());
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "{info:?}");
     assert!(info[0].body.contains("fail"), "{}", info[0].body);
 }
@@ -217,7 +222,7 @@ fn a_second_call_is_a_no_op() {
     let mut s = world(true);
     s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 3)).unwrap();
     let merge_ops = ops(&mut s).len();
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap().len();
+    let info = settlement_info(&mut s).len();
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
 
     // Again, later: nothing happens.
@@ -225,7 +230,7 @@ fn a_second_call_is_a_no_op() {
 
     assert_eq!(ops(&mut s).len(), merge_ops, "no second merge op");
     assert_eq!(
-        s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap().len(),
+        settlement_info(&mut s).len(),
         info,
         "no second information line"
     );
@@ -310,7 +315,7 @@ fn a_pass_on_an_older_contract_is_a_rework() {
     assert!(ops(&mut s).is_empty());
     // The captain still gets one line, and no action item.
     assert!(captain_inbox(&mut s).is_empty());
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "{info:?}");
     assert!(info[0].body.contains("v2"), "{}", info[0].body);
 }
@@ -325,13 +330,13 @@ fn duplicate_reviews_leave_no_action_item() {
     // world already carries the first item T-2 wrote.
     mail::send(&mut s, &env, Some(&fp), &send_review(Outcome::Pass, "r-1"), T0 + 3).unwrap();
     mail::send(&mut s, &env, Some(&fp), &send_review(Outcome::Pass, "r-2"), T0 + 4).unwrap();
-    assert_eq!(captain_inbox(&mut s).len(), 3, "three copies are three items before settlement");
+    assert_eq!(captain_inbox(&mut s).len(), 1, "only the legacy open review needs closing; new passes are info");
 
     s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 5)).unwrap();
 
     assert!(captain_inbox(&mut s).is_empty(), "every copy is resolved");
     assert_eq!(ops(&mut s).len(), 1, "still one merge");
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "one information line");
 
     // A duplicate after the settlement is refused and creates no item.
@@ -361,7 +366,7 @@ fn an_obsolete_review_closes_the_attempt_and_settles_nothing() {
     assert_eq!(task_state(&mut s, "T-1"), TaskState::Cancelled, "the task keeps its state");
     assert!(ops(&mut s).is_empty(), "nothing is merged");
     assert!(captain_inbox(&mut s).is_empty(), "no action item");
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "{info:?}");
     assert!(info[0].body.contains("cancelled"), "{}", info[0].body);
 }
@@ -504,6 +509,6 @@ fn a_restart_between_the_review_and_the_settlement_does_not_double_settle() {
         notes,
         "the same rework, not a second one"
     );
-    let info = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    let info = settlement_info(&mut s);
     assert_eq!(info.len(), 1, "one information line: {info:?}");
 }
