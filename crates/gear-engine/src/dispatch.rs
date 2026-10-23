@@ -194,10 +194,10 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 }
 
 /// design/09 "Delivery content", exactly:
-/// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send.`
+/// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
 pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
     format!(
-        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send."
+        "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
