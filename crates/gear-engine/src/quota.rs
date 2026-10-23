@@ -159,7 +159,9 @@ pub fn apply_quota_policy(
                         QuotaPolicy::Fallback => "chain exhausted",
                     }
                 );
-                tell_captain(store, project, seat, &line, now)?;
+                // A parked lane is work stopped for hours: an urgent item that
+                // rings the captain, never an info line (L-74).
+                alert_captain(store, project, seat, &line, now)?;
                 report.events.push(line);
             }
         }
@@ -507,6 +509,39 @@ fn tell_captain(
     })
 }
 
+/// An urgent action item for the captain: it rings the doorbell.
+fn alert_captain(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
+        })?;
+        let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
+        tx.insert_message(&NewMessage {
+            project: project.to_string(),
+            thread: format!("{}:{seq}", seat.name),
+            task: None,
+            attempt: None,
+            sender: seat.id.clone(),
+            sender_gen: seat.generation,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: true,
+            body: format!("{line} — the lane is stopped: switch it to another model by hand, or let it wait"),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
 /// The next free thread number for `prefix` (the same rule as `gear send`).
 fn next_thread_seq(
     tx: &gear_store::Tx<'_>,
@@ -745,6 +780,12 @@ quota_reset_h = 5
         let until = T0 + 20 + 5 * 3600;
         assert!(seat.state_reason.unwrap_or_default().contains(&until.to_string()));
         assert!(exits(&herdr).is_empty(), "nothing is restarted");
+        // L-74: the captain gets an urgent action item that rings, not an info line.
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 30)).unwrap();
+        assert!(
+            open.iter().any(|m| m.urgent && m.body.contains("parked until")),
+            "an urgent captain item: {open:?}"
+        );
 
         // Before the reset: still parked, nothing happens.
         let report = tick_quota(&mut store, &mut herdr, false, until - 1);

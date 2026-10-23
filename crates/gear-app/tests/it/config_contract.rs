@@ -190,11 +190,15 @@ fn models_parse_with_defaults() {
 
 #[test]
 fn models_rules() {
+    // L-74: fallback with no next model is refused (it would only park)
+    let single = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["deepseek/deepseek-v4.1-flash"]"#);
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{single}")).unwrap())), vec!["models.review"]);
     // valid as given
     assert!(validate(&parse(&format!("{MINIMAL}{MODELS}")).unwrap()).is_empty());
     // review must hold a model different from every lane's primary
     let same = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["minimax-cn/MiniMax-M3.1-Flash"]"#);
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review"]);
+    // (a one-model review chain with fallback is also refused: L-74)
+    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review", "models.review"]);
     // no blank or repeated entries in a chain (after trim)
     let blank = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""  ""#);
     assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{blank}")).unwrap())), vec!["models.review"]);
