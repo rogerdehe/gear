@@ -41,4 +41,3 @@ finishing their queue; `- tail: -` clears that set. A draft without a tail line
 preserves it. Names must resolve to lane seats in the project; an invalid name
 rejects the whole apply. The state is persisted in `meta` under
 `lane-tail:<project>:<lane>` and suppresses feed warnings without parking lanes.
-
