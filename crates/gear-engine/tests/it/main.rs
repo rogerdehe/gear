@@ -22,3 +22,4 @@ mod stall_contract;
 
 mod captain_quota_contract;
 mod hand_in_notifications;
+mod station_contract;

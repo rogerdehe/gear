@@ -19,6 +19,7 @@ pub mod plan;
 pub mod review;
 pub mod seats;
 pub mod skill;
+pub mod station;
 pub mod tasks;
 pub mod time;
 
