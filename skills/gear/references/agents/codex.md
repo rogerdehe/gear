@@ -10,7 +10,8 @@ Verified on: codex-cli 0.163.0, Herdr 0.9.1 (protocol 22), macOS, 2026-10-22 (fi
 |---|---|
 | Herdr kind | `codex` |
 | Unattended flag (mandatory) | `--dangerously-bypass-approvals-and-sandbox` — the screen header then says `permissions: YOLO mode` |
-| Model | start flag `-m <slug>`, per process (no shared state between agents, unlike OpenCode). Slugs: `~/.codex/models_cache.json` (`slug`), e.g. `gpt-6.1-sol` |
+| Shared service | the TUI attaches to a shared local `codex app-server daemon` by default (`codex agents` lists its sessions); `--no-daemon` runs without it (the counterpart of OpenCode's `--standalone`). GEAR's reviewers use the daemon (default) |
+| Model | start flag `-m <slug>`, applied per session even on the shared daemon (verified with `/status` on every reviewer). Slugs: `~/.codex/models_cache.json` (`slug`), e.g. `gpt-6.1-sol` |
 | Reasoning effort | start flag `-c model_reasoning_effort=high` (low / medium / high / xhigh) |
 | Herdr reports `agent_session` | yes — `agent get` → `agent_session.value` (UUID) |
 | Resume | `codex resume <session-uuid>` — a subcommand, so pass `resume <uuid>` plus the same flags after `--` |
