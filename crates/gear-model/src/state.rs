@@ -72,6 +72,9 @@ string_enum!(OpKind {
     Release => "release", Title => "title", Notify => "notify",
     // Merge a passed task's branches into the integration branch (T-12/T-13).
     Merge => "merge",
+    // One call to the project's forge (T-91): the claim, a comment, a merge, a
+    // close. The engine's, not a seat's: the payload says which call.
+    Forge => "forge",
 });
 
 string_enum!(OpState {
