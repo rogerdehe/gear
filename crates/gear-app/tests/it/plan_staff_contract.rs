@@ -59,3 +59,51 @@ fn bad_staff_writes_nothing() {
     assert_eq!(seat(&mut s, "wire").0, SeatState::Active, "the valid line before the bad one is not applied either");
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
 }
+
+/// T-82 (trial G02, G04): a lane the engine parked can be retried from the
+/// plan, and a running lane cannot.
+#[test]
+fn retry_puts_a_parked_lane_back_in_the_queue() {
+    // `run_at` applies against the plan version the store holds.
+    fn run_at(s: &mut Store, staff: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+        let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
+        let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
+        apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, T0 + 10)
+    }
+
+    let mut s = world();
+    // The engine parked `heat` in NeedsCheck with the step's reason.
+    s.write(|tx| {
+        tx.set_seat_state("p:heat", SeatState::NeedsCheck, Some("agent_start: refused (agent_pane_busy)"), T0 + 1)
+    })
+    .unwrap();
+
+    let r = run_at(&mut s, "- retry heat\n", "retry-1").unwrap();
+    assert_eq!(r.staffed, vec!["retry heat".to_string()]);
+    assert_eq!(
+        seat(&mut s, "heat"),
+        (SeatState::Queued, Some("retried by the captain".into())),
+        "the engine onboards it again"
+    );
+
+    // A lane that is running cannot be retried: the transition says no, with
+    // the code the acceptance names.
+    let error = run_at(&mut s, "- retry wire\n", "retry-2").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(error.detail.contains("p:wire"), "{}", error.detail);
+    assert_eq!(seat(&mut s, "wire").0, SeatState::Active, "nothing written");
+
+    // A lost lane (Unknown) is retried too; a queued one is already there.
+    s.write(|tx| tx.set_seat_state("p:prompts", SeatState::Unknown, Some("the pane is gone"), T0 + 2))
+        .unwrap();
+    run_at(&mut s, "- retry prompts\n", "retry-3").unwrap();
+    assert_eq!(seat(&mut s, "prompts").0, SeatState::Queued);
+    let r = run_at(&mut s, "- retry heat\n", "retry-4").unwrap();
+    assert_eq!(r.staffed, vec!["retry heat".to_string()], "a queued lane is a no-op");
+
+    // A lane that does not exist, and a seat that is not a lane, are refused.
+    assert_eq!(run_at(&mut s, "- retry nobody\n", "retry-5").unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(run_at(&mut s, "- retry captain\n", "retry-6").unwrap_err().code, ErrorCode::BadFormat);
+}

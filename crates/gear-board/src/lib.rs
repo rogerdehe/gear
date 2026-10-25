@@ -160,6 +160,22 @@ pub struct LaneBoard {
     pub tasks: Vec<TaskBoard>,
     /// The lane's never-stop measures.
     pub rework: Rework,
+    /// Set when the seat is not running (T-82): its state, the reason the
+    /// engine recorded and the plan line that acts on it — instead of an
+    /// `agent unknown` nobody can do anything with (trial G02, G04).
+    pub down: Option<DownSeat>,
+}
+
+/// A seat that is not running, what it said about it, and the way back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownSeat {
+    /// The seat state in words: `needs check`, `unknown`, `parked`, …
+    pub state: String,
+    /// The reason the seat recorded (the engine's step failure, a park, …).
+    pub reason: String,
+    /// The plan `# Staff` line that acts on it, when there is one:
+    /// `- retry heat`.
+    pub action: Option<String>,
 }
 
 /// One task of a lane's queue.
@@ -275,6 +291,7 @@ pub fn project_with_agents(
             agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
             tasks: Vec::new(),
             rework: Rework::default(),
+            down: down_seat(seat),
         });
     }
 
@@ -303,6 +320,7 @@ pub fn project_with_agents(
                 agent_state: "unknown",
                 tasks: vec![line],
                 rework: Rework::default(),
+                down: None,
             }),
         }
     }
@@ -417,6 +435,28 @@ pub fn project_with_agents(
     })
 }
 
+/// The seat's own account of why it is not running (T-82): None while it runs
+/// or is about to (Active, Standby, Starting, Queued). A seat in NeedsCheck or
+/// Unknown can be retried with one plan line; the others say what they are.
+fn down_seat(seat: &gear_store::SeatRow) -> Option<DownSeat> {
+    let state = match seat.state {
+        SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Queued => {
+            return None
+        }
+        SeatState::NeedsCheck => "needs check",
+        other => other.as_str(),
+    };
+    Some(DownSeat {
+        state: state.to_string(),
+        reason: seat.state_reason.clone().unwrap_or_default(),
+        action: match seat.state {
+            // The captain's way back: the plan's `# Staff` line (T-82).
+            SeatState::NeedsCheck | SeatState::Unknown => Some(format!("- retry {}", seat.name)),
+            _ => None,
+        },
+    })
+}
+
 /// Only label the agent in this generation's active binding.
 ///
 /// A seat whose provider is in a back-off says so before anything else
@@ -454,7 +494,23 @@ pub fn lane_line(lane: &LaneBoard) -> String {
     let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
         .unwrap_or_else(|| "no current task".into());
     let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
-    format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued)
+    match &lane.down {
+        // A seat that is not running says why, and how it gets back (T-82):
+        // the state, the reason, the plan line — never a bare "agent unknown".
+        Some(down) => {
+            let mut line = format!("{} · {}", lane.lane, down.state);
+            if !down.reason.is_empty() {
+                line.push_str(": ");
+                line.push_str(&down.reason);
+            }
+            if let Some(action) = &down.action {
+                line.push_str(" · ");
+                line.push_str(action);
+            }
+            format!("{line} · {current} · {queued} queued")
+        }
+        None => format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued),
+    }
 }
 
 /// The seat states that hold a temp slot (design/10): STARTING, ACTIVE,

@@ -160,7 +160,9 @@ impl SeatState {
                     | (Retiring, Retired | Missing)
                     | (Retired, Queued) // registered again: a new voyage reuses the name (T-54)
                     | (Missing, Starting | NeedsCheck | Retired)
-                    | (NeedsCheck, Active | Starting | Retired)
+                    // Retried by the captain (T-82): the engine onboards it again.
+                    | (NeedsCheck, Queued | Active | Starting | Retired)
+                    | (Unknown, Queued)
             ),
             SeatRole::Temp => matches!(
                 (from, to),
@@ -171,7 +173,9 @@ impl SeatState {
                     | (Releasing, Released | Unknown)
                     | (Released, Starting | Retired)
                     | (Missing, Starting | NeedsCheck | Retired)
-                    | (NeedsCheck, Active | Starting | Retired)
+                    // Retried by the captain (T-82): the engine onboards it again.
+                    | (NeedsCheck, Queued | Active | Starting | Retired)
+                    | (Unknown, Queued)
             ),
         }
     }
