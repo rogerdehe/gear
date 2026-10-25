@@ -94,7 +94,21 @@ pub fn execute_intended(
                 continue;
             }
             let item = check_op(tx, &op)?;
+            // A delivery for a seat the last tick saw blocked waits for the
+            // dialog to clear: it stays Intended, so one pending delivery is
+            // kept and no failed op is filed every tick (T-68). The
+            // blocked-seat alert carries the reason to the captain (T-57).
+            let item = match item {
+                Prepared::Run { id, .. }
+                    if op.kind == OpKind::Deliver && crate::blocked::holding(tx, &op.seat)? =>
+                {
+                    Prepared::Wait { id }
+                }
+                other => other,
+            };
             match &item {
+                // It waits: nothing is written, the op stays Intended.
+                Prepared::Wait { .. } => continue,
                 Prepared::Run { id, .. } => {
                     require_transition(
                         OpState::Intended.can_transition(OpState::Executing),
@@ -124,6 +138,8 @@ pub fn execute_intended(
     for item in &prepared {
         outcomes.push(match item {
             Prepared::Run { pane_id, text, .. } => Some(herdr.prompt(pane_id, text)),
+            // Waiting ops never reach here (they are not prepared).
+            Prepared::Wait { .. } => None,
             Prepared::Void { .. } => None,
         });
     }
@@ -137,6 +153,12 @@ pub fn execute_intended(
                 (Prepared::Void { .. }, _) => {
                     results.push((item.id().to_string(), OpState::Void.as_str().to_string()));
                     continue;
+                }
+                (Prepared::Wait { .. }, _) => {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!("waiting operation {} was prepared", item.id()),
+                    ))
                 }
                 (Prepared::Run { .. }, Some(Outcome::Ok(()))) => {
                     (OpState::Submitted, None)
@@ -171,6 +193,9 @@ pub fn execute_intended(
 enum Prepared {
     /// The op may run: send `text` to `pane_id`.
     Run { id: String, pane_id: String, text: String },
+    /// The op waits: it stays Intended and the next tick looks again (a
+    /// delivery for a seat that is blocked, T-68).
+    Wait { id: String },
     /// The op must not run (stale seat, unreachable seat, no binding).
     Void { id: String, reason: String },
 }
@@ -179,6 +204,7 @@ impl Prepared {
     fn id(&self) -> &str {
         match self {
             Prepared::Run { id, .. } => id,
+            Prepared::Wait { id, .. } => id,
             Prepared::Void { id, .. } => id,
         }
     }

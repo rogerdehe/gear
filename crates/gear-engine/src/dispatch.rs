@@ -3,7 +3,7 @@
 //! [`Action`] into ops (08).
 
 use crate::observe::SeatObs;
-use gear_herdr::ScreenFlag;
+use gear_herdr::{AgentStatus, ScreenFlag};
 use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
 use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
@@ -91,8 +91,11 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     if v.switch_pending {
         return none("a model switch is under way for this seat");
     }
-    // 4. Never type into a working agent.
-    if !obs.idle {
+    // 4. Never type into a working agent. A blocked one is not working: it
+    //    may be handed work, and the delivery waits for the dialog to clear
+    //    instead of failing every tick (T-68).
+    let blocked = obs.status == Some(AgentStatus::Blocked);
+    if !obs.idle && !blocked {
         return none("the agent is not idle");
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
