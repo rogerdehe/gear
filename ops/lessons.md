@@ -18,6 +18,8 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 
 7c. **Self-hosting runs the build it was started with** (M2.1). The engine ran a binary from before the voyage, so merged fixes were not live and a stopgap was removed too early. Rebuild and restart after the merges you need live — and only when no merge op is in flight (a restart interrupted T-58's merge; it recovered).
 
+7d. **A failed review is settled in the plan's `# Verdicts`, never by a reply** (M3, 2026-10-25). The captain replied "rework F1+F2" to two review fails and resolved them, following the home page's `next: gear reply … --resolve`; nothing was settled, the tasks stayed verifying, and a lane found it while waiting on one. The command GEAR suggests must be the one that does the job.
+
 ## Holding the course
 
 7. **The captain judges findings against the voyage's bar**; reviewers give the smallest exact fix; one round is the norm. Copying reviewer severities into rework cost M1 36 rounds for 28 tasks; judging them cost M2 3 rounds for 17.
