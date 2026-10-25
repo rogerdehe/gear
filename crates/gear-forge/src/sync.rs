@@ -30,8 +30,23 @@ use serde::Deserialize;
 use crate::marker;
 use crate::{Forge, ForgeResult, PrRef};
 
-/// How many times one forge call is tried before it is left to the captain.
-pub const MAX_ATTEMPTS: usize = 3;
+/// The most forge calls one project's sync makes in one tick (T-91): a backlog
+/// catches up over the next ticks instead of holding the tick for every call's
+/// timeout. A call never stops being retried — the tick's pace is the wait.
+pub const MAX_CALLS_PER_TICK: usize = 8;
+
+/// What one call did this tick.
+enum Outcome {
+    /// It ran now, with its result.
+    Done(String),
+    /// It was done on an earlier tick: nothing happened, and nothing is
+    /// reported again.
+    Already,
+    /// It waits for a later tick: it failed now, an earlier attempt left an
+    /// unknown outcome, or this tick's budget is spent. A waiting call stops
+    /// the task's later calls, so the order a reader sees cannot invert.
+    Pending,
+}
 
 /// The state an op the engine did not finish is left in: the call may have
 /// happened, so it is never repeated.
@@ -64,8 +79,9 @@ pub fn sync_with(
         ops.entry(key_of(&op)).or_default().push(op);
     }
     let mut done = Vec::new();
+    let mut budget = MAX_CALLS_PER_TICK;
     for fact in &facts {
-        done.extend(run_task(store, project, forge, fact, &mut ops, now)?);
+        done.extend(run_task(store, project, forge, fact, &mut ops, &mut budget, now)?);
     }
     Ok(done)
 }
@@ -130,10 +146,6 @@ enum What {
         pr: PrRef,
         body: String,
     },
-    Merge {
-        pr: PrRef,
-        method: crate::MergeMethod,
-    },
     Close {
         repo: String,
         issue: u64,
@@ -146,7 +158,6 @@ impl What {
         match self {
             What::Claim { .. } => "claim",
             What::Comment { .. } => "comment",
-            What::Merge { .. } => "merge",
             What::Close { .. } => "close",
         }
     }
@@ -159,11 +170,13 @@ fn run_task(
     forge: &dyn Forge,
     fact: &Fact,
     ops: &mut BTreeMap<String, Vec<OpRow>>,
+    budget: &mut usize,
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut done = Vec::new();
     // 1. The claim: the pull request every later call names. It is opened at the
-    //    task's first delivery, not before.
+    //    task's first delivery, not before, and it keeps being tried while the
+    //    branch is not there yet (T-91, F3).
     let mut pr = claim_of(fact, ops);
     let delivered = fact
         .attempts
@@ -171,19 +184,24 @@ fn run_task(
         .is_some_and(|attempt| attempt.delivered.is_some());
     if pr.is_none() && delivered {
         let call = claim_call(project, fact);
-        match run_call(store, project, forge, &call, ops, now)? {
-            Some(result) => {
+        match run_call(store, project, forge, &call, ops, budget, now)? {
+            Outcome::Done(result) => {
                 pr = pr_of(&result);
                 done.push(format!("{project}:{}:claim", fact.task));
             }
-            None => return Ok(done),
+            // Without a pull request there is nothing the later calls can name.
+            Outcome::Already | Outcome::Pending => return Ok(done),
         }
     }
     let Some(pr) = pr else { return Ok(done) };
-    // 2. The rest of the task's life, against that pull request.
+    // 2. The rest of the task's life, against that pull request. A call that
+    //    waits holds back every later one: a close never runs before its merge,
+    //    and a verdict never overtakes a hand-in (T-91, F2).
     for call in calls_after_claim(project, fact, &pr) {
-        if let Some(_result) = run_call(store, project, forge, &call, ops, now)? {
-            done.push(format!("{project}:{}:{}", fact.task, call.key));
+        match run_call(store, project, forge, &call, ops, budget, now)? {
+            Outcome::Done(_) => done.push(format!("{project}:{}:{}", fact.task, call.key)),
+            Outcome::Already => {}
+            Outcome::Pending => return Ok(done),
         }
     }
     Ok(done)
@@ -280,29 +298,15 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .unwrap_or("merged");
-            match fact.github.merge {
-                Mode::Push => calls.push(Call {
-                    key: format!("{base}:merge"),
-                    task: fact.task.clone(),
-                    attempt: Some(attempt.n),
-                    what: What::Comment {
-                        pr: pr.clone(),
-                        body: format!("Landed in {}: {}", fact.integration, landed),
-                    },
-                }),
-                Mode::Pr => calls.push(Call {
-                    key: format!("{base}:merge"),
-                    task: fact.task.clone(),
-                    attempt: Some(attempt.n),
-                    what: What::Merge {
-                        pr: pr.clone(),
-                        method: match fact.github.merge_method {
-                            MergeMethod::Merge => crate::MergeMethod::Merge,
-                            MergeMethod::Squash => crate::MergeMethod::Squash,
-                        },
-                    },
-                }),
-            }
+            calls.push(Call {
+                key: format!("{base}:merge"),
+                task: fact.task.clone(),
+                attempt: Some(attempt.n),
+                what: What::Comment {
+                    pr: pr.clone(),
+                    body: format!("Landed in {}: {}", fact.integration, landed),
+                },
+            });
             calls.push(Call {
                 key: format!("{base}:close"),
                 task: fact.task.clone(),
@@ -326,31 +330,36 @@ fn run_call(
     forge: &dyn Forge,
     call: &Call,
     ops: &mut BTreeMap<String, Vec<OpRow>>,
+    budget: &mut usize,
     now: Ts,
-) -> GearResult<Option<String>> {
+) -> GearResult<Outcome> {
     let prior = ops.get(&call.key).cloned().unwrap_or_default();
     if let Some(op) = prior
         .iter()
+        .rev()
         .find(|op| matches!(op.state, OpState::Confirmed | OpState::Unknown))
     {
-        return Ok(if op.state == OpState::Confirmed {
-            op.result.clone()
-        } else {
-            None
+        // Confirmed once, or left with an unknown outcome: never repeated. A
+        // repeated confirmation is not news (T-91, F5).
+        return Ok(match op.state {
+            OpState::Confirmed => Outcome::Already,
+            _ => Outcome::Pending,
         });
-    }
-    if prior.len() >= MAX_ATTEMPTS {
-        return Ok(None);
     }
     if let Some(op) = prior
         .iter()
         .find(|op| matches!(op.state, OpState::Intended | OpState::Executing))
     {
         // The engine stopped between the intent and the answer: the call may
-        // have happened, so it is never repeated (T-91).
+        // have happened, so it is never repeated (T-91, F4).
         store.write(|tx| tx.set_op_state(project, &op.id, OpState::Unknown, Some(RESTARTED), now))?;
-        return Ok(None);
+        return Ok(Outcome::Pending);
     }
+    if *budget == 0 {
+        // This tick's calls are spent: the rest wait for the next one.
+        return Ok(Outcome::Pending);
+    }
+    *budget -= 1;
     let op = store.write(|tx| {
         tx.insert_op(&NewOp {
             project: project.to_string(),
@@ -384,8 +393,10 @@ fn run_call(
     row.updated = now;
     ops.entry(call.key.clone()).or_default().push(row);
     Ok(match outcome {
-        Ok(result) => Some(result),
-        Err(_) => None,
+        Ok(result) => Outcome::Done(result),
+        // A failure stands for this tick only: the next tick tries again, so an
+        // outage of any length catches up (T-91, F3).
+        Err(_) => Outcome::Pending,
     })
 }
 
@@ -402,7 +413,6 @@ fn act(forge: &dyn Forge, what: &What) -> ForgeResult<String> {
             .open_claim(repo, branch, base, title, body)
             .map(|pr| serde_json::json!({ "repo": pr.repo, "number": pr.number, "url": pr.url }).to_string()),
         What::Comment { pr, body } => forge.comment(pr, body).map(|_| String::new()),
-        What::Merge { pr, method } => forge.merge(pr, *method).map(|merge| merge.message),
         What::Close {
             repo,
             issue,
@@ -512,24 +522,6 @@ fn first_words(goal: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Github {
     repo: String,
-    merge: Mode,
-    merge_method: MergeMethod,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum Mode {
-    #[default]
-    Push,
-    Pr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum MergeMethod {
-    #[default]
-    Squash,
-    Merge,
 }
 
 #[derive(Debug, Deserialize)]
@@ -554,10 +546,6 @@ struct Conventions {
 struct GithubSection {
     #[serde(default)]
     repo: Option<String>,
-    #[serde(default)]
-    merge: Mode,
-    #[serde(default)]
-    merge_method: MergeMethod,
 }
 
 #[derive(Debug, Deserialize)]
@@ -596,8 +584,6 @@ impl Config {
         let github = github.and_then(|section| {
             Some(Github {
                 repo: section.repo.clone()?,
-                merge: section.merge,
-                merge_method: section.merge_method,
             })
         })?;
         let integration = integration
