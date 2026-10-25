@@ -120,8 +120,13 @@ pub fn plan_onboard(
 /// 4. `gear_app::seats::begin_onboard(seat, pane, kind)` in a write transaction;
 /// 5. Herdr `pane_run(pane, env_command)`, then `agent_start(agent_name, kind, pane, args)`;
 /// 6. agent started → `gear_app::seats::finish_onboard(seat, gen, session_ref)`.
-/// Any Herdr step not `Ok` → the seat goes NeedsCheck with a reason naming the
-/// step (never retried automatically). Returns the seat ids that became Active.
+/// A start refused with `agent_pane_busy` (the shell still runs the environment
+/// line) keeps the seat in Starting with the start pending — same binding, pane
+/// and generation — and a later tick tries it once more, for at most
+/// `cfg.pane_busy_ticks` ticks (T-95); nothing before the start runs again, and
+/// the tick is never held for a shell. Any other Herdr step not `Ok` → the seat
+/// goes NeedsCheck with a reason naming the step (never retried
+/// automatically). Returns the seat ids that became Active.
 pub fn onboard_queued(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -178,10 +183,12 @@ pub fn onboard_queued(
             if crate::restart::pending(store, &seat.id)?.is_some() {
                 continue;
             }
-            // A lane whose start is waiting on its model (T-33, F5) is resumed:
-            // the switch plan is durable, so an engine restart continues it.
-            let resuming =
-                seat.state == SeatState::Starting && crate::switch::pending(store, &seat.id)?.is_some();
+            // A lane whose start is waiting on its model (T-33, F5) or on its
+            // shell (T-95) is resumed: both plans are durable, so an engine
+            // restart continues them instead of starting the seat over.
+            let resuming = seat.state == SeatState::Starting
+                && (crate::switch::pending(store, &seat.id)?.is_some()
+                    || crate::start::pending(store, &seat.id)?.is_some());
             if seat.state != SeatState::Queued && !resuming {
                 continue;
             }
@@ -195,8 +202,12 @@ pub fn onboard_queued(
                 Ok(true) => active.push(seat.id.clone()),
                 // The start waits for the model switch: the next tick continues.
                 Ok(false) => {}
-                // A failed step parks the seat; it is never retried blindly.
-                Err(reason) => park(store, &seat.id, &reason, now)?,
+                // A failed step parks the seat; it is never retried blindly,
+                // and a start left pending for it goes too.
+                Err(reason) => {
+                    crate::start::clear_pending(store, &seat.id)?;
+                    park(store, &seat.id, &reason, now)?
+                }
             }
         }
     }
@@ -239,6 +250,21 @@ fn onboard_seat(
     let (profile_name, profile) = selected
         .ok_or_else(|| format!("no profile drives the CLI {kind:?}"))?;
 
+    // A start that is already under way is continued, never redone: the model
+    // switch it waits on (T-33, F5), or the shell a busy refusal waits for
+    // (T-95). Both plans are in the store, so an engine restart continues them
+    // instead of starting the seat over.
+    if seat.state == SeatState::Starting {
+        if crate::switch::pending(store, &seat.id).map_err(|e| e.detail)?.is_some() {
+            return resume_start(store, herdr, seat, profile, config, now);
+        }
+        if crate::start::pending(store, &seat.id).map_err(|e| e.detail)?.is_some() {
+            return resume_busy_start(store, herdr, cfg, seat, config, profile, entry, now);
+        }
+        // Starting for another reason (a handover, a restart): not this tick's.
+        return Ok(false);
+    }
+
     // 2. the plan: worktree, environment line, agent name and start args.
     //    The lane's worktree is in the lane's own repo, cut from that repo's
     //    integration branch (T-53): a lane bound to a child repo works there.
@@ -268,17 +294,9 @@ fn onboard_seat(
         .clone()
         .ok_or_else(|| "a lane gets a worktree, but the plan has none".to_string())?;
 
-    // A start that is waiting on its model (T-33, F5): continue the switch and
-    // finish onboarding only once the status bar confirms.
-    if seat.state == SeatState::Starting
-        && crate::switch::pending(store, &seat.id).map_err(|e| e.detail)?.is_some()
-    {
-        return resume_start(store, herdr, seat, profile, config, now);
-    }
-
     // 3. the worktree, with the root pane the agent starts in. A lane's home
-    // worktree is long-lived (17 §3): reopen it when its branch exists (a
-    // restart, or a lane GEAR takes over), create it otherwise.
+    //    worktree is long-lived (17 §3): reopen it when its branch exists (a
+    //    restart, or a lane GEAR takes over), create it otherwise.
     let created = match herdr.worktree_open(&worktree.repo, &worktree.branch, &worktree.label) {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => match herdr.worktree_create(
@@ -300,9 +318,12 @@ fn onboard_seat(
         .map_err(|e| format!("worktree path: {}", e.detail))?;
 
     // 4. the seat moves to Starting with a pending binding for the pane. The
-    //    seat's profile follows the CLI that runs its model (T-35).
+    //    seat's profile follows the CLI that runs its model (T-35). A start
+    //    left pending by an earlier generation goes with it: it belonged to
+    //    another pane.
     let generation = store
         .write(|tx| {
+            tx.set_meta(&crate::start::pending_key(&seat.id), "")?;
             let generation = gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now)?;
             tx.set_seat_profile(&seat.id, profile_name)?;
             Ok(generation)
@@ -334,43 +355,144 @@ fn onboard_seat(
     // first start, while Herdr reports it idle, and the prompt would be lost.
     crate::trust::trust_worktree(&plan.kind, &created.path, now)
         .map_err(|reason| format!("trust: {reason}"))?;
-    // The shell may still be running the environment line when the start
-    // comes (a slow shell init — nvm, a plugin manager): Herdr then refuses
-    // with agent_pane_busy. That is "not yet", not a failure (T-89): wait for
-    // the shell, bounded, and only park when the wait runs out. The first
-    // refusal never parks a lane.
-    let limit = std::time::Duration::from_secs(cfg.pane_busy_limit_s.max(0) as u64);
-    let wait = std::time::Duration::from_millis(cfg.pane_busy_wait_ms);
-    let began = std::time::Instant::now();
-    let started = loop {
-        // T-76: the start args name the folder the agent runs in (the
-        // worktree of one of the project's repos) — Codex's trust dialog.
-        let start_args = gear_herdr::render_args(&plan.args, &created.path);
-        match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &start_args) {
-            Outcome::Ok(info) => break info,
-            Outcome::Refused { code, .. } if code == "agent_pane_busy" && began.elapsed() < limit => {
-                std::thread::sleep(wait);
-            }
-            Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
-                return Err(format!(
-                    "agent_start: refused (agent_pane_busy): the shell was still busy after {}s (the environment line has not finished)",
-                    cfg.pane_busy_limit_s.max(0)
-                ));
-            }
-            other => return Err(step_failure("agent_start", &other)),
-        }
+    // The shell may still be running the environment line when the start comes
+    // (a slow shell init — nvm, a plugin manager): Herdr then refuses with
+    // agent_pane_busy. That is "not yet", not a failure (T-95): the start is
+    // tried once per tick on this binding, and only the bound parks the seat.
+    // The tick is never held for the shell — the lanes queued behind it go on.
+    let start_args = gear_herdr::render_args(&plan.args, &created.path);
+    let pending = crate::start::PendingStart {
+        pane: pane.clone(),
+        generation,
+        agent_name: plan.agent_name.clone(),
+        kind: plan.kind.clone(),
+        args: start_args.clone(),
+        tries: 0,
     };
+    match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &start_args) {
+        Outcome::Ok(started) => finish_start(
+            store,
+            herdr,
+            seat,
+            config,
+            profile,
+            entry,
+            &kind,
+            generation,
+            Some(&started),
+            now,
+        ),
+        Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+            wait_for_shell(store, cfg, &seat.id, pending)
+        }
+        other => Err(step_failure("agent_start", &other)),
+    }
+}
 
+/// Try a pending start once more (T-95): the same binding, pane and generation,
+/// with the arguments rendered for the same worktree — nothing before the start
+/// is run again. A binding that moved means a human decides, not another pane.
+fn resume_busy_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &crate::EngineCfg,
+    seat: &SeatRow,
+    config: &gear_app::config::ProjectConfig,
+    profile: &gear_herdr::Profile,
+    entry: Option<&gear_app::config::ModelEntry>,
+    now: Ts,
+) -> Result<bool, String> {
+    let Some(pending) = crate::start::pending(store, &seat.id).map_err(|e| e.detail)? else {
+        return Ok(false);
+    };
+    let binding = store
+        .read(|tx| tx.get_binding(&seat.id, pending.generation))
+        .map_err(|e| e.detail)?;
+    let Some(binding) = binding else {
+        return Err(format!(
+            "agent_start: the start was pending on {} (generation {}), but that binding is gone",
+            pending.pane, pending.generation
+        ));
+    };
+    if binding.pane_id != pending.pane || pending.generation != seat.generation {
+        return Err(format!(
+            "agent_start: the start was pending on pane {} of generation {}, but the seat is on pane {} of generation {}",
+            pending.pane, pending.generation, binding.pane_id, seat.generation
+        ));
+    }
+    match herdr.agent_start(&pending.agent_name, &pending.kind, &pending.pane, &pending.args) {
+        Outcome::Ok(started) => finish_start(
+            store,
+            herdr,
+            seat,
+            config,
+            profile,
+            entry,
+            &pending.kind,
+            pending.generation,
+            Some(&started),
+            now,
+        ),
+        Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+            wait_for_shell(store, cfg, &seat.id, pending)
+        }
+        other => Err(step_failure("agent_start", &other)),
+    }
+}
+
+/// Record one busy refusal (T-95): within the bound the start stays pending and
+/// the tick goes on to the next seat; at the bound the seat parks with the
+/// reason, because a shell that is still busy then is not coming back on its
+/// own.
+fn wait_for_shell(
+    store: &mut Store,
+    cfg: &crate::EngineCfg,
+    seat_id: &str,
+    pending: crate::start::PendingStart,
+) -> Result<bool, String> {
+    let tries = pending.tries + 1;
+    let bound = cfg.pane_busy_ticks.max(1);
+    if tries >= bound {
+        return Err(format!(
+            "agent_start: refused (agent_pane_busy): the shell was still busy after {tries} ticks (the environment line has not finished)"
+        ));
+    }
+    crate::start::set_pending(store, seat_id, &crate::start::PendingStart { tries, ..pending })
+        .map_err(|e| e.detail)?;
+    Ok(false)
+}
+
+/// The agent is up — now, or after the shell said "not yet" (T-95). The model
+/// gate (T-33, F5) decides before the seat is marked started; the seat becomes
+/// Active and the pending start is forgotten in one transaction.
+#[allow(clippy::too_many_arguments)]
+fn finish_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    config: &gear_app::config::ProjectConfig,
+    profile: &gear_herdr::Profile,
+    entry: Option<&gear_app::config::ModelEntry>,
+    kind: &str,
+    generation: i64,
+    started: Option<&gear_herdr::AgentInfo>,
+    now: Ts,
+) -> Result<bool, String> {
     // 6. an OpenCode agent runs on the chain's model before the seat is marked
     //    started (T-33, F5): the shared service ignores the start environment,
     //    so the status bar decides here. Waiting keeps the start pending.
-    if plan.kind == "opencode" {
-        if let Some(entry) = lane_primary(lane, &config.models.lanes) {
+    if kind == "opencode" {
+        if let Some(entry) = entry {
             match crate::switch::ensure_model(store, herdr, seat, profile, config, entry.model(), now)
                 .map_err(|e| format!("model check: {}", e.detail))?
             {
                 crate::switch::ModelGate::Ready => {}
-                crate::switch::ModelGate::Waiting => return Ok(false),
+                crate::switch::ModelGate::Waiting => {
+                    // The agent is up; the switch is the seat's next step and
+                    // needs no start of its own.
+                    crate::start::clear_pending(store, &seat.id).map_err(|e| e.detail)?;
+                    return Ok(false);
+                }
                 crate::switch::ModelGate::Failed(reason) => {
                     // T-60: the lane cannot run on the chain's model — it is
                     // parked in NeedsCheck below, so the captain is rung.
@@ -387,12 +509,16 @@ fn onboard_seat(
     //    must never run the writer's current model (T-35).
     let api_session = store.read(|tx| tx.get_binding(&seat.id, generation))
         .map_err(|e| e.detail)?.and_then(|binding| binding.session_ref);
-    let session_ref = api_session.as_deref()
-        .or_else(|| started.agent_session.as_ref().map(|session| session.value.as_str()));
+    let session_ref = api_session.as_deref().or_else(|| {
+        started
+            .and_then(|info| info.agent_session.as_ref())
+            .map(|session| session.value.as_str())
+    });
     store
         .write(|tx| {
             gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
-            if let Some(entry) = lane_primary(lane, &config.models.lanes) {
+            tx.set_meta(&crate::start::pending_key(&seat.id), "")?;
+            if let Some(entry) = entry {
                 tx.set_meta(&crate::model::model_meta_key(&seat.id), entry.model())?;
             }
             Ok(())
@@ -537,6 +663,38 @@ profile = "claude"
 name = "heat"
 duty = "everything"
 owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+
+    /// The same project with a second lane: one shell may be slow while the
+    /// other lane onboards (T-95).
+    const CONFIG_TWO_LANES: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/heat/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "warm"
+duty = "warming"
+owns = ["src/warm/"]
 kind = "opencode"
 profile = "opencode"
 "#;
@@ -837,7 +995,8 @@ repo = "web"
     }
 
     /// The shell still runs the environment line when the start comes: Herdr
-    /// refuses with agent_pane_busy, and the start is tried again, not parked.
+    /// refuses with agent_pane_busy, the seat keeps its start in Starting, and
+    /// the next tick's attempt works — the environment line ran once (T-95).
     #[test]
     fn a_busy_shell_at_start_is_retried() {
         let mut store = world(CONFIG);
@@ -845,50 +1004,144 @@ repo = "web"
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+        assert!(active.is_empty(), "the seat waits, it does not start");
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "a pending start, not NeedsCheck");
+        let pending = crate::start::pending(&mut store, "toy:heat").unwrap().expect("a pending start");
+        assert_eq!((pending.tries, pending.generation), (1, 1));
 
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2).unwrap();
         assert_eq!(active, vec!["toy:heat".to_string()]);
         let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active, "not NeedsCheck");
+        assert_eq!(crate::start::pending(&mut store, "toy:heat").unwrap(), None);
+
+        // One environment line, two starts — the retry is the start only.
+        assert_eq!(
+            herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::PaneRun { .. })).count(),
+            1,
+            "the environment line is never re-run"
+        );
+        assert_eq!(
+            herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })).count(),
+            2,
+            "one attempt per tick"
+        );
+        let starts: Vec<String> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                gear_herdr::fake::Call::AgentStart { name, pane, args, .. } => {
+                    Some(format!("{name}@{pane} {}", args.join(" ")))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts[0], starts[1], "the same binding, pane and arguments");
+        assert_eq!(
+            herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::WorktreeCreate { .. })).count(),
+            1,
+            "the worktree is created once"
+        );
     }
 
-    /// A shell that stays busy for several tries is waited for, not parked
-    /// (T-89): a slow shell init is the normal case on a fresh worktree.
+    /// Busy for three ticks, then free: the seat is Starting while the shell
+    /// finishes and Active on the fourth — one attempt per tick, never a park
+    /// (the live multi-api case: three lanes on a slow shell).
     #[test]
-    fn a_shell_busy_for_a_while_is_waited_for() {
+    fn a_shell_busy_for_three_ticks_then_free_starts_the_lane() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 3));
 
-        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+        let mut seen = Vec::new();
+        for tick in 0..4 {
+            let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1 + tick).unwrap();
+            let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+            seen.push((seat.state, active.len()));
+            // The pending start survives each tick with the same binding.
+            if tick < 3 {
+                let pending = crate::start::pending(&mut store, "toy:heat").unwrap().unwrap();
+                let binding = store.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+                assert_eq!(pending.tries, tick + 1);
+                assert_eq!((pending.pane.as_str(), pending.generation), (binding.pane_id.as_str(), 1));
+            }
+        }
 
-        assert_eq!(active, vec!["toy:heat".to_string()]);
-        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Active, "four attempts, then the start");
+        assert_eq!(
+            seen,
+            vec![
+                (SeatState::Starting, 0),
+                (SeatState::Starting, 0),
+                (SeatState::Starting, 0),
+                (SeatState::Active, 1),
+            ]
+        );
+        assert_eq!(herdr.started_agents, vec!["toy-heat".to_string()]);
     }
 
-    /// Past the wait the shell is not coming back on its own: the seat parks
-    /// in NeedsCheck, and the reason names the shell and the wait.
+    /// A shell that stays busy past the bound is not coming back on its own:
+    /// the seat parks in NeedsCheck with the reason, and nothing stays pending.
     #[test]
-    fn a_shell_busy_past_the_wait_parks_the_seat() {
+    fn a_shell_busy_past_the_bound_parks_the_seat() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 1000));
         let mut cfg = cfg();
-        cfg.pane_busy_limit_s = 1;
-        cfg.pane_busy_wait_ms = 10;
+        cfg.pane_busy_ticks = 3;
 
-        let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+        for tick in 0..2 {
+            assert!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1 + tick).unwrap().is_empty());
+            let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Starting, "tick {}", tick + 1);
+        }
+        assert!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 3).unwrap().is_empty());
 
-        assert!(active.is_empty());
         let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::NeedsCheck);
         let reason = seat.state_reason.unwrap_or_default();
         assert!(reason.contains("agent_pane_busy"), "{reason}");
-        assert!(reason.contains("still busy after 1s"), "{reason}");
-        assert!(
-            !herdr.started_agents.contains(&"toy-heat".to_string()),
-            "no agent was started"
-        );
+        assert!(reason.contains("still busy after 3 ticks"), "{reason}");
+        assert_eq!(crate::start::pending(&mut store, "toy:heat").unwrap(), None);
+        assert!(herdr.started_agents.is_empty(), "no agent was started");
+    }
+
+    /// A queued lane behind a busy one onboards in the same tick: the tick is
+    /// never held for a shell (T-95).
+    #[test]
+    fn a_second_queued_lane_onboards_while_the_first_waits() {
+        let mut store = world(CONFIG_TWO_LANES);
+        store
+            .write(|tx| {
+                tx.insert_seat(&SeatRow {
+                    id: "toy:warm".into(),
+                    project: "toy".into(),
+                    role: SeatRole::Lane,
+                    name: "warm".into(),
+                    profile: "opencode".into(),
+                    generation: 0,
+                    state: SeatState::Queued,
+                    state_since: T0,
+                    state_reason: Some("registered".into()),
+                    task_id: None,
+                })
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        // The first start of the tick is refused: heat, first in id order.
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:warm".to_string()], "the second lane went on");
+        let heat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(heat.state, SeatState::Starting);
+        let warm = store.read(|tx| tx.get_seat("toy:warm")).unwrap().unwrap();
+        assert_eq!(warm.state, SeatState::Active);
+        assert_eq!(herdr.started_agents, vec!["toy-warm".to_string()]);
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2).unwrap();
+        assert_eq!(active, vec!["toy:heat".to_string()], "the waiting lane follows");
     }
 
     #[test]
