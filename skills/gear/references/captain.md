@@ -141,7 +141,7 @@ deps: T-1
 
 1. **`gear`** every time you wake: the voyage report, the plan snapshot, the items waiting for you. Running it records that you saw them.
 2. **Answer** each item: `gear reply M-<n> -m "<answer>"`. Station and landing items are answered in the plan (`station M-<n>: …`), not by a reply. Hand-ins and passing reviews are information — the engine handles them; you are rung for fails, failed merges and alerts.
-3. **Plan** the next steps in the voyage file and apply it. Keep 2–3 valuable tasks queued per lane. After every apply, read the snapshot: a lane with no current task and nothing startable gets a task before you end your turn.
+3. **Plan** the next steps in the voyage file and apply it. Keep 2–3 valuable tasks queued per lane. After every apply, act on its `warning: lane … has nothing to start after …` lines before you end your turn: a lane gets its next task before it runs dry, not after.
 4. **Let the engine move the lanes.** It delivers tasks, pushes stopped agents, starts and nudges reviewers, merges passes. Never prompt a lane with work by hand, never type into a pane without checking its occupant. A quota stop is a model switch or a park, never a finished task — read the screen (`gear --skill agent:<kind>`).
 5. **Hold the course** (`gear --skill course`): judge findings against the bar, calibrate the eta, answer the signals.
 6. **Ask the user** only what is theirs: release to the main branch, money, scope, destructive acts on things you did not create.
