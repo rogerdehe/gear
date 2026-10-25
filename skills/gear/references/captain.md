@@ -4,10 +4,11 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
 
 ## 1. Kickoff (once per voyage)
 
-1. **Inventory.** `gear admin kickoff` prints the agent CLIs this machine can start, the models each reaches, and a `gear.toml` skeleton. Never plan around a model that is not there.
+1. **Inventory.** `gear admin kickoff` prints the agent CLIs this machine can start, the models each reaches, and a `gear.toml` skeleton. The skeleton lists the git repositories it found under the project root. Never plan around a model that is not there.
 2. **Agree with the user** — you propose, the user confirms:
    - the goal and the voyage (milestone): its `done:` sentence, its `bar:`, its `eta:` as a style ("quick landing" or "do it properly");
-   - the lanes: name, duty, owned paths, agent kind (`<project>-<duty>` names);
+   - the repos this voyage changes: the skeleton lists what it found, but take only the repos the voyage touches — a repo joins the config in a later voyage, when it is needed;
+   - the lanes: name, duty, owned paths (relative to the lane's repo), the repo it works in, agent kind (`<project>-<duty>` names); one lane per repo;
    - the model chain per role, by full model id (`lanes`: fast; `review`: a different, stronger model — a reviewer never runs the writer's model);
    - the quota policy per role: `fallback` (next model in the chain) or `wait` (park until the provider resets). It must work today: `init` refuses a `fallback` with no next model.
 
@@ -21,7 +22,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
 
 3. **Confirm with the user's question tool, in two steps.**
    - **The bar first**, as its own question offering the three bars (the user may also write their own). It shapes the plan, the packets and every review, so the sheet is written after it.
-   - **Then the kickoff sheet** in one question: goal, done, the chosen bar, eta style, lanes, models with full ids, quota policy. Offer a single option, "confirm"; the user writes any change as their own text answer. Apply the changes and show the sheet again until it is confirmed. Never offer a "change something" option that takes no input, and never repeat the bar as a separate choice next to a sheet that already contains it.
+   - **Then the kickoff sheet** in one question: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. Offer a single option, "confirm"; the user writes any change as their own text answer. Apply the changes and show the sheet again until it is confirmed. Never offer a "change something" option that takes no input, and never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
 4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then ask the user to register the project in their own shell — `init` is a user command, never an agent's. After it succeeds, apply the plan:
@@ -30,7 +31,13 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    [project]
    id = "acme"                 # [a-z][a-z0-9-]*
    herdr_session = "main"      # the Herdr session the agents live in ($HERDR_SESSION in a Herdr pane)
-   repo = "/path/to/repo"
+   repo = "/path/to/repo"      # the root repo of the project
+
+   [[repos]]                   # only when the project is a folder of several
+   name = "api"                # [a-z][a-z0-9-]*, unique
+   path = "services/api"       # relative to project.repo
+   integration = "dev"         # optional; defaults to [conventions]
+   gate = "make test"          # optional; defaults to [conventions]
 
    [quota]
    lanes = 2
@@ -44,7 +51,15 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    [[lanes]]
    name = "engine"
    duty = "The engine and the CLI"
-   owns = ["crates/engine/"]
+   owns = ["crates/engine/"]   # relative to the lane's repo
+   kind = "opencode"
+   profile = "opencode"
+
+   [[lanes]]
+   name = "api"
+   duty = "The API service"
+   owns = ["src/"]             # relative to the lane's repo
+   repo = "api"                # the [[repos]] entry; without it the project root
    kind = "opencode"
    profile = "opencode"
 
