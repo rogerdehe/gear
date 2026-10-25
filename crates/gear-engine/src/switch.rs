@@ -713,6 +713,7 @@ mod tests {
             status: Some(gear_herdr::AgentStatus::Idle),
             flags: BTreeSet::new(),
             idle: true,
+            screen: None,
         }
     }
 

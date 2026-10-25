@@ -1665,6 +1665,8 @@ review = [
                 "codex".to_string(),
                 vec![
                     "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                    "-c".to_string(),
+                    "check_for_update_on_startup=false".to_string(),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),

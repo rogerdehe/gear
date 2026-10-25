@@ -429,6 +429,7 @@ mod tests {
             status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
             flags: BTreeSet::new(),
             idle,
+            screen: None,
         }
     }
 
