@@ -295,6 +295,9 @@ fn apply_queue(
                     // The planned time of the task (T-38); a NEW block must
                     // carry it (checked above).
                     estimate_min: item.estimate.map(i64::from),
+                    // The GitHub issue the task came from (T-79); the
+                    // parser keeps it inside the store's range.
+                    issue: item.issue.and_then(|number| i64::try_from(number).ok()),
                     updated: now,
                 };
                 tx.insert_task(&task)?;
@@ -328,6 +331,11 @@ fn apply_queue(
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
                     task.estimate_min = Some(i64::from(estimate));
+                }
+                // The GitHub issue (T-79): a draft that names one sets it; a
+                // block without `issue:` keeps the issue the task came from.
+                if let Some(issue) = item.issue.and_then(|number| i64::try_from(number).ok()) {
+                    task.issue = Some(issue);
                 }
                 match item.state.as_deref() {
                     Some("cancelled") => {
@@ -421,9 +429,14 @@ fn apply_queue(
     }
 
     // Staff (T-55): park/hold/retire move a lane seat of this project in this
-    // transaction; a target already reached is skipped.
+    // transaction; a target already reached is skipped. `remerge` (T-92) is
+    // not a seat: it queues a new merge op for a task whose merge failed.
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
+        if let StaffItem::Remerge { task, .. } = item {
+            remerge(tx, project, task, staff_line(item), now)?;
+            continue;
+        }
         let (lane, verb, target, reason) = match item {
             StaffItem::Park { lane, until, until_task, .. } => {
                 let reason = match (until, until_task) {
@@ -447,6 +460,7 @@ fn apply_queue(
             StaffItem::Temp { .. } => {
                 return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"))
             }
+            StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -544,8 +558,111 @@ fn staff_line(item: &StaffItem) -> usize {
         StaffItem::Temp { line, .. }
         | StaffItem::Park { line, .. }
         | StaffItem::Hold { line, .. }
-        | StaffItem::Retire { line, .. } => *line,
+        | StaffItem::Retire { line, .. }
+        | StaffItem::Remerge { line, .. } => *line,
     }
+}
+
+/// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
+/// something that can clear (a flaky test, a broken gate run). A new merge op
+/// is queued for the task's accepted attempt and candidate.
+///
+/// Only a task whose **last merge op failed** can be retried: a merge that is
+/// still in flight is not queued twice, and a task that is merged has nothing
+/// to do. Anything else is refused with the reason, like every plan line.
+fn remerge(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task_id: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let task = tx.get_task(project, task_id)?.ok_or_else(|| {
+        bad(line, format!("no task {task_id} in this project"))
+    })?;
+    let latest = tx
+        .attempts_of_task(project, task_id)?
+        .into_iter()
+        .last()
+        .ok_or_else(|| bad(line, format!("{task_id} has no attempt to merge")))?;
+    if latest.state != gear_model::AttemptState::Accepted {
+        return Err(bad(
+            line,
+            format!(
+                "{task_id} attempt {} is {}, not accepted: only an accepted attempt is merged",
+                latest.n,
+                latest.state.as_str()
+            ),
+        ));
+    }
+    let candidate = latest.candidate.clone().ok_or_else(|| {
+        bad(line, format!("{task_id} attempt {} has no candidate", latest.n))
+    })?;
+    // The task's merge ops, oldest first (the store has no query by task and
+    // kind; the states are few).
+    let mut merges: Vec<gear_store::OpRow> = Vec::new();
+    for state in [
+        gear_model::OpState::Intended,
+        gear_model::OpState::Executing,
+        gear_model::OpState::Submitted,
+        gear_model::OpState::Unknown,
+        gear_model::OpState::Confirmed,
+        gear_model::OpState::Failed,
+        gear_model::OpState::Void,
+    ] {
+        for op in tx.ops_in_state(project, state)? {
+            if op.kind == gear_model::OpKind::Merge && op.task.as_deref() == Some(task_id) {
+                merges.push(op);
+            }
+        }
+    }
+    merges.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+    let Some(last) = merges.into_iter().last() else {
+        return Err(bad(
+            line,
+            format!("{task_id} has no merge to retry: the engine queues one when its review passes"),
+        ));
+    };
+    match last.state {
+        gear_model::OpState::Failed => {}
+        gear_model::OpState::Confirmed => {
+            return Err(bad(line, format!("{task_id} is already merged ({})", last.id)))
+        }
+        state => {
+            return Err(bad(
+                line,
+                format!(
+                    "a merge of {task_id} is already {} ({}), not failed: nothing to retry",
+                    state.as_str(),
+                    last.id
+                ),
+            ))
+        }
+    }
+    // The same payload the engine writes when a review passes: the lane's
+    // branch (a hint for closing it), the accepted candidate and the review
+    // branch.
+    let lane = task.lane.clone().unwrap_or_default();
+    let slug = task_id.to_lowercase().replace('-', "");
+    let branch = if lane.is_empty() { String::new() } else { format!("{lane}/{slug}") };
+    tx.insert_op(&gear_store::NewOp {
+        project: project.to_string(),
+        seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },
+        generation: 1,
+        kind: gear_model::OpKind::Merge,
+        task: Some(task_id.to_string()),
+        attempt: Some(latest.n),
+        ref_msg: None,
+        plan_version: None,
+        payload: serde_json::json!({
+            "branch": branch,
+            "candidate": candidate,
+            "review": format!("review/{slug}"),
+            "remerge": true,
+        }),
+        created: now,
+    })?;
+    Ok(())
 }
 
 fn priority_str(priority: Priority) -> &'static str {
