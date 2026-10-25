@@ -22,7 +22,8 @@ use serde_json::{json, Value};
 
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
 pub use profile::{
-    builtin, builtins, classify_screen, validate_template, Profile, ProfilePatch, ScreenFlag,
+    builtin, builtins, classify_screen, render_args, validate_template, Profile, ProfilePatch,
+    ScreenFlag,
 };
 
 /// Reading Herdr failed. Callers must treat this as "observation failed",

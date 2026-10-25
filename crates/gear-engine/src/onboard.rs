@@ -343,7 +343,10 @@ fn onboard_seat(
     let wait = std::time::Duration::from_millis(cfg.pane_busy_wait_ms);
     let began = std::time::Instant::now();
     let started = loop {
-        match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &plan.args) {
+        // T-76: the start args name the folder the agent runs in (the
+        // worktree of one of the project's repos) — Codex's trust dialog.
+        let start_args = gear_herdr::render_args(&plan.args, &created.path);
+        match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &start_args) {
             Outcome::Ok(info) => break info,
             Outcome::Refused { code, .. } if code == "agent_pane_busy" && began.elapsed() < limit => {
                 std::thread::sleep(wait);
