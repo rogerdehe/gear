@@ -276,6 +276,17 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
 
+        // 8a. retire: a Retiring lane that is idle at a safe point says
+        //     goodbye, closes its pane and becomes Retired (T-65).
+        report.released.extend(release::retire_finished_lanes(
+            store,
+            herdr,
+            &project,
+            &observed,
+            &profiles,
+            now,
+        )?);
+
         // 9. decide (pure): who should be rung now. This comes after every
         //    delivery of the tick: a seat that is being handed work is not
         //    rung in the same tick (T-71) — on T-61 both went into the
