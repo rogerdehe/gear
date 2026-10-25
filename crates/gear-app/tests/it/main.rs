@@ -30,4 +30,5 @@ mod time_contract;
 mod time_report_contract;
 mod verdict_item_contract;
 mod voyage_contract;
+mod standard_contract;
 mod station_contract;
