@@ -4,7 +4,7 @@ The one default way of working every GEAR project shares. The captain and every 
 
 ## 1. A project, a voyage, a lane
 
-- A **project** is one piece of work with a goal: a new product, or one requirement inside an existing repo (then the project gets a short name, e.g. `billing-v2`, and its own integration branch cut from the mainline).
+- A **project** is one piece of work with a goal: a new product, or one requirement inside an existing repo (then the project gets a short name, e.g. `billing-v2`, and its own integration branch cut from the mainline). Its code may be one git repository or a folder of several (§9).
 - A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own plan file `gear/voyages/<milestone>.md`.
 - A **lane** is a long-lived agent with a declared **duty** (one sentence) and **owned paths**; lanes never own the same path. A lane whose duty cannot be stated is not opened. A changed duty is a new lane, not a rename.
 - A **temp worker** (today: a reviewer) starts clean for one job and ends with one deliverable. Clean context always comes from a new session, never from clearing an old one.
@@ -28,7 +28,7 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 |---|---|
 | `main` (release) | released state; reaches it only through the user's decision at a voyage's end |
 | `dev` (integration) | always builds and passes the gate; the engine merges passed tasks into it |
-| `<lane>/t<n>` | a task branch, cut from the latest integration branch, pushed as you commit, deleted after the merge |
+| `<lane>/t<n>` | a task branch, cut from the latest integration branch of the lane's repo, pushed as you commit, deleted after the merge |
 | `home/<lane>` | the anchor of a lane's long-lived worktree; never committed to |
 
 Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches.
@@ -37,9 +37,11 @@ Lanes create, switch and push their own task branches only. They never merge, re
 
 Herdr creates and removes every worktree; its config decides the path. A lane keeps one worktree for life (its build cache persists); a reviewer seat keeps one between jobs. One agent, one worktree. Nobody edits in the main checkout. Removing a worktree, closing a session and deleting a branch are separate acts; nothing uncommitted or unmerged is ever thrown away.
 
+A lane's worktree holds only its repo (§9).
+
 ## 5. The lane's task loop
 
-0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework).
+0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework).
 1. **Orient.** Read the packet completely (goal, acceptance, the voyage's `done:`/`bar:`), the files it names, the recent history of the area.
 2. **Reproduce before fixing** a bug. If you cannot observe it, your model is wrong: ask.
 3. **Implement the minimum** the goal needs. No side refactors; what you notice goes into the brief under "Out of scope".
@@ -82,7 +84,7 @@ Send it with `gear send --kind question`, then continue with other ready work if
 ## 7. Review and merge (what the engine does)
 
 - A hand-in starts a temp reviewer on a different model from the writer's, on its own branch `review/t<n>`. What it delivers: `gear --skill review`.
-- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch, runs the project's gate (`[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
+- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
 - A **fail** goes to the captain, who judges it against the bar and writes the rework (`gear --skill course`).
 - Status comes from facts: an attempt exists → in progress; handed in → in review; merged → done. "The agent said done" is not a fact.
 
@@ -96,3 +98,28 @@ gate = "make test"      # the project's own build + test, run before every merge
 ```
 
 Everything else here is not overridable.
+
+## 9. A project of several repos
+
+A project may be one git repository or a folder of several. The config names the repos; a lane names the repo it works in.
+
+```toml
+[[repos]]
+name = "api"                 # [a-z][a-z0-9-]*, unique
+path = "services/api"        # relative to project.repo
+integration = "dev"          # optional; defaults to [conventions]
+release = "main"             # optional
+gate = "make test"           # optional
+
+[[lanes]]
+name = "api"
+duty = "The API service"
+owns = ["src/"]              # relative to the lane's repo
+repo = "api"                 # the [[repos]] entry; without it the project root
+```
+
+A lane without a `repo` works in the project root, exactly as before.
+
+- A lane's worktree holds only its repo: it is cut from that repo's integration branch, reviewed against it and merged into it with that repo's gate.
+- `owns` paths are relative to the lane's repo, so two lanes may own the same path in two repos.
+- One lane per repo. A task changes one repo; a requirement that crosses repos is cut into a contract task first, then one task per repo (`gear --skill decompose`).
