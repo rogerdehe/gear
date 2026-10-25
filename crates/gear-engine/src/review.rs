@@ -546,6 +546,17 @@ fn start_reviewer(
                 park(store, &seat.id, "the seat's worktree path is unknown", now)?;
                 return Ok(Started::NotYet);
             };
+            // R1 of the T-69 review: the one worktree the engine may detach —
+            // a known reviewer seat with no live agent whose recorded checkout
+            // is this branch. Every other holder is left to fail the checkout.
+            let detach = holder_to_detach(
+                store,
+                herdr,
+                &config.project.id,
+                &repo.path,
+                &seat.id,
+                &branch,
+            )?;
             match checkout_ready(
                 store,
                 herdr,
@@ -555,6 +566,8 @@ fn start_reviewer(
                 &path,
                 &branch,
                 &task.candidate,
+                detach.as_deref(),
+                &repo.path,
             )? {
                 Checked::Ready => {}
                 // The checkout is pending: no reviewer starts on a tree nobody
@@ -725,30 +738,88 @@ const CHECKOUT_TAIL_LINES: u32 = 24;
 /// The token is a shell variable, so the echo of the command line (which the
 /// pane shows) carries the marker text with the variable unexpanded and can
 /// never be read as the report of a finished checkout.
-fn checkout_command(path: &str, branch: &str, candidate: &str, token: &str) -> String {
+fn checkout_command(
+    path: &str,
+    branch: &str,
+    candidate: &str,
+    token: &str,
+    detach: Option<&str>,
+) -> String {
+    // T-69 (trial G10), R1 of the review: `git checkout -B` refuses a branch
+    // that another worktree still holds. The engine names **one** holder — a
+    // known reviewer seat with no live agent whose recorded checkout is this
+    // branch — and this chain detaches it only while it is clean (its HEAD is
+    // kept). Every other holder is left alone: the checkout then fails and the
+    // engine stops after three tries and rings the captain.
+    let holder = match detach {
+        Some(holder) => format!(
+            "if [ -z \"$(git -C '{holder}' status --porcelain 2>/dev/null)\" ]; then \
+                 git -C '{holder}' checkout --detach >/dev/null 2>&1; \
+             else echo {fail}${{T}}; exit 1; fi && ",
+            holder = holder,
+            fail = FAIL_MARKER,
+        ),
+        None => String::new(),
+    };
     format!(
-        // T-69 (trial G10): a re-review on another seat may find the branch
-        // still checked out in the previous reviewer's worktree. `git checkout
-        // -B` would refuse it. A worktree that holds the branch and is clean
-        // is detached first (its HEAD is kept); one with changes is left
-        // alone and this checkout fails, so the engine can stop and tell the
-        // captain instead of fighting it every tick.
-        "T={token}; cd {path} && git fetch origin \
-         && for wt in $(git worktree list --porcelain | sed -n 's/^worktree //p'); do \
-              [ \"$wt\" = \"$(pwd)\" ] && continue; \
-              [ \"$(git -C \"$wt\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" = '{branch}' ] || continue; \
-              if [ -z \"$(git -C \"$wt\" status --porcelain 2>/dev/null)\" ]; then \
-                  git -C \"$wt\" checkout --detach >/dev/null 2>&1; \
-              else \
-                  echo {fail}${{T}}; exit 1; \
-              fi; \
-            done \
-         && git checkout -f -B {branch} {candidate} \
+        "T={token}; cd {path} && git fetch origin && {holder}\
+         git checkout -f -B {branch} {candidate} \
          && git clean -fd && echo {ok}${{T}}_$(git rev-parse HEAD)_$(git rev-parse --abbrev-ref HEAD) \
          || echo {fail}${{T}}",
         ok = OK_MARKER,
         fail = FAIL_MARKER,
     )
+}
+
+/// The worktree the engine may detach before a checkout (R1): a **known
+/// reviewer seat** (its worktree and the branch it took are recorded), not
+/// this seat, whose bound pane has **no live agent** in Herdr. Any other
+/// holder of the branch is left to fail the checkout.
+fn holder_to_detach(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    repo_path: &str,
+    this_seat: &str,
+    branch: &str,
+) -> GearResult<Option<String>> {
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.id == this_seat || seat.role != SeatRole::Temp {
+            continue;
+        }
+        let (path, taken) = store.read(|tx| {
+            Ok((
+                tx.get_meta(&repo_path_key(&seat.id, repo_path))?,
+                tx.get_meta(&branch_key(&seat.id, repo_path))?,
+            ))
+        })?;
+        let (Some(path), Some(taken)) = (path, taken) else {
+            continue;
+        };
+        if taken != branch {
+            continue;
+        }
+        // A bound pane with an agent in it is a live reviewer: never touched.
+        let pane = store.read(|tx| {
+            Ok(tx
+                .get_binding(&seat.id, seat.generation)?
+                .filter(|binding| binding.status == BindingStatus::Active)
+                .map(|binding| binding.pane_id))
+        })?;
+        let Some(pane) = pane else { continue };
+        if matches!(herdr.agent_get(&pane), Ok(Some(_))) {
+            continue;
+        }
+        return Ok(Some(path));
+    }
+    Ok(None)
+}
+
+/// The branch a seat's recorded checkout took in a repo (R1 of the T-69
+/// review): set with the checkout, cleared when the seat is released.
+fn branch_key(seat: &str, repo: &str) -> String {
+    format!("engine.review_branch.{seat}.{repo}")
 }
 
 /// What the engine should do after reading the checkout's state.
@@ -837,6 +908,8 @@ fn checkout_ready(
     path: &str,
     branch: &str,
     candidate: &str,
+    detach: Option<&str>,
+    repo_path: &str,
 ) -> GearResult<Checked> {
     let key = checkout_key(seat, generation);
     let recorded = store
@@ -844,7 +917,7 @@ fn checkout_ready(
         .filter(|token| !token.is_empty());
     let Some(token) = recorded else {
         // The checkout was never submitted: submit it and wait for its report.
-        submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
+        submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
         return Ok(Checked::Waiting);
     };
     // The chain ran on an earlier tick: read what it did.
@@ -855,7 +928,7 @@ fn checkout_ready(
                 Ok(Checked::Ready)
             } else {
                 // It landed somewhere else: check out again.
-                submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
+                submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
                 Ok(Checked::Waiting)
             }
         }
@@ -877,7 +950,7 @@ fn checkout_ready(
                     "the checkout of {branch} at {candidate} failed {used} times (the worktree {path}): {detail}"
                 )));
             }
-            submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
+            submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
             Ok(Checked::Waiting)
         }
         Checkout::Pending => Ok(Checked::Waiting),
@@ -905,10 +978,17 @@ fn submit_checkout(
     path: &str,
     branch: &str,
     candidate: &str,
+    detach: Option<&str>,
+    repo_path: &str,
 ) -> GearResult<()> {
     let token = next_checkout_token(store)?;
-    let command = checkout_command(path, branch, candidate, &token);
-    store.write(|tx| tx.set_meta(&checkout_key(seat, generation), &token))?;
+    let command = checkout_command(path, branch, candidate, &token, detach);
+    store.write(|tx| {
+        tx.set_meta(&checkout_key(seat, generation), &token)?;
+        // The seat's recorded checkout: a later re-review on another seat reads
+        // it to find the holder of this branch (R1 of the T-69 review).
+        tx.set_meta(&branch_key(seat, repo_path), branch)
+    })?;
     if let Outcome::Ok(()) = herdr.pane_run(pane, &command) {
         Ok(())
     } else {
@@ -1699,6 +1779,46 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    /// R1 of the T-69 review: the engine names **one** holder to detach — a
+    /// known reviewer seat, not this one, whose recorded checkout is the
+    /// branch and whose pane has no live agent. A live reviewer and an
+    /// unowned holder are never named.
+    #[test]
+    fn only_an_idle_clean_reviewer_is_named_as_the_holder() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w9:p1", "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "review-2", SeatRole::Temp, "w9:p2", "codex", T0)?;
+                tx.set_meta(&repo_path_key("p:review-1", "/repo"), "/repo-old-1")?;
+                tx.set_meta(&branch_key("p:review-1", "/repo"), "review/t1")?;
+                tx.set_meta(&repo_path_key("p:review-2", "/repo"), "/repo-old-2")?;
+                tx.set_meta(&branch_key("p:review-2", "/repo"), "review/t1")?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        // review-2 has a live agent; review-1's pane has none.
+        herdr.add_agent("w9:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let holder =
+            holder_to_detach(&mut store, &mut herdr, "p", "/repo", "p:review-3", "review/t1").unwrap();
+        assert_eq!(holder.as_deref(), Some("/repo-old-1"), "the idle reviewer");
+
+        // That reviewer is on another branch now: the live one is not named.
+        store.write(|tx| tx.set_meta(&branch_key("p:review-1", "/repo"), "review/t2")).unwrap();
+        let holder =
+            holder_to_detach(&mut store, &mut herdr, "p", "/repo", "p:review-3", "review/t1").unwrap();
+        assert_eq!(holder, None, "a live reviewer is never detached");
+
+        // Nobody recorded for the branch: an unowned holder is left alone.
+        store.write(|tx| tx.set_meta(&branch_key("p:review-2", "/repo"), "review/t3")).unwrap();
+        let holder =
+            holder_to_detach(&mut store, &mut herdr, "p", "/repo", "p:review-3", "review/t1").unwrap();
+        assert_eq!(holder, None, "an unowned holder is left alone");
+    }
+
     /// T-69 (trial G10): the re-review of a task on another seat. A worktree
     /// that holds `review/t1` and is clean is detached (its HEAD kept) and the
     /// checkout goes on; one with uncommitted changes is left alone and the
@@ -1734,7 +1854,8 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
         // A clean holder: detached, its HEAD kept, and the checkout succeeds.
         let token = "t1";
-        let report = sh(&new, &checkout_command(&new.display().to_string(), "review/t1", &candidate, token));
+        let old_path = old.display().to_string();
+        let report = sh(&new, &checkout_command(&new.display().to_string(), "review/t1", &candidate, token, Some(&old_path)));
         assert!(report.contains(&format!("{OK_MARKER}{token}_")), "{report}");
         assert_eq!(sh(&old, "git rev-parse HEAD"), candidate, "its HEAD is kept");
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD", "detached");
@@ -1747,10 +1868,19 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         std::fs::write(old.join("uncommitted.txt"), "mine\n").unwrap();
         sh(&work, &format!("git worktree add -q -b home/seat2 {} origin/dev", root.join("new-seat-2").display()));
         let second = root.join("new-seat-2");
-        let report = sh_out(&second, &checkout_command(&second.display().to_string(), "review/t1", &candidate, "t2"));
+        let report = sh_out(&second, &checkout_command(&second.display().to_string(), "review/t1", &candidate, "t2", Some(&old_path)));
         assert!(report.contains(&format!("{FAIL_MARKER}t2")), "{report}");
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1", "not detached");
         assert!(old.join("uncommitted.txt").exists(), "its changes are kept");
+
+        // An unowned holder (no path named by the engine) is left alone too:
+        // the checkout fails rather than detaching what it does not know.
+        sh(&work, &format!("git -C {} checkout -q review/t1", old.display()));
+        let third = root.join("new-seat-3");
+        sh(&work, &format!("git worktree add -q -b home/seat3 {} origin/dev", third.display()));
+        let report = sh_out(&third, &checkout_command(&third.display().to_string(), "review/t1", &candidate, "t3", None));
+        assert!(report.contains(&format!("{FAIL_MARKER}t3")), "{report}");
+        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1", "not detached");
         let _ = std::fs::remove_dir_all(&root);
     }
 
