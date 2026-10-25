@@ -293,6 +293,9 @@ fn onboard_seat(
         other => return Err(step_failure("worktree_open", &other)),
     };
     let pane = created.pane_id;
+    // The worktree pushes only where the project registered it (T-72): the hook
+    // must be in place before the agent can push anything.
+    crate::hooks::install(std::path::Path::new(&created.path))?;
     // The worktree's path is kept: a fallback to another CLI may have to trust
     // it (grok asks before its first start in a directory, T-32).
     store
