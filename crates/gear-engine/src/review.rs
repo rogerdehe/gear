@@ -1138,7 +1138,7 @@ fn review_packet_for(
     // The diff is against the integration branch of the repo the work is in
     // (T-53): a child repo has its own branch.
     let repo = config.repo_of_lane(&lane);
-    Ok(review_packet(
+    let packet = review_packet(
         task,
         attempt,
         version,
@@ -1149,7 +1149,12 @@ fn review_packet_for(
         candidate,
         &repo.integration,
         &review_branch(task),
-    ))
+    );
+    // T-84: the reviewer judges against the project standard when it has one.
+    Ok(match gear_app::standard::line(&config.project.repo) {
+        Some(line) => format!("{packet}\n{line}"),
+        None => packet,
+    })
 }
 
 /// Reviewers that are up but never got their packet — the state an engine
@@ -2096,6 +2101,28 @@ review = [
             .collect();
         assert_eq!(starts.len(), 1, "{starts:?}");
         assert!(starts[0].1.contains(&"--custom-flag".to_string()), "{:?}", starts[0].1);
+    }
+
+    /// T-84: the review packet carries the project standard when the project
+    /// root has `gear/standard.md`, and says nothing when it has none.
+    #[test]
+    fn the_review_packet_carries_the_project_standard() {
+        let root = tempfile::tempdir().unwrap();
+        let config_text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", root.path().display()));
+        let config = gear_app::config::parse(&config_text).unwrap();
+        let mut store = world(&config_text);
+
+        let without = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(!without.contains("Project standard:"), "{without}");
+
+        std::fs::create_dir_all(root.path().join("gear")).unwrap();
+        std::fs::write(root.path().join("gear/standard.md"), "# Standard\n").unwrap();
+        let with = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(with.contains("Project standard: "), "{with}");
+        assert!(with.contains("the reviewer judges against it"), "{with}");
+        // The packet itself is unchanged around it.
+        assert!(with.contains("Review T-1 attempt 1"), "{with}");
+        assert!(with.contains("Diff to review"), "{with}");
     }
 
     #[test]
