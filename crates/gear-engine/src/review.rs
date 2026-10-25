@@ -14,7 +14,7 @@
 //!
 //! The lane is never blocked: the reviewer is a seat of its own.
 
-use gear_app::config::{ModelEntry, ProjectConfig};
+use gear_app::config::{ModelEntry, ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome, Profile};
 use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
@@ -166,6 +166,9 @@ struct ReviewTask {
     attempt: i64,
     /// The seat that handed the result in.
     writer: String,
+    /// The lane that wrote the work: the task's repo is that lane's repo
+    /// (T-53).
+    lane: String,
     candidate: String,
 }
 
@@ -215,6 +218,7 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
                 task: task.id.clone(),
                 attempt: attempt.n,
                 writer: attempt.seat.clone(),
+                lane: task.lane.clone().unwrap_or_default(),
                 candidate,
             });
         }
@@ -389,12 +393,15 @@ fn start_reviewer(
     profile: &Profile,
     now: Ts,
 ) -> GearResult<Started> {
-    let repo = &config.project.repo;
+    // The repo the work is in: the repo of the lane that wrote it (T-53).
+    // The reviewer's worktree, its branch and the diff the packet names all
+    // belong to that repo.
+    let repo = config.repo_of_lane(&task.lane);
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
     let branch = review_branch(&task.task);
     let seat_branch = format!("home/{}", seat.name);
-    let seat_label = format!("{}-{}", config.project.id, seat.name);
+    let seat_label = seat_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
     let model = entry.map(ModelEntry::model);
 
@@ -407,14 +414,16 @@ fn start_reviewer(
         Some(pane) => pane,
         None => {
             // A warm seat is reopened by its path: its checkout is on the last
-            // job's review branch, not on the seat's own branch.
-            let by_path = match worktree_path(store, &seat.id)? {
-                Some(path) => herdr.worktree_open_path(repo, &path, &seat_label),
+            // job's review branch, not on the seat's own branch. A seat whose
+            // last worktree is in another repo gets one in this repo (T-53):
+            // the checkout of another repo holds none of this repo's branches.
+            let by_path = match worktree_in(store, &seat.id, &repo)? {
+                Some(path) => herdr.worktree_open_path(&repo.path, &path, &seat_label),
                 None => Outcome::Refused { code: "worktree_not_found".into(), message: String::new() },
             };
             let opened = match by_path {
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
-                    herdr.worktree_open(repo, &seat_branch, &seat_label)
+                    herdr.worktree_open(&repo.path, &seat_branch, &seat_label)
                 }
                 other => other,
             };
@@ -422,9 +431,9 @@ fn start_reviewer(
                 Outcome::Ok(worktree) => worktree,
                 Outcome::Refused { code, .. } if code == "worktree_not_found" => {
                     match herdr.worktree_create(
-                        repo,
+                        &repo.path,
                         &seat_branch,
-                        &config.conventions.integration,
+                        &repo.integration,
                         &seat_label,
                     ) {
                         Outcome::Ok(worktree) => worktree,
@@ -439,7 +448,12 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
-            store.write(|tx| tx.set_meta(&path_key(&seat.id), &worktree.path))?;
+            store.write(|tx| {
+                tx.set_meta(&path_key(&seat.id), &worktree.path)?;
+                // The repo the seat's worktree is in: the next job in another
+                // repo must not reopen this one (T-53).
+                tx.set_meta(&repo_key(&seat.id), &repo.path)
+            })?;
             worktree.pane_id
         }
     };
@@ -932,7 +946,7 @@ fn review_packet_for(
     attempt: i64,
     candidate: &str,
 ) -> GearResult<String> {
-    let (goal, accept, done, bar) = store.read(|tx| {
+    let (goal, accept, done, bar, lane) = store.read(|tx| {
         let version = tx
             .get_attempt(&config.project.id, task, attempt)?
             .map(|row| row.adopted_version)
@@ -942,23 +956,31 @@ fn review_packet_for(
             None => (String::new(), String::new()),
         };
         // The voyage the task sails on (T-22): the sentence the phase is
-        // judged by and its quality bar (T-23).
-        let (done, bar) = match tx.get_task(&config.project.id, task)? {
-            Some(row) => match row
-                .milestone
-                .as_deref()
-                .map(|milestone| tx.get_voyage(&config.project.id, milestone))
-            {
-                Some(Ok(Some(voyage))) => (
-                    voyage.done.clone().unwrap_or_default(),
-                    voyage.bar.clone().unwrap_or_default(),
-                ),
-                _ => (String::new(), String::new()),
-            },
-            None => (String::new(), String::new()),
+        // judged by and its quality bar (T-23). The lane is the task's lane:
+        // the repo the work is in (T-53).
+        let (done, bar, lane) = match tx.get_task(&config.project.id, task)? {
+            Some(row) => {
+                let lane = row.lane.clone().unwrap_or_default();
+                let (done, bar) = match row
+                    .milestone
+                    .as_deref()
+                    .map(|milestone| tx.get_voyage(&config.project.id, milestone))
+                {
+                    Some(Ok(Some(voyage))) => (
+                        voyage.done.clone().unwrap_or_default(),
+                        voyage.bar.clone().unwrap_or_default(),
+                    ),
+                    _ => (String::new(), String::new()),
+                };
+                (done, bar, lane)
+            }
+            None => (String::new(), String::new(), String::new()),
         };
-        Ok((goal, accept, done, bar))
+        Ok((goal, accept, done, bar, lane))
     })?;
+    // The diff is against the integration branch of the repo the work is in
+    // (T-53): a child repo has its own branch.
+    let repo = config.repo_of_lane(&lane);
     Ok(review_packet(
         task,
         attempt,
@@ -967,7 +989,7 @@ fn review_packet_for(
         &done,
         &bar,
         candidate,
-        &config.conventions.integration,
+        &repo.integration,
         &review_branch(task),
     ))
 }
@@ -1036,9 +1058,47 @@ fn path_key(seat: &str) -> String {
     format!("engine.review_path.{seat}")
 }
 
+/// Where the repo of a seat's worktree is kept: a warm seat whose last
+/// worktree is in another repo must not reopen it (T-53).
+fn repo_key(seat: &str) -> String {
+    format!("engine.review_repo.{seat}")
+}
+
 /// The seat's worktree path, once its first job created the worktree.
 fn worktree_path(store: &mut Store, seat: &str) -> GearResult<Option<String>> {
     store.read(|tx| tx.get_meta(&path_key(seat)))
+}
+
+/// The seat's worktree path when that worktree is in `repo`: `None` when the
+/// seat has no worktree yet, or when its last worktree is in another repo
+/// (T-53). The checkout of another repo holds none of this repo's branches,
+/// so it is opened by branch instead.
+fn worktree_in(
+    store: &mut Store,
+    seat: &str,
+    repo: &Repo,
+) -> GearResult<Option<String>> {
+    let path = worktree_path(store, seat)?;
+    let Some(path) = path else { return Ok(None) };
+    let last = store.read(|tx| tx.get_meta(&repo_key(seat)))?;
+    match last {
+        // A seat with no recorded repo is an old one: its worktree is the
+        // project's own, as before.
+        None => Ok(Some(path)),
+        Some(last) if last == repo.path => Ok(Some(path)),
+        Some(_) => Ok(None),
+    }
+}
+
+/// The label of a review seat's worktree: `<project>-<seat>`, plus the repo
+/// name for a seat that works in a child repo (T-53) — one seat, one
+/// worktree per repo.
+fn seat_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
+    if repo.name.is_empty() {
+        format!("{}-{}", config.project.id, seat)
+    } else {
+        format!("{}-{}-{}", config.project.id, seat, repo.name)
+    }
 }
 
 /// The review branch of a task: `review/t<n>` (conventions 17 §3: the
@@ -2384,6 +2444,82 @@ review = [
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 20).unwrap();
         assert!(report.reviewers.is_empty(), "{:?}", report.reviewers);
         assert_eq!(herdr.prompts_to(pane).len(), 1);
+    }
+
+    /// The project with a child repo: the lane works in it (T-53).
+    fn config_with_repos() -> String {
+        CONFIG
+            .replace(
+                "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"",
+                "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\
+                 \n[[repos]]\nname = \"web\"\npath = \"web\"\nintegration = \"web-dev\"",
+            )
+            .replace(
+                "[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]",
+                "[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\nrepo = \"web\"",
+            )
+    }
+
+    /// The worktree the engine created for the reviewer: (repo, branch, base,
+    /// label).
+    fn created_worktree(herdr: &FakeHerdr) -> (String, String, String, String) {
+        herdr.calls
+            .iter()
+            .find_map(|call| match call {
+                Call::WorktreeCreate { repo, branch, base, label } => {
+                    Some((repo.clone(), branch.clone(), base.clone(), label.clone()))
+                }
+                _ => None,
+            })
+            .expect("the reviewer got a worktree")
+    }
+
+    /// T-53: the reviewer's worktree is in the repo of the task's lane, cut
+    /// from that repo's integration branch, and the packet names that branch.
+    #[test]
+    fn a_review_works_in_the_repo_of_the_task() {
+        let mut store = world(&config_with_repos());
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+
+        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let (repo, branch, base, label) = created_worktree(&herdr);
+        assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
+        assert_eq!(branch, "home/review-1");
+        assert_eq!(base, "web-dev", "the repo's own integration branch");
+        assert_eq!(label, "p-review-1-web", "the label names the repo");
+        // The packet asks for the diff against that repo's integration branch.
+        let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
+        assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+    }
+
+    /// T-53: a warm reviewer whose last worktree is in another repo gets a
+    /// worktree in the repo of the task it takes now.
+    #[test]
+    fn a_warm_reviewer_in_another_repo_gets_a_worktree_in_this_one() {
+        let mut store = world(&config_with_repos());
+        // The seat's last worktree was in the project root.
+        store
+            .write(|tx| {
+                tx.set_meta(&path_key("p:review-1"), "/root-review-1")?;
+                tx.set_meta(&repo_key("p:review-1"), "/repo")
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let (repo, _, base, _) = created_worktree(&herdr);
+        assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
+        assert_eq!(base, "web-dev");
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { .. })),
+            "the checkout of another repo is never reopened: {:?}",
+            herdr.calls
+        );
     }
 }
 

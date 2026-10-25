@@ -2,15 +2,19 @@
 //!
 //! A task whose current attempt has a passing verdict and that has no merge op
 //! yet gets one `merge` op. A background thread executes it in the integration
-//! worktree (`home/merge`, created once from the integration branch, reopened
-//! afterwards):
+//! worktree of the task's repo (`home/merge`, created once from that repo's
+//! integration branch, reopened afterwards):
 //!
 //! 1. reset to `origin/<integration>`: a half-done earlier run is discarded,
 //!    and a retry of the same op cannot merge twice;
 //! 2. `git merge --no-ff origin/<task branch>`, then `origin/review/t<n>`;
 //! 3. refuse a merge that left conflict markers, abort a conflicted merge;
-//! 4. run the project's gate ([`Conventions::gate`]) in that worktree;
+//! 4. run the gate of that repo in that worktree;
 //! 5. push `<integration>`, then delete the task and review branches on origin.
+//!
+//! A project of several repos merges each of them on its own branch and with
+//! its own gate (T-53): the task's repo is its lane's repo, and one worker
+//! runs per repo.
 //!
 //! Any failure before the push leaves the remote integration branch untouched
 //! (`git reset --hard origin/<integration>`), records the op Failed with the
@@ -29,7 +33,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gear_app::config::ProjectConfig;
+use gear_app::config::{ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, TaskState, Ts,
@@ -119,16 +123,23 @@ pub fn merge_passed(
     }
 
     // A worker survives between ticks. Collect only a completed result;
-    // never join a running thread.
+    // never join a running thread. One worker per repo (T-53): the workers of
+    // the repos of a project are collected one after the other.
     let mut workers =
         cfg.merges.0.lock().map_err(|_| {
             GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
         })?;
-    if let Some(worker) = workers.get(project) {
-        let finished = worker.finished.lock().unwrap().clone();
-        let Some(finished) = finished else {
-            return Ok(merged);
-        };
+    let finished_keys: Vec<String> = workers
+        .iter()
+        .filter(|(key, worker)| {
+            key.starts_with(&format!("{project}\u{1f}"))
+                && worker.finished.lock().unwrap().is_some()
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    if let Some(key) = finished_keys.first() {
+        let worker = workers.remove(key).expect("the worker was just found");
+        let finished = worker.finished.lock().unwrap().clone().expect("just found");
         let op = &worker.op;
         match finished.result {
             Ok(Some(lines)) => {
@@ -162,13 +173,10 @@ pub fn merge_passed(
             }
             Err(reason) => fail_merge(store, project, op, &reason, finished.at)?,
         }
-        // Keep the completion until its database write succeeded: a transient
-        // store error must not lose the result or launch a second worker.
-        workers.remove(project);
         return Ok(merged);
     }
 
-    // One worker per project. Unknown ops are restart recovery: merge_one
+    // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to origin before doing any merges, and adopts a completed push.
     for op in ready_merges(store, project)? {
         let task = op.task.clone().unwrap_or_default();
@@ -181,7 +189,14 @@ pub fn merge_passed(
             store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
             continue;
         }
-        let worktree = match integration_worktree(herdr, &config, project) {
+        // The repo the work is in: the repo of the task's lane (T-53).
+        let repo = repo_of_op(store, project, &op, &config)?;
+        let key = worker_key(project, &repo);
+        // A merge of this repo is already running: this one waits for it.
+        if workers.contains_key(&key) {
+            continue;
+        }
+        let worktree = match integration_worktree(herdr, &repo, project) {
             Ok(worktree) => worktree,
             Err(reason) => {
                 tell_captain(store, project, &format!("merge waits: {reason}"), now)?;
@@ -194,15 +209,15 @@ pub fn merge_passed(
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
-        let config = config.clone();
+        let repo = repo.clone();
         let spawned = std::thread::Builder::new()
-            .name(format!("merge-{project}"))
+            .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
                 let result = std::panic::catch_unwind(|| {
                     let Some(lock) = merge_lock(Path::new(&worktree.path))? else {
                         return Ok(None);
                     };
-                    merge_one_locked(&worktree, &config, &job, &lock).map(Some)
+                    merge_one_locked(&worktree, &repo, &job, &lock).map(Some)
                 })
                 .unwrap_or_else(|_| Err("merge worker panicked".to_string()));
                 *output.lock().unwrap() = Some(Finished {
@@ -212,7 +227,7 @@ pub fn merge_passed(
             });
         match spawned {
             Ok(_) => {
-                workers.insert(project.to_string(), Worker { op, finished });
+                workers.insert(key, Worker { op, finished });
             }
             Err(error) => fail_merge(
                 store,
@@ -222,7 +237,6 @@ pub fn merge_passed(
                 wall_time(),
             )?,
         }
-        break;
     }
     Ok(merged)
 }
@@ -407,21 +421,25 @@ fn ready_merges(store: &mut Store, project: &str) -> GearResult<Vec<OpRow>> {
     })
 }
 
-/// The engine's integration worktree: `home/merge`, created once from the
-/// integration branch and reopened after that (17 §4: worktrees are Herdr's).
+/// The engine's integration worktree of one repo: `home/merge`, created once
+/// from that repo's integration branch and reopened after that (17 §4:
+/// worktrees are Herdr's).
+///
+/// One worktree per repo (T-53): a project of several repos merges each of
+/// them in its own worktree, on its own integration branch, with its own gate.
 fn integration_worktree(
     herdr: &mut dyn HerdrAct,
-    config: &ProjectConfig,
+    repo: &Repo,
     project: &str,
 ) -> Result<gear_herdr::Worktree, String> {
-    let label = format!("{project}-merge");
-    match herdr.worktree_open(&config.project.repo, "home/merge", &label) {
+    let label = merge_label(project, repo);
+    match herdr.worktree_open(&repo.path, "home/merge", &label) {
         Outcome::Ok(worktree) => Ok(worktree),
         Outcome::Refused { code, .. } if code == "worktree_not_found" => {
             match herdr.worktree_create(
-                &config.project.repo,
+                &repo.path,
                 "home/merge",
-                &config.conventions.integration,
+                &repo.integration,
                 &label,
             ) {
                 Outcome::Ok(worktree) => Ok(worktree),
@@ -432,28 +450,59 @@ fn integration_worktree(
     }
 }
 
+/// The label of a repo's integration worktree: `<project>-merge` for the
+/// project root, `<project>-merge-<repo name>` for a child repo (T-53).
+fn merge_label(project: &str, repo: &Repo) -> String {
+    if repo.name.is_empty() {
+        format!("{project}-merge")
+    } else {
+        format!("{project}-merge-{}", repo.name)
+    }
+}
+
+/// The repo a merge op works in: the repo of the task's lane (T-53). A task
+/// without a lane merges in the project root.
+fn repo_of_op(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    config: &ProjectConfig,
+) -> GearResult<Repo> {
+    let mut lane = None;
+    if let Some(task) = op.task.as_deref() {
+        lane = store.read(|tx| Ok(tx.get_task(project, task)?.and_then(|row| row.lane.clone())))?;
+    }
+    Ok(config.repo_of_lane(lane.as_deref().unwrap_or_default()))
+}
+
+/// The key of a merge worker: one worker per repo (T-53), so a merge in one
+/// repo does not wait for the merge of another.
+fn worker_key(project: &str, repo: &Repo) -> String {
+    format!("{project}\u{1f}{}", repo.name)
+}
+
 /// Merge one op's task branches and run the gate. `Ok(lines)` = merged and
 /// pushed; `Err(reason)` = nothing was pushed and the worktree is clean again.
 #[cfg(test)]
 fn merge_one(
     worktree: &gear_herdr::Worktree,
-    config: &ProjectConfig,
+    repo: &Repo,
     op: &OpRow,
 ) -> Result<String, String> {
     let lock = merge_lock(Path::new(&worktree.path))?
         .ok_or_else(|| "merge worktree is busy".to_string())?;
-    merge_one_locked(worktree, config, op, &lock)
+    merge_one_locked(worktree, repo, op, &lock)
 }
 
 fn merge_one_locked(
     worktree: &gear_herdr::Worktree,
-    config: &ProjectConfig,
+    repo: &Repo,
     op: &OpRow,
     lock: &File,
 ) -> Result<String, String> {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
-    let integration = config.conventions.integration.clone();
+    let integration = repo.integration.clone();
     let branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
     // The op may come from `tasks::settle_review`, which names the branch and
     // the candidate but not the review branch: derive it, and merge it only
@@ -546,8 +595,9 @@ fn merge_one_locked(
         return Err("conflict markers in the merged tree".to_string());
     }
 
-    // 4. the gate, before anything is pushed.
-    let gate = config.conventions.gate.clone();
+    // 4. the gate, before anything is pushed: the gate of the repo the work
+    //    is in (T-53).
+    let gate = repo.gate.clone();
     // The empty lock file is inherited as stdin (normally /dev/null for a
     // gate). Keeping the same open file description in the subprocess means
     // it still excludes recovery if the engine is killed before wait returns.
@@ -759,6 +809,70 @@ mod tests {
         }
     }
 
+    /// A child repo below the project root (T-53): its own origin, its own
+    /// integration branch, a task branch and a review branch.
+    struct Child {
+        root: PathBuf,
+        work: PathBuf,
+        origin: PathBuf,
+    }
+
+    impl Child {
+        fn new(root: &Path, name: &str, integration: &str) -> Child {
+            let origin = root.join(format!("{name}-origin.git"));
+            let work = root.join(name);
+            sh(root, &format!("git init -q --bare {}", origin.display()));
+            sh(root, &format!("git init -q -b {integration} {}", work.display()));
+            fs::write(work.join("README.md"), "dev\n").unwrap();
+            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+            sh(
+                &work,
+                &format!("git remote add origin ../{name}-origin.git && git push -q origin {integration}"),
+            );
+            sh(
+                &work,
+                "git switch -qc heat/t5 && echo task >> README.md && git add -A \
+                 && git -c user.email=a@b -c user.name=a commit -qm task && git push -q origin heat/t5",
+            );
+            sh(
+                &work,
+                "git switch -qc review/t5 && echo review > review.txt && git add -A \
+                 && git -c user.email=a@b -c user.name=a commit -qm review && git push -q origin review/t5",
+            );
+            Child { root: root.to_path_buf(), work, origin }
+        }
+
+        /// The merge worktree of this repo: `home/merge`, cut from its
+        /// integration branch.
+        fn merge_worktree(&self, integration: &str) -> gear_herdr::Worktree {
+            let path = self.root.join("web-merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b home/merge {} origin/{integration}",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge-web".into(),
+                pane_id: "wt-merge-web:p1".into(),
+                path: path.display().to_string(),
+                branch: "home/merge".into(),
+            }
+        }
+
+        /// The head of a branch on this repo's origin.
+        fn head_of(&self, branch: &str) -> String {
+            sh(&self.root, &format!("git -C {} rev-parse {branch}", self.origin.display()))
+        }
+
+        /// The commits on a branch of this repo's origin.
+        fn log_of(&self, branch: &str) -> String {
+            sh(&self.root, &format!("git -C {} log --format=%s {branch}", self.origin.display()))
+        }
+    }
+
     fn sh(dir: &Path, command: &str) -> String {
         let output = Command::new("sh").arg("-c").arg(command).current_dir(dir).output().unwrap();
         assert!(
@@ -811,9 +925,12 @@ gate = "{gate}"
         )
     }
 
-    /// A project config with the given gate.
-    fn config(gate: &str) -> ProjectConfig {
-        gear_app::config::parse(&config_text(gate)).unwrap()
+    /// The repo the merge runs in: the root repo of the test project, with
+    /// the given gate.
+    fn repo(gate: &str) -> Repo {
+        gear_app::config::parse(&config_text(gate))
+            .unwrap()
+            .repo_of_lane("heat")
     }
 
     fn op(candidate: &str) -> OpRow {
@@ -1013,6 +1130,170 @@ gate = "{gate}"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// The config of a project whose lane "heat" works in the child repo
+    /// "web" (T-53): the child repo has its own integration branch and its
+    /// own gate.
+    fn child_config(root: &Path, child_gate: &str, project_gate: &str) -> String {
+        format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "{root}"
+
+[[repos]]
+name = "web"
+path = "web"
+integration = "web-dev"
+gate = "{child_gate}"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "web"
+
+[conventions]
+gate = "{project_gate}"
+"#,
+            root = root.display(),
+        )
+    }
+
+    /// A project with a handed-in task of the lane "heat" and a queued merge
+    /// op for it.
+    fn child_world(config_toml: &str, candidate: &str) -> Store {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_toml.to_string();
+                tx.update_project(&project)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, candidate, "report", 0)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-53: the merge of a task of a lane bound to a child repo runs in that
+    /// repo: its own worktree, its own integration branch and its own gate.
+    #[test]
+    fn a_task_merges_in_the_repo_of_its_lane() {
+        let scratch = Scratch::new("child");
+        let child = Child::new(&scratch.root, "web", "web-dev");
+        let worktree = child.merge_worktree("web-dev");
+        let candidate = child.head_of("heat/t5");
+        let child_gate = scratch.root.join("child-gate");
+        let project_gate = scratch.root.join("project-gate");
+        let config_toml = child_config(
+            &scratch.root,
+            &format!("pwd > '{}'", child_gate.display()),
+            &format!("touch '{}'", project_gate.display()),
+        );
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = child_world(&config_toml, &candidate);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        // The worktree is the one of the child repo, under its own label.
+        let opened = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::WorktreeOpen { repo, branch, label } => {
+                    Some((repo.clone(), branch.clone(), label.clone()))
+                }
+                _ => None,
+            })
+            .expect("the engine opened the merge worktree");
+        assert_eq!(opened.0, format!("{}/web", scratch.root.display()));
+        assert_eq!(opened.1, "home/merge");
+        assert_eq!(opened.2, "p-merge-web", "the label names the repo");
+        // The merge landed on the child's own integration branch.
+        let log = child.log_of("web-dev");
+        assert!(log.contains("task"), "{log}");
+        assert!(log.contains("review"), "{log}");
+        // The child's gate ran, in the child's worktree; the project's gate
+        // did not run at all.
+        assert!(child_gate.exists(), "the child's gate did not run");
+        let gate_dir = fs::read_to_string(&child_gate).unwrap();
+        assert!(
+            gate_dir.trim().ends_with("web-merge"),
+            "the gate ran in the child's worktree: {}",
+            gate_dir.trim()
+        );
+        assert!(!project_gate.exists(), "the project's gate must not run");
+        // The project root was not touched: its dev is where it was.
+        assert_eq!(scratch.dev_log(), "dev", "the root repo was not merged into");
+    }
+
+    /// T-53: the merge worktree of a repo is created in that repo, cut from
+    /// that repo's integration branch.
+    #[test]
+    fn a_merge_worktree_is_created_in_the_repo_of_the_task() {
+        let scratch = Scratch::new("child-create");
+        let child = Child::new(&scratch.root, "web", "web-dev");
+        let candidate = child.head_of("heat/t5");
+        let config_toml = child_config(&scratch.root, "true", "true");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut store = child_world(&config_toml, &candidate);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+
+        let created = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::WorktreeCreate { repo, branch, base, label } => {
+                    Some((repo.clone(), branch.clone(), base.clone(), label.clone()))
+                }
+                _ => None,
+            })
+            .expect("the engine created the merge worktree");
+        assert_eq!(created.0, format!("{}/web", scratch.root.display()));
+        assert_eq!(created.1, "home/merge");
+        assert_eq!(created.2, "web-dev", "the repo's own integration branch");
+        assert_eq!(created.3, "p-merge-web");
     }
 
     #[test]
@@ -1216,7 +1497,7 @@ gate = "{gate}"
         };
         merge_one(
             &worktree,
-            &config(&std::env::var("GEAR_TEST_MERGE_GATE").unwrap()),
+            &repo(&std::env::var("GEAR_TEST_MERGE_GATE").unwrap()),
             &op(&std::env::var("GEAR_TEST_MERGE_CANDIDATE").unwrap()),
         )
         .unwrap();
@@ -1312,7 +1593,7 @@ gate = "{gate}"
         let scratch = Scratch::new("clean");
         let worktree = scratch.merge_worktree();
 
-        let line = merge_one(&worktree, &config("true"), &op(&scratch.head_of("heat/t5"))).unwrap();
+        let line = merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap();
 
         assert!(line.contains("merged T-5 into dev"), "{line}");
         // dev has both commits …
@@ -1338,7 +1619,7 @@ gate = "{gate}"
             scratch.work.display()
         );
 
-        let error = merge_one(&worktree, &config(&racer), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        let error = merge_one(&worktree, &repo(&racer), &op(&scratch.head_of("heat/t5"))).unwrap_err();
 
         assert!(error.starts_with(RACE), "{error}");
         assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
@@ -1384,7 +1665,7 @@ gate = "{gate}"
         let worktree = scratch.merge_worktree();
         let before = scratch.dev_log();
 
-        let error = merge_one(&worktree, &config("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        let error = merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
 
         assert!(error.contains("conflict merging"), "{error}");
         assert_eq!(scratch.dev_log(), before, "dev is untouched");
@@ -1398,7 +1679,7 @@ gate = "{gate}"
         let worktree = scratch.merge_worktree();
         let before = scratch.dev_log();
 
-        let error = merge_one(&worktree, &config("echo the gate said no >&2; exit 1"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+        let error = merge_one(&worktree, &repo("echo the gate said no >&2; exit 1"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
 
         assert!(error.contains("gate failed"), "{error}");
         assert!(error.contains("the gate said no"), "{error}");
@@ -1446,7 +1727,7 @@ gate = "{gate}"
         );
         let before = scratch.dev_log();
 
-        let error = merge_one(&worktree, &config("true"), &op(&candidate)).unwrap_err();
+        let error = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap_err();
 
         assert!(error.contains("moved after the review"), "{error}");
         assert_eq!(scratch.dev_log(), before, "dev is untouched");
@@ -1467,7 +1748,7 @@ gate = "{gate}"
         let mut settled = op(&candidate);
         settled.payload = serde_json::json!({ "branch": "heat/t5", "candidate": candidate.clone() });
 
-        let line = merge_one(&worktree, &config("true"), &settled).unwrap();
+        let line = merge_one(&worktree, &repo("true"), &settled).unwrap();
 
         assert!(line.contains("merged T-5"), "{line}");
         let log = scratch.dev_log();
@@ -1490,7 +1771,7 @@ gate = "{gate}"
         let before = scratch.dev_log();
 
         let error =
-            merge_one(&worktree, &config("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
+            merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap_err();
 
         assert!(error.contains("review branch"), "{error}");
         assert!(error.contains("origin/review/t5"), "{error}");
@@ -1578,13 +1859,13 @@ gate = "{gate}"
         // reset discards the half-run, the merge is already there once.
         let scratch = Scratch::new("retry");
         let worktree = scratch.merge_worktree();
-        let config = config("true");
+        let repo = repo("true");
 
         let candidate = scratch.head_of("heat/t5");
-        merge_one(&worktree, &config, &op(&candidate)).unwrap();
+        merge_one(&worktree, &repo, &op(&candidate)).unwrap();
         let first = scratch.dev_log();
         // The second run: the branches are gone, and the candidate is on dev.
-        merge_one(&worktree, &config, &op(&candidate)).unwrap();
+        merge_one(&worktree, &repo, &op(&candidate)).unwrap();
         let second = scratch.dev_log();
 
         assert_eq!(first, second, "no second merge, no lost push");

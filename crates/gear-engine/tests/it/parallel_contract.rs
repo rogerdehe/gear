@@ -73,6 +73,31 @@ profile = "codex"
     fn store(&self) -> Store { self.seed(Store::open_in_memory().unwrap(), "steady") }
 }
 
+/// A child repo below the project root (T-53): its own integration branch
+/// and its own branches.
+struct Child { path: PathBuf }
+impl Child {
+    fn new(root: &Path, integration: &str) -> Child {
+        let path = root.join("web");
+        fs::create_dir_all(&path).unwrap();
+        git(&path, &["init", "-q", "-b", integration]);
+        git(&path, &["config", "user.name", "test"]);
+        git(&path, &["config", "user.email", "a@b"]);
+        git(&path, &["config", "commit.gpgsign", "false"]);
+        git(&path, &["config", "core.hooksPath", "/dev/null"]);
+        for file in [SHARED, "other.rs"] { fs::write(path.join(file), "base\n").unwrap(); }
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-qm", "base"]);
+        Child { path }
+    }
+    fn branch(&self, name: &str, file: &str) {
+        git(&self.path, &["switch", "-qc", name]);
+        fs::write(self.path.join(file), name).unwrap();
+        git(&self.path, &["add", "--", file]);
+        git(&self.path, &["commit", "-qm", "change"]);
+    }
+}
+
 fn git(path: &Path, args: &[&str]) -> String {
     let output = Command::new("git").arg("-C").arg(path).args(args).output().unwrap();
     assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
@@ -252,4 +277,116 @@ fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
     let items = pair_items(&mut store);
     assert_eq!(items[0].state, MsgState::Resolved);
     assert_eq!(items[1].state, MsgState::Open);
+}
+
+/// A project with a child repo (T-53): the lane "heat" works in the root,
+/// the lanes "steady" and "web2" in the child repo.
+fn multi_repo_store(root: &Repo) -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T0)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
+        for (lane, pane) in [("heat", "w1:p2"), ("steady", "w1:p3"), ("web2", "w1:p4")] {
+            testing::seed_active_seat(tx, "p", lane, SeatRole::Lane, pane, "opencode", T0)?;
+            tx.set_seat_state(&format!("p:{lane}"), SeatState::Held, Some("isolated Git scan fixture"), T0)?;
+        }
+        for (n, lane) in [(1, "heat"), (2, "steady"), (3, "web2")] {
+            tx.insert_task(&TaskRow {
+                project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
+                priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
+                contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
+                wait_cond: None, rework_note: None, estimate_min: Some(30), updated: T0,
+            })?;
+        }
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = format!(r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = {root}
+
+[[repos]]
+name = "web"
+path = "web"
+integration = "web-dev"
+
+[quota]
+lanes = 3
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "steady"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "web"
+
+[[lanes]]
+name = "web2"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "web"
+"#, root = serde_json::json!(root.path.to_string_lossy()).to_string());
+        tx.update_project(&project)
+    }).unwrap();
+    store
+}
+
+/// T-53: the scan runs per repo. The task of the root repo and the task of
+/// the child repo change the same file name and are not compared: only the
+/// tasks whose lanes share a repo are.
+#[test]
+fn tasks_of_different_repos_are_never_compared() {
+    let root = Repo::new();
+    let child = Child::new(&root.path, "web-dev");
+    root.branch("heat/t1", SHARED);
+    child.branch("steady/t2", SHARED);
+    child.branch("web2/t3", SHARED);
+    let mut store = multi_repo_store(&root);
+
+    let checked = scan(&mut store, 0);
+
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert_eq!(checked.opened.len(), 1, "only the two tasks of the child repo overlap");
+    let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
+    assert!(item.body.contains("T-2 (steady) and T-3 (web2)"), "{}", item.body);
+    assert!(item.body.contains(SHARED), "{}", item.body);
+    assert!(!item.body.contains("T-1"), "the task of the root repo is another repo: {}", item.body);
+}
+
+/// T-53: the scan of a repo reads that repo's own integration branch: a
+/// change on the child's branch is a change on its integration branch.
+#[test]
+fn the_scan_of_a_child_repo_reads_its_own_integration_branch() {
+    let root = Repo::new();
+    let child = Child::new(&root.path, "web-dev");
+    child.branch("steady/t2", SHARED);
+    // The child's integration branch moved: the shared file is now on it.
+    git(&child.path, &["switch", "-q", "web-dev"]);
+    fs::write(child.path.join(SHARED), "integration\n").unwrap();
+    git(&child.path, &["add", "--", SHARED]);
+    git(&child.path, &["commit", "-qm", "integration"]);
+    let mut store = multi_repo_store(&root);
+
+    let checked = scan(&mut store, 0);
+
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert_eq!(checked.opened.len(), 1, "{:?}", checked.opened);
+    let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
+    assert!(item.body.contains("integration web-dev"), "{}", item.body);
 }
