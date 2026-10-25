@@ -2,7 +2,7 @@
 
 use gear_herdr::{classify_screen, AgentInfo, AgentStatus, HerdrRead, Profile, ScreenFlag};
 use gear_model::{GearResult, SeatState};
-use gear_store::{BindingStatus, SeatRow, Tx};
+use gear_store::{BindingStatus, SeatRow, Store, Tx};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,10 @@ pub struct SeatObs {
     /// agent of a kind that shows a provider back-off (T-75). None when the
     /// screen was not read.
     pub screen: Option<String>,
+    /// The session the agent in the pane reports (T-97). A hand restart of the
+    /// agent shows a new one: that is how a delivery that was never confirmed
+    /// gets its second chance without a store edit.
+    pub session: Option<String>,
 }
 
 /// One `agents()` call for the whole session. `Err` = observation failed:
@@ -78,6 +82,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     }
 
@@ -93,6 +98,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     };
 
@@ -106,6 +112,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     };
 
@@ -118,12 +125,21 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     }
 
     let (flags, idle, screen) =
         screen_of(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
-    Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle, screen })
+    Ok(SeatObs {
+        seat,
+        presence: Presence::Present,
+        status: Some(agent.agent_status),
+        flags,
+        idle,
+        screen,
+        session: agent.agent_session.as_ref().map(|session| session.value.clone()),
+    })
 }
 
 /// The screen of the seat's agent, the flags it shows and whether the agent
@@ -179,6 +195,36 @@ fn screen_of(
         }
     }
     (flags, false, Some(tail))
+}
+
+/// Keep each seat's binding session equal to the one its agent reports (T-97).
+///
+/// An agent restarted by hand in its pane is a new session with the same
+/// generation: the store must say so, because the record of a delivery that was
+/// never confirmed is compared with the session it was sent into. Only a
+/// present agent with a session value updates the binding; a kind that reports
+/// none leaves it as it is.
+pub fn record_sessions(store: &mut Store, observed: &[SeatObs]) -> GearResult<()> {
+    let updates: Vec<(String, i64, String)> = observed
+        .iter()
+        .filter(|obs| obs.presence == Presence::Present)
+        .filter_map(|obs| {
+            let session = obs.session.as_ref().filter(|session| !session.is_empty())?;
+            Some((obs.seat.id.clone(), obs.seat.generation, session.clone()))
+        })
+        .collect();
+    if updates.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        for (seat, generation, session) in updates {
+            let current = tx.get_binding(&seat, generation)?.and_then(|binding| binding.session_ref);
+            if current.as_deref() != Some(session.as_str()) {
+                tx.set_binding_session_ref(&seat, generation, &session)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// States considered "may receive a doorbell/delivery".

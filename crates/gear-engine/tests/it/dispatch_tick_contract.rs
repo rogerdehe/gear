@@ -27,7 +27,7 @@ fn world() -> (Store, SeatRow, SeatRow) {
 }
 
 fn idle(seat: &SeatRow) -> SeatObs {
-    SeatObs { seat: seat.clone(), presence: Presence::Present, status: Some(AgentStatus::Idle), flags: BTreeSet::new(), idle: true, screen: None }
+    SeatObs { seat: seat.clone(), presence: Presence::Present, status: Some(AgentStatus::Idle), flags: BTreeSet::new(), idle: true, screen: None, session: None }
 }
 
 #[test]

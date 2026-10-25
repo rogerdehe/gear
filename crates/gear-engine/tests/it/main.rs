@@ -32,6 +32,7 @@ mod stall_contract;
 mod captain_quota_contract;
 mod hand_in_notifications;
 mod station_contract;
+mod undelivered_delivery_contract;
 mod busy_contract;
 mod blocked_contract;
 mod blocked_delivery_contract;

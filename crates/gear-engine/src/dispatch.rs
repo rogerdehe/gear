@@ -2,6 +2,7 @@
 //! engine builds a [`LaneView`] per lane seat each tick and turns the
 //! [`Action`] into ops (08).
 
+use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
 use gear_herdr::{AgentStatus, ScreenFlag};
 use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
@@ -26,6 +27,10 @@ pub struct LaneView {
     /// An in-place model switch is under way (T-33, F6): no prompt may land in
     /// the agent while its picker or dialog is open.
     pub switch_pending: bool,
+    /// The last delivery to this seat that Herdr accepted and the lane never
+    /// confirmed (T-97). It is delivered once more in a new agent session — or
+    /// at once when a switch swallowed it — never every tick.
+    pub failed_delivery: Option<FailedDelivery>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +123,24 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
             // delivery was confirmed but the agent never started (R-31) — it
             // is nudged the same way instead of waiting forever.
             AttemptState::Started | AttemptState::Stopped | AttemptState::Delivered => {
+                // T-97: a delivery that was never confirmed is not typed into
+                // the same agent session again. It goes once more when the
+                // pane reports a new session (a hand restart) or the seat has
+                // a new generation (a restart GEAR did), and at once when a
+                // model switch swallowed it.
+                if attempt.state == AttemptState::Delivered {
+                    if let Some(failed) = &v.failed_delivery {
+                        if failed.task == attempt.task && failed.attempt == attempt.n {
+                            let new_session = obs.session != failed.session;
+                            let new_generation = seat.generation != failed.generation;
+                            if !(failed.retry_now || new_session || new_generation) {
+                                return none(
+                                    "the delivery was not confirmed in this agent session; it goes again in a new one",
+                                );
+                            }
+                        }
+                    }
+                }
                 // A contract update the lane has not adopted yet is named once,
                 // before any continue (T-8, design/06). The marker holds the
                 // newest version, so two bumps still give one delivery.
@@ -248,7 +271,14 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
             let continues = task
-                .map(|task| matches!(task.state, TaskState::Running | TaskState::Verifying))
+                .map(|task| match task.state {
+                    TaskState::Running | TaskState::Verifying => true,
+                    // A delivery that was never confirmed never started the
+                    // task: the attempt is the seat's open one all the same,
+                    // and the delivery goes again (T-97).
+                    TaskState::Ready => attempt.state == AttemptState::Delivered,
+                    _ => false,
+                })
                 .unwrap_or(false);
             if !continues {
                 return Ok(empty_view(obs));
@@ -272,6 +302,7 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
             .get_meta(&format!("engine.switch.{}", seat.id))?
             .map(|value| !value.is_empty())
             .unwrap_or(false),
+        failed_delivery: crate::delivery::failed(tx, &seat.id)?,
     })
 }
 
@@ -286,6 +317,7 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
         ready_tasks: Vec::new(),
         safe_for_next: false,
         switch_pending: false,
+        failed_delivery: None,
     }
 }
 
@@ -417,7 +449,13 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
             Action::None { .. } | Action::Escalate { .. } => {}
         }
     }
-    crate::ops::intend_deliveries(tx, &deliveries, now)
+    let ops = crate::ops::intend_deliveries(tx, &deliveries, now)?;
+    // The attempt is on its way again: the record of the failed delivery has
+    // done its job (T-97). A second failure writes a fresh one.
+    for delivery in &deliveries {
+        crate::delivery::clear(tx, &delivery.seat)?;
+    }
+    Ok(ops)
 }
 
 #[cfg(test)]
@@ -450,6 +488,7 @@ mod tests {
             flags: BTreeSet::new(),
             idle,
             screen: None,
+            session: None,
         }
     }
 
@@ -499,6 +538,7 @@ mod tests {
                  issue: None,updated: NOW,
             }],
             safe_for_next: false,
+            failed_delivery: None,
         }
     }
 

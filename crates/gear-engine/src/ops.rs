@@ -346,6 +346,9 @@ pub fn confirm_pending(
                     };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
                     if op.kind == OpKind::Deliver {
+                        // The delivery got through: nothing is left to send
+                        // again for this attempt (T-97).
+                        crate::delivery::clear(tx, &op.seat)?;
                         // Design/06: the confirmed delivery starts the attempt.
                         start_confirmed_attempt(tx, project, &op, now)?;
                     }
@@ -374,9 +377,42 @@ pub fn confirm_pending(
                     continue;
                 }
                 // No evidence yet: the op waits for the next round. Its budget
-                // counts the checks; when it reaches the limit the seat needs
-                // a human check (the op is not resent).
+                // counts the checks. A delivery whose budget is spent must not
+                // hold the seat's slot forever (T-97): it fails with the
+                // reason, the captain is rung once, and the open attempt is
+                // delivered again in a new agent session (dispatch).
                 let used = tx.bump_op_check_budget(project, &op.id, now)?;
+                if op.kind == OpKind::Deliver && used >= budget {
+                    let session = tx
+                        .get_binding(&op.seat, op.generation)?
+                        .and_then(|binding| binding.session_ref);
+                    tx.set_op_state(
+                        project,
+                        &op.id,
+                        OpState::Failed,
+                        Some(&format!(
+                            "delivery not confirmed after {used} checks (the lane never showed task {} attempt {}): it is delivered again in a new agent session",
+                            op.task.as_deref().unwrap_or("-"),
+                            op.attempt.unwrap_or(0)
+                        )),
+                        now,
+                    )?;
+                    crate::delivery::record(
+                        tx,
+                        &op.seat,
+                        &crate::delivery::FailedDelivery {
+                            task: op.task.clone().unwrap_or_default(),
+                            attempt: op.attempt.unwrap_or(0),
+                            generation: op.generation,
+                            session,
+                            retry_now: false,
+                        },
+                    )?;
+                    if !flagged.contains(&op.seat) {
+                        flagged.push(op.seat.clone());
+                    }
+                    continue;
+                }
                 if used == budget && !flagged.contains(&op.seat) {
                     flagged.push(op.seat.clone());
                 }
