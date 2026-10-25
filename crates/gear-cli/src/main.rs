@@ -15,15 +15,9 @@ use gear_model::{GearError, GearResult};
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Expand an item: message/thread id, task id, `queue`, `draft`.
+    /// Expand a task id (T-n): its packet.
     #[arg(long, global = false)]
     show: Option<String>,
-    /// With --show <task>: diff since the last work check.
-    #[arg(long)]
-    diff: bool,
-    /// User only: read-only overview of every project.
-    #[arg(long)]
-    all: bool,
     /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
@@ -33,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Report: progress | question | blocked | result | ack | instruction | review.
+    /// Report: progress | question | result | instruction | review.
     Send(SendCmd),
     /// Captain: handle exact message ids.
     Reply(ReplyCmd),
@@ -125,8 +119,6 @@ struct ReplyCmd {
     note: bool,
     #[arg(long)]
     downgrade: bool,
-    #[arg(long = "next-check")]
-    next_check: Option<String>,
     #[arg(long = "request-id")]
     request_id: Option<String>,
     #[arg(long, short)]
@@ -172,6 +164,7 @@ enum ReportOp {
 
 #[derive(Subcommand, Debug)]
 enum AdminOp {
+    /// Register a project, or apply a changed config to a registered one.
     Init { config: std::path::PathBuf },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -183,34 +176,6 @@ enum AdminOp {
     },
     /// Stop the background engine (it starts again on the next `gear` call).
     Stop,
-    Seat {
-        #[command(subcommand)]
-        op: SeatOp,
-    },
-    Captain {
-        #[command(subcommand)]
-        op: CaptainOp,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum SeatOp {
-    Confirm { seat: String },
-    Remove { seat: String },
-}
-
-#[derive(Subcommand, Debug)]
-enum CaptainOp {
-    Replace {
-        #[arg(long)]
-        project: String,
-        #[arg(long)]
-        pane: String,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        resume: Option<String>,
-    },
 }
 
 fn main() {
@@ -260,7 +225,7 @@ fn run(cli: Cli) -> GearResult<()> {
         ensure_engine();
     }
     match cli.cmd {
-        None => cmd_home(cli.show.as_deref(), cli.diff, cli.all, cli.json),
+        None => cmd_home(cli.show.as_deref(), cli.json),
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
         Some(Cmd::Plan { op }) => match op {
@@ -283,7 +248,6 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
-        Some(Cmd::Admin { .. }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
     }
 }
 
@@ -312,10 +276,6 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::PushCheck { .. })
             | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
     )
-}
-
-fn not_yet(what: &str) -> GearError {
-    GearError::new(gear_model::ErrorCode::Forbidden, format!("{what} is not implemented yet"))
 }
 
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
@@ -450,10 +410,7 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
     format!("r-{ms}-{pid}")
 }
 
-fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult<()> {
-    // `--diff`/`--all` are views that are not implemented yet: reject them by
-    // name instead of printing a page that silently ignores them.
-    reject_slice2(diff, all)?;
+fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
     if let Some(target) = show {
         let env = env_from_process()?;
         let mut store = open_store()?;
@@ -466,20 +423,6 @@ fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     run_home(&mut store, &env, &mut herdr, now_ts(), json, &mut std::io::stdout())
-}
-
-/// The `--diff`/`--all` views are slice 2: reject them by name instead of
-/// printing a page that silently ignores them.
-fn reject_slice2(diff: bool, all: bool) -> GearResult<()> {
-    for (flag, given) in [("--diff", diff), ("--all", all)] {
-        if given {
-            return Err(GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!("{flag} is not supported in slice 1"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// `gear --show <target>` over injected state: the task packet of a task id.
@@ -1295,7 +1238,6 @@ fn run_reply(
     now: i64,
     json: bool,
 ) -> GearResult<String> {
-    reject_unsupported(&[("--next-check", c.next_check.is_some())])?;
     let (mode, wait_on, wait_until) = reply_mode(c, now)?;
     let args = gear_app::mail::ReplyArgs {
         ids: c.ids.clone(),
@@ -1354,14 +1296,14 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
     match kind {
         gear_model::MsgKind::Progress
         | gear_model::MsgKind::Question
-        | gear_model::MsgKind::Blocked
         | gear_model::MsgKind::Result
-        | gear_model::MsgKind::Ack
         | gear_model::MsgKind::Instruction
         | gear_model::MsgKind::Review => Ok(kind),
-        gear_model::MsgKind::Reply | gear_model::MsgKind::System => Err(GearError::new(
+        _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
-            format!("--kind {text} is not a `gear send` kind"),
+            format!(
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction or review"
+            ),
         )),
     }
 }
@@ -1902,7 +1844,6 @@ mod tests {
             until: None,
             note: false,
             downgrade: false,
-            next_check: None,
             request_id: Some("r-2".into()),
             message: "Use v2".into(),
         }
@@ -3041,19 +2982,6 @@ mod tests {
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{target}");
             assert!(err.detail.contains(target), "{target}: {}", err.detail);
         }
-    }
-
-    #[test]
-    fn slice2_flags_are_bad_format() {
-        for (flag, rejected) in [
-            ("--diff", reject_slice2(true, false)),
-            ("--all", reject_slice2(false, true)),
-        ] {
-            let err = rejected.unwrap_err();
-            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
-            assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
-        }
-        assert!(reject_slice2(false, false).is_ok());
     }
 
     #[test]
