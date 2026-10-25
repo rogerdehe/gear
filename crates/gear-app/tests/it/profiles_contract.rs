@@ -105,7 +105,7 @@ exit_keys = ["ctrl+c", "ctrl+d"]"#,
 kind = "pi""#,
     ).replace(r#"profile = "opencode""#, r#"profile = "pi""#);
 
-    let err = admin::init(&mut s, &admin_env(), &text, NOW).unwrap_err();
+    let err = admin::init_with_home(&mut s, &admin_env(), &text,Some(crate::skill_home()), NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
     assert!(err.detail.contains("unattended"), "{}", err.detail);
     // Nothing was registered.
@@ -116,7 +116,7 @@ kind = "pi""#,
 fn an_unknown_profile_is_refused_at_init() {
     let mut s = world();
     let text = config_with("").replace(r#"profile = "opencode""#, r#"profile = "grokline""#);
-    let err = admin::init(&mut s, &admin_env(), &text, NOW).unwrap_err();
+    let err = admin::init_with_home(&mut s, &admin_env(), &text,Some(crate::skill_home()), NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
     assert!(err.detail.contains("grokline"), "{}", err.detail);
 }
@@ -125,7 +125,7 @@ fn an_unknown_profile_is_refused_at_init() {
 fn a_configured_profile_is_accepted_at_init() {
     let mut s = world();
     let text = config_with("").replace(r#"profile = "opencode""#, r#"profile = "grok""#);
-    let r = admin::init(&mut s, &admin_env(), &text, NOW).unwrap();
+    let r = admin::init_with_home(&mut s, &admin_env(), &text,Some(crate::skill_home()), NOW).unwrap();
     assert_eq!(r.project, "toy");
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
     assert_eq!(seat.profile, "grok");
@@ -139,6 +139,7 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
             executable: "/usr/local/bin/pi".into(),
             models: vec!["pi-1".into()],
             note: None,
+            skill: false,
         }],
         missing: vec![],
     };
@@ -153,6 +154,7 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
             executable: "/usr/local/bin/opencode".into(),
             models: vec![],
             note: None,
+            skill: true,
         }],
         missing: vec![],
     };
