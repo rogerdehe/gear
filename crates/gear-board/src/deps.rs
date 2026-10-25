@@ -125,7 +125,7 @@ mod tests {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-            updated: 0,
+             issue: None,updated: 0,
         }
     }
 

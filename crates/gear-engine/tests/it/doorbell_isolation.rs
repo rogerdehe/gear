@@ -200,7 +200,7 @@ fn warm_reviewer(w: &mut World) -> SeatRow {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),
@@ -325,7 +325,7 @@ fn a_reregistered_lane_starts_with_its_task_not_a_doorbell() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })
         })
         .unwrap();
@@ -378,7 +378,7 @@ fn a_tick_with_a_doorbell_and_a_delivery_for_one_seat_sends_only_the_delivery() 
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })
         })
         .unwrap();
