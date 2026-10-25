@@ -50,7 +50,10 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         let key = key(&seat.id);
         let blocked = obs.presence == Presence::Present
             && obs.status == Some(AgentStatus::Blocked)
-            && matches!(seat.state, SeatState::Active | SeatState::Standby);
+            && matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Retiring
+            );
         if !blocked {
             recover(tx, project, &key, now)?;
             continue;

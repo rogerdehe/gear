@@ -7,7 +7,7 @@
 
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
-use gear_model::{OpKind, OpState, SeatRole, TaskState};
+use gear_model::{MsgState, OpKind, OpState, SeatRole, SeatState, TaskState};
 use gear_store::{testing, ContractRow, OpRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -129,4 +129,48 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
         "{:?}",
         w.herdr.prompts_to(LANE)
     );
+}
+
+/// R1 of the T-68 review: a lane retired while it sits on a dialog is still
+/// alerted (its pane is a dialog nobody may ignore), and its pending delivery
+/// keeps waiting; when the dialog clears it is delivered once.
+#[test]
+fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
+    let mut w = world(AgentStatus::Blocked);
+    // The delivery is pending: a blocked seat is not typed into.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    let ops = deliveries(&mut w);
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+
+    // The captain retires the lane while it is blocked.
+    w.store
+        .write(|tx| {
+            tx.set_seat_state("p:heat", SeatState::Retiring, Some("retired by the plan"), T0 + 2)
+        })
+        .unwrap();
+
+    // Ten blocked ticks, more than the alert's two minutes.
+    for n in 0..10 {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
+    }
+    let ops = deliveries(&mut w);
+    assert_eq!(ops.len(), 1, "one pending delivery: {ops:?}");
+    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+    let alerts = w
+        .store
+        .read(|tx| tx.thread_messages("p", "blocked:p:heat"))
+        .unwrap();
+    assert_eq!(alerts.len(), 1, "the blocked alert: {alerts:?}");
+    assert_eq!(alerts[0].state, MsgState::Open);
+
+    // The dialog is dismissed: one delivery, once.
+    w.herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
+    for n in 10..14 {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
+    }
+    let ops = deliveries(&mut w);
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Submitted, "{ops:?}");
+    assert_eq!(w.herdr.prompts_to(LANE).len(), 1, "delivered once");
 }
