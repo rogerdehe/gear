@@ -1,20 +1,24 @@
 //! Contract for [`GitHub`], the forge over the `gh` CLI (T-78).
 //!
 //! Every test runs a fake `gh` — a shell script in a scratch directory, put
-//! on the child's `PATH` — that records the argv it was called with and
-//! answers recorded JSON. That is what the engine's forge calls look like
-//! from `gh`'s side: the command line, the parsing of the answer, and a typed
-//! error when the tool is missing, fails, answers nonsense or runs too long.
+//! on the child's `PATH` — that records the argv and the sequence of calls it
+//! was given and answers recorded JSON. That is what the engine's forge calls
+//! look like from `gh`'s side: the command line, the parsing of the answer,
+//! the draft-to-ready step before a merge (T-78, F1), and a typed error when
+//! the tool is missing, fails, answers nonsense or runs too long.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gear_forge::{marker, Error, Filter, Forge, GitHub, MergeMethod, PrRef};
 
-/// A fake `gh` for `dir`: it writes its argv to `argv` (each argument closed
-/// by a `\037`, so an argument may hold newlines), prints `out`, prints `err`
-/// on stderr and exits with `code`; every file is optional. Shell builtins
-/// only — it runs with a `PATH` that holds nothing but itself.
+/// A fake `gh` for `dir`: it records its argv (each argument closed by a
+/// `\037`, so an argument may hold newlines) and one line per call
+/// (`pr create`, `pr view`, …). Its answer is chosen by the first two
+/// arguments: `out-<cmd>-<sub>`, `err-…`, `code-…` when present, else the
+/// generic `out`, `err`, `code`. Every file is optional. Shell builtins only —
+/// it runs with a `PATH` that holds nothing but itself.
 fn fake_script(dir: &Path) -> String {
     let dir = dir.display();
     format!(
@@ -23,17 +27,21 @@ dir={dir}
 for arg in "$@"; do
   printf '%s\037' "$arg"
 done > "$dir/argv"
-if [ -f "$dir/out" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$dir/out"
+printf '%s %s\n' "$1" "$2" >> "$dir/calls"
+key="$1-$2"
+src=""
+if [ -f "$dir/out-$key" ]; then src="$dir/out-$key"; elif [ -f "$dir/out" ]; then src="$dir/out"; fi
+if [ -n "$src" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$src"
 fi
-if [ -f "$dir/err" ]; then
-  while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line" >&2; done < "$dir/err"
+src=""
+if [ -f "$dir/err-$key" ]; then src="$dir/err-$key"; elif [ -f "$dir/err" ]; then src="$dir/err"; fi
+if [ -n "$src" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line" >&2; done < "$src"
 fi
-if [ -f "$dir/code" ]; then
-  read -r code < "$dir/code"
-  exit "$code"
-fi
-exit 0
+code=0
+if [ -f "$dir/code-$key" ]; then read -r code < "$dir/code-$key"; elif [ -f "$dir/code" ]; then read -r code < "$dir/code"; fi
+exit "$code"
 "#
     )
 }
@@ -65,7 +73,7 @@ fn forge_with(tag: &str, script: Option<&str>) -> (PathBuf, GitHub) {
     (dir, forge)
 }
 
-/// What the fake was called with.
+/// What the fake was called with, last call only.
 fn argv(dir: &Path) -> Vec<String> {
     let recorded = fs::read_to_string(dir.join("argv")).expect("the fake gh recorded nothing");
     recorded
@@ -75,14 +83,44 @@ fn argv(dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// What the fake answers on stdout.
+/// Every call the fake was given, in order, as `<command> <subcommand>`.
+fn calls(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What the fake answers, for every call.
 fn answer(dir: &Path, text: &str) {
     fs::write(dir.join("out"), text).expect("the answer");
 }
 
-/// What the fake exits with.
+/// What the fake answers one call (`out-<cmd>-<sub>`).
+fn answer_for(dir: &Path, key: &str, text: &str) {
+    fs::write(dir.join(format!("out-{key}")), text).expect("the answer");
+}
+
+/// What the fake exits with, for every call.
 fn code(dir: &Path, code: i32) {
     fs::write(dir.join("code"), code.to_string()).expect("the exit code");
+}
+
+/// What the fake exits with, for one call (`code-<cmd>-<sub>`).
+fn code_for(dir: &Path, key: &str, code: i32) {
+    fs::write(dir.join(format!("code-{key}")), code.to_string()).expect("the exit code");
+}
+
+/// What the fake says on stderr, for one call (`err-<cmd>-<sub>`).
+fn error_for(dir: &Path, key: &str, text: &str) {
+    fs::write(dir.join(format!("err-{key}")), text).expect("the error text");
+}
+
+/// A pull request that is not a draft: the merge asks and goes on.
+fn ready_pr(dir: &Path) {
+    answer_for(dir, "pr-view", r#"{"isDraft":false}"#);
+    answer_for(dir, "pr-merge", "✔ Merged pull request #7\n");
 }
 
 #[test]
@@ -182,7 +220,7 @@ fn comment_names_the_repo_and_the_number() {
 #[test]
 fn merge_takes_the_method() {
     let (dir, forge) = forge_with("merge", None);
-    answer(&dir, "✔ Merged pull request #7\n");
+    ready_pr(&dir);
     let pr = PrRef {
         repo: "owner/name".to_string(),
         number: 7,
@@ -193,15 +231,84 @@ fn merge_takes_the_method() {
         argv(&dir),
         vec!["pr", "merge", "7", "--repo", "owner/name", "--squash"]
     );
+    assert_eq!(calls(&dir), vec!["pr view", "pr merge"], "a ready pull request is not re-readied");
     assert!(result.merged, "{result:?}");
     assert!(result.message.contains("Merged pull request #7"), "{result:?}");
 
     let (dir, forge) = forge_with("merge-commit", None);
+    ready_pr(&dir);
     forge.merge(&pr, MergeMethod::Merge).expect("the merge");
     assert_eq!(
         argv(&dir),
         vec!["pr", "merge", "7", "--repo", "owner/name", "--merge"]
     );
+}
+
+/// T-78, F1: a claim is opened as a draft, and GitHub refuses to merge a
+/// draft. The ordinary path — claim, hand-in, verdict, merge — must need no
+/// hand, so the merge turns the claim ready first.
+#[test]
+fn a_draft_claim_is_made_ready_before_it_merges() {
+    let (dir, forge) = forge_with("draft", None);
+    answer_for(&dir, "pr-create", "https://github.com/owner/name/pull/7\n");
+    answer_for(&dir, "pr-view", r#"{"isDraft":true}"#);
+    answer_for(&dir, "pr-ready", "");
+    answer_for(&dir, "pr-merge", "✔ Merged pull request #7\n");
+
+    let pr = forge
+        .open_claim("owner/name", "base/t78", "dev", "The forge layer", "Closes #12")
+        .expect("the claim");
+    assert!(pr.is_open());
+    let result = forge.merge(&pr, MergeMethod::Squash).expect("the merge");
+
+    assert_eq!(
+        calls(&dir),
+        vec!["pr create", "pr view", "pr ready", "pr merge"],
+        "a draft is turned ready before the merge"
+    );
+    assert_eq!(
+        argv(&dir),
+        vec!["pr", "merge", "7", "--repo", "owner/name", "--squash"]
+    );
+    assert!(result.merged, "{result:?}");
+}
+
+/// T-78, F1: readiness is asked, never assumed. A pull request that is already
+/// ready (a retry, or one opened by hand) is not turned ready again.
+#[test]
+fn a_ready_pull_request_is_not_made_ready_again() {
+    let (dir, forge) = forge_with("ready", None);
+    ready_pr(&dir);
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    forge.merge(&pr, MergeMethod::Squash).expect("the merge");
+    assert_eq!(calls(&dir), vec!["pr view", "pr merge"]);
+}
+
+/// T-78, F1: a readiness step that fails is a typed error, and nothing is
+/// merged afterwards.
+#[test]
+fn a_failed_readiness_is_a_typed_error() {
+    let (dir, forge) = forge_with("ready-failed", None);
+    answer_for(&dir, "pr-view", r#"{"isDraft":true}"#);
+    code_for(&dir, "pr-ready", 1);
+    error_for(&dir, "pr-ready", "HTTP 403: not allowed\n");
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    match forge.merge(&pr, MergeMethod::Squash).unwrap_err() {
+        Error::Failed(said) => {
+            assert!(said.contains("pr ready"), "{said}");
+            assert!(said.contains("not allowed"), "{said}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(calls(&dir), vec!["pr view", "pr ready"], "no merge after a failed readiness");
 }
 
 #[test]
@@ -233,7 +340,7 @@ fn a_closed_pull_request_is_never_asked_about() {
     forge.comment(&none, "x").expect("no call");
     let merged = forge.merge(&none, MergeMethod::Squash).expect("no call");
     assert!(!merged.merged, "{merged:?}");
-    assert!(!dir.join("argv").exists(), "the forge was called");
+    assert!(calls(&dir).is_empty(), "the forge was called: {:?}", calls(&dir));
 }
 
 #[test]
@@ -266,6 +373,16 @@ fn an_unreadable_answer_is_a_typed_error() {
         Error::Unreadable(said) => assert!(said.contains("the opened pull request"), "{said}"),
         other => panic!("expected an unreadable answer, got {other:?}"),
     }
+    // The draft state is read, not guessed: nonsense there is unreadable too.
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    match forge.merge(&pr, MergeMethod::Squash).unwrap_err() {
+        Error::Unreadable(said) => assert!(said.contains("draft state"), "{said}"),
+        other => panic!("expected an unreadable answer, got {other:?}"),
+    }
 }
 
 #[test]
@@ -283,14 +400,14 @@ fn a_missing_tool_is_a_typed_error() {
 #[test]
 fn a_call_past_its_bound_is_a_timeout() {
     let (_dir, forge) = forge_with("hang", Some(HANG));
-    let forge = forge.with_timeout(std::time::Duration::from_millis(250));
+    let forge = forge.with_timeout(Duration::from_millis(250));
     let started = std::time::Instant::now();
     match forge.issues("owner/name", &Filter::default()).unwrap_err() {
-        Error::Timeout(bound) => assert_eq!(bound, std::time::Duration::from_millis(250)),
+        Error::Timeout(bound) => assert_eq!(bound, Duration::from_millis(250)),
         other => panic!("expected a timeout, got {other:?}"),
     }
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(5),
         "the bound was not respected: {:?}",
         started.elapsed()
     );

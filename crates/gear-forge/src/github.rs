@@ -15,6 +15,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+
 use crate::{Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef};
 
 /// How long one `gh` call may take before it is killed.
@@ -72,6 +74,44 @@ impl GitHub {
             command.env("PATH", dir);
         }
         command
+    }
+
+    /// Make a pull request ready for review when it is still a draft.
+    ///
+    /// A claim is opened as a draft ("this lane took the issue"), and GitHub
+    /// refuses to merge a draft, so the merge turns it ready first. Only a
+    /// draft is turned ready: a pull request that is already ready — a retry
+    /// after a failed merge, or one opened by hand — is left alone, so no step
+    /// is repeated and a retry is safe (T-78, F1).
+    fn make_ready(&self, pr: &PrRef) -> ForgeResult<()> {
+        if !self.is_draft(pr)? {
+            return Ok(());
+        }
+        let args: Vec<String> = vec![
+            "pr".into(),
+            "ready".into(),
+            pr.number.to_string(),
+            "--repo".into(),
+            pr.repo.clone(),
+        ];
+        self.run(&args).map(|_| ())
+    }
+
+    /// Is the pull request still a draft? (`gh pr view --json isDraft`.)
+    fn is_draft(&self, pr: &PrRef) -> ForgeResult<bool> {
+        let args: Vec<String> = vec![
+            "pr".into(),
+            "view".into(),
+            pr.number.to_string(),
+            "--repo".into(),
+            pr.repo.clone(),
+            "--json".into(),
+            "isDraft".into(),
+        ];
+        let out = self.run(&args)?;
+        let view: DraftState = serde_json::from_str(&out)
+            .map_err(|e| Error::Unreadable(format!("the pull request's draft state: {e}")))?;
+        Ok(view.is_draft)
     }
 
     /// Run one `gh` call and answer its stdout, or a typed error.
@@ -221,6 +261,10 @@ impl Forge for GitHub {
                 message: "no pull request to merge".to_string(),
             });
         }
+        // A claim is opened as a draft and GitHub refuses to merge a draft:
+        // the merge turns it ready first (T-78, F1). The ordinary path is
+        // claim → hand-in → verdict → merge, and it must need no hand.
+        self.make_ready(pr)?;
         let args: Vec<String> = vec![
             "pr".into(),
             "merge".into(),
@@ -248,4 +292,11 @@ impl Forge for GitHub {
         ];
         self.run(&args).map(|_| ())
     }
+}
+
+/// What `gh pr view --json isDraft` answers.
+#[derive(Debug, Deserialize)]
+struct DraftState {
+    #[serde(rename = "isDraft")]
+    is_draft: bool,
 }
