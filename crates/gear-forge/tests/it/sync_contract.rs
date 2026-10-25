@@ -342,16 +342,20 @@ fn a_hand_in_a_verdict_and_a_merge_are_commented_in_order() {
     assert!(calls[1].starts_with("comment owner/name#1"), "{calls:?}");
     assert!(calls[1].contains("Handed in (abc1234)"), "{calls:?}");
     assert!(
-        calls[1].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:heat rounds=1 ci=pending -->"),
+        calls[1].contains("<!-- ORCHESTRATE:COMPLETION agent=p:heat rounds=1 -->"),
         "{calls:?}"
     );
     assert!(calls[2].contains("Verdict: fail."), "{calls:?}");
     assert!(calls[2].contains("F1: the gate is red"), "{calls:?}");
     assert!(
-        calls[2].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:review-1 rounds=1 ci=pending -->"),
+        calls[2].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:review-1 rounds=1 -->"),
         "{calls:?}"
     );
     assert!(calls[3].contains("Landed in dev: merged T-1 into dev: def5678"), "{calls:?}");
+    assert!(
+        calls[3].contains("<!-- ORCHESTRATE:COMPLETION reviewer=p:review-1 rounds=1 ci=pass -->"),
+        "the landing carries the gate's state: {calls:?}"
+    );
 }
 
 #[test]

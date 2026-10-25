@@ -321,14 +321,16 @@ fn not_yet(what: &str) -> GearError {
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
 ///
 /// An absent `GEAR_CTX` means an anonymous caller (the user's own shell or an
-/// unmanaged agent); a malformed one is an error, never a silent `None`.
+/// unmanaged agent), and so does an empty one; a malformed one is an error.
 fn env_from_process() -> GearResult<gear_app::Env> {
     env_from(|name| std::env::var(name).ok())
 }
 
 /// [`env_from_process`] over an injected variable lookup (testable).
 fn env_from(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_app::Env> {
-    let ctx = match vars(gear_model::ctx::ENV_CTX) {
+    // An empty GEAR_CTX is no seat: the tests blank it (.cargo/config.toml) so
+    // a test run in a lane's shell never acts as that lane.
+    let ctx = match vars(gear_model::ctx::ENV_CTX).filter(|raw| !raw.is_empty()) {
         None => None,
         Some(raw) => Some(gear_model::GearCtx::parse(&raw)?),
     };
@@ -370,7 +372,8 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
     })?;
     let mut store = open_store()?;
-    let r = gear_app::admin::init(&mut store, &env, &text, now_ts())?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let r = gear_app::admin::init_with_home(&mut store, &env, &text, home.as_deref(), now_ts())?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),

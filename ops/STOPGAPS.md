@@ -5,6 +5,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
+| captain's loop auto-resolving `push refused … /T/gear-merge-…/merge belongs to no repo` items (scratchpad `resolve-test-leaks.sh`) | lanes' and reviewers' branches without e5ddb14 run tests with their GEAR_CTX, so the tests' pre-push hook rings the captain per test push | every open branch includes e5ddb14 (all M3 tasks merged) | captain |
 
 ## Removed
 
