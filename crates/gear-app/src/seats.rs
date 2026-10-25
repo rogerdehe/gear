@@ -4,8 +4,8 @@
 //! role → `BadTransition`; missing seat/binding → `NoTarget`.
 
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, SeatState, Ts};
-use gear_store::{BindingRow, BindingStatus, Tx};
+use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
+use gear_store::{BindingRow, BindingStatus, MessageRow, SeatRow, Tx};
 
 /// Start onboarding: the seat (Queued, or Missing/NeedsCheck for a restart)
 /// moves to Starting, its generation becomes `generation + 1`, every earlier
@@ -147,4 +147,22 @@ pub fn generation_started(
 /// about its start, so nothing is hidden.
 pub fn generation_since(tx: &Tx<'_>, seat_id: &str, generation: i64) -> GearResult<Ts> {
     Ok(generation_started(tx, seat_id, generation)?.map_or(0, |started| started.saturating_sub(1)))
+}
+
+/// Whether a message is the seat's own job (T-71): written after its current
+/// generation started, and — for a temp seat — about the task it works on now.
+///
+/// A warm temp seat keeps its id across jobs, so an answer about the task it
+/// reviewed before is not this job's, even when it was written after the new
+/// job started (F1 of the T-71 review). The worker seats use this one rule for
+/// the doorbell and for the home page alike; the captain's open action items
+/// are not limited by it (its inbox is the engine's business, F2).
+pub fn message_belongs(seat: &SeatRow, message: &MessageRow, since: Ts) -> bool {
+    if message.created <= since {
+        return false;
+    }
+    if seat.role == SeatRole::Temp {
+        return message.task.as_deref() == seat.task_id.as_deref();
+    }
+    true
 }

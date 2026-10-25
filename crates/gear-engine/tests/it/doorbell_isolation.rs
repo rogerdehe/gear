@@ -338,6 +338,22 @@ fn a_reregistered_lane_starts_with_its_task_not_a_doorbell() {
 }
 
 #[test]
+fn an_earlier_voyages_question_does_not_ring_a_reregistered_lane() {
+    let mut w = world();
+    let seat = reregistered_lane(&mut w);
+    // Open since the previous voyage; nothing is ready to deliver this tick.
+    w.question(&seat.id, "M2: which lane takes the runtime?", T0 + 10);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, JOB_STARTED + 10).unwrap();
+
+    assert!(
+        w.herdr.prompts_to(LANE_PANE).is_empty(),
+        "no doorbell for an earlier voyage's question: {:?}",
+        w.herdr.prompts_to(LANE_PANE)
+    );
+}
+
+#[test]
 fn a_tick_with_a_doorbell_and_a_delivery_for_one_seat_sends_only_the_delivery() {
     let mut w = world();
     let seat = reregistered_lane(&mut w);
@@ -389,6 +405,68 @@ fn the_captains_open_items_still_ring() {
 }
 
 #[test]
+fn a_late_answer_about_the_previous_task_does_not_reach_the_new_job() {
+    let mut w = world();
+    let seat = warm_reviewer(&mut w);
+    // The captain answers late: about the task the seat reviewed *before*,
+    // but written after this job started. The generation alone would let it
+    // through (F1 of the T-71 review).
+    w.reply(&seat.id, "T-5", "judge v2", JOB_STARTED + 20);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, JOB_STARTED + 30).unwrap();
+
+    assert!(
+        w.herdr.prompts_to(REV_PANE).is_empty(),
+        "no doorbell for the previous task: {:?}",
+        w.herdr.prompts_to(REV_PANE)
+    );
+    let home = home_of(&mut w, &seat, REV_PANE, "codex", JOB_STARTED + 30);
+    assert!(
+        !home.text.contains("judge v2"),
+        "and it is not shown: {}",
+        home.text
+    );
+}
+
+/// `gear` for a seat, as the CLI builds it.
+fn home_of(w: &mut World, seat: &SeatRow, pane: &str, kind: &str, now: i64) -> gear_app::home::Home {
+    let env = gear_app::Env {
+        ctx: Some(gear_model::GearCtx {
+            project: "p".into(),
+            seat: seat.name.clone(),
+            generation: seat.generation,
+        }),
+        pane_id: Some(pane.into()),
+        admin: false,
+    };
+    let fp = gear_app::identity::Fingerprint {
+        pane_id: pane.into(),
+        kind: Some(kind.into()),
+        session_ref: None,
+    };
+    gear_app::home::build(&mut w.store, &env, Some(&fp), now).unwrap()
+}
+
+#[test]
+fn an_open_item_from_before_a_new_captain_generation_still_rings() {
+    let mut w = world();
+    // A new captain generation (a handover), and an item that was already
+    // open before it: the captain's inbox is the engine's business, so the
+    // item must ring (F2 of the T-71 review).
+    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    w.next_generation(&captain, CAP_PANE);
+    w.question("p:captain", "merge of T-5 failed: conflict", T0 + 10);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, JOB_STARTED + 30).unwrap();
+
+    let said = w.herdr.prompts_to(CAP_PANE);
+    assert!(
+        said.iter().any(|text| text.contains("GEAR:")),
+        "the captain is rung for its open item: {said:?}"
+    );
+}
+
+#[test]
 fn a_new_reviewers_gear_shows_no_message_from_an_earlier_job() {
     let mut w = world();
     let seat = warm_reviewer(&mut w);
@@ -396,21 +474,7 @@ fn a_new_reviewers_gear_shows_no_message_from_an_earlier_job() {
     w.reply(&seat.id, "T-5", "judge v2", T0 + 10);
     w.reply(&seat.id, "T-7", "judge this one", JOB_STARTED + 50);
 
-    let env = gear_app::Env {
-        ctx: Some(gear_model::GearCtx {
-            project: "p".into(),
-            seat: "review-1".into(),
-            generation: seat.generation,
-        }),
-        pane_id: Some(REV_PANE.into()),
-        admin: false,
-    };
-    let fp = gear_app::identity::Fingerprint {
-        pane_id: REV_PANE.into(),
-        kind: Some("codex".into()),
-        session_ref: None,
-    };
-    let home = gear_app::home::build(&mut w.store, &env, Some(&fp), JOB_STARTED + 60).unwrap();
+    let home = home_of(&mut w, &seat, REV_PANE, "codex", JOB_STARTED + 60);
 
     assert!(home.text.contains("judge this one"), "{}", home.text);
     assert!(

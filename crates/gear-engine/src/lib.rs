@@ -347,18 +347,20 @@ fn doorbell_inputs(
         // Only this generation's messages may ring the seat (T-71): a warm
         // temp seat keeps its id across jobs and a re-registered lane keeps
         // its name, so an earlier job's or voyage's items would otherwise be
-        // counted as unshown for ever.
+        // counted as unshown for ever. A temp seat's messages must also be
+        // about the task it reviews now (F1 of the T-71 review).
         let since = gear_app::seats::generation_since(tx, &seat.id, seat.generation)?;
         let period = attention::period(tx, project)?;
         let mut actionable = Vec::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
-            if message.created <= since {
-                continue;
-            }
             let include = if seat.role == gear_model::SeatRole::Captain {
+                // The captain's open items are the engine's business: they
+                // ring until they are answered, whatever generation took the
+                // seat over (F2 of the T-71 review).
                 attention::should_show(tx, &message, shown.contains(&message.id), period, now)?
             } else {
-                !shown.contains(&message.id)
+                gear_app::seats::message_belongs(seat, &message, since)
+                    && !shown.contains(&message.id)
             };
             if include { actionable.push(message); }
         }
@@ -369,7 +371,7 @@ fn doorbell_inputs(
         let unshown: Vec<String> = tx
             .messages_to_since(project, &seat.id, since)?
             .into_iter()
-            .filter(|m| !shown.contains(&m.id))
+            .filter(|m| !shown.contains(&m.id) && gear_app::seats::message_belongs(seat, m, since))
             .map(|m| m.id)
             .collect();
 
