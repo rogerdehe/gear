@@ -501,6 +501,20 @@ fn start(
             }
         }
     }
+    // T-76: the restart's args name the folder the agent runs in — its
+    // worktree; a seat from before the worktree was recorded falls back to the
+    // root of its lane's repo, which Codex trusts just the same.
+    let folder = match worktree_path(store, seat)? {
+        Some(path) => Some(path),
+        None => store
+            .read(|tx| tx.get_project(&seat.project))?
+            .and_then(|row| gear_app::config::parse(&row.config_toml).ok())
+            .map(|config| config.repo_of_lane(&seat.name).path),
+    };
+    let args = match folder {
+        Some(folder) => gear_herdr::render_args(&args, &folder),
+        None => args,
+    };
     match herdr.agent_start(&name, &plan.cli, &pane, &args) {
         Outcome::Ok(_) => {
             plan.phase = Phase::Finish;

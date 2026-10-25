@@ -82,6 +82,26 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
     flags
 }
 
+/// The start args with `{repo_root}` replaced (T-76): the folder the agent
+/// runs in — the worktree the engine made for one of the project's repos. A
+/// profile without the placeholder keeps its args as they are. `{session}` is
+/// filled by the callers that resume a session.
+///
+/// The folder is written **as the filesystem resolves it**: Codex canonicalises
+/// its working directory before it looks a folder up, so a symlinked path
+/// (`/var` in a temp dir, a linked checkout) would not match (checked live,
+/// 0.164.0). A path that does not exist is written as it came.
+pub fn render_args(args: &[String], repo_root: &str) -> Vec<String> {
+    let folder = std::fs::canonicalize(repo_root)
+        .ok()
+        .filter(|_| args.iter().any(|arg| arg.contains("{repo_root}")))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo_root.to_string());
+    args.iter()
+        .map(|arg| arg.replace("{repo_root}", &folder))
+        .collect()
+}
+
 /// Reject a prompt template that contains any marker of `profile`
 /// (old keeper incident: the nudge text tripped its own rate-limit detector).
 /// Returns the offending marker in the error.
@@ -323,6 +343,14 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "--dangerously-bypass-approvals-and-sandbox".into(),
                 "-c".into(),
                 "check_for_update_on_startup=false".into(),
+                // T-76: the folder the agent runs in is trusted, so Codex's
+                // first-run "Trust this folder?" dialog never blocks a seat.
+                // `{repo_root}` is the worktree the engine made for one of the
+                // project's repos (trial G08). The inline table is the form
+                // Codex's `-c` honours: the dotted `projects."<path>".trust_level`
+                // spelling is silently ignored there (checked live, 0.164.0).
+                "-c".into(),
+                "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".into(),
             ],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
@@ -424,6 +452,28 @@ mod tests {
         assert!(profile.backoff("waiting for provider: 30 s"));
         // The built-in is untouched.
         assert!(!builtin("opencode").unwrap().backoff("waiting for provider: 30 s"));
+    }
+
+    /// T-76: the codex start args carry the folder the agent runs in, so its
+    /// first-run "Trust this folder?" dialog never blocks a seat.
+    #[test]
+    fn the_codex_start_args_name_the_folder_it_runs_in() {
+        let codex = builtin("codex").unwrap();
+        let args = render_args(&codex.unattended_args, "/worktrees/gear/home-heat");
+        assert_eq!(
+            args,
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "-c".to_string(),
+                "check_for_update_on_startup=false".to_string(),
+                "-c".to_string(),
+                "projects={\"/worktrees/gear/home-heat\"={trust_level=\"trusted\"}}".to_string(),
+            ]
+        );
+        // No placeholder survives, and no kind without it changes.
+        assert!(!args.iter().any(|arg| arg.contains("{repo_root}")));
+        let claude = builtin("claude").unwrap();
+        assert_eq!(render_args(&claude.unattended_args, "/x"), claude.unattended_args);
     }
 
     #[test]
