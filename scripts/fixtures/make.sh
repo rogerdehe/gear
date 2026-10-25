@@ -55,6 +55,9 @@ commit() {
 for name in parent web api; do
     git_ init -q --bare -b dev "$target/origins/$name.git"
 done
+# The project that already runs has its own origin too: a GEAR project's push
+# allow-list needs a registered destination (T-98).
+git_ init -q --bare -b main "$target/origins/running.git"
 # The children's integration branch is their own (T-53): their origins start on
 # `feat`, so a clone of one is on it.
 for name in web api; do
@@ -286,7 +289,9 @@ check:
 	sh gate.sh
 EOF
 
+git_ -C "$running" remote add origin "$target/origins/running.git"
 commit "$running" "running: the project as it is today"
+git_ -C "$running" push -q -u origin main
 
 # ---------------------------------------------------------------- notes
 
@@ -334,6 +339,10 @@ A project that already runs: `.github/workflows/ci.yml`, a `CLAUDE.md` and an
 `AGENTS.md` that contradict each other and GEAR, `.claude/skills/release-check`,
 three stale docs under `docs/`, and `src/bad.py` beside the exemplar
 `src/good.py`. Its gate is `sh gate.sh` (the same thing `make check` runs).
+
+It has its own local bare `origin` too — `origins/running.git`, on `main` — so a
+GEAR project registered on it has a destination for the push allow-list; the
+adoption run used to need one made by hand.
 
 Use it for the adoption voyage: `gear --skill adopt` (T-85) before the kickoff.
 
