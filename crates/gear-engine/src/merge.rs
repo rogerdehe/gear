@@ -24,6 +24,12 @@
 //! wait; a failure that stands (a conflict, a gate that said no, a candidate
 //! on no pushed ref) ends the op and rings the captain once.
 //!
+//! A candidate that carries another task's work waits for that task (T-62):
+//! the work of a task that has not landed on the integration branch yet must
+//! not ride in with the task built on it. The wait is not a failure: the op
+//! goes back to the queue, and the captain is told once which task it waits
+//! for.
+//!
 //! A project of several repos merges each of them on its own branch and with
 //! its own gate (T-53): the task's repo is its lane's repo, and one worker
 //! runs per repo.
@@ -74,9 +80,23 @@ struct Worker {
 
 #[derive(Debug, Clone)]
 struct Finished {
-    // None means another engine still holds this worktree's merge lock.
-    result: Result<Option<String>, Failed>,
+    result: Report,
     at: Ts,
+}
+
+/// What the merge worker reports back.
+#[derive(Debug, Clone)]
+enum Report {
+    /// Merged and pushed: the result line.
+    Merged(String),
+    /// The worktree is busy: another engine still holds the merge lock.
+    Busy,
+    /// The merge waits: the candidate carries the work of other tasks that
+    /// have not landed on the integration branch yet (T-62). Each task is
+    /// named with whether it has passed its review.
+    Waiting(Vec<(String, bool)>),
+    /// The merge failed: the reason, and whether it can clear.
+    Failed(Failed),
 }
 
 fn wall_time() -> Ts {
@@ -157,7 +177,7 @@ pub fn merge_passed(
         };
         let op = &worker.op;
         match finished.result {
-            Ok(Some(lines)) => {
+            Report::Merged(lines) => {
                 store.write(|tx| {
                     let current = tx.get_op(project, &op.id)?.unwrap();
                     if current.state == OpState::Executing {
@@ -175,11 +195,27 @@ pub fn merge_passed(
                     task: op.task.clone().unwrap_or_default(),
                     branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
                 });
+                // The wait is over: the captain's item about it closes (T-62).
+                resolve_wait(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
             }
-            Ok(None) => retry_merge(store, project, op, finished.at)?,
+            Report::Busy => retry_merge(store, project, op, "merge will retry from origin", finished.at)?,
+            // The merge waits for another task: it is not a failure. The op
+            // goes back to Unknown and the captain is told once which task it
+            // waits for (T-62).
+            Report::Waiting(blocked) => {
+                let names: Vec<String> = blocked.iter().map(|(task, _)| task.clone()).collect();
+                retry_merge(
+                    store,
+                    project,
+                    op,
+                    &format!("waits for {}", names.join(", ")),
+                    finished.at,
+                )?;
+                tell_captain_waiting(store, project, op, &blocked, finished.at)?;
+            }
             // The worker already retried a reason that can clear (T-61): what
             // comes back is the failure that stands.
-            Err(failed) => fail_merge(store, project, op, &failed.reason, finished.at)?,
+            Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, finished.at)?,
         }
         // Keep the completion until its database write succeeded: a transient
         // store error must not lose the result or launch a second worker.
@@ -189,7 +225,7 @@ pub fn merge_passed(
 
     // One worker per repo. Unknown ops are restart recovery: merge_one
     // resets to origin before doing any merges, and adopts a completed push.
-    for op in ready_merges(store, project)? {
+    for op in merge_order(ready_merges(store, project)?) {
         let task = op.task.clone().unwrap_or_default();
         let valid_task = store.read(|tx| {
             Ok(tx
@@ -198,6 +234,8 @@ pub fn merge_passed(
         })?;
         if !valid_task || still_current(store, project, &op)?.is_err() {
             store.write(|tx| neutrino_void(tx, project, &op.id, now))?;
+            // The merge will not happen: its wait is over (T-62).
+            resolve_wait(store, project, &task, now)?;
             continue;
         }
         // The repo the work is in: the repo of the task's lane (T-53).
@@ -217,6 +255,9 @@ pub fn merge_passed(
         if op.state == OpState::Intended {
             store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
         }
+        // The other tasks of the project with a candidate: the merge waits for
+        // the ones whose work its candidate carries (T-62).
+        let others = other_candidates(store, project, &task)?;
         let finished = Arc::new(Mutex::new(None));
         let output = finished.clone();
         let job = op.clone();
@@ -225,14 +266,18 @@ pub fn merge_passed(
             .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
                 let result = std::panic::catch_unwind(|| {
-                    let Some(lock) = merge_lock(Path::new(&worktree.path))
-                        .map_err(|reason| Failed::clear(reason))?
-                    else {
-                        return Ok(None);
+                    let lock = match merge_lock(Path::new(&worktree.path)) {
+                        Ok(Some(lock)) => lock,
+                        Ok(None) => return Report::Busy,
+                        Err(reason) => return Report::Failed(Failed::clear(reason)),
                     };
-                    merge_with_retries(&worktree, &repo, &job, &lock).map(Some)
+                    match merge_with_retries(&worktree, &repo, &job, &lock, &others) {
+                        Step::Merged(lines) => Report::Merged(lines),
+                        Step::Waiting(tasks) => Report::Waiting(tasks),
+                        Step::Failed(failed) => Report::Failed(failed),
+                    }
                 })
-                .unwrap_or_else(|_| Err(Failed::stuck("merge worker panicked")));
+                .unwrap_or_else(|_| Report::Failed(Failed::stuck("merge worker panicked")));
                 *output.lock().unwrap() = Some(Finished {
                     result,
                     at: wall_time(),
@@ -274,22 +319,43 @@ fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
     }
 }
 
-fn retry_merge(store: &mut Store, project: &str, op: &OpRow, now: Ts) -> GearResult<()> {
+/// Put a merge op back in the queue: it runs again on a later tick. The reason
+/// says why it did not go through.
+fn retry_merge(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
     store.write(|tx| {
         if tx
             .get_op(project, &op.id)?
             .is_some_and(|row| row.state == OpState::Executing)
         {
-            tx.set_op_state(
-                project,
-                &op.id,
-                OpState::Unknown,
-                Some("merge will retry from origin"),
-                now,
-            )?;
+            tx.set_op_state(project, &op.id, OpState::Unknown, Some(reason), now)?;
         }
         Ok(())
     })
+}
+
+/// The reason an op that waits for another task carries (T-62). It is the
+/// op's explanation, so the engine can tell a waiting merge from one that
+/// waits for the next tick.
+const WAITS: &str = "waits for ";
+
+/// The tasks a merge op waits for, if it waits (T-62).
+fn waits_for(op: &OpRow) -> Option<&str> {
+    op.result.as_deref()?.strip_prefix(WAITS)
+}
+
+/// The ready merges in the order they run: a merge that waits for another task
+/// goes last (T-62). The task it waits for must be able to land first, or the
+/// two would hold each other.
+fn merge_order(ready: Vec<OpRow>) -> Vec<OpRow> {
+    let (waiting, running): (Vec<OpRow>, Vec<OpRow>) =
+        ready.into_iter().partition(|op| waits_for(op).is_some());
+    running.into_iter().chain(waiting).collect()
 }
 
 /// A push rejected because the integration branch moved meanwhile.
@@ -333,6 +399,18 @@ impl Failed {
     }
 }
 
+/// What one merge attempt did.
+#[derive(Debug, Clone)]
+enum Step {
+    /// Merged and pushed: the result line.
+    Merged(String),
+    /// The merge waits: the candidate carries the work of other tasks that
+    /// have not landed yet. Each task is named with whether it has passed.
+    Waiting(Vec<(String, bool)>),
+    /// The merge failed.
+    Failed(Failed),
+}
+
 /// Run the merge and retry it while the reason can clear. The wait grows after
 /// every attempt; after the last one the failure stands and the captain hears
 /// about it once (T-61).
@@ -341,12 +419,14 @@ fn merge_with_retries(
     repo: &Repo,
     op: &OpRow,
     lock: &File,
-) -> Result<String, Failed> {
+    others: &[(String, String, bool)],
+) -> Step {
     let mut attempt = 0;
     loop {
-        match merge_one_locked(worktree, repo, op, lock) {
-            Ok(lines) => return Ok(lines),
-            Err(mut failed) => {
+        match merge_one_locked(worktree, repo, op, lock, others) {
+            Step::Merged(lines) => return Step::Merged(lines),
+            Step::Waiting(tasks) => return Step::Waiting(tasks),
+            Step::Failed(mut failed) => {
                 if failed.blocker != Blocker::Clear || attempt >= MERGE_RETRIES {
                     if attempt > 0 {
                         failed.reason = format!(
@@ -354,7 +434,7 @@ fn merge_with_retries(
                             failed.reason
                         );
                     }
-                    return Err(failed);
+                    return Step::Failed(failed);
                 }
                 attempt += 1;
                 std::thread::sleep(backoff(attempt));
@@ -453,6 +533,44 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             passed.push((task.id.clone(), lane, verdict.candidate, verdict.attempt, latest.candidate.clone().unwrap_or_default()));
         }
         Ok(passed)
+    })
+}
+
+/// The other tasks of the project with a candidate: (task, candidate, whether
+/// that attempt has a passing verdict). A merge waits for the ones whose work
+/// its candidate carries (T-62).
+fn other_candidates(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+) -> GearResult<Vec<(String, String, bool)>> {
+    store.read(|tx| {
+        let mut others = Vec::new();
+        for row in tx.tasks_of_project(project)? {
+            if row.id == task {
+                continue;
+            }
+            // Only the latest attempt counts: the candidate of an older
+            // attempt is not the work the task has now.
+            let Some(latest) = tx.attempts_of_task(project, &row.id)?.into_iter().last() else {
+                continue;
+            };
+            let Some(candidate) = latest.candidate.clone() else {
+                continue;
+            };
+            let passed = tx
+                .verdicts_of_task(project, &row.id)?
+                .into_iter()
+                .rev()
+                .any(|verdict| {
+                    verdict.passed
+                        && verdict.attempt == latest.n
+                        && verdict.contract_version == row.contract_version
+                        && Some(&verdict.candidate) == latest.candidate.as_ref()
+                });
+            others.push((row.id.clone(), candidate, passed));
+        }
+        Ok(others)
     })
 }
 
@@ -576,10 +694,31 @@ fn merge_one(
     repo: &Repo,
     op: &OpRow,
 ) -> Result<String, Failed> {
-    let lock = merge_lock(Path::new(&worktree.path))
+    step_result(merge_one_locked(worktree, repo, op, &lock_of(worktree)?, &[]))
+}
+
+#[cfg(test)]
+fn lock_of(worktree: &gear_herdr::Worktree) -> Result<File, Failed> {
+    merge_lock(Path::new(&worktree.path))
         .map_err(|reason| Failed::stuck(reason))?
-        .ok_or_else(|| Failed::stuck("merge worktree is busy"))?;
-    merge_one_locked(worktree, repo, op, &lock)
+        .ok_or_else(|| Failed::stuck("merge worktree is busy"))
+}
+
+/// The step of a merge, as the tests read it: the line, or the failure.
+#[cfg(test)]
+fn step_result(step: Step) -> Result<String, Failed> {
+    match step {
+        Step::Merged(line) => Ok(line),
+        Step::Waiting(tasks) => Err(Failed::stuck(format!(
+            "waits for {}",
+            tasks
+                .iter()
+                .map(|(task, _)| task.clone())
+                .collect::<Vec<String>>()
+                .join(", ")
+        ))),
+        Step::Failed(failed) => Err(failed),
+    }
 }
 
 fn merge_one_locked(
@@ -587,7 +726,8 @@ fn merge_one_locked(
     repo: &Repo,
     op: &OpRow,
     lock: &File,
-) -> Result<String, Failed> {
+    others: &[(String, String, bool)],
+) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
     let integration = repo.integration.clone();
@@ -609,24 +749,26 @@ fn merge_one_locked(
     //    sit on any of them (T-61), and a clone that restricts its refspec
     //    would not bring it in. A fetch that fails may clear (the network,
     //    the remote): it is retried.
-    git(dir, &["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"])
-        .map_err(|reason| Failed::clear(format!("fetch origin: {reason}")))?;
-    git(dir, &["reset", "--hard", &format!("origin/{integration}")])
-        .map_err(|reason| Failed::stuck(format!("reset to origin/{integration}: {reason}")))?;
+    if let Err(reason) = git(dir, &["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"]) {
+        return Step::Failed(Failed::clear(format!("fetch origin: {reason}")));
+    }
+    if let Err(reason) = git(dir, &["reset", "--hard", &format!("origin/{integration}")]) {
+        return Step::Failed(Failed::stuck(format!("reset to origin/{integration}: {reason}")));
+    }
 
     // 2. the approved candidate, by commit. P0: what merges is the commit the
     //    review approved, never what a branch points at now. The branch the
     //    lane named may hold it, hold more than it, or be gone (T-61).
     let candidate = op.payload["candidate"].as_str().unwrap_or("").trim().to_string();
     if candidate.is_empty() {
-        return Err(Failed::stuck(format!("{task}: the merge op names no candidate")));
+        return Step::Failed(Failed::stuck(format!("{task}: the merge op names no candidate")));
     }
     // The commit must be known here. It is not yet: the lane's push has not
     // landed (or has not been fetched). That can clear, so it is retried.
     let sha = match git(dir, &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")]) {
         Ok(out) => out.trim().to_string(),
         Err(reason) => {
-            return Err(Failed::clear(format!(
+            return Step::Failed(Failed::clear(format!(
                 "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
                  it may not be pushed yet: the merge retries and asks the captain if it stays"
             )))
@@ -645,19 +787,35 @@ fn merge_one_locked(
             &format!("--contains={sha}"),
             "refs/remotes/origin/",
         ],
-    )
-    .map_err(|reason| Failed::clear(format!("cannot read the pushed refs of origin: {reason}")))?;
+    );
+    let pushed = match pushed {
+        Ok(pushed) => pushed,
+        Err(reason) => {
+            return Step::Failed(Failed::clear(format!(
+                "cannot read the pushed refs of origin: {reason}"
+            )))
+        }
+    };
     if pushed.trim().is_empty() {
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
-        return Err(Failed::clear(format!(
+        return Step::Failed(Failed::clear(format!(
             "{task}: the approved candidate {sha} is on no pushed ref of origin\n\
              it was never pushed, or the branch that held it is gone"
         )));
     }
 
-    // 4. the candidate may already be on the integration branch: a restart
+    // 4. the work the candidate carries (T-62): the commits of other tasks
+    //    that are in this candidate and are not on the integration branch yet.
+    //    They must land first: a task that waits for another one must not
+    //    carry its unreviewed commits into the integration branch.
+    let carried = carried_tasks(dir, &git, &sha, &integration, others);
+    if !carried.is_empty() {
+        return Step::Waiting(carried);
+    }
+
+    // 5. the candidate may already be on the integration branch: a restart
     //    after the push, or another task that carried it in.
     let already = git(
         dir,
@@ -665,7 +823,7 @@ fn merge_one_locked(
     )
     .is_ok();
 
-    // 5. the merges, in order (the approved candidate, then the review
+    // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
     //    cannot slip an unreviewed commit in.
     //    The review branch is *required*: a merge that publishes the task
@@ -678,7 +836,7 @@ fn merge_one_locked(
     let has_review = review_found.is_ok();
     if !has_review && !already {
         let reason = review_found.unwrap_err();
-        return Err(Failed::stuck(format!(
+        return Step::Failed(Failed::stuck(format!(
             "{task}: the review branch {review_ref} is missing on origin\n{reason}\n\
              a merge publishes the approved candidate and its review branch together"
         )));
@@ -693,7 +851,7 @@ fn merge_one_locked(
     if pinned_refs.is_empty() {
         // The candidate is on the integration branch and its review branch is
         // gone: a restart after the push. Nothing to merge, nothing to push.
-        return Ok(format!(
+        return Step::Merged(format!(
             "{task} was already merged: {sha} is on origin/{integration}"
         ));
     }
@@ -711,32 +869,37 @@ fn merge_one_locked(
             // Abort and leave the worktree exactly at the integration branch.
             let _ = git(dir, &["merge", "--abort"]);
             let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
-            return Err(Failed::stuck(format!("conflict merging {pinned}: {reason}")));
+            return Step::Failed(Failed::stuck(format!("conflict merging {pinned}: {reason}")));
         }
     }
 
-    // 6. conflict markers that a merge left behind without reporting a
+    // 7. conflict markers that a merge left behind without reporting a
     //    conflict (a file committed with markers in it).
     if git(dir, &["grep", "-n", "-e", "^<<<<<<<", "-e", "^>>>>>>>"]).is_ok() {
         let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
-        return Err(Failed::stuck("conflict markers in the merged tree"));
+        return Step::Failed(Failed::stuck("conflict markers in the merged tree"));
     }
 
-    // 7. the gate, before anything is pushed: the gate of the repo the work
+    // 8. the gate, before anything is pushed: the gate of the repo the work
     //    is in (T-53).
     let gate = repo.gate.clone();
     // The empty lock file is inherited as stdin (normally /dev/null for a
     // gate). Keeping the same open file description in the subprocess means
     // it still excludes recovery if the engine is killed before wait returns.
-    let output = gate_command(&gate, dir)
-        .stdin(
-            lock.try_clone()
-                .map_err(|error| Failed::clear(format!("gate lock: {error}")))?,
-        )
-        .output()
+    let stdin = match lock.try_clone() {
+        Ok(stdin) => stdin,
+        Err(error) => {
+            return Step::Failed(Failed::clear(format!("gate lock: {error}")))
+        }
+    };
+    let output = match gate_command(&gate, dir).stdin(stdin).output() {
+        Ok(output) => output,
         // The gate could not run at all: the environment is broken, not the
         // work. That can clear (a toolchain coming back), so it is retried.
-        .map_err(|error| Failed::clear(format!("gate could not run ({gate}): {error}")))?;
+        Err(error) => {
+            return Step::Failed(Failed::clear(format!("gate could not run ({gate}): {error}")))
+        }
+    };
     if !output.status.success() {
         // Both streams: cargo reports test failures on stdout, a shell's own
         // errors on stderr.
@@ -750,24 +913,24 @@ fn merge_one_locked(
         // status is the project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
         let reason = format!("gate failed ({gate}):\n{tail}");
-        return Err(if status == 126 || status == 127 {
+        return Step::Failed(if status == 126 || status == 127 {
             Failed::clear(reason)
         } else {
             Failed::stuck(reason)
         });
     }
 
-    // 8. push, then close the branches the merge consumed.
+    // 9. push, then close the branches the merge consumed.
     // A push the remote rejects because the integration branch moved (the
     // captain or another merge pushed meanwhile) is a race, not a failure: the
     // merge starts again from the new tip.
     if let Err(reason) = git(dir, &["push", "origin", &format!("HEAD:{integration}")]) {
         if reason.contains("non-fast-forward") || reason.contains("fetch first") || reason.contains("cannot lock ref") {
-            return Err(Failed::clear(format!("{RACE}{reason}")));
+            return Step::Failed(Failed::clear(format!("{RACE}{reason}")));
         }
         // Any other push failure can clear too: the network, the remote, a
         // hook that rejects the push once (F1 of the T-61 review).
-        return Err(Failed::clear(format!("push failed: {reason}")));
+        return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
     let (closed, left) = close_branches(dir, repo, &branch, &review, &sha, &task);
 
@@ -782,7 +945,54 @@ fn merge_one_locked(
             left.join(", ")
         ));
     }
-    Ok(line)
+    Step::Merged(line)
+}
+
+/// The tasks whose work the candidate carries (T-62): their candidates are
+/// ancestors of this candidate and are not on the integration branch yet. They
+/// must land first: a task that was built on another task's branch must not
+/// carry that task's unreviewed commits into the integration branch.
+///
+/// Each task comes with whether it has passed its review: a task that has
+/// not passed is the captain's business, a task that has passed is only
+/// waiting for its own merge.
+fn carried_tasks(
+    dir: &Path,
+    git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
+    candidate: &str,
+    integration: &str,
+    others: &[(String, String, bool)],
+) -> Vec<(String, bool)> {
+    let mut carried = Vec::new();
+    for (task, other, passed) in others {
+        // The commit of the other task, as this repo knows it. A candidate of
+        // another repo is not here at all: git cannot place it, and it cannot
+        // be carried either.
+        let other_sha = match git(dir, &["rev-parse", "--verify", &format!("{other}^{{commit}}")]) {
+            Ok(out) => out.trim().to_string(),
+            Err(_) => continue,
+        };
+        // The same commit is not carried work: two tasks may hand in the same
+        // one, and neither of them waits for the other.
+        if other_sha == candidate {
+            continue;
+        }
+        // Is the other candidate an ancestor of this one?
+        if git(dir, &["merge-base", "--is-ancestor", &other_sha, candidate]).is_err() {
+            continue;
+        }
+        // Is it on the integration branch already? Then it landed.
+        if git(
+            dir,
+            &["merge-base", "--is-ancestor", &other_sha, &format!("origin/{integration}")],
+        )
+        .is_ok()
+        {
+            continue;
+        }
+        carried.push((task.clone(), *passed));
+    }
+    carried
 }
 
 /// Close the branches the merge consumed: the review branch, and every branch
@@ -944,6 +1154,120 @@ fn tell_captain(store: &mut Store, project: &str, body: &str, now: Ts) -> GearRe
     })
 }
 
+/// The thread of the item that says the merge of a task waits for another one
+/// (T-62). One item per waiting merge: the captain is told once, not every
+/// tick.
+fn wait_thread(task: &str) -> String {
+    format!("merge-wait:{task}")
+}
+
+/// Tell the captain that a merge waits for another task (T-62): one open item
+/// per merge, naming the tasks it waits for. The item closes when the merge
+/// goes through, or when the tasks it waits for have passed and only their
+/// own merge is left.
+fn tell_captain_waiting(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    blocked: &[(String, bool)],
+    now: Ts,
+) -> GearResult<()> {
+    let task = op.task.clone().unwrap_or_default();
+    let names: Vec<String> = blocked.iter().map(|(task, _)| task.clone()).collect();
+    let unpassed: Vec<String> = blocked
+        .iter()
+        .filter(|(_, passed)| !passed)
+        .map(|(task, _)| task.clone())
+        .collect();
+    let body = format!(
+        "the merge of {task} waits for {}: their candidate is in {task}'s commits \
+         and is not on the integration branch yet",
+        names.join(", ")
+    );
+    // The line names the tasks that have not passed: that is the captain's
+    // business. The others only wait for their own merge.
+    let body = if unpassed.is_empty() {
+        body
+    } else {
+        format!(
+            "{body}\n{}: {}",
+            unpassed.join(", "),
+            if unpassed.len() == 1 {
+                "has not passed its review yet"
+            } else {
+                "have not passed their review yet"
+            }
+        )
+    };
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        let thread = wait_thread(&task);
+        // One open item per merge: the captain is told once, not every tick.
+        let open = tx
+            .thread_messages(project, &thread)?
+            .into_iter()
+            .find(|message| message.state == MsgState::Open);
+        if let Some(item) = open {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        // Every task it waits for has passed: the wait is only about their own
+        // merge, which is a moment. The captain has nothing to do.
+        if unpassed.is_empty() {
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            project: project.to_string(),
+            thread,
+            task: Some(task.clone()),
+            attempt: op.attempt,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::Question,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Close the item that says the merge of a task waits (T-62): the wait is
+/// over.
+fn resolve_wait(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    if task.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        let thread = wait_thread(task);
+        for item in tx.thread_messages(project, &thread)? {
+            if item.state == MsgState::Open {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some("the merge went through"),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1041,10 +1365,311 @@ mod tests {
         }
     }
 
+    /// Two tasks in one scratch repo (T-62): `heat/t1` (the work of T-1) and
+    /// `heat/t2`, cut from `heat/t1` when `built_on` is true — so T-2's
+    /// candidate carries T-1's work — or from `dev` when it is false.
+    struct Pair {
+        root: PathBuf,
+        work: PathBuf,
+        a: String,
+        b: String,
+    }
+
+    impl Pair {
+        fn new(name: &str, built_on: bool) -> Pair {
+            let root = std::env::temp_dir().join(format!(
+                "gear-merge-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            let origin = root.join("origin.git");
+            let work = root.join("work");
+            sh(&root, &format!("git init -q --bare {}", origin.display()));
+            sh(&root, &format!("git init -q -b dev {}", work.display()));
+            fs::write(work.join("README.md"), "dev\n").unwrap();
+            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+            sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+            // T-1: its branch, then its review branch.
+            sh(
+                &work,
+                "git switch -qc heat/t1 && echo a > a.txt && git add -A \
+                 && git -c user.email=a@b -c user.name=a commit -qm a && git push -q origin heat/t1",
+            );
+            sh(
+                &work,
+                "git switch -qc review/t1 && echo r1 > r1.txt && git add -A \
+                 && git -c user.email=a@b -c user.name=a commit -qm r1 && git push -q origin review/t1",
+            );
+            // T-2: cut from T-1's branch (it carries T-1's work) or from dev.
+            let base = if built_on { "heat/t1" } else { "dev" };
+            sh(
+                &work,
+                &format!(
+                    "git switch -qc heat/t2 {base} && echo b > b.txt && git add -A \
+                     && git -c user.email=a@b -c user.name=a commit -qm b && git push -q origin heat/t2"
+                ),
+            );
+            sh(
+                &work,
+                "git switch -qc review/t2 && echo r2 > r2.txt && git add -A \
+                 && git -c user.email=a@b -c user.name=a commit -qm r2 && git push -q origin review/t2",
+            );
+            let a = sh(&root, "git -C origin.git rev-parse heat/t1");
+            let b = sh(&root, "git -C origin.git rev-parse heat/t2");
+            Pair { root, work, a, b }
+        }
+
+        /// The merge worktree of this repo.
+        fn merge_worktree(&self) -> gear_herdr::Worktree {
+            let path = self.root.join("merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b home/merge {} origin/dev",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "home/merge".into(),
+            }
+        }
+
+        /// What origin's dev holds.
+        fn dev_log(&self) -> String {
+            sh(&self.root, "git -C origin.git log --format=%s dev")
+        }
+
+        /// `true` when origin's dev holds a commit with this subject.
+        fn dev_has(&self, subject: &str) -> bool {
+            sh_ok(
+                &self.root,
+                &format!("git -C origin.git log --format=%s dev | grep -qx {subject}"),
+            )
+        }
+    }
+
+    impl Drop for Pair {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A project with two tasks, T-1 and T-2, both handed in: their
+    /// candidates are the two commits of the scratch repo.
+    fn pair_world(candidate_a: &str, candidate_b: &str) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config_text("true"),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "heat",
+                    gear_model::SeatRole::Lane,
+                    "w1:p1",
+                    "opencode",
+                    0,
+                )?;
+                gear_store::testing::seed_active_seat(
+                    tx,
+                    "p",
+                    "captain",
+                    gear_model::SeatRole::Captain,
+                    "w9:p1",
+                    "claude",
+                    0,
+                )?;
+                for (id, rank, candidate) in
+                    [("T-1", 1, candidate_a), ("T-2", 2, candidate_b)]
+                {
+                    tx.insert_task(&gear_store::TaskRow {
+                        project: "p".into(),
+                        id: id.into(),
+                        rank,
+                        state: TaskState::Ready,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        updated: 0,
+                    })?;
+                    gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, 0)?;
+                    gear_app::tasks::on_delivery_confirmed(tx, "p", id, 1, 0)?;
+                    gear_app::tasks::submit_result(tx, "p", id, 1, 1, candidate, "report", 0)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// A passing verdict for a task's latest attempt.
+    fn pass(store: &mut Store, task: &str, candidate: &str, at: Ts) {
+        store
+            .write(|tx| {
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.into(),
+                    passed: true,
+                    evidence: Some("ops/reviews/T-1.md".into()),
+                    by_seat: "p:captain".into(),
+                    created: at,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// T-62: a merge that waits for another task goes last in the queue: the
+    /// task it waits for must be able to land first.
+    #[test]
+    fn a_waiting_merge_goes_last_in_the_queue() {
+        let mut waiting = op("abc1234");
+        waiting.id = "O-1".into();
+        waiting.state = OpState::Unknown;
+        waiting.result = Some("waits for T-1".into());
+        let mut running = op("abc1234");
+        running.id = "O-2".into();
+        running.state = OpState::Unknown;
+        running.result = Some("merge will retry from origin".into());
+
+        let order = merge_order(vec![waiting.clone(), running.clone()]);
+
+        assert_eq!(order[0].id, running.id, "the merge that can run goes first");
+        assert_eq!(order[1].id, waiting.id, "the waiting merge goes last");
+    }
+
+    /// T-62: a task built on another task's branch does not merge before that
+    /// task passes. The merge waits (it is not a failure), the captain is
+    /// told which task it waits for, and both land in order once the other
+    /// task passes.
+    #[test]
+    fn a_merge_waits_for_the_task_its_commits_carry() {
+        let pair = Pair::new("carried", true);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // T-2 passed; T-1 did not (yet). The engine queues T-2's merge itself.
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // The engine runs T-2's merge: it waits for T-1.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Unknown)
+        });
+
+        let reason = op_result(&mut store, "O-1");
+        assert!(reason.contains("waits for T-1"), "{reason}");
+        assert_eq!(
+            op_state(&mut store, "O-1"),
+            Some(OpState::Unknown),
+            "a wait is not a failure"
+        );
+        // T-2 is not merged: its commits are not on the integration branch.
+        let log = pair.dev_log();
+        assert!(!log.contains("b"), "T-2 is not merged: {log}");
+        assert_eq!(log, "dev", "the integration branch is untouched: {log}");
+        // The captain is told once which task it waits for.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("T-2"), "{}", inbox[0].body);
+        assert!(
+            inbox[0].body.contains("has not passed"),
+            "the line says what the captain has to do: {}",
+            inbox[0].body
+        );
+        // Another tick does not add a second item.
+        ticks(&mut store, &mut herdr, &cfg, 3);
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+
+        // T-1 passes now: its merge lands first, then T-2's.
+        pass(&mut store, "T-1", &pair.a, 40);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(pair.dev_has("a"), "T-1 landed: {log}");
+        assert!(pair.dev_has("b"), "T-2 landed: {log}");
+        assert!(pair.dev_has("r1"), "T-1's review landed: {log}");
+        assert!(pair.dev_has("r2"), "T-2's review landed: {log}");
+        // In order: T-1's merge is below T-2's (the log is newest first).
+        let first = log.find("merge(T-1)").expect("T-1's merge commit");
+        let second = log.find("merge(T-2)").expect("T-2's merge commit");
+        assert!(second < first, "T-1 lands before T-2: {log}");
+        // The captain's item about the wait is closed.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 60)).unwrap();
+        assert!(inbox.is_empty(), "the wait is over: {inbox:?}");
+    }
+
+    /// T-62: a task that is not built on another task's branch is not held.
+    #[test]
+    fn a_merge_that_carries_no_other_task_is_not_held() {
+        let pair = Pair::new("independent", false);
+        let worktree = pair.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pair_world(&pair.a, &pair.b);
+        // T-2 passed; T-1 did not. T-2's commits carry none of T-1's work.
+        pass(&mut store, "T-2", &pair.b, 10);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+        });
+
+        let log = pair.dev_log();
+        assert!(pair.dev_has("b"), "T-2 landed: {log}");
+        assert!(!pair.dev_has("a"), "T-1 did not land: {log}");
+        // The captain is not told about a wait that did not happen.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert!(inbox.is_empty(), "{inbox:?}");
+    }
+
     /// A child repo below the project root (T-53): its own origin, its own
     /// integration branch, a task branch and a review branch.
-    struct Child {
-        root: PathBuf,
+    struct Child {        root: PathBuf,
         work: PathBuf,
         origin: PathBuf,
     }
@@ -1365,6 +1990,70 @@ gate = "{gate}"
         }
     }
 
+    /// Drive the engine's merge step until the store is in the state the test
+    /// wants (or the deadline passes).
+    fn drive(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        ready: impl Fn(&mut Store) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            merge_passed(store, herdr, cfg, "p", 30).unwrap();
+            if ready(store) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine did not reach the wanted state"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Run the engine's merge step a few times, letting the worker run and be
+    /// collected between the calls.
+    fn ticks(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        times: usize,
+    ) {
+        for _ in 0..times {
+            merge_passed(store, herdr, cfg, "p", 30).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                merge_passed(store, herdr, cfg, "p", 31).unwrap();
+                if cfg.merges.0.lock().unwrap().is_empty() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the merge worker did not finish"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+
+    /// The state of a merge op.
+    fn op_state(store: &mut Store, id: &str) -> Option<OpState> {
+        store
+            .read(|tx| tx.get_op("p", id))
+            .unwrap()
+            .map(|op| op.state)
+    }
+
+    /// The result of a merge op.
+    fn op_result(store: &mut Store, id: &str) -> String {
+        store
+            .read(|tx| tx.get_op("p", id))
+            .unwrap()
+            .and_then(|op| op.result)
+            .unwrap_or_default()
+    }
+
     fn wait_file(path: &Path) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !path.exists() {
@@ -1384,10 +2073,13 @@ gate = "{gate}"
         repo: &Repo,
         op: &OpRow,
     ) -> Result<String, Failed> {
-        let lock = merge_lock(Path::new(&worktree.path))
-            .map_err(|reason| Failed::stuck(reason))?
-            .ok_or_else(|| Failed::stuck("merge worktree is busy"))?;
-        merge_with_retries(worktree, repo, op, &lock)
+        step_result(merge_with_retries(
+            worktree,
+            repo,
+            op,
+            &lock_of(worktree)?,
+            &[],
+        ))
     }
 
     /// T-61: a push race is not a failure. The merge waits, tries again from
