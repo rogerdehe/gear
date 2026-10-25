@@ -123,21 +123,19 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
             // delivery was confirmed but the agent never started (R-31) — it
             // is nudged the same way instead of waiting forever.
             AttemptState::Started | AttemptState::Stopped | AttemptState::Delivered => {
-                // T-97: a delivery that was never confirmed is not typed into
-                // the same agent session again. It goes once more when the
-                // pane reports a new session (a hand restart) or the seat has
-                // a new generation (a restart GEAR did), and at once when a
-                // model switch swallowed it.
-                if attempt.state == AttemptState::Delivered {
-                    if let Some(failed) = &v.failed_delivery {
-                        if failed.task == attempt.task && failed.attempt == attempt.n {
-                            let new_session = obs.session != failed.session;
-                            let new_generation = seat.generation != failed.generation;
-                            if !(failed.retry_now || new_session || new_generation) {
-                                return none(
-                                    "the delivery was not confirmed in this agent session; it goes again in a new one",
-                                );
-                            }
+                // T-97: a delivery that was never confirmed — the assignment
+                // or a continue — is not typed into the same agent session
+                // again. It goes once more when the pane reports a new session
+                // (a hand restart) or the seat has a new generation (a restart
+                // GEAR did), and at once when a model switch swallowed it.
+                if let Some(failed) = &v.failed_delivery {
+                    if failed.task == attempt.task && failed.attempt == attempt.n {
+                        let new_session = obs.session != failed.session;
+                        let new_generation = seat.generation != failed.generation;
+                        if !(failed.retry_now || new_session || new_generation) {
+                            return none(
+                                "the delivery was not confirmed in this agent session; it goes again in a new one",
+                            );
                         }
                     }
                 }

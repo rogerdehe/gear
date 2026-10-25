@@ -207,3 +207,96 @@ fn a_second_failure_waits_for_the_next_session() {
     assert_eq!(ops[1].state, OpState::Failed, "{ops:?}");
     assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "no loop in one session");
 }
+
+/// The lane reads the open attempt: a view that confirms its delivery.
+fn view(w: &mut World, at: i64) {
+    w.store
+        .write(|tx| {
+            tx.insert_view(&ViewRecord {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                ts: T0 + at,
+                shown_msgs: vec![],
+                shown_ops: vec![],
+                shown_task: Some("T-1".into()),
+                shown_attempt: Some(1),
+                shown_contract: Some(1),
+            })
+        })
+        .unwrap();
+}
+
+/// F1 of the review: an agent restarted *before* the budget expires is the
+/// session the retry belongs to. The failure names the session the prompt went
+/// into (A), not the one the binding shows by then (B) — so B receives the open
+/// attempt at once instead of waiting for another restart.
+#[test]
+fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
+    let mut w = world();
+    w.herdr.set_agent_session(LANE, "ses_A");
+    w.tick(1); // the prompt goes into A
+    w.tick(5); // first check
+    w.herdr.set_agent_session(LANE, "ses_B");
+    w.tick(9); // second check: the delivery fails
+
+    let ops = w.deliveries();
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
+    assert_eq!(ops[1].state, OpState::Submitted, "B got the attempt: {ops:?}");
+    assert_eq!(ops[1].attempt, Some(1));
+    assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "{:?}", w.herdr.prompts_to(LANE));
+    assert_eq!(w.stall_items().len(), 1);
+
+    // B reads it: the attempt starts.
+    view(&mut w, 10);
+    w.tick(13);
+    let ops = w.deliveries();
+    assert_eq!(ops[1].state, OpState::Confirmed, "{ops:?}");
+    let attempt = w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Started);
+}
+
+/// F2 of the review: a failed **continue** is not delivered again in the same
+/// session either — the guard covers Started/Stopped attempts, not only a
+/// Delivered one.
+#[test]
+fn a_failed_continue_is_not_repeated_in_the_same_session() {
+    let mut w = world();
+    w.herdr.set_agent_session(LANE, "ses_A");
+    w.tick(1); // the assignment goes into A
+    view(&mut w, 2);
+    w.tick(5); // confirmed: the attempt starts
+    assert_eq!(w.deliveries()[0].state, OpState::Confirmed);
+
+    w.tick(9); // a Continue goes (cooldown elapsed)
+    let ops = w.deliveries();
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert!(
+        w.herdr.prompts_to(LANE)[1].contains("Continue T-1"),
+        "{:?}",
+        w.herdr.prompts_to(LANE)
+    );
+
+    w.tick(13); // one check
+    w.tick(17); // the budget is spent: the Continue fails
+    let ops = w.deliveries();
+    assert_eq!(ops.len(), 2, "no replacement in the same session: {ops:?}");
+    assert_eq!(ops[1].state, OpState::Failed, "{ops:?}");
+    w.tick(21);
+    assert_eq!(w.deliveries().len(), 2, "{:?}", w.deliveries());
+    assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "nothing is retyped in A");
+
+    // A new session gets exactly one delivery of the same attempt.
+    w.herdr.set_agent_session(LANE, "ses_B");
+    w.tick(25);
+    let ops = w.deliveries();
+    assert_eq!(ops.len(), 3, "{ops:?}");
+    assert_eq!(ops[2].state, OpState::Submitted, "{ops:?}");
+    assert_eq!(ops[2].attempt, Some(1));
+    assert!(
+        w.herdr.prompts_to(LANE)[2].contains("Continue T-1"),
+        "{:?}",
+        w.herdr.prompts_to(LANE)
+    );
+}

@@ -92,6 +92,29 @@ pub fn key(seat: &str) -> String {
     format!("engine.delivery.{seat}")
 }
 
+/// The meta key of the agent session a delivery's prompt went into (T-97).
+pub fn sent_key(op_id: &str) -> String {
+    format!("engine.deliver_session.{op_id}")
+}
+
+/// Fix the session a delivery's prompt goes into, when the op is prepared for
+/// the send (T-97). A hand restart may refresh the binding before the op fails;
+/// the record must name the session that actually received the prompt, so the
+/// new session can be delivered again and the old one is not blamed.
+pub fn record_sent(tx: &Tx<'_>, op_id: &str, session: Option<&str>) -> GearResult<()> {
+    tx.set_meta(&sent_key(op_id), session.unwrap_or(""))
+}
+
+/// The session recorded when the prompt was sent: `Some(None)` when the kind
+/// reported none, `None` when nothing was recorded (an op prepared before
+/// T-97's snapshot).
+pub fn sent(tx: &Tx<'_>, op_id: &str) -> GearResult<Option<Option<String>>> {
+    let Some(raw) = tx.get_meta(&sent_key(op_id))? else {
+        return Ok(None);
+    };
+    Ok(Some(Some(raw).filter(|session| !session.is_empty())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
