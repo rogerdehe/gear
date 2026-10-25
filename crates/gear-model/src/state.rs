@@ -115,6 +115,9 @@ impl AttemptState {
             (Submitted, Accepted | Rejected) => true,
             // UNKNOWN only leaves via evidence to a proven state; never straight to Abandoned.
             (Unknown, Started | Stopped | Submitted) => true,
+            // A task cancelled from the plan (T-93) closes its open attempt: a
+            // delivered prompt and a handed-in result are abandoned directly.
+            (Delivered | Submitted, Abandoned) => true,
             _ => false,
         }
     }
