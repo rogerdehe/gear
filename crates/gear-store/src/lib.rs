@@ -198,6 +198,8 @@ pub struct TaskRow {
     /// The planned time of the task in minutes (T-38): the plan's `estimate:`
     /// field. None for a task that has none.
     pub estimate_min: Option<i64>,
+    /// The GitHub issue the task came from (T-79): the plan's `issue: #<n>`.
+    pub issue: Option<i64>,
     pub updated: Ts,
 }
 
@@ -1617,8 +1619,8 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO tasks
                    (project, id, rank, state, priority, lane, milestone, required, contract_version,
-                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     row.project,
                     row.id,
@@ -1635,6 +1637,7 @@ impl<'s> Tx<'s> {
                     row.wait_cond,
                     row.rework_note,
                     row.estimate_min,
+                    row.issue,
                     row.updated,
                 ],
             )
@@ -1680,7 +1683,7 @@ impl<'s> Tx<'s> {
                 "UPDATE tasks
                  SET rank=?3, state=?4, priority=?5, lane=?6, milestone=?7, required=?8,
                      contract_version=?9, deps=?10, followup_of=?11, wait_on=?12, wait_cond=?13,
-                     rework_note=?14, estimate_min=?15, updated=?16
+                     rework_note=?14, estimate_min=?15, issue=?16, updated=?17
                  WHERE project=?1 AND id=?2",
                 params![
                     row.project,
@@ -1698,6 +1701,7 @@ impl<'s> Tx<'s> {
                     row.wait_cond,
                     row.rework_note,
                     row.estimate_min,
+                    row.issue,
                     row.updated,
                 ],
             )
@@ -2488,7 +2492,7 @@ fn op_select(tail: &str) -> String {
 fn task_select(tail: &str) -> String {
     format!(
         "SELECT project, id, rank, state, priority, lane, milestone, required, contract_version,
-                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated
+                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated
          FROM tasks{tail}"
     )
 }
@@ -2531,7 +2535,8 @@ fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
         wait_cond: row.get(12)?,
         rework_note: row.get(13)?,
         estimate_min: row.get(14)?,
-        updated: row.get(15)?,
+        issue: row.get(15)?,
+        updated: row.get(16)?,
     })
 }
 

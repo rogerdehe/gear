@@ -312,7 +312,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),

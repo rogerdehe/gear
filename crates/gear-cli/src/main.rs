@@ -1689,7 +1689,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })
             })
             .unwrap();
@@ -1961,7 +1961,7 @@ mod tests {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-            updated: T0,
+             issue: None,updated: T0,
         }
     }
 
@@ -2132,7 +2132,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: Some(60),
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
                     project: "p".into(),
@@ -2225,7 +2225,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -2281,7 +2281,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -2770,7 +2770,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),

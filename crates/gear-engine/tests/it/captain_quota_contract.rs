@@ -58,7 +58,7 @@ quota_reset_h = 1
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),

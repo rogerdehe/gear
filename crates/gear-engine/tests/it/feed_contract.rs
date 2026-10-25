@@ -80,7 +80,7 @@ fn task(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<
         wait_cond: None,
         rework_note: None,
         estimate_min: None,
-        updated: T0,
+         issue: None,updated: T0,
     })
 }
 

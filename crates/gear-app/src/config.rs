@@ -42,6 +42,10 @@ pub struct ProjectConfig {
     /// Per-kind profile overrides, kept as raw TOML; merged by the engine (04).
     #[serde(default)]
     pub profiles: BTreeMap<String, toml::Table>,
+    /// The GitHub mode of the project (T-79). Absent = local-only: issues are
+    /// not read and no pull request is opened.
+    #[serde(default)]
+    pub github: Option<GithubSection>,
 }
 
 impl ProjectConfig {
@@ -54,6 +58,7 @@ impl ProjectConfig {
             integration: self.conventions.integration.clone(),
             release: self.conventions.release.clone(),
             gate: self.conventions.gate.clone(),
+            github: self.github.as_ref().and_then(GithubSection::resolved),
         }
     }
 
@@ -103,6 +108,12 @@ impl ProjectConfig {
                 .gate
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
+            // A repo's own `[github]` replaces the project's (T-79).
+            github: section
+                .github
+                .as_ref()
+                .or(self.github.as_ref())
+                .and_then(GithubSection::resolved),
         }
     }
 }
@@ -174,6 +185,99 @@ pub struct RepoSection {
     /// `[conventions].gate`.
     #[serde(default)]
     pub gate: Option<String>,
+    /// This repo's own GitHub mode (T-79); absent = the project's `[github]`.
+    #[serde(default)]
+    pub github: Option<GithubSection>,
+}
+
+/// The GitHub mode of a project or a repo (T-79): `repo = "owner/name"`, the
+/// labels that select issues, and how a merge reaches GitHub. Absent at both
+/// levels = local-only.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct GithubSection {
+    /// The GitHub repository, `owner/name`. Required when the section is
+    /// present: a GitHub mode without a repo names no place to read or write.
+    pub repo: Option<String>,
+    /// Which issues become tasks.
+    pub issues: IssuesSection,
+    /// How an accepted task reaches the integration branch: `push` (local, as
+    /// today) or `pr` (through a pull request the forge merges).
+    pub merge: MergeMode,
+    /// The method a pull-request merge uses.
+    pub merge_method: MergeMethod,
+}
+
+impl GithubSection {
+    /// The resolved mode; `None` when the section names no repo (an invalid
+    /// config, refused by `validate`; a reader fails closed).
+    pub fn resolved(&self) -> Option<Github> {
+        let repo = self.repo.clone()?;
+        Some(Github {
+            repo,
+            issues_labels: self.issues.labels.clone(),
+            merge: self.merge,
+            merge_method: self.merge_method,
+        })
+    }
+}
+
+/// The labels that select issues (`[github.issues] labels = [...]`). Empty =
+/// every open issue.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IssuesSection {
+    pub labels: Vec<String>,
+}
+
+/// How an accepted task reaches the integration branch (T-79).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMode {
+    /// Local, as today: the engine merges and pushes (the default).
+    #[default]
+    Push,
+    /// Through a pull request the forge opens and merges.
+    Pr,
+}
+
+impl MergeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMode::Push => "push",
+            MergeMode::Pr => "pr",
+        }
+    }
+}
+
+/// The method a pull-request merge uses (`squash` by default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMethod {
+    #[default]
+    Squash,
+    Merge,
+}
+
+impl MergeMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Squash => "squash",
+            MergeMethod::Merge => "merge",
+        }
+    }
+}
+
+/// The GitHub mode of a repo, resolved (T-79): the project's `[github]`, or
+/// the repo's own when it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Github {
+    /// `owner/name`.
+    pub repo: String,
+    /// Only issues with these labels; empty = all open issues.
+    pub issues_labels: Vec<String>,
+    pub merge: MergeMode,
+    pub merge_method: MergeMethod,
 }
 
 /// A repo of the project, resolved (T-52): the project root or one of the
@@ -191,6 +295,8 @@ pub struct Repo {
     pub release: String,
     /// The gate that runs in this repo before a merge.
     pub gate: String,
+    /// The GitHub mode of this repo (T-79); `None` = local-only.
+    pub github: Option<Github>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -893,7 +999,55 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
+    // ---- the GitHub mode (T-79): absent = local-only, so there is nothing
+    // to check then; present = it must name a repo.
+    if let Some(github) = &cfg.github {
+        github_issues(github, "github", &mut issues);
+    }
+    for (index, repo) in cfg.repos.iter().enumerate() {
+        if let Some(github) = &repo.github {
+            github_issues(github, &format!("repos[{index}].github"), &mut issues);
+        }
+    }
+
     issues
+}
+
+/// A `[github]` section's findings: it names a GitHub repository as
+/// `owner/name`, and no issue label is blank.
+fn github_issues(section: &GithubSection, field: &str, issues: &mut Vec<ConfigIssue>) {
+    match section.repo.as_deref() {
+        None => issues.push(issue(
+            &format!("{field}.repo"),
+            "a [github] section needs `repo = \"owner/name\"` (absent it is local-only, so remove the section)".to_string(),
+        )),
+        Some(repo) if !is_github_repo(repo) => issues.push(issue(
+            &format!("{field}.repo"),
+            format!("the GitHub repo {repo:?} must be `owner/name`"),
+        )),
+        Some(_) => {}
+    }
+    for (index, label) in section.issues.labels.iter().enumerate() {
+        if label.trim().is_empty() {
+            issues.push(issue(
+                &format!("{field}.issues.labels[{index}]"),
+                "an issue label is empty after trimming".to_string(),
+            ));
+        }
+    }
+}
+
+/// `owner/name`: one slash, both sides non-empty, no whitespace and no URL
+/// punctuation (a GitHub repository, not a URL).
+fn is_github_repo(repo: &str) -> bool {
+    let Some((owner, name)) = repo.split_once('/') else {
+        return false;
+    };
+    !owner.is_empty()
+        && !name.is_empty()
+        && !name.contains('/')
+        && !owner.contains('/')
+        && repo.chars().all(|c| !c.is_whitespace() && !matches!(c, '@' | ':' | '\\'))
 }
 
 // ---------------------------------------------------------------- helpers

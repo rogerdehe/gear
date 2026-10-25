@@ -11,6 +11,7 @@ pub mod admin;
 pub mod base;
 pub mod config;
 pub mod draft;
+pub mod github;
 pub mod home;
 pub mod identity;
 pub mod kickoff;

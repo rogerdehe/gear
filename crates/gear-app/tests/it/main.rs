@@ -11,6 +11,7 @@ mod backoff_home_contract;
 mod config_change_contract;
 mod config_contract;
 mod draft_contract;
+mod github_contract;
 mod home_task_contract;
 mod kickoff_contract;
 mod packet_contract;

@@ -38,6 +38,8 @@ pub struct QueueItem {
     pub state: Option<String>,
     pub followup_of: Option<String>,
     pub reopen: Option<String>,
+    /// The GitHub issue a task came from (T-79): `issue: #12`.
+    pub issue: Option<u64>,
 }
 
 /// One `# Staff` line.
@@ -356,6 +358,37 @@ fn parse_priority(token: &str) -> Option<Priority> {
     }
 }
 
+impl Priority {
+    /// The plan's word for a priority: `now`, `must`, …
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::Now => "now",
+            Priority::Must => "must",
+            Priority::Should => "should",
+            Priority::Could => "could",
+            Priority::Wont => "wont",
+        }
+    }
+
+    /// The priority a GitHub label names (T-79): `priority/now`,
+    /// `priority/must`, … `None` for any other label.
+    pub fn from_label(label: &str) -> Option<Priority> {
+        match label.trim().strip_prefix("priority/")? {
+            "now" => Some(Priority::Now),
+            "must" => Some(Priority::Must),
+            "should" => Some(Priority::Should),
+            "could" => Some(Priority::Could),
+            "wont" => Some(Priority::Wont),
+            _ => None,
+        }
+    }
+
+    /// The label a priority is written as (the inverse of `from_label`).
+    pub fn label(self) -> String {
+        format!("priority/{}", self.as_str())
+    }
+}
+
 fn is_task_id(token: &str) -> bool {
     match token.strip_prefix("T-") {
         Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
@@ -446,6 +479,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         state: None,
         followup_of: None,
         reopen: None,
+        issue: None,
     })
 }
 
@@ -471,6 +505,7 @@ fn parse_queue_field(
         "state" => "state",
         "followup-of" => "followup-of",
         "reopen" => "reopen",
+        "issue" => "issue",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -510,6 +545,11 @@ fn parse_queue_field(
             item.followup_of = Some(value.to_string());
         }
         "reopen" => item.reopen = Some(value.to_string()),
+        "issue" => {
+            item.issue = Some(value.strip_prefix('#').and_then(|n| n.parse::<u64>().ok()).ok_or_else(|| {
+                bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
+            })?)
+        }
         _ => unreachable!("the field was matched above"),
     }
     Ok(())

@@ -129,7 +129,7 @@ fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::Ta
         wait_cond: None,
         rework_note: None,
         estimate_min: None,
-        updated: NOW,
+         issue: None,updated: NOW,
     }
 }
 

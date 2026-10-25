@@ -1224,7 +1224,7 @@ gate = "{gate}"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: 0,
+                     issue: None,updated: 0,
                 })?;
                 tx.insert_verdict(&gear_store::VerdictRow {
                     project: "p".into(),
