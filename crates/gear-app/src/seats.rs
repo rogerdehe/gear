@@ -121,3 +121,30 @@ fn binding_status_name(status: BindingStatus) -> &'static str {
         BindingStatus::Void => "void",
     }
 }
+
+/// The moment a seat's current generation started (T-71): the binding of that
+/// generation is opened then, in the same transaction that bumps the
+/// generation. A warm seat keeps its id across jobs, so this is what tells an
+/// earlier job's messages from this job's.
+///
+/// `None` for a seat without a binding of that generation (never onboarded).
+pub fn generation_started(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    generation: i64,
+) -> GearResult<Option<Ts>> {
+    Ok(tx
+        .get_binding(seat_id, generation)?
+        .map(|binding| binding.created))
+}
+
+/// The time from which a message belongs to the seat's current generation: one
+/// second before the generation started, because the store's message queries
+/// take a strict `created > since` and a message written in the same second as
+/// the binding is this generation's (T-71).
+///
+/// `0` for a seat without a binding of that generation: nothing is known
+/// about its start, so nothing is hidden.
+pub fn generation_since(tx: &Tx<'_>, seat_id: &str, generation: i64) -> GearResult<Ts> {
+    Ok(generation_started(tx, seat_id, generation)?.map_or(0, |started| started.saturating_sub(1)))
+}
