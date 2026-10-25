@@ -19,3 +19,5 @@
 - **A task built on another unreviewed branch merges after it (M2.1).** T-59 was built on T-53's branch and merged while T-53 was in rework, carrying T-53's failed attempt into dev. The merge of a task should wait until every task whose commits it carries has passed.
 
 - **Merge the approved commit, not the branch name (M2.1, T-53).** The lane pushed its rebased rework to a new branch `engine/t53-v2` (to avoid a force push); the engine merges `<lane>/t<n>` and refused: "the branch moved after the review". The approved candidate was fine. The merge should take the approved candidate commit wherever it is, and a failed merge needs a retry path (today the captain had to point the branch and reset the op in the store by hand).
+
+- **A hand-in must be pushed (M2.1, T-60).** The lane handed in cf58f57 on a local `config/t60` that tracked origin/dev and was never pushed; the reviewer (same machine) read it and passed it, the merge found no `origin/config/t60`. `gear send --kind result` refuses a candidate that is not on `origin/<lane>/t<n>`.
