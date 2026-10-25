@@ -61,6 +61,8 @@ After the exit the screen shows `codex resume <uuid>` and the shell prompt. Afte
 
 The status bar carries the limits (`5h …`, `weekly N% left`). A stop on a limit or a server error ("model at capacity") looks like a finished turn: read the screen before treating a stop as completion.
 
+A provider back-off is different: after a 429, Codex retries on its own and shows no output for minutes while the screen still says it is working. GEAR reads the back-off signs and shows the seat as a provider back-off — it is not a stall, do not kill it, and do not spend a switch on it.
+
 ## Pitfalls
 
 - **Switching the model needs a restart** with another `-m`; there is no in-session switch GEAR uses.
