@@ -648,7 +648,10 @@ fn merge_one_locked(
     )
     .map_err(|reason| Failed::clear(format!("cannot read the pushed refs of origin: {reason}")))?;
     if pushed.trim().is_empty() {
-        return Err(Failed::stuck(format!(
+        // The candidate may not be pushed yet: the lane pushes it and the
+        // merge retries. Only the bounded retry decides whether it was never
+        // pushed (F2 of the T-61 review).
+        return Err(Failed::clear(format!(
             "{task}: the approved candidate {sha} is on no pushed ref of origin\n\
              it was never pushed, or the branch that held it is gone"
         )));
@@ -762,7 +765,9 @@ fn merge_one_locked(
         if reason.contains("non-fast-forward") || reason.contains("fetch first") || reason.contains("cannot lock ref") {
             return Err(Failed::clear(format!("{RACE}{reason}")));
         }
-        return Err(Failed::stuck(reason));
+        // Any other push failure can clear too: the network, the remote, a
+        // hook that rejects the push once (F1 of the T-61 review).
+        return Err(Failed::clear(format!("push failed: {reason}")));
     }
     let (closed, left) = close_branches(dir, repo, &branch, &review, &sha, &task);
 
@@ -1340,7 +1345,9 @@ gate = "{gate}"
         herdr: &mut gear_herdr::fake::FakeHerdr,
         cfg: &EngineCfg,
     ) -> Vec<Merged> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // The deadline is generous: a merge that retries waits between its
+        // attempts (T-61).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         loop {
             let merged = merge_passed(store, herdr, cfg, "p", 30).unwrap();
             let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
@@ -1430,8 +1437,9 @@ gate = "{gate}"
         assert!(scratch.dev_has_task_commit());
     }
 
-    /// T-61: a candidate on no pushed ref fails with a clear reason and rings
-    /// the captain once. Nothing in the store is edited by hand.
+    /// T-61, F2 of the review: a candidate on no pushed ref is retried (it may
+    /// not be pushed yet) and rings the captain once when the retries are
+    /// used up. Nothing in the store is edited by hand.
     #[test]
     fn a_candidate_on_no_pushed_ref_fails_the_op_and_rings_the_captain_once() {
         let scratch = Scratch::new("unpushed-op");
@@ -1451,6 +1459,7 @@ gate = "{gate}"
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         let reason = op.result.clone().unwrap_or_default();
         assert!(reason.contains("no pushed ref"), "{reason}");
+        assert!(reason.contains("retried"), "the retries are named: {reason}");
         // dev is untouched: nothing was merged.
         assert_eq!(scratch.dev_log(), "dev", "dev is untouched");
         // One item in the captain's inbox: one ring, not one per tick.
@@ -2011,11 +2020,69 @@ gate = "{project_gate}"
         assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
     }
 
+    /// F1 of the T-61 review: a push that a hook rejects once is not a failed
+    /// merge. The merge waits, tries again, and lands.
+    #[test]
+    fn a_push_that_a_hook_rejects_once_is_retried_and_lands() {
+        let scratch = Scratch::new("hook");
+        let worktree = scratch.merge_worktree();
+        // The repo's own pre-push hook says no once, then lets it through.
+        let marker = scratch.root.join("hook-said-no");
+        let hooks = scratch.work.join(".git/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-push");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nif [ ! -e '{marker}' ]; then touch '{marker}'; echo 'the hook says no' >&2; exit 1; fi\nexit 0\n",
+                marker = marker.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let line = merge_retried(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap();
+
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(marker.exists(), "the hook said no once");
+        assert!(scratch.dev_has_task_commit());
+    }
+
+    /// F2 of the T-61 review: a candidate that is not pushed yet is not a
+    /// failed merge. The lane pushes it, and the merge lands.
+    #[test]
+    fn a_candidate_pushed_late_merges_after_the_retry() {
+        let scratch = Scratch::new("late-push");
+        let worktree = scratch.merge_worktree();
+        // The lane committed but did not push yet.
+        sh(
+            &scratch.work,
+            "git switch -q dev && git switch -qc heat/t5-late && echo late > late.txt \
+             && git add -A && git -c user.email=a@b -c user.name=a commit -qm late",
+        );
+        let candidate = scratch.local_head_of("heat/t5-late");
+        // The lane pushes while the merge waits.
+        let work = scratch.work.clone();
+        let pusher = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            sh(&work, "git push -q origin heat/t5-late");
+        });
+
+        let line = merge_retried(&worktree, &repo("true"), &op(&candidate)).unwrap();
+
+        pusher.join().unwrap();
+        assert!(line.contains("merged T-5 into dev"), "{line}");
+        assert!(scratch.dev_has_task_commit());
+    }
+
     /// L-67: a failed merge is not queued again tick after tick (it filed 120
     /// items for the captain); a new passing attempt gets its own merge.
     #[test]
-    fn a_failed_merge_is_not_queued_again() {
-        let mut store = gear_store::Store::open_in_memory().unwrap();
+    fn a_failed_merge_is_not_queued_again() {        let mut store = gear_store::Store::open_in_memory().unwrap();
         store
             .write(|tx| {
                 gear_store::testing::seed_project(tx, "p", "sess", 1)?;
@@ -2159,8 +2226,8 @@ gate = "{project_gate}"
         assert!(branches.contains("heat/t5"), "{branches}");
     }
 
-    /// T-61: work that was never pushed is not merged. The merge says why and
-    /// the captain is rung once; nothing in the store is edited by hand.
+    /// T-61, F2 of the review: a candidate that is on no pushed ref may not be
+    /// pushed yet: the merge retries, and the bounded retry decides.
     #[test]
     fn a_candidate_on_no_pushed_ref_fails_with_a_clear_reason() {
         let scratch = Scratch::new("unpushed");
@@ -2169,7 +2236,7 @@ gate = "{project_gate}"
         // merge worktree shares its objects) but on no pushed ref.
         sh(
             &scratch.work,
-            "git switch -q dev && git switch -qc heat/t5-local && echo local >> README.md \
+            "git switch -q dev && git switch -qc heat/t5-local && echo local > local.txt \
              && git add -A && git -c user.email=a@b -c user.name=a commit -qm local",
         );
         let candidate = scratch.local_head_of("heat/t5-local");
@@ -2179,7 +2246,11 @@ gate = "{project_gate}"
 
         assert!(failed.reason.contains("no pushed ref"), "{}", failed.reason);
         assert!(failed.reason.contains(&candidate), "{}", failed.reason);
-        assert_eq!(failed.blocker, Blocker::Stuck, "unpushed work does not clear");
+        assert_eq!(
+            failed.blocker,
+            Blocker::Clear,
+            "a candidate that is not pushed yet can clear"
+        );
         assert_eq!(scratch.dev_log(), before, "dev is untouched");
         assert!(!scratch.dev_has_task_commit());
     }
