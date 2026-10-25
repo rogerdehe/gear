@@ -1,4 +1,10 @@
 //! All integration tests of gear-engine in one binary: each test binary is scanned by macOS on its first run, so one binary per crate keeps the gate fast.
+
+/// Tests that onboard a `grok` lane (its trust file is written under `HOME`)
+/// or set `HOME` themselves take this lock: `HOME` is process-wide, so two
+/// such tests at once write into each other's home.
+pub static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 mod backoff_contract;
 mod config_profile_onboard;
 mod contract_update;
