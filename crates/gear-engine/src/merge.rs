@@ -321,6 +321,10 @@ fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
 
 /// Put a merge op back in the queue: it runs again on a later tick. The reason
 /// says why it did not go through.
+/// Put a merge op back in the queue: it runs again on a later tick. The reason
+/// says why it did not go through. An op that already waits (Unknown) is
+/// refreshed too: the wait's time is what orders the waiting merges fairly
+/// (T-62), and a reason that changed must not stay stale.
 fn retry_merge(
     store: &mut Store,
     project: &str,
@@ -329,10 +333,9 @@ fn retry_merge(
     now: Ts,
 ) -> GearResult<()> {
     store.write(|tx| {
-        if tx
-            .get_op(project, &op.id)?
-            .is_some_and(|row| row.state == OpState::Executing)
-        {
+        if tx.get_op(project, &op.id)?.is_some_and(|row| {
+            matches!(row.state, OpState::Executing | OpState::Unknown)
+        }) {
             tx.set_op_state(project, &op.id, OpState::Unknown, Some(reason), now)?;
         }
         Ok(())
@@ -352,9 +355,14 @@ fn waits_for(op: &OpRow) -> Option<&str> {
 /// The ready merges in the order they run: a merge that waits for another task
 /// goes last (T-62). The task it waits for must be able to land first, or the
 /// two would hold each other.
+///
+/// Among the waiting merges the one that has waited longest goes first: its
+/// `updated` moves on every retry, so the group is a round robin and no waiting
+/// task starves behind another (F2 of the T-62 review).
 fn merge_order(ready: Vec<OpRow>) -> Vec<OpRow> {
-    let (waiting, running): (Vec<OpRow>, Vec<OpRow>) =
+    let (mut waiting, running): (Vec<OpRow>, Vec<OpRow>) =
         ready.into_iter().partition(|op| waits_for(op).is_some());
+    waiting.sort_by_key(|op| op.updated);
     running.into_iter().chain(waiting).collect()
 }
 
@@ -537,8 +545,13 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
 }
 
 /// The other tasks of the project with a candidate: (task, candidate, whether
-/// that attempt has a passing verdict). A merge waits for the ones whose work
-/// its candidate carries (T-62).
+/// the task's latest attempt has a passing verdict), **one entry per attempt**.
+/// A merge waits for the ones whose work its candidate carries (T-62).
+///
+/// Every attempt counts, not only the latest (F1 of the T-62 review): a task
+/// that reworked hands in a new candidate, and the task built on the older
+/// branch carries that older, rejected work. Its verdict was rejected, but its
+/// commits are still in the branch.
 fn other_candidates(
     store: &mut Store,
     project: &str,
@@ -550,12 +563,8 @@ fn other_candidates(
             if row.id == task {
                 continue;
             }
-            // Only the latest attempt counts: the candidate of an older
-            // attempt is not the work the task has now.
-            let Some(latest) = tx.attempts_of_task(project, &row.id)?.into_iter().last() else {
-                continue;
-            };
-            let Some(candidate) = latest.candidate.clone() else {
+            let attempts = tx.attempts_of_task(project, &row.id)?;
+            let Some(latest) = attempts.last() else {
                 continue;
             };
             let passed = tx
@@ -568,7 +577,11 @@ fn other_candidates(
                         && verdict.contract_version == row.contract_version
                         && Some(&verdict.candidate) == latest.candidate.as_ref()
                 });
-            others.push((row.id.clone(), candidate, passed));
+            for attempt in attempts {
+                if let Some(candidate) = attempt.candidate {
+                    others.push((row.id.clone(), candidate, passed));
+                }
+            }
         }
         Ok(others)
     })
@@ -963,8 +976,13 @@ fn carried_tasks(
     integration: &str,
     others: &[(String, String, bool)],
 ) -> Vec<(String, bool)> {
-    let mut carried = Vec::new();
+    let mut carried: Vec<(String, bool)> = Vec::new();
     for (task, other, passed) in others {
+        // One entry per task: a task that handed in several attempts is one
+        // task to wait for, not three (F1 of the T-62 review).
+        if carried.iter().any(|(seen, _)| seen == task) {
+            continue;
+        }
         // The commit of the other task, as this repo knows it. A candidate of
         // another repo is not here at all: git cannot place it, and it cannot
         // be carried either.
@@ -977,11 +995,11 @@ fn carried_tasks(
         if other_sha == candidate {
             continue;
         }
-        // Is the other candidate an ancestor of this one?
+        // Is this attempt's candidate an ancestor of this one?
         if git(dir, &["merge-base", "--is-ancestor", &other_sha, candidate]).is_err() {
             continue;
         }
-        // Is it on the integration branch already? Then it landed.
+        // Is it on the integration branch already? Then this work landed.
         if git(
             dir,
             &["merge-base", "--is-ancestor", &other_sha, &format!("origin/{integration}")],
@@ -1531,16 +1549,21 @@ mod tests {
 
     /// A passing verdict for a task's latest attempt.
     fn pass(store: &mut Store, task: &str, candidate: &str, at: Ts) {
+        pass_n(store, task, 1, candidate, at);
+    }
+
+    /// A passing verdict for a given attempt.
+    fn pass_n(store: &mut Store, task: &str, attempt: i64, candidate: &str, at: Ts) {
         store
             .write(|tx| {
                 tx.insert_verdict(&gear_store::VerdictRow {
                     project: "p".into(),
                     task: task.into(),
-                    attempt: 1,
+                    attempt,
                     contract_version: 1,
                     candidate: candidate.into(),
                     passed: true,
-                    evidence: Some("ops/reviews/T-1.md".into()),
+                    evidence: Some(format!("ops/reviews/{task}.md")),
                     by_seat: "p:captain".into(),
                     created: at,
                 })?;
@@ -1667,9 +1690,283 @@ mod tests {
         assert!(inbox.is_empty(), "{inbox:?}");
     }
 
+    /// A scratch repo with a chain of tasks (T-62, F2 of the review): each
+    /// task's branch is cut from the one before, so T-2 carries T-1's work,
+    /// T-3 carries T-2's, and so on.
+    struct Chain {
+        root: PathBuf,
+        work: PathBuf,
+        /// The candidates in chain order: index 0 is the base.
+        candidates: Vec<String>,
+    }
+
+    impl Chain {
+        fn new(name: &str, tasks: usize) -> Chain {
+            let root = scratch_root(name);
+            let origin = root.join("origin.git");
+            let work = root.join("work");
+            sh(&root, &format!("git init -q --bare {}", origin.display()));
+            sh(&root, &format!("git init -q -b dev {}", work.display()));
+            fs::write(work.join("README.md"), "dev\n").unwrap();
+            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+            sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+            let mut candidates = Vec::new();
+            for n in 1..=tasks {
+                let base = if n == 1 { "dev".to_string() } else { format!("heat/t{}", n - 1) };
+                sh(
+                    &work,
+                    &format!(
+                        "git switch -qc heat/t{n} {base} && echo t{n} > t{n}.txt && git add -A \
+                         && git -c user.email=a@b -c user.name=a commit -qm t{n} && git push -q origin heat/t{n}"
+                    ),
+                );
+                sh(
+                    &work,
+                    &format!(
+                        "git switch -qc review/t{n} && echo r{n} > r{n}.txt && git add -A \
+                         && git -c user.email=a@b -c user.name=a commit -qm r{n} && git push -q origin review/t{n}"
+                    ),
+                );
+                candidates.push(sh(&root, &format!("git -C origin.git rev-parse heat/t{n}")));
+            }
+            Chain { root, work, candidates }
+        }
+
+        fn merge_worktree(&self) -> gear_herdr::Worktree {
+            let path = self.root.join("merge");
+            sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b home/merge {} origin/dev",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "home/merge".into(),
+            }
+        }
+
+        fn dev_log(&self) -> String {
+            sh(&self.root, "git -C origin.git log --format=%s dev")
+        }
+    }
+
+    impl Drop for Chain {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The scratch directory of a fixture.
+    fn scratch_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "gear-merge-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A project with `candidates.len()` tasks, T-1..T-n, each handed in on
+    /// its first attempt.
+    fn chain_world(candidates: &[String]) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: config_text("true"),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
+                gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
+                for (index, candidate) in candidates.iter().enumerate() {
+                    let id = format!("T-{}", index + 1);
+                    tx.insert_task(&gear_store::TaskRow {
+                        project: "p".into(),
+                        id: id.clone(),
+                        rank: index as i64 + 1,
+                        state: TaskState::Ready,
+                        priority: "must".into(),
+                        lane: Some("heat".into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        updated: 0,
+                    })?;
+                    gear_app::tasks::start_attempt(tx, "p", &id, "p:heat", 1, 0)?;
+                    gear_app::tasks::on_delivery_confirmed(tx, "p", &id, 1, 0)?;
+                    gear_app::tasks::submit_result(tx, "p", &id, 1, 1, candidate, "report", 0)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// T-62, F1 of the review: a task that reworked hands in a new candidate,
+    /// and the task built on the older branch still carries the older,
+    /// rejected work. The wait must look at every attempt, not only the last.
+    #[test]
+    fn a_merge_waits_for_an_earlier_attempt_of_the_task_it_carries() {
+        let chain = Chain::new("rework", 2);
+        // A's rework: one more commit on the same branch, outside B's history.
+        sh(
+            &chain.work,
+            "git switch -q heat/t1 && echo rework > rework.txt && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm a2 && git push -q origin heat/t1 \
+             && git push -q -f origin heat/t1:refs/heads/review/t1",
+        );
+        let a1 = chain.candidates[0].clone();
+        let b = chain.candidates[1].clone();
+        let a2 = sh(&chain.root, "git -C origin.git rev-parse heat/t1");
+        assert_ne!(a1, a2, "the rework is a new commit");
+        // B holds A's first attempt, not its rework.
+        assert!(
+            sh_ok(&chain.work, &format!("git merge-base --is-ancestor {a1} {b}")),
+            "B was built on A's first attempt"
+        );
+        assert!(
+            !sh_ok(&chain.work, &format!("git merge-base --is-ancestor {a2} {b}")),
+            "the rework is outside B's history"
+        );
+
+        let worktree = chain.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        // T-1: attempt 1 (a1) was rejected, attempt 2 (a2) is in review.
+        let mut store = chain_world(&chain.candidates);
+        store
+            .write(|tx| {
+                let mut first = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                first.state = gear_model::AttemptState::Rejected;
+                tx.update_attempt(&first)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: a1.clone(),
+                    passed: false,
+                    evidence: Some("ops/reviews/T-1.md".into()),
+                    by_seat: "p:captain".into(),
+                    created: 5,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, 10)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, 10)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, &a2, "report", 10)?;
+                Ok(())
+            })
+            .unwrap();
+        // T-2 passed; T-1 has not.
+        pass(&mut store, "T-2", &b, 20);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // T-2's merge waits: it carries T-1's first, rejected attempt.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Unknown)
+        });
+        let reason = op_result(&mut store, "O-1");
+        assert!(reason.contains("waits for T-1"), "{reason}");
+        assert_eq!(chain.dev_log(), "dev", "nothing landed yet");
+
+        // T-1's rework passes: T-1 lands, then T-2.
+        pass_n(&mut store, "T-1", 2, &a2, 40);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Confirmed)
+                && op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+
+        let log = chain.dev_log();
+        let b_merge = log.find("merge(T-2)").expect("T-2's merge");
+        let a_merge = log.find("merge(T-1)").expect("T-1's merge");
+        assert!(b_merge < a_merge, "T-1 lands before T-2 (newest first): {log}");
+        assert!(sh_ok(&chain.root, "git -C origin.git log --format=%s dev | grep -qx a2"));
+        assert!(sh_ok(&chain.root, "git -C origin.git log --format=%s dev | grep -qx t2"));
+    }
+
+    /// T-62, F2 of the review: waiting merges take turns, so a chain lands in
+    /// its own order even when the verdicts arrive last-task first, and even
+    /// after a restart (every waiting op is Unknown then).
+    #[test]
+    fn waiting_merges_take_turns_and_a_chain_lands_in_order() {
+        // T-1 (the base) is carried by T-2, which is carried by T-3.
+        let chain = Chain::new("chain", 3);
+        let worktree = chain.merge_worktree();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = chain_world(&chain.candidates);
+        let mut cfg = EngineCfg::default();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles
+                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // The verdicts arrive deepest first: T-3 (the task on top) passes, its
+        // merge waits; then T-2, whose merge waits too; then T-1, the base, so
+        // its merge can land. Every waiting op is Unknown by then.
+        pass(&mut store, "T-3", &chain.candidates[2], 10);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Unknown)
+        });
+        pass(&mut store, "T-2", &chain.candidates[1], 20);
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-2") == Some(OpState::Unknown)
+        });
+        pass(&mut store, "T-1", &chain.candidates[0], 30);
+        // A restart finds the waiting ops Unknown, as a real one would.
+        let recovered = crate::ops::recover_on_start(&mut store, 40).unwrap();
+        assert!(recovered.is_empty(), "nothing was left executing: {recovered:?}");
+
+        // Only the fair order can finish the chain from here: T-1, then T-2,
+        // then T-3.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            ["O-1", "O-2", "O-3"]
+                .iter()
+                .all(|id| op_state(store, id) == Some(OpState::Confirmed))
+        });
+
+        let log = chain.dev_log();
+        assert!(log.contains("t1") && log.contains("t2") && log.contains("t3"), "{log}");
+        // Newest first: T-3's merge is on top, T-1's at the bottom.
+        let t3 = log.find("merge(T-3)").expect("T-3's merge");
+        let t2 = log.find("merge(T-2)").expect("T-2's merge");
+        let t1 = log.find("merge(T-1)").expect("T-1's merge");
+        assert!(t3 < t2 && t2 < t1, "the chain lands in order: {log}");
+    }
+
     /// A child repo below the project root (T-53): its own origin, its own
     /// integration branch, a task branch and a review branch.
-    struct Child {        root: PathBuf,
+    struct Child {
+        root: PathBuf,
         work: PathBuf,
         origin: PathBuf,
     }
