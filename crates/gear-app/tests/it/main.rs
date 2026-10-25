@@ -18,6 +18,7 @@ mod plan_apply_contract;
 mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
+mod push_contract;
 mod result_contract;
 mod review_contract;
 mod seats_contract;
