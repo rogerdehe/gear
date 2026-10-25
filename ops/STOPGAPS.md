@@ -5,6 +5,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
+| `[profiles.codex]` in `gear/gear.toml` (unattended args with `check_for_update_on_startup=false`) | Codex reviewers stood blocked on the start-up "Update available" dialog (T-52, T-56) | T-57 lands (the built-in codex profile carries the flag) | captain |
 
 ## Removed
 
