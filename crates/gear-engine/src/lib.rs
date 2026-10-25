@@ -152,6 +152,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.parallel.extend(checked.opened.into_iter().map(|id| format!("{project}:{id}")));
         report.parallel_failed.extend(checked.problems.into_iter().map(|error| format!("{project}: {error}")));
     }
+    // The GitHub side of a project in GitHub mode (T-91): every call is an op,
+    // so an outage queues them and never stops the tick.
+    for project in &projects {
+        gear_forge::sync(store, project, now)?;
+    }
     // Station facts need no Herdr observation. Enqueue them before deciding
     // doorbells, including when a previous outage delayed a checkpoint.
     for project in &projects {

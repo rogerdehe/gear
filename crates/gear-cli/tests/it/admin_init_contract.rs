@@ -99,6 +99,35 @@ fn the_captain_re_registers_after_a_config_change() {
     assert_eq!(config_version(&db), 2, "a re-init writes the next config version");
 }
 
+/// T-91, F1: landing a task through its pull request is not in this release,
+/// so the config refuses `merge = "pr"` instead of letting a project be
+/// configured for a landing that cannot work.
+#[test]
+fn a_pull_request_merge_mode_is_refused() {
+    let dir = scratch("pr-mode");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[github]\nrepo = \"owner/name\"\nmerge = \"pr\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stdout));
+    let err = stderr(&o);
+    assert!(err.contains("github.merge"), "{err}");
+    assert!(err.contains("not in this release"), "{err}");
+    assert_eq!(config_version(&db), 0, "nothing was registered");
+}
+
 #[test]
 fn a_lane_may_not_register_the_project() {
     let dir = scratch("lane");
