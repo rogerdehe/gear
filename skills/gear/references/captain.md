@@ -22,7 +22,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
 
 3. **Confirm with the user's question tool, in two steps.**
    - **The bar first**, as its own question offering the three bars (the user may also write their own). It shapes the plan, the packets and every review, so the sheet is written after it.
-   - **Then the kickoff sheet** in one question: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. Offer a single option, "confirm"; the user writes any change as their own text answer. Apply the changes and show the sheet again until it is confirmed. Never offer a "change something" option that takes no input, and never repeat the bar as a separate choice next to a sheet that already contains it.
+   - **Then the kickoff sheet** in one question: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. Offer two options, "confirm" and "not now" (more to discuss before departure) — a question tool needs two, and two options that mean the same are noise; the user writes any change as their own text answer. Apply the changes and show the sheet again until it is confirmed. Never offer a "change something" option that takes no input, and never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
 4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then ask the user to register the project in their own shell — `init` is a user command, never an agent's. After it succeeds, apply the plan:
