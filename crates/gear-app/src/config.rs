@@ -1128,6 +1128,18 @@ fn chain_problem(chain: &[ModelEntry]) -> Option<String> {
     None
 }
 
+/// The chain a lane runs on (T-35): its own entries when it names any, else
+/// the project's `models.lanes`. The engine starts a seat on the CLI the
+/// chain's entry names, so this is also what says which CLIs a lane can run
+/// (T-83).
+pub fn lane_chain<'a>(config: &'a ProjectConfig, lane: &'a LaneSection) -> &'a [ModelEntry] {
+    if lane.models.is_empty() {
+        &config.models.lanes
+    } else {
+        &lane.models
+    }
+}
+
 /// The primary model of a lane: its own first entry, else the lane chain's.
 fn lane_primary<'a>(
     lane: &'a LaneSection,

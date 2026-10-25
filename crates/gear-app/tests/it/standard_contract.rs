@@ -43,10 +43,11 @@ profile = "opencode"
 fn world() -> (tempfile::TempDir, Store) {
     let root = tempfile::tempdir().unwrap();
     let mut s = Store::open_in_memory().unwrap();
-    admin::init(
+    admin::init_with_home(
         &mut s,
         &Env { ctx: None, pane_id: None, admin: true },
         &TEMPLATE.replace("{root}", &root.path().display().to_string()),
+        Some(crate::skill_home()),
         T0,
     )
     .unwrap();

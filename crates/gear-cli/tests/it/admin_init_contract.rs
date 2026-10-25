@@ -34,6 +34,11 @@ fn config(dir: &Path, repo: &Path) -> PathBuf {
 /// `gear admin init <config>` as a caller's process. No Herdr: `init` must not
 /// start an engine on a test store (L-54).
 fn init(home: &Path, db: &Path, config: &Path, ctx: Option<&str>, admin: bool) -> Output {
+    // T-83: `init` refuses a kind whose GEAR skill is missing; these tests are
+    // about the caller checks, so the skill is installed in the test home.
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home).expect("install the skill");
+    }
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
     cmd.args(["admin", "init", config.to_str().expect("a utf-8 path")])
         .env("HOME", home)
@@ -194,4 +199,88 @@ fn without_the_users_consent_nobody_registers() {
         assert!(err.contains("GEAR_ADMIN=1"), "{ctx:?}: {err}");
         assert_eq!(config_version(&db), 0, "{ctx:?}");
     }
+}
+
+/// T-83 (trial G06): a config whose kind has no GEAR skill installed is
+/// refused, naming the command, and nothing is registered.
+#[test]
+fn a_kind_without_its_skill_is_refused() {
+    let home = scratch("noskill");
+    let db = scratch("noskill-db");
+    let repo = scratch("noskill-repo");
+    let config = config(&scratch("noskill-cfg"), &repo);
+
+    // No `gear admin install-skill` here: the home has no skill at all.
+    let out = {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+        cmd.args(["admin", "init", config.to_str().unwrap()])
+            .env("HOME", &home)
+            .env("GEAR_DB", db.join("gear.db"))
+            .env("GEAR_ADMIN", "1")
+            .env_remove("GEAR_CTX")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH");
+        cmd.output().expect("run gear")
+    };
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let message = stderr(&out);
+    assert!(message.contains("BAD_FORMAT"), "{message}");
+    assert!(message.contains("GEAR skill is not installed"), "{message}");
+    assert!(message.contains("gear admin install-skill --agent codex"), "{message}");
+    assert_eq!(config_version(&db.join("gear.db")), 0, "nothing was registered");
+}
+
+/// T-83 (round 2, F1) through the real binary: the review's reproduction —
+/// codex seats whose lane chain runs OpenCode, with only codex's skill
+/// installed — is refused, and the same config registers once OpenCode's skill
+/// is there.
+#[test]
+fn a_model_chain_cli_without_its_skill_is_refused() {
+    use gear_app::skill::{install, SkillAgent};
+
+    let home = scratch("chain-home");
+    install(SkillAgent::Codex, &home).expect("install codex");
+    let db = scratch("chain-db").join("gear.db");
+    let repo = scratch("chain-repo");
+    let dir = scratch("chain-cfg");
+    let config = dir.join("gear.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[models]\nlanes = [\n  {{ model = \"test-model\", cli = \"opencode\" }},\n  {{ model = \"fallback\", cli = \"codex\" }},\n]\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+
+    let run = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+        cmd.args(["admin", "init", config.to_str().unwrap()])
+            .env("HOME", &home)
+            .env("GEAR_DB", &db)
+            .env("GEAR_ADMIN", "1")
+            .env_remove("GEAR_CTX")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH");
+        cmd.output().expect("run gear")
+    };
+
+    let out = run();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let message = stderr(&out);
+    assert!(message.contains("BAD_FORMAT"), "{message}");
+    assert!(message.contains("opencode"), "{message}");
+    assert!(message.contains("gear admin install-skill --agent opencode"), "{message}");
+    assert_eq!(config_version(&db), 0, "nothing was registered");
+
+    install(SkillAgent::OpenCode, &home).expect("install opencode");
+    let out = run();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(config_version(&db), 1, "the same config registers");
 }

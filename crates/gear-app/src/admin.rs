@@ -49,7 +49,25 @@ const CAPTAIN: &str = "captain";
 ///      the next config version (see [`re_register`]).
 /// Checks that need Herdr or git (session, repo, branch) are not part of this
 /// cut.
-pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
+pub fn init(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    now: Ts,
+) -> GearResult<InitResult> {
+    init_with_home(store, env, config_text, None, now)
+}
+
+/// `gear admin init` with an explicit home for the skill check (T-83): the CLI
+/// passes the user's `HOME`; a test passes a scratch home with the skills
+/// installed. `None` means the process's `HOME`.
+pub fn init_with_home(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    home: Option<&std::path::Path>,
+    now: Ts,
+) -> GearResult<InitResult> {
     // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
     //    or the project's captain may act on it (T-86). Which project is
     //    checked once its config is parsed, below.
@@ -120,8 +138,8 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 .map(|temps| ("temps", temps.profile.as_str())),
         )
         .collect();
-    for (name, profile_name) in seats_to_check {
-        let Some(profile) = table.get(profile_name) else {
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
@@ -134,6 +152,69 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 ErrorCode::BadFormat,
                 format!(
                     "the profile {profile_name:?} has no unattended args: an agent that stops on permission dialogs cannot run unattended (T-31)"
+                ),
+            ));
+        }
+    }
+
+    // Every kind the project can start must have the GEAR skill installed
+    // (T-83, trial G06): an agent that never read it does not know how to work
+    // as a seat, and the voyage would need the captain's hands. The kinds are
+    // every seat's resolved profile **and** every CLI an effective model chain
+    // names (T-35): an entry may run its model on another CLI than its seat's
+    // kind, and a chain's fallback may name a third, so the profile alone does
+    // not say what an unattended run will start. The home is the caller's (the
+    // CLI's user); an unset one is the process's. GEAR never installs a skill
+    // behind the user's back — it names the command.
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home),
+            None => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
+                ))
+            }
+        },
+    };
+    let mut kinds: Vec<(String, String)> = Vec::new();
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
+            continue; // reported above
+        };
+        let who = match *name {
+            "captain" => "the captain".to_string(),
+            "temps" => "the reviewer".to_string(),
+            lane => format!("lane {lane}"),
+        };
+        note_kind(&mut kinds, &profile.kind, &who);
+    }
+    for lane in &config.lanes {
+        note_chain(
+            &mut kinds,
+            config::lane_chain(&config, lane),
+            &format!("the model chain of lane {}", lane.name),
+        );
+    }
+    note_chain(&mut kinds, &config.models.review, "the reviewers' model chain");
+    note_chain(&mut kinds, &config.models.captain, "the captain's model chain");
+
+    for (kind, who) in &kinds {
+        let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{who} runs {kind:?}, which GEAR has no skill for: the kinds with a skill are claude, codex, opencode and grok"
+                ),
+            ));
+        };
+        if !crate::skill::installed(agent, &home) {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{who} runs {kind}, whose GEAR skill is not installed in {}: run `gear admin install-skill --agent {kind}` and init again",
+                    home.display()
                 ),
             ));
         }
@@ -403,4 +484,25 @@ fn re_register(
         seats,
         destinations: frozen.to_vec(),
     })
+}
+
+/// Note that `who` may start the CLI `kind` (T-83): once per kind, the first
+/// seat that names it.
+fn note_kind(kinds: &mut Vec<(String, String)>, kind: &str, who: &str) {
+    let kind = kind.trim();
+    if kind.is_empty() || kinds.iter().any(|(seen, _)| seen == kind) {
+        return;
+    }
+    kinds.push((kind.to_string(), who.to_string()));
+}
+
+/// Note every CLI a chain may start (T-83, T-35): the entry form of a model
+/// names the CLI that runs it, and a fallback may name another one — each of
+/// them must have the GEAR skill too.
+fn note_chain(kinds: &mut Vec<(String, String)>, chain: &[config::ModelEntry], who: &str) {
+    for entry in chain {
+        if let Some(cli) = entry.cli() {
+            note_kind(kinds, cli, who);
+        }
+    }
 }
