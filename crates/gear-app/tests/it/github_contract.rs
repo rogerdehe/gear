@@ -45,7 +45,7 @@ profile = "opencode"
 #[test]
 fn a_project_github_section_parses_and_resolves_on_the_root_repo() {
     let text = format!(
-        "{BASE}\n[github]\nrepo = \"rogerdehe/gear\"\nmerge = \"pr\"\nmerge_method = \"merge\"\n\n[github.issues]\nlabels = [\"gear\", \"triage\"]\n"
+        "{BASE}\n[github]\nrepo = \"rogerdehe/gear\"\nmerge = \"push\"\nmerge_method = \"merge\"\n\n[github.issues]\nlabels = [\"gear\", \"triage\"]\n"
     );
     let cfg = config::parse(&text).unwrap();
     assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
@@ -53,7 +53,7 @@ fn a_project_github_section_parses_and_resolves_on_the_root_repo() {
     let github = root.github.expect("the project's mode reaches the root repo");
     assert_eq!(github.repo, "rogerdehe/gear");
     assert_eq!(github.issues_labels, vec!["gear".to_string(), "triage".to_string()]);
-    assert_eq!(github.merge, config::MergeMode::Pr);
+    assert_eq!(github.merge, config::MergeMode::Push);
     assert_eq!(github.merge_method, config::MergeMethod::Merge);
     // The root's own repo works the same way.
     assert_eq!(cfg.repo_of_lane("heat").github, Some(github));
@@ -85,10 +85,37 @@ fn a_repo_github_section_replaces_the_projects_and_absent_means_local_only() {
 /// F2 of the review: a `[[repos]]` entry without its own `[github]` is
 /// local-only — it never inherits the root's repository identity, which would
 /// write in the wrong place.
+/// T-91, F1: landing through a pull request is not in this release. The config
+/// refuses it rather than let a project be configured for a landing that cannot
+/// work (the engine's merge still lands locally and consumes the branch).
+#[test]
+fn a_pull_request_landing_is_refused_until_m4() {
+    for (field, text) in [
+        (
+            "github.merge",
+            format!("{BASE}\n[github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"),
+        ),
+        (
+            "repos[0].github.merge",
+            format!(
+                "{BASE}\n[[repos]]\nname = \"api\"\npath = \"api\"\n\n[repos.github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"
+            ),
+        ),
+    ] {
+        let cfg = config::parse(&text).unwrap();
+        let issues = config::validate(&cfg);
+        assert!(
+            issues.iter().any(|issue| issue.field == field
+                && issue.problem.contains("not in this release")),
+            "{field}: {issues:?}"
+        );
+    }
+}
+
 #[test]
 fn a_child_repo_without_a_section_is_local_only() {
     let text = format!(
-        "{BASE}\n[github]\nrepo = \"root/project\"\nmerge = \"pr\"\n\n[[repos]]\nname = \"child\"\npath = \"child\"\n\n[[repos]]\nname = \"api\"\npath = \"services/api\"\n\n[repos.github]\nrepo = \"root/api\"\n"
+        "{BASE}\n[github]\nrepo = \"root/project\"\nmerge = \"push\"\n\n[[repos]]\nname = \"child\"\npath = \"child\"\n\n[[repos]]\nname = \"api\"\npath = \"services/api\"\n\n[repos.github]\nrepo = \"root/api\"\n"
     );
     let cfg = config::parse(&text).unwrap();
     assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
@@ -97,7 +124,7 @@ fn a_child_repo_without_a_section_is_local_only() {
     let root = cfg.root_repo();
     let github = root.github.as_ref().expect("the root's mode");
     assert_eq!(github.repo, "root/project");
-    assert_eq!(github.merge, config::MergeMode::Pr);
+    assert_eq!(github.merge, config::MergeMode::Push);
 
     // The child has none — through both ways to reach it.
     let repos = cfg.repos();
@@ -112,7 +139,7 @@ fn a_child_repo_without_a_section_is_local_only() {
 
 #[test]
 fn a_github_section_without_a_repo_or_with_a_bad_repo_is_refused() {
-    let no_repo = format!("{BASE}\n[github]\nmerge = \"pr\"\n");
+    let no_repo = format!("{BASE}\n[github]\nmerge = \"push\"\n");
     let cfg = config::parse(&no_repo).unwrap();
     let issues = config::validate(&cfg);
     assert_eq!(issues.len(), 1, "{issues:?}");

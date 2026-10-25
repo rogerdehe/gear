@@ -24,9 +24,11 @@
 pub mod github;
 pub mod local;
 pub mod marker;
+pub mod sync;
 
 pub use github::GitHub;
 pub use local::Local;
+pub use sync::{sync, sync_with};
 
 use serde::Deserialize;
 
