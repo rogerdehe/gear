@@ -2997,4 +2997,102 @@ mod tests {
         assert_eq!(mail.len(), 1, "{mail:?}");
         assert!(mail[0].urgent, "{mail:?}");
     }
+
+    /// A git repository at `dir` with one empty commit (a worktree needs a
+    /// HEAD to branch from).
+    fn git_repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).expect("a scratch directory");
+        for args in [
+            vec!["init", "-q"],
+            vec!["commit", "-q", "--allow-empty", "-m", "root"],
+        ] {
+            let ok = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .status()
+                .expect("git");
+            assert!(ok.success(), "git {args:?} in {}", dir.display());
+        }
+    }
+
+    #[test]
+    fn push_check_finds_the_repo_a_child_worktree_belongs_to() {
+        // A multi-repo project: the lane works in a worktree of the child repo,
+        // which sits below the project root and is a repository of its own.
+        let dir = std::env::temp_dir().join(format!("gear-push-{}-child", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let root = dir.join("root");
+        git_repo(&root);
+        let child = root.join("child");
+        git_repo(&child);
+        let worktree = dir.join("lane-child");
+        let added = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                worktree.to_str().expect("a utf-8 path"),
+                "-b",
+                "base/t74",
+            ])
+            .current_dir(&child)
+            .status()
+            .expect("git worktree add");
+        assert!(added.success(), "git worktree add in {}", child.display());
+
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {:?}\n\
+                     \n[quota]\nlanes = 4\ntemps = 2\n\
+                     \n[captain]\npane = \"{CAP_PANE}\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+                     \n[[repos]]\nname = \"child\"\npath = \"child\"\n",
+                    root.to_string_lossy()
+                );
+                tx.update_project(&project)?;
+                // The child repo's own destination.
+                tx.set_push_destinations(
+                    "p",
+                    "child",
+                    &["github.com/owner/child".to_string()],
+                    T0,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+
+        // The child's registered destination is allowed.
+        let allowed = run_push_check(
+            &mut store,
+            &env("heat", LANE_PANE),
+            Some(&mut herdr),
+            &push_cmd("git@github.com:owner/child.git"),
+            &worktree,
+            T0 + 1,
+        );
+        assert!(allowed.is_ok(), "{:?}", allowed.err());
+
+        // Another host is refused, and the item names the child repo.
+        let err = run_push_check(
+            &mut store,
+            &env("heat", LANE_PANE),
+            Some(&mut herdr),
+            &push_cmd("git@github.com:other/child.git"),
+            &worktree,
+            T0 + 2,
+        )
+        .expect_err("the push is refused");
+        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+        assert!(err.detail.contains("child"), "{}", err.detail);
+        let mail = captain_mail(&mut store);
+        assert_eq!(mail.len(), 1, "{mail:?}");
+    }
 }
