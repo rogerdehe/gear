@@ -59,6 +59,23 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 format!("{}–{} done", (previous + 1) * 3, groups * 3)
             });
         }
+        // Every task of a watched voyage is done: the voyage must be landed by
+        // the captain (report, freeze, ask about the lanes). Nothing else
+        // would ever ring for it — M2 sat finished for 36 h (L-78).
+        if left == 0 && done > 0 && tx.get_meta(&format!("{key}:land"))?.is_none() {
+            let message = tx.insert_message(&NewMessage {
+                project: project.into(), thread: format!("station:{}", report.milestone),
+                task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
+                recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
+                body: format!(
+                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}). Land it: write the voyage report, freeze the voyage file, ask the user whether to reclaim the lanes; close this with `station <id>: land`.",
+                    report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
+                ),
+                reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+            })?;
+            tx.set_meta(&format!("{key}:land"), &message.id)?;
+            opened.push(message.id);
+        }
         if crossed.is_empty() { continue; }
         let pace = report.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
         let slowest = report.slowest.as_ref().map(|(id, min)| format!("{id} {min}m"))
@@ -89,10 +106,10 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
         let Some(rest) = decision.strip_prefix("station ") else { continue; };
         let (id, response) = rest.split_once(':').ok_or_else(|| bad("station decision needs `station M-n: action`"))?;
         let (id, response) = (id.trim(), response.trim());
-        let valid = ["keep course", "time-box", "cut", "move"].iter().any(|action| {
+        let valid = ["keep course", "time-box", "cut", "move", "land"].iter().any(|action| {
             response.strip_prefix(action).is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
         });
-        if !valid { return Err(bad("station action must be keep course, time-box, cut or move")); }
+        if !valid { return Err(bad("station action must be keep course, time-box, cut, move or land")); }
         let message = tx.get_message(project, id)?.ok_or_else(|| bad(format!("no station item {id}")))?;
         let captain = tx.captain_of(project)?.ok_or_else(|| bad("no captain for station decision"))?;
         if !is_station(&message) || message.recipient != captain.id {

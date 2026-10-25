@@ -129,8 +129,14 @@ fn each_third_completion_is_a_station_including_the_final_task() {
     assert_eq!(check(&mut store, 3600).len(), 1);
     for n in 4..=6 { finish(&mut store, n); }
     let ids = check(&mut store, 7200);
-    assert_eq!(ids.len(), 1);
-    assert!(item(&mut store, &ids[0]).body.contains("[6 done]"));
+    // The final station, and (L-78) the urgent "ready to land" item.
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    let bodies: Vec<String> = ids.iter().map(|id| item(&mut store, id).body).collect();
+    assert!(bodies.iter().any(|b| b.contains("[6 done]")), "{bodies:?}");
+    let land = ids.iter().find(|id| item(&mut store, id).body.contains("ready to land")).unwrap().clone();
+    assert!(item(&mut store, &land).urgent);
+    apply(&mut store, &format!("- station {land}: land"), "land", T0 + 7300).unwrap();
+    assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
     assert!(check(&mut store, 14400).is_empty(), "landed voyages do not keep producing time stations");
     let mut historical = world("8h", 3);
     for n in 1..=3 { finish(&mut historical, n); }
