@@ -139,7 +139,7 @@ deps: T-1
   ```
 
   A `fail` puts the task at the head of its lane's queue with your rework text.
-- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- retire <lane>`.
+- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted).
 
 ## 3. The daily loop
 

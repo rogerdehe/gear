@@ -57,6 +57,11 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../../../skills/gear/references/adopt.md"),
     },
     Topic {
+        name: "github",
+        file: "references/github.md",
+        text: include_str!("../../../skills/gear/references/github.md"),
+    },
+    Topic {
         name: "agent:opencode",
         file: "references/agents/opencode.md",
         text: include_str!("../../../skills/gear/references/agents/opencode.md"),

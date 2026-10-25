@@ -56,6 +56,7 @@ fn the_new_topics_print_their_file() {
     for (topic, rel) in [
         ("review", "references/review.md"),
         ("adopt", "references/adopt.md"),
+        ("github", "references/github.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
@@ -80,6 +81,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "review",
         "captain",
         "adopt",
+        "github",
         "agent:opencode",
         "agent:codex",
         "agent:claude",

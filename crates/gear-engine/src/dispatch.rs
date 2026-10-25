@@ -3,7 +3,7 @@
 //! [`Action`] into ops (08).
 
 use crate::observe::SeatObs;
-use gear_herdr::ScreenFlag;
+use gear_herdr::{AgentStatus, ScreenFlag};
 use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
 use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
@@ -91,8 +91,11 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     if v.switch_pending {
         return none("a model switch is under way for this seat");
     }
-    // 4. Never type into a working agent.
-    if !obs.idle {
+    // 4. Never type into a working agent. A blocked one is not working: it
+    //    may be handed work, and the delivery waits for the dialog to clear
+    //    instead of failing every tick (T-68).
+    let blocked = obs.status == Some(AgentStatus::Blocked);
+    if !obs.idle && !blocked {
         return none("the agent is not idle");
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
@@ -161,6 +164,15 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
 /// A `None` action with a reason (design/09 asks for one).
 fn none(reason: &str) -> Action {
     Action::None { reason: reason.to_string() }
+}
+
+/// A delivery's text, with the project standard's line when the project has
+/// one (T-84).
+fn with_standard(text: String, standard: &Option<String>) -> String {
+    match standard {
+        Some(line) => format!("{text}\n{line}"),
+        None => text,
+    }
 }
 
 /// The first ready task, if this seat may take one at all.
@@ -335,6 +347,8 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
 /// Returns the Intended ops (via `ops::intend_deliveries`).
 pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)], now: Ts) -> GearResult<Vec<OpRow>> {
     let mut deliveries: Vec<DeliverAction> = Vec::new();
+    // T-84: the project standard travels with the assignment and the continue.
+    let standard = gear_app::standard::line_for(tx, project)?;
     for (seat, action) in actions {
         match action {
             Action::Assign { task } => {
@@ -348,11 +362,14 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                     generation: seat.generation,
                     task: task.clone(),
                     attempt: attempt.n,
-                    text: assign_text(
-                        task,
-                        attempt.contract_version,
-                        &task_branch(&seat.name, task),
-                        &packet_ref(task),
+                    text: with_standard(
+                        assign_text(
+                            task,
+                            attempt.contract_version,
+                            &task_branch(&seat.name, task),
+                            &packet_ref(task),
+                        ),
+                        &standard,
                     ),
                 });
             }
@@ -371,7 +388,10 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                     generation: seat.generation,
                     task: task.clone(),
                     attempt: attempt.n,
-                    text: continue_text(task, attempt.adopted_version, &packet_ref(task)),
+                    text: with_standard(
+                        continue_text(task, attempt.adopted_version, &packet_ref(task)),
+                        &standard,
+                    ),
                 });
             }
             Action::Adopt { task, version } => {
