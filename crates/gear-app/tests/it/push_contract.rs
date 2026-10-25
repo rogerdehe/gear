@@ -133,6 +133,11 @@ repo = "child"
     fn child_origin(&self) -> String {
         self.child_origin.display().to_string()
     }
+
+    /// The path of the child repo.
+    fn child_path(&self) -> PathBuf {
+        self.parent.join("child")
+    }
 }
 
 fn admin() -> Env {
@@ -241,6 +246,36 @@ fn the_check_passes_the_registered_destination_and_refuses_the_others() {
     )
     .unwrap_err();
     assert_eq!(refusal.reason, Reason::NotRegistered);
+}
+
+#[test]
+fn a_repo_may_be_named_by_its_path() {
+    // A caller that knows where the push happens need not know the name: the
+    // path of a repo names it too.
+    let world = World::new();
+    let mut store = Store::open_in_memory().unwrap();
+    init(&mut store, &admin(), &world.config(), T0).unwrap();
+
+    // The project root by its path.
+    assert!(push::check(
+        &mut store,
+        "p",
+        &world.parent.display().to_string(),
+        "https://ext.example.com/owner/parent.git"
+    )
+    .is_ok());
+    // A child repo by its path.
+    assert!(push::check(
+        &mut store,
+        "p",
+        &world.child_path().display().to_string(),
+        &world.child_origin()
+    )
+    .is_ok());
+    // A path that is not a repo of the project is refused.
+    let refusal = push::check(&mut store, "p", &world.child_origin(), &world.child_origin())
+        .unwrap_err();
+    assert_eq!(refusal.reason, Reason::UnknownRepo);
 }
 
 #[test]

@@ -131,18 +131,21 @@ pub struct Frozen {
 
 /// May the project push `repo` to `url`?
 ///
-/// `repo` is the repo's name: the `[[repos]]` entry, or `""` for the project
-/// root. `url` is the destination as git resolved it — the pre-push hook's
-/// second argument, or `git remote get-url --push origin` — and it is
-/// compared as it stands: the frozen destinations were read after git's URL
-/// rewrites, so a raw (unrewritten) URL is not the place the push would go.
+/// `repo` is the repo of the project: the `[[repos]]` entry by its name, or
+/// `""` for the project root. A repo's own path is accepted as well, so a
+/// caller that knows where the push happens need not know the name.
+///
+/// `url` is the destination as git resolved it — the pre-push hook's second
+/// argument, or `git remote get-url --push origin` — and it is compared as
+/// it stands: the frozen destinations were read after git's URL rewrites, so
+/// a raw (unrewritten) URL is not the place the push would go.
 ///
 /// `Ok(())` = the push may go ahead. `Err(refusal)` = it may not; the
 /// refusal names the repo and the normalised destination.
 pub fn check(store: &mut Store, project: &str, repo: &str, url: &str) -> Result<(), Refusal> {
     let destination = normalise(url).unwrap_or_default();
-    let refuse = |reason: Reason| Refusal {
-        repo: repo.to_string(),
+    let refuse = |name: &str, reason: Reason| Refusal {
+        repo: name.to_string(),
         destination: destination.clone(),
         reason,
     };
@@ -150,28 +153,28 @@ pub fn check(store: &mut Store, project: &str, repo: &str, url: &str) -> Result<
     // The project must be registered: its config says which repos it has.
     let config = match config_of(store, project) {
         Ok(Some(config)) => config,
-        Ok(None) => return Err(refuse(Reason::UnknownProject)),
-        Err(()) => return Err(refuse(Reason::Unreadable)),
+        Ok(None) => return Err(refuse(repo, Reason::UnknownProject)),
+        Err(()) => return Err(refuse(repo, Reason::Unreadable)),
     };
 
     // The repo must be one of the project's repos: the root, or a
     // `[[repos]]` entry.
-    if !is_repo_of(&config, repo) {
-        return Err(refuse(Reason::UnknownRepo));
-    }
+    let Some(name) = repo_name_of(&config, repo) else {
+        return Err(refuse(repo, Reason::UnknownRepo));
+    };
 
     // The destinations frozen for the repo when the project was registered.
-    let destinations = match store.read(|tx| tx.push_destinations(project, repo)) {
+    let destinations = match store.read(|tx| tx.push_destinations(project, &name)) {
         Ok(destinations) => destinations,
-        Err(_) => return Err(refuse(Reason::Unreadable)),
+        Err(_) => return Err(refuse(&name, Reason::Unreadable)),
     };
     if destinations.is_empty() {
-        return Err(refuse(Reason::NoDestinations));
+        return Err(refuse(&name, Reason::NoDestinations));
     }
     if destinations.iter().any(|allowed| *allowed == destination) {
         return Ok(());
     }
-    Err(refuse(Reason::NotRegistered))
+    Err(refuse(&name, Reason::NotRegistered))
 }
 
 /// The destination a URL names, normalised: host + path.
@@ -329,9 +332,37 @@ fn config_of(store: &mut Store, project: &str) -> Result<Option<ProjectConfig>, 
     crate::config::parse(&row.config_toml).map(Some).map_err(|_| ())
 }
 
-/// Is `repo` one of the project's repos? The project root is `""`.
-fn is_repo_of(config: &ProjectConfig, repo: &str) -> bool {
-    repo.is_empty() || config.repos.iter().any(|entry| entry.name == repo)
+/// The repo of the project that `repo` names: the project root (`""`), a
+/// `[[repos]]` entry by its name, or a repo by the path it lives in. `None`
+/// when the project has no such repo.
+fn repo_name_of(config: &ProjectConfig, repo: &str) -> Option<String> {
+    if repo.is_empty() {
+        return Some(String::new());
+    }
+    if config.repos.iter().any(|entry| entry.name == repo) {
+        return Some(repo.to_string());
+    }
+    // The path of a repo: the caller may know where the push happens without
+    // knowing the name.
+    config
+        .repos()
+        .into_iter()
+        .find(|resolved| same_path(&resolved.path, repo))
+        .map(|resolved| resolved.name)
+}
+
+/// Are two paths the same place? The strings first, then the paths the file
+/// system knows (a symlinked temp dir is one place under two names).
+fn same_path(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 #[cfg(test)]
