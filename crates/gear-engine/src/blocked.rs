@@ -24,6 +24,15 @@ fn key(seat: &str) -> String {
     format!("seat-blocked:{seat}")
 }
 
+/// Whether the seat is in a blocked spell right now (its timer was started by
+/// the last tick and not cleared by a recovery). A delivery that is intended
+/// for it waits instead of being typed into the dialog (T-68).
+pub fn holding(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
+    Ok(tx
+        .get_meta(&format!("{}:since", key(seat)))?
+        .is_some_and(|since| !since.is_empty()))
+}
+
 /// Ring the captain for every lane or reviewer seat that has been blocked for
 /// more than [`BLOCKED_S`] seconds. Returns the seat ids that were rung.
 ///
@@ -41,7 +50,10 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         let key = key(&seat.id);
         let blocked = obs.presence == Presence::Present
             && obs.status == Some(AgentStatus::Blocked)
-            && matches!(seat.state, SeatState::Active | SeatState::Standby);
+            && matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Retiring
+            );
         if !blocked {
             recover(tx, project, &key, now)?;
             continue;
