@@ -95,6 +95,19 @@ pub fn send(
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
             crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+            // And it must be on the task's branch on origin (T-83): a hand-in
+            // nobody can fetch is not a hand-in (M2.1: T-60).
+            if let Some(task) = args.task.as_deref() {
+                if let Some(lane) = env
+                    .ctx
+                    .as_ref()
+                    .and_then(|ctx| store.read(|tx| tx.get_task(&ctx.project, task)).ok().flatten())
+                    .and_then(|row| row.lane)
+                {
+                    let branch = crate::base::task_branch(&lane, task);
+                    crate::base::require_pushed(&gate.worktree, &branch, candidate)?;
+                }
+            }
         }
     }
     store.write(|tx| {

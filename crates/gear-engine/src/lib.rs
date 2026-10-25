@@ -22,6 +22,7 @@ pub mod busy;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod hooks;
 pub mod merge;
 pub mod model;
 pub mod observe;
@@ -33,6 +34,7 @@ pub mod quota;
 pub mod release;
 pub mod restart;
 pub mod review;
+pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
@@ -63,12 +65,11 @@ pub struct EngineCfg {
     pub auto_settle: bool,
     /// Background merge jobs shared across ticks and configuration clones.
     pub merges: merge::MergeWorkers,
-    /// How long onboarding waits for a fresh worktree's shell before it gives
-    /// up (T-89), and how long between two start attempts. A shell that still
-    /// runs the environment line refuses the start with `agent_pane_busy`;
-    /// that is "not yet", not a failure, until this wait runs out.
-    pub pane_busy_limit_s: i64,
-    pub pane_busy_wait_ms: u64,
+    /// How many ticks a start refused with `agent_pane_busy` may wait for its
+    /// shell before the seat parks (T-95). One tick is one attempt: a slow
+    /// shell is retried once per tick on the same binding and never holds the
+    /// tick, so a busy pane no longer delays the lanes queued behind it.
+    pub pane_busy_ticks: i64,
     /// How long an OpenCode lane waits for its directory's model list to load
     /// before it parks (T-67), and how long between two looks.
     pub model_list_wait_s: u64,
@@ -77,7 +78,7 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_limit_s: 20, pane_busy_wait_ms: 250, model_list_wait_s: 60, model_list_poll_ms: 500 }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500 }
     }
 }
 

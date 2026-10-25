@@ -450,6 +450,12 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
+            // The reviewer's worktree pushes only where the project registered
+            // it (T-72): the hook goes in before the agent starts.
+            if let Err(reason) = crate::hooks::install(std::path::Path::new(&worktree.path)) {
+                park(store, &seat.id, &format!("push hook: {reason}"), now)?;
+                return Ok(Started::NotYet);
+            }
             store.write(|tx| {
                 // Archive the previous checkout before replacing the current
                 // path. Older seats have only that path; a missing repo means root.

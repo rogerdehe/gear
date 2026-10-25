@@ -266,7 +266,7 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
                     body: format!(
                         "Handed in ({}).\n\n{}",
                         attempt.candidate.clone().unwrap_or_else(|| "-".to_string()),
-                        marker::completion(&lane_seat, attempt.n as u32, "pending")
+                        marker::hand_in(&lane_seat, attempt.n as u32)
                     ),
                 },
             });
@@ -286,7 +286,7 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
                     pr: pr.clone(),
                     body: format!(
                         "{body}\n\n{}",
-                        marker::completion(by_seat, attempt.n as u32, "pending")
+                        marker::completion(by_seat, attempt.n as u32, None)
                     ),
                 },
             });
@@ -298,13 +298,25 @@ fn calls_after_claim(project: &str, fact: &Fact, pr: &PrRef) -> Vec<Call> {
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .unwrap_or("merged");
+            // The landing ran the gate, so this is the one place `ci` is known
+            // (T-98): the verdict's reviewer and round, and the gate's state.
+            let reviewer = attempt
+                .verdict
+                .as_ref()
+                .map(|(_, _, by_seat)| by_seat.as_str())
+                .unwrap_or_default();
+            let ci = if reviewer.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{}", marker::completion(reviewer, attempt.n as u32, Some("pass")))
+            };
             calls.push(Call {
                 key: format!("{base}:merge"),
                 task: fact.task.clone(),
                 attempt: Some(attempt.n),
                 what: What::Comment {
                     pr: pr.clone(),
-                    body: format!("Landed in {}: {}", fact.integration, landed),
+                    body: format!("Landed in {}: {landed}{ci}", fact.integration),
                 },
             });
             calls.push(Call {
