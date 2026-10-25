@@ -153,7 +153,13 @@ pub fn build_with_agents(
                         let milestone = message.thread.trim_start_matches("station:");
                         format!("next: gear plan apply gear/voyages/{milestone}.md (# Decisions: station {first}: keep course|time-box|cut|move)")
                     }
-                    _ => format!("next: gear reply {first} --resolve"),
+                    // A review fail (or a failed merge) is settled where it
+                    // can be: by a `# Verdicts` line, not by a reply (T-90).
+                    Some(message) => match crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
+                        Some(hint) => format!("next: {}", verdict_command(&hint)),
+                        None => format!("next: gear reply {first} --resolve"),
+                    },
+                    None => format!("next: gear reply {first} --resolve"),
                 },
                 None => "next: gear".to_string(),
             },
@@ -194,6 +200,16 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
         }
         Ok(())
     })
+}
+
+/// The command that settles an item with a `# Verdicts` line (T-90): the
+/// voyage file of the task's milestone, then the line with the real values.
+pub fn verdict_command(hint: &crate::tasks::VerdictHint) -> String {
+    let path = match &hint.milestone {
+        Some(milestone) => format!("gear/voyages/{milestone}.md"),
+        None => "gear/voyages/<M>.md".to_string(),
+    };
+    format!("gear plan apply {path} (# Verdicts: {})", hint.line)
 }
 
 /// The most lanes the snapshot lists; the rest is one line of count, so the

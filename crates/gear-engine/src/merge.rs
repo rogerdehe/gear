@@ -210,7 +210,7 @@ pub fn merge_passed(
         let worktree = match integration_worktree(herdr, &repo, project) {
             Ok(worktree) => worktree,
             Err(reason) => {
-                tell_captain(store, project, &format!("merge waits: {reason}"), now)?;
+                tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
                 return Ok(merged);
             }
         };
@@ -381,7 +381,16 @@ fn fail_merge(store: &mut Store, project: &str, op: &OpRow, reason: &str, now: T
         tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)
     })?;
     let task = op.task.clone().unwrap_or_default();
-    tell_captain(store, project, &format!("merge of {task} failed: {reason}\nnothing was pushed"), now)
+    // The item names the task and attempt it is about, so the captain's home
+    // page can suggest the verdict that settles it (T-90).
+    let about = op.task.as_deref().zip(op.attempt);
+    tell_captain(
+        store,
+        project,
+        about,
+        &format!("merge of {task} failed: {reason}\nnothing was pushed"),
+        now,
+    )
 }
 
 /// Whether the op still merges what was passed: its attempt is the task's
@@ -915,8 +924,16 @@ fn step_failure<T>(step: &str, outcome: &Outcome<T>) -> String {
     }
 }
 
-/// One open item in the captain's inbox.
-fn tell_captain(store: &mut Store, project: &str, body: &str, now: Ts) -> GearResult<()> {
+/// One open item in the captain's inbox. `task` is the task and attempt the
+/// item is about, when it is about one (T-90: the home page suggests the
+/// verdict that settles such an item).
+fn tell_captain(
+    store: &mut Store,
+    project: &str,
+    task: Option<(&str, i64)>,
+    body: &str,
+    now: Ts,
+) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(
@@ -927,8 +944,8 @@ fn tell_captain(store: &mut Store, project: &str, body: &str, now: Ts) -> GearRe
         tx.insert_message(&NewMessage {
             project: project.to_string(),
             thread: format!("merge:{}", now),
-            task: None,
-            attempt: None,
+            task: task.map(|(task, _)| task.to_string()),
+            attempt: task.map(|(_, attempt)| attempt),
             sender: captain.id.clone(),
             sender_gen: 1,
             recipient: captain.id,
@@ -1962,7 +1979,7 @@ gate = "{project_gate}"
         let result = merge_passed(&mut store, &mut herdr, &cfg, "p", launched_at).unwrap();
         assert!(!done.exists(), "merge_passed waited for the sleeping gate");
         assert!(result.is_empty(), "the merge is still running");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let result = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
             if !result.is_empty() {

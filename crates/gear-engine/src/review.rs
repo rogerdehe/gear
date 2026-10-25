@@ -2065,7 +2065,7 @@ review = [
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
 
         // The shell is still starting: the agent start is refused.
-        herdr.refuse_next_start = Some("agent_pane_busy".into());
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert!(report.started.is_empty(), "the agent is not up yet");
