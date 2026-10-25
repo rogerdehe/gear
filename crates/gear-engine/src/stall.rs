@@ -6,21 +6,55 @@
 //! gets one action item in its captain's inbox (so the doorbell rings), kept
 //! until the captain resolves it; a second flag of the same seat while the
 //! item is open adds nothing.
+//!
+//! T-75: a seat whose provider is in a back-off is not stuck. It waits for
+//! the provider — minutes without any output — and no stall item is raised
+//! for it. The screen is the only evidence, and the profile of the seat's
+//! kind says what a back-off looks like.
 
+use crate::observe::SeatObs;
+use gear_herdr::Profile;
 use gear_model::{GearResult, MsgKind, MsgState, Ts};
 use gear_store::{NewMessage, Tx};
+use std::collections::BTreeMap;
 
 /// The thread a seat's stall item lives in.
 fn thread(seat: &str) -> String {
     format!("stall:{seat}")
 }
 
+/// The seats that wait for their provider (T-75): their screen shows a
+/// provider back-off. The profile of the seat's kind says what a back-off
+/// looks like on that screen; a kind without back-off markers never waits.
+pub fn waiting_for_provider(
+    profiles: &BTreeMap<String, Profile>,
+    observed: &[SeatObs],
+) -> Vec<String> {
+    observed
+        .iter()
+        .filter(|obs| {
+            profiles
+                .get(&obs.seat.profile)
+                .map(|profile| profile.backoff(obs.screen.as_deref().unwrap_or_default()))
+                .unwrap_or(false)
+        })
+        .map(|obs| obs.seat.id.clone())
+        .collect()
+}
+
 /// Open the captain's item for a flagged seat unless one is open already.
 /// Returns true when an item was opened.
+///
+/// A seat that waits for its provider gets no item (T-75): the engine
+/// recorded the wait, and the captain is not rung for a seat that is not
+/// stuck.
 pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
     let Some(seat) = tx.get_seat(seat_id)? else {
         return Ok(false);
     };
+    if tx.seats_in_backoff(&seat.project)?.iter().any(|waiting| waiting == seat_id) {
+        return Ok(false); // waiting for the provider, not stuck
+    }
     let Some(captain) = tx.captain_of(&seat.project)? else {
         return Ok(false); // no captain: nobody to tell
     };

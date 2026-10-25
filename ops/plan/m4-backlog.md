@@ -8,3 +8,11 @@
   Then quota fallback / wait-for-reset and captain quota behave the same for every kind in every role (captain, lane, reviewer). A kind with no built-in profile is added by the user with `[profiles.<kind>]`; the kickoff skeleton already emits one for a known kind without a built-in profile.
   Why deferred: the first trial user runs a Codex captain with ample tokens; quota exhaustion is not expected in M2.1.
   Moved to M4: M2 covers the kinds in use; take it up when a trial hits it.
+
+## Added 2026-10-25 (user)
+
+- **The captain's decisions are recorded, and the landing starts by aligning them with the user.** To run unattended, the captain decides on its own mid-voyage (verdict overrides, findings logged instead of reworked, tasks added/cut/moved, re-scoping at stations, model or config changes, hand fixes). Today these end up scattered in the voyage file's Decisions, mixed with notes, and at landing the user is asked straight away whether to reclaim the lanes — before they have seen what happened or why. Wanted:
+  - every captain decision recorded as it is made, in one place, with what was decided, why, what else was possible, and what it changed (scope, time, quality, risk); hand fixes always recorded;
+  - at landing, first a voyage review with the user: the report plus the decision log, decisions the user may want to revisit marked; the user's corrections are recorded too (and feed the next voyage's kickoff and the skill review);
+  - only after that alignment, the end-of-voyage questions (reclaim the lanes, release).
+  Today's captain guide and lessons say decisions go into `# Decisions` and the landing asks about reclaiming; both change with this.

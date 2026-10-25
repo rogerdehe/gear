@@ -13,6 +13,9 @@
 //! the `seats.slot` of the skeleton) and the stamp never told the difference.
 //! **v2** is the canonical shape: a store stamped 2 was normalized by a binary
 //! that rebuilt every drifted table and kept its rows.
+//! **v3** adds the `push_destinations` of T-73 (the places a repo of the
+//! project may be pushed to). It is a table of its own, so the step only
+//! creates it; nothing else changes.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -20,7 +23,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -36,7 +39,10 @@ pub struct Step {
 
 /// The steps, in order. Every step carries the store from `from` to
 /// `from + 1`; a store older than the first step starts there.
-pub const STEPS: &[Step] = &[Step { from: 1, apply: step_1_to_2 }];
+pub const STEPS: &[Step] = &[
+    Step { from: 1, apply: step_1_to_2 },
+    Step { from: 2, apply: step_2_to_3 },
+];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
 const VOYAGE_COLUMNS: [&str; 10] = [
@@ -110,6 +116,16 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
     // `resources`. Nothing has read it since the skeleton.
     tx.execute_batch("DROP TABLE IF EXISTS slots").map_err(map_sqlite)?;
 
+    Ok(())
+}
+
+/// v2 → v3: the push destinations of T-73.
+///
+/// A table of its own: the step creates it and keeps every row of the store
+/// as it is. The schema is applied as a whole (every statement of it is
+/// `IF NOT EXISTS`), so a store that already has the table keeps it.
+fn step_2_to_3(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
     Ok(())
 }
 
