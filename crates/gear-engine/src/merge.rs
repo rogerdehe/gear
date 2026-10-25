@@ -828,15 +828,22 @@ fn push_allowed(
     repo: &Repo,
     worktree: &gear_herdr::Worktree,
 ) -> Result<(), String> {
-    let url = git(Path::new(&worktree.path), &["remote", "get-url", "--push", "origin"])?;
-    match gear_app::push::check(store, project, &repo.name, url.trim()) {
-        Ok(()) => Ok(()),
-        Err(refusal) => Err(format!(
-            "{} (`git push origin HEAD:{}` was not sent)",
-            refusal.message(),
-            repo.integration
-        )),
+    let urls = git(
+        Path::new(&worktree.path),
+        &["remote", "get-url", "--push", "--all", "origin"],
+    )?;
+    // Git pushes to every configured push URL (T-72, F1): one unregistered
+    // destination would receive the work, so every one must be registered.
+    for url in urls.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Err(refusal) = gear_app::push::check(store, project, &repo.name, url) {
+            return Err(format!(
+                "{} (`git push origin HEAD:{}` was not sent)",
+                refusal.message(),
+                repo.integration
+            ));
+        }
     }
+    Ok(())
 }
 
 /// The label of a repo's integration worktree: `<project>-merge` for the
@@ -2515,6 +2522,46 @@ gate = "{gate}"
         assert!(merged.is_empty());
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Void, "{op:?}");
+    }
+
+    /// T-72, F1: git pushes to every configured push URL, so every one must be
+    /// registered. A second, unregistered push URL stops the merge before
+    /// anything is pushed, with one urgent item and no retry.
+    #[test]
+    fn a_second_unregistered_push_url_stops_the_merge() {
+        let scratch = Scratch::new("pushsecond");
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
+        // The project registered `../origin` only; origin pushes there and to
+        // another bare repository.
+        let other = scratch.root.join("other-origin.git");
+        sh(&scratch.root, &format!("git init -q --bare {}", other.display()));
+        let worktree = scratch.root.join("merge");
+        sh(&worktree, "git config remote.origin.pushurl ../origin.git");
+        sh(&worktree, "git config --add remote.origin.pushurl ../other-origin.git");
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
+
+        assert!(merged.is_empty(), "{merged:?}");
+        // Neither destination received the merge: the whole push is refused.
+        let other_refs = sh(
+            &scratch.root,
+            &format!("git -C {} for-each-ref --format='%(refname)'", other.display()),
+        );
+        assert!(!other_refs.contains("dev"), "the unregistered destination received the merge: {other_refs}");
+        let op = store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Merge))
+            .unwrap()
+            .pop()
+            .expect("the merge op");
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        assert!(op.result.as_deref().unwrap_or_default().contains("not registered"), "{op:?}");
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", 1_000)).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].urgent, "{items:?}");
+        assert!(items[0].body.contains("other-origin"), "{items:?}");
+        // A later tick does not retry it.
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 31).unwrap();
+        assert!(merged.is_empty(), "{merged:?}");
     }
 
     /// T-72: the engine's own merge push obeys the same allow-list as a lane's

@@ -52,10 +52,10 @@ pub fn install(worktree: &Path) -> Result<(), String> {
          # destinations the project registered (`gear admin init` froze them).\n\
          # The repository's own pre-push hook runs after it.\n\
          gear push-check \"$1\" \"$2\" || exit 1\n\
-         own='{own}'\n\
+         own={own}\n\
          if [ -x \"$own\" ]; then exec \"$own\" \"$1\" \"$2\"; fi\n\
          exit 0\n",
-        own = own.display()
+        own = shell_literal(&own)
     );
     let path = hooks.join("pre-push");
     std::fs::write(&path, script).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -85,6 +85,12 @@ pub fn installed(worktree: &Path) -> bool {
     };
     let hooks = PathBuf::from(hooks.trim());
     hooks.join("pre-push").is_file()
+}
+
+/// A path as a single-quoted shell literal: an embedded `'` becomes `'\''`,
+/// so a repository named `captain's-repo` still gets a valid hook (T-72, F2).
+fn shell_literal(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {

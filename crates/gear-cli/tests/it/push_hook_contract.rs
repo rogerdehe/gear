@@ -69,6 +69,40 @@ fn push(dir: &Path, bin: &Path, db: &Path, remote: &str, reference: &str) -> Out
         .expect("run git push")
 }
 
+/// T-72, F2: a repository whose path holds an apostrophe still gets a valid
+/// hook — the chained repository hook is a shell literal, quotes and all.
+#[test]
+fn a_quote_in_the_path_still_makes_a_valid_hook() {
+    let dir = scratch("quote");
+    let repo = dir.join("captain's-repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    ok(&repo, &["init", "-q", "-b", "dev"]);
+    std::fs::write(repo.join("README.md"), "fixture\n").expect("a file");
+    ok(&repo, &["add", "."]);
+    ok(&repo, &["commit", "-qm", "base"]);
+    let work = dir.join("work's");
+    ok(&repo, &["worktree", "add", "-q", "-b", "heat/t1", work.to_str().unwrap()]);
+    // The repository's own hook whose path holds the quote too.
+    let own_dir = repo.join(".git").join("hooks");
+    std::fs::create_dir_all(&own_dir).expect("the hooks directory");
+    std::fs::write(own_dir.join("pre-push"), "#!/bin/sh\nexit 0\n").expect("the own hook");
+    let mut perms = std::fs::metadata(own_dir.join("pre-push")).expect("the own hook").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(own_dir.join("pre-push"), perms).expect("an executable own hook");
+
+    gear_engine::hooks::install(&work).expect("the hook installs");
+
+    let hooks = ok(&work, &["config", "--worktree", "--get", "core.hooksPath"]);
+    let script = std::fs::read_to_string(Path::new(hooks.trim()).join("pre-push")).expect("the hook");
+    // The script is valid shell and its own-hook line is one literal.
+    let out = Command::new("sh").arg("-n").arg(Path::new(hooks.trim()).join("pre-push")).output().expect("run sh");
+    assert!(
+        out.status.success(),
+        "the generated hook is not valid shell: {}\n{script}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn a_push_to_the_registered_destination_goes_through_and_another_is_refused() {
     let dir = scratch("hook");
