@@ -198,6 +198,107 @@ fn release_one(
     Ok(true)
 }
 
+/// Finish the retirement of a lane (design/10, plan T-65).
+///
+/// A `Retiring` lane whose work is at a safe point — every open attempt handed
+/// in, nothing in progress, its agent idle or already gone — says goodbye to
+/// its agent (the profile's `exit_command`, else its `exit_keys`), closes its
+/// pane and becomes `Retired`, in that order and once. A lane still working
+/// (an attempt that is not handed in, or an agent mid-turn) is finished after
+/// its current hand-in.
+///
+/// The worktree is kept: its build cache is the lane's, and the design removes
+/// it only when the lane's results are all merged (design/10), which is not
+/// this step.
+pub fn retire_finished_lanes(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    observed: &[crate::observe::SeatObs],
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut retired = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.role != SeatRole::Lane || seat.state != SeatState::Retiring {
+            continue;
+        }
+        // Busy: an attempt that is not handed in finishes first; a hand-in is
+        // the lane's safe point (design/10: submitted ones continue through
+        // acceptance without the lane).
+        let open = store.read(|tx| tx.open_attempts_of_seat(&seat.id))?;
+        if !open.iter().all(|attempt| attempt.state == AttemptState::Submitted) {
+            continue;
+        }
+        // A lane mid-turn is not cut off; one whose agent is already gone has
+        // nothing left to say goodbye to.
+        let settled = observed
+            .iter()
+            .find(|obs| obs.seat.id == seat.id)
+            .map(|obs| {
+                obs.idle || matches!(obs.presence, crate::observe::Presence::Missing)
+            })
+            .unwrap_or(false);
+        if !settled {
+            continue;
+        }
+        if let Err(_reason) = retire_one(store, herdr, &seat, profiles, now) {
+            continue;
+        }
+        retired.push(seat.id.clone());
+    }
+    Ok(retired)
+}
+
+/// Take one lane out: exit, close its pane, Retired.
+fn retire_one(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    now: Ts,
+) -> Result<(), String> {
+    let pane = binding_pane(store, seat)?;
+
+    // 1. the agent leaves: the profile's own goodbye (a command for the CLIs
+    //    whose exit is a slash command, keys for the others). A pane that is
+    //    already gone is fine.
+    if let Some(pane) = pane.as_deref() {
+        if let Some(profile) = profiles.get(&seat.profile) {
+            if let Some(command) = profile.exit_command.as_deref() {
+                let _ = herdr.prompt(pane, command);
+            } else if !profile.exit_keys.is_empty() {
+                let _ = herdr.send_keys(pane, &profile.exit_keys);
+            }
+        }
+
+        // 2. the pane goes: a closed pane ends any agent that ignored its exit.
+        match herdr.pane_close(pane) {
+            Outcome::Ok(()) => {}
+            Outcome::Refused { code, .. } if code == "pane_not_found" => {}
+            Outcome::Refused { code, message } => {
+                return Err(format!("pane_close: refused ({code}): {message}"))
+            }
+            Outcome::Uncertain { reason } => return Err(format!("pane_close: {reason}")),
+        }
+    }
+
+    // 3. the seat is stayed: its binding ends with it, so a later re-register
+    //    opens a fresh pane (the seat's worktree and cache stay on disk).
+    store
+        .write(|tx| {
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding.status != BindingStatus::Void {
+                    tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                }
+            }
+            tx.set_seat_state(&seat.id, SeatState::Retired, Some("retired"), now)
+        })
+        .map_err(|e| e.detail)?;
+    Ok(())
+}
+
 /// The pane of the reviewer's active binding.
 fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, String> {
     let (id, generation) = (seat.id.clone(), seat.generation);
@@ -278,13 +379,169 @@ profile = "codex"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: T0,
+                    issue: None,
+                    updated: T0,
                 })?;
                 testing::seed_temp_seat(tx, "p", "r-1", "T-1", pane, profile, T0)?;
                 Ok(())
             })
             .unwrap();
         store
+    }
+
+    /// A project with the lane `heat` on `pane`, the seat in `state`, and one
+    /// task `T-1` the lane may work on.
+    fn lane_world(pane: &str, state: SeatState) -> (Store, SeatRow) {
+        let mut store = Store::open_in_memory().unwrap();
+        let seat = store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 2,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                let seat = testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, pane, "opencode", T0)?;
+                if state != SeatState::Active {
+                    tx.set_seat_state(&seat.id, state, Some("retiring for the test"), T0)?;
+                }
+                Ok(seat)
+            })
+            .unwrap();
+        (store, seat)
+    }
+
+    /// The lane as this tick observed it: up and idle.
+    fn idle_obs(seat: &SeatRow) -> Vec<crate::observe::SeatObs> {
+        vec![crate::observe::SeatObs {
+            seat: seat.clone(),
+            presence: crate::observe::Presence::Present,
+            status: Some(gear_herdr::AgentStatus::Idle),
+            flags: std::collections::BTreeSet::new(),
+            idle: true,
+            screen: None,
+        }]
+    }
+
+    fn profiles() -> std::collections::BTreeMap<String, gear_herdr::Profile> {
+        let mut profiles = std::collections::BTreeMap::new();
+        profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        profiles
+    }
+
+    /// T-65: a Retiring lane idle at a safe point says goodbye, its pane is
+    /// closed and it becomes Retired — in that order, once.
+    #[test]
+    fn a_retiring_lane_is_exited_closed_and_retired_in_order() {
+        let (mut store, seat) = lane_world("w1:p1", SeatState::Retiring);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
+
+        let retired =
+            retire_finished_lanes(&mut store, &mut herdr, "p", &idle_obs(&seat), &profiles(), T0 + 10)
+                .unwrap();
+
+        assert_eq!(retired, vec![seat.id.clone()], "the lane is retired");
+        let calls: Vec<&str> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                Call::SendKeys { .. } | Call::Prompt { .. } => Some("exit"),
+                Call::PaneClose { .. } => Some("close"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["exit", "close"], "exit, then the closed pane");
+        assert_eq!(
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
+            SeatState::Retired
+        );
+        // Once: the next tick has nothing left to do.
+        let before = herdr.calls.len();
+        assert!(retire_finished_lanes(
+            &mut store,
+            &mut herdr,
+            "p",
+            &idle_obs(&seat),
+            &profiles(),
+            T0 + 20
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(herdr.calls.len(), before, "no second exit or close");
+    }
+
+    /// T-65: a lane still working is finished after its current hand-in.
+    #[test]
+    fn a_retiring_lane_with_an_open_attempt_is_not_closed() {
+        let (mut store, seat) = lane_world("w1:p1", SeatState::Active);
+        // The lane is working when the captain retires it: the attempt goes on
+        // and the lane is finished after its hand-in.
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Retiring, Some("retired by the plan"), T0 + 1)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Working);
+
+        assert!(retire_finished_lanes(
+            &mut store,
+            &mut herdr,
+            "p",
+            &idle_obs(&seat),
+            &profiles(),
+            T0 + 10
+        )
+        .unwrap()
+        .is_empty(), "a working attempt keeps the lane");
+        assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
+        assert_eq!(
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
+            SeatState::Retiring
+        );
+
+        // Handed in: the lane is at its safe point and goes.
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "report", T0 + 5)
+            })
+            .unwrap();
+        assert_eq!(
+            retire_finished_lanes(&mut store, &mut herdr, "p", &idle_obs(&seat), &profiles(), T0 + 20)
+                .unwrap(),
+            vec![seat.id.clone()]
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
+            SeatState::Retired
+        );
     }
 
     fn exits(herdr: &FakeHerdr) -> usize {
@@ -429,7 +686,8 @@ profile = "codex"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                     issue: None,updated: T0,
+                    issue: None,
+                    updated: T0,
                 })?;
                 testing::seed_temp_seat(tx, "p", "r-2", "T-2", &second.pane_id, "codex", T0)?;
                 // Both already sent their exit keys.
