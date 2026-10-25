@@ -13,3 +13,5 @@
 - **Review the newest contract (M2.1, T-58).** A contract rewritten mid-task (the lane is told to rework to it) still sent the reviewer the attempt's original v1 packet; the reviewer had to ask the captain which one governs. A hand-in after a contract change is reviewed against the newest contract.
 
 - **Hand the conversation over on a cross-CLI switch (user, 2026-10-25).** An in-place OpenCode switch keeps the session; a switch to another CLI (OpenCode → Codex) starts a fresh agent that gets only the task packet, the worktree and the progress lines. Add the previous agent's kind and session id to the continue message, with the one command that reads it (e.g. `opencode export <session>`, `codex resume`'s transcript), so the new agent may look at what the old one was doing. Verify each CLI's read command live; the session id comes from Herdr (`session_ref`) or, for OpenCode, the session API the engine already uses.
+
+- **Parallel-change check skips landed tasks (M2.1).** It warned "T-58 and integration dev share main.rs" after T-58 had merged (state verifying/done): a task whose branch is already in the integration branch is not a parallel change.
