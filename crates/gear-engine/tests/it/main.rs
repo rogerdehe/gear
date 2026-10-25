@@ -26,3 +26,4 @@ mod station_contract;
 mod busy_contract;
 mod blocked_contract;
 mod parallel_contract;
+mod multi_repo_contract;
