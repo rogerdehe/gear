@@ -670,6 +670,21 @@ pub fn reply(
                         message.id, message.id,
                     )));
                 }
+                // A review fail (or a failed merge) is settled where it can
+                // be: by a `# Verdicts` line. Resolving it by reply would
+                // close the item and settle nothing (T-90).
+                if args.mode == ReplyMode::Resolve {
+                    if let Some(hint) = crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
+                        return Err(GearError::new(
+                            ErrorCode::BadFormat,
+                            format!(
+                                "message {} is settled by a plan # Verdicts line, not by a reply: next: {}",
+                                message.id,
+                                crate::home::verdict_command(&hint),
+                            ),
+                        ));
+                    }
+                }
                 originals.push(message);
             }
 

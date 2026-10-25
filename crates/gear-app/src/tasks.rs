@@ -238,6 +238,67 @@ fn forbidden(detail: impl std::fmt::Display) -> GearError {
     GearError::new(ErrorCode::Forbidden, detail.to_string())
 }
 
+/// The `# Verdicts` line that settles what a captain's item is about, when a
+/// verdict — not `gear reply … --resolve` — is what settles it (T-90).
+///
+/// Two items need one: a review fail (the attempt is still handed in, the
+/// task still Verifying) and a failed merge (the attempt was accepted, its
+/// work is not in the integration branch, and the task must go back for a
+/// rework). Everything else is answered by a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerdictHint {
+    /// The task's milestone (`M3`), for the voyage file the line goes in;
+    /// `None` when the task has none.
+    pub milestone: Option<String>,
+    /// `T-<n> attempt=<a> contract=<c> candidate=<sha> fail rework="…"` with
+    /// the real values. The rework is the captain's words.
+    pub line: String,
+}
+
+/// The verdict that settles `message`, with the real values filled in
+/// (T-90); `None` when a reply is the right answer.
+pub fn verdict_hint(
+    tx: &Tx<'_>,
+    project: &str,
+    message: &gear_store::MessageRow,
+) -> GearResult<Option<VerdictHint>> {
+    // Only an action item needs settling: an information line (a pass, a
+    // bookkeeping result) is closed by a reply and settles nothing anyway.
+    if !matches!(message.state, MsgState::Open | MsgState::Waiting) {
+        return Ok(None);
+    }
+    let (Some(task), Some(attempt)) = (message.task.as_deref(), message.attempt) else {
+        return Ok(None);
+    };
+    let Some(task_row) = tx.get_task(project, task)? else {
+        return Ok(None);
+    };
+    let Some(attempt_row) = tx.get_attempt(project, task, attempt)? else {
+        return Ok(None);
+    };
+    // A verdict settles an attempt that is still handed in (a review fail, a
+    // decision over the rework cap) or reopens a task whose merge failed.
+    let handed_in = attempt_row.state == AttemptState::Submitted
+        && task_row.state == TaskState::Verifying;
+    let merge_failed = tx
+        .ops_in_state(project, gear_model::OpState::Failed)?
+        .iter()
+        .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task) && op.attempt == Some(attempt));
+    if !handed_in && !merge_failed {
+        return Ok(None);
+    }
+    let Some(candidate) = attempt_row.candidate.clone() else {
+        return Ok(None);
+    };
+    Ok(Some(VerdictHint {
+        milestone: task_row.milestone.clone(),
+        line: format!(
+            "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
+            attempt_row.adopted_version
+        ),
+    }))
+}
+
 /// An acceptance verdict (design/05 `# Verdicts`, design/06 `settle`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -258,7 +319,10 @@ pub struct Verdict {
 /// - pass: candidate and contract equal the attempt's; contract = the task's
 ///   current contract version; evidence given → attempt Accepted, task Done;
 /// - fail: candidate and contract equal the attempt's (an older contract is
-///   fine); rework given → attempt Rejected, task Ready, `rework_note` = rework.
+///   fine); rework given → attempt Rejected, task Ready, `rework_note` = rework;
+///   on an attempt that already passed whose task is Done (a failed merge,
+///   T-90) the task reopens for a rework on a new attempt and the accepted
+///   attempt keeps its state.
 /// A mismatch or missing field → `BadFormat`; the same verdict again (same
 /// task/attempt/outcome/candidate) after it settled → Ok, nothing written;
 /// a conflicting one → `BadTransition`.
@@ -281,6 +345,14 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         }
         if settled.passed == v.pass && settled.candidate == v.candidate {
             return Ok(());
+        }
+        // The one conflict a captain may make (T-90): a pass that already
+        // settled this attempt, followed by the fail that reopens the task
+        // because its merge failed. The attempt stays accepted below.
+        if settled.passed && !v.pass && settled.candidate == v.candidate
+            && attempt.state == AttemptState::Accepted
+        {
+            continue;
         }
         return Err(GearError::new(
             ErrorCode::BadTransition,
@@ -350,17 +422,27 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         ));
     }
 
+    // A failed merge (T-90): the attempt passed, but its work is not in the
+    // integration branch. The captain's fail sends the task back — the
+    // attempt keeps its accepted state (it did pass), the task reopens for a
+    // rework on a new attempt.
+    let reopen = !v.pass
+        && attempt.state == AttemptState::Accepted
+        && task_row.state == TaskState::Done;
+
     let (attempt_state, attempt_name) = if v.pass {
         (AttemptState::Accepted, "accepted")
     } else {
         (AttemptState::Rejected, "rejected")
     };
-    require_transition(
-        AttemptState::can_transition(attempt.state, attempt_state),
-        "attempt",
-        attempt.state.as_str(),
-        attempt_name,
-    )?;
+    if !reopen {
+        require_transition(
+            AttemptState::can_transition(attempt.state, attempt_state),
+            "attempt",
+            attempt.state.as_str(),
+            attempt_name,
+        )?;
+    }
     let (task_state, task_name) = if v.pass {
         (TaskState::Done, "done")
     } else {
@@ -385,11 +467,13 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
         created: now,
     })?;
 
-    attempt.state = attempt_state;
-    attempt.updated = now;
-    tx.update_attempt(&attempt)?;
-    // The captain decided (T-38): the wait for the captain ends here.
-    tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Settled, now)?;
+    if !reopen {
+        attempt.state = attempt_state;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        // The captain decided (T-38): the wait for the captain ends here.
+        tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Settled, now)?;
+    }
 
     task_row.state = task_state;
     if !v.pass {

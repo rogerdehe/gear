@@ -25,5 +25,6 @@ mod settle_review_contract;
 mod tasks_contract;
 mod time_contract;
 mod time_report_contract;
+mod verdict_item_contract;
 mod voyage_contract;
 mod station_contract;
