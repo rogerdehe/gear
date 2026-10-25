@@ -16,6 +16,7 @@ pub mod identity;
 pub mod kickoff;
 pub mod mail;
 pub mod plan;
+pub mod push;
 pub mod review;
 pub mod seats;
 pub mod skill;
