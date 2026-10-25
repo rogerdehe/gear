@@ -19,8 +19,7 @@ inherits the root's section: it names another repository):
 ```toml
 [github]
 repo = "owner/name"
-merge = "push"                 # or "pr": land a task through its pull request
-merge_method = "squash"        # or "merge"
+merge = "push"                 # the landing of this release; "pr" lands in M4
 
 [github.issues]
 labels = ["gear"]              # which issues become tasks; empty = every open one
@@ -36,13 +35,17 @@ already knows — no agent writes on GitHub:
 | a task's first delivery | a **draft claim PR** for `<lane>/t<n>`, titled from the goal's first words, body `Closes #n` and the `ORCHESTRATE:CLAIM` marker |
 | a hand-in | a comment with the `ORCHESTRATE:COMPLETION` marker |
 | a verdict | a comment: the verdict and the findings |
-| a merge, `merge = "push"` | a comment naming the merge commit |
-| a merge, `merge = "pr"` | the pull request is merged, with `merge_method` |
-| either merge | the issue is closed |
+| a merge | a comment naming the merge commit, then the issue is closed |
 
-Every call is one op: once per event, at most three tries across ticks, and an
-op the engine found unfinished is never repeated — a restart cannot post a
-comment twice. A GitHub outage queues the calls and never stops local work.
+Landing a task through its pull request (`merge = "pr"`) is not in this
+release: the engine's merge lands locally and consumes the branch, so the
+config refuses the mode. M4 brings it, with `merge_method`.
+
+Every call is one op, kept until the forge confirms it: once per event, retried
+on the next tick while the forge fails (one tick's calls are bounded, so a
+backlog catches up over the next ticks), and an op the engine found unfinished
+is never repeated — a restart cannot post a comment twice. A GitHub outage
+queues the calls and never stops local work.
 
 ## How an issue becomes a task
 

@@ -130,6 +130,82 @@ const ISSUES: &str = r#"[
 {"number":14,"title":"A new idea","body":"","labels":[]}
 ]"#;
 
+
+/// A fake `gh` that behaves like the real one: without `--limit` it answers the
+/// default first page, with it every issue. The argv is still recorded.
+fn fake_gh_paged(dir: &Path, all: &str, page: &str) {
+    std::fs::create_dir_all(dir).expect("the fake dir");
+    std::fs::write(dir.join("all"), all).expect("the full answer");
+    std::fs::write(dir.join("page"), page).expect("the default page");
+    let script = format!(
+        r#"#!/bin/sh
+dir={dir}
+for arg in "$@"; do
+  printf '%s\037' "$arg"
+done > "$dir/argv"
+limited=0
+for arg in "$@"; do
+  if [ "$arg" = "--limit" ]; then limited=1; fi
+done
+if [ "$limited" = "1" ]; then src="$dir/all"; else src="$dir/page"; fi
+while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$src"
+exit 0
+"#,
+        dir = dir.display()
+    );
+    let gh = dir.join("gh");
+    std::fs::write(&gh, script).expect("the fake gh");
+    let mut perms = std::fs::metadata(&gh).expect("the fake gh").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&gh, perms).expect("an executable fake gh");
+}
+
+/// One JSON array of issues, `numbers` in the order given.
+fn issues_json(numbers: &[u32]) -> String {
+    let items: Vec<String> = numbers
+        .iter()
+        .map(|n| {
+            format!(
+                "{{\"number\":{n},\"title\":\"issue {n}\",\"body\":\"\",\"labels\":[]}}"
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(",\n"))
+}
+
+/// T-81, F1: the import must not silently stop at `gh`'s default first page.
+/// With 31 open issues, the newest 30 already planned and #1 still unplanned,
+/// #1 has to be printed — an older issue is exactly what a long-lived plan is
+/// missing.
+#[test]
+fn an_issue_older_than_the_first_page_is_still_imported() {
+    let dir = scratch("page");
+    let db = dir.join("gear.db");
+    drop(store_with_plan(&db, true));
+    // The newest 30 are #31..#2; #1 is older than the default page.
+    let all: Vec<u32> = (1..=31).rev().collect();
+    let page: Vec<u32> = (2..=31).rev().collect();
+    fake_gh_paged(&dir.join("bin"), &issues_json(&all), &issues_json(&page));
+    // The voyage file already names the newest 30.
+    let voyage = dir.join("M2.md");
+    let mut planned = String::from("# Queue\n");
+    for n in (2..=31).rev() {
+        planned.push_str(&format!("## T-{n} [must] lane=heat milestone=M2\ngoal: x\nissue: #{n}\n\n"));
+    }
+    std::fs::write(&voyage, planned).expect("the voyage file");
+
+    let o = gear(&dir, &db, Some(&voyage), &[], &dir.join("bin"));
+
+    assert_eq!(o.status.code(), Some(0), "{}", String::from_utf8_lossy(&o.stderr));
+    let out = stdout(&o);
+    assert!(out.contains("issue: #1"), "the older unplanned issue is missing:\n{out}");
+    assert!(out.contains("goal: issue 1"), "{out}");
+    assert!(!out.contains("issue: #2\n"), "a planned issue came back:\n{out}");
+    // The query asked for everything, not the default page.
+    let args = argv(&dir.join("bin"));
+    assert!(args.windows(2).any(|pair| pair[0] == "--limit"), "{args:?}");
+}
+
 #[test]
 fn it_prints_blocks_for_the_issues_the_plan_does_not_carry() {
     let dir = scratch("new");

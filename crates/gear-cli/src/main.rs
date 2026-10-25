@@ -1059,7 +1059,10 @@ fn run_import_issues(
     };
     let mut filter = gear_forge::Filter {
         labels: github.issues_labels.clone(),
-        limit: 0,
+        // Every open issue, not `gh`'s default first 30: an issue older than the
+        // newest page is exactly the one a long-lived plan is missing (T-81,
+        // F1). One bounded call still returns it all.
+        limit: u32::MAX,
     };
     filter.labels.extend(labels.iter().cloned());
     let forge = gear_forge::GitHub::new();
