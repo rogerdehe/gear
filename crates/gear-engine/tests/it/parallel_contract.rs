@@ -109,9 +109,9 @@ fn scan(store: &mut Store, seconds: i64) -> parallel::Check {
 fn pair_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
     store.read(|tx| tx.thread_messages("p", "parallel:tasks:T-1:T-2")).unwrap()
 }
-fn hand_in(store: &mut Store, candidate: &str) {
+fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
     store.write(|tx| tx.insert_attempt(&AttemptRow {
-        project: "p".into(), task: "T-2".into(), n: 1, seat: "p:steady".into(), generation: 1,
+        project: "p".into(), task: task.into(), n, seat: seat.into(), generation: 1,
         contract_version: 1, adopted_version: 1, pending_update: None,
         state: AttemptState::Submitted, candidate: Some(candidate.into()), report: None,
         safe_point: None, started: T0, updated: T0+1,
@@ -201,7 +201,7 @@ fn periodic_scan_and_new_hand_in_trigger_at_their_required_cadence() {
         repo.change("steady/t2", SHARED, "new shared change");
         assert!(scan(&mut store, 599).opened.is_empty(), "not polling on every tick");
         if handoff {
-            hand_in(&mut store, &git(&repo.path, &["rev-parse", "steady/t2"]));
+            hand_in(&mut store, "T-2", "p:steady", 1, &git(&repo.path, &["rev-parse", "steady/t2"]));
             assert_eq!(scan(&mut store, 599).opened.len(), 1, "hand-in bypasses interval");
         } else {
             assert_eq!(scan(&mut store, 600).opened.len(), 1, "ten-minute boundary");
@@ -422,4 +422,49 @@ fn the_scan_of_a_child_repo_reads_its_own_integration_branch() {
     assert_eq!(checked.opened.len(), 1, "{:?}", checked.opened);
     let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
     assert!(item.body.contains("integration web-dev"), "{}", item.body);
+}
+
+/// T-64: a task whose candidate is already in the integration branch has
+/// landed. The engine merges the approved candidate, not the branch (T-61), so
+/// a branch may still point past it; that leftover is not an open change. An
+/// open task is still paired with another open one on the same file.
+#[test]
+fn a_landed_task_is_not_an_open_change_and_open_tasks_still_pair() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SHARED);
+    repo.branch("steady/t2", "other.rs");
+    // T-1 handed in this commit, and the integration branch merged it.
+    let candidate = git(&repo.path, &["rev-parse", "heat/t1"]);
+    let mut store = repo.store();
+    hand_in(&mut store, "T-1", "p:heat", 1, &candidate);
+    git(&repo.path, &["switch", "-q", "dev"]);
+    git(&repo.path, &["merge", "-q", "--no-ff", "-m", "merge T-1", "heat/t1"]);
+    // Another task landed on the integration branch and touched the same file.
+    repo.change("dev", SHARED, "another task landed");
+    // The branch moves past the merged candidate: a commit no merge will take.
+    repo.change("heat/t1", SHARED, "heat after the hand-in");
+
+    let checked = scan(&mut store, 0);
+    assert!(checked.problems.is_empty(), "{:?}", checked.problems);
+    assert!(
+        checked.opened.is_empty(),
+        "a merged task raises no parallel item: {:?}",
+        checked.opened
+    );
+    assert!(pair_items(&mut store).is_empty(), "nor a pair with an open task");
+
+    // A newer attempt on T-1 is not merged: T-1 is open again, and two open
+    // branches on the same file still pair.
+    let rework = git(&repo.path, &["rev-parse", "heat/t1"]);
+    hand_in(&mut store, "T-1", "p:heat", 2, &rework);
+    repo.change("steady/t2", SHARED, "steady shares it");
+    assert!(!scan(&mut store, 600).opened.is_empty());
+    let pair = pair_items(&mut store);
+    assert_eq!(pair.len(), 1, "{pair:?}");
+    assert!(
+        pair[0].body.contains("T-1 (heat) and T-2 (steady)"),
+        "{}",
+        pair[0].body
+    );
+    assert!(pair[0].body.contains(SHARED), "{}", pair[0].body);
 }
