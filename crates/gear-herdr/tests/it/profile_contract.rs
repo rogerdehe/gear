@@ -10,6 +10,9 @@ fn opencode() -> Profile {
         quota_markers: vec!["insufficient_quota".into()],
         quota_bar: None,
         auth_markers: vec!["Unauthorized".into()],
+        // T-75: the back-off markers of a kind whose signs are not recorded
+        // yet; the codex profile is the one that has them.
+        backoff_markers: vec![],
         tail_lines: 3,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
