@@ -75,6 +75,16 @@ impl ProjectConfig {
         }
     }
 
+    /// Every repo of the project (T-52): the project root first, then the
+    /// `[[repos]]` entries in config order. The root's name is `""`.
+    pub fn repos(&self) -> Vec<Repo> {
+        let mut repos = vec![self.root_repo()];
+        for section in &self.repos {
+            repos.push(self.repo_of_section(section));
+        }
+        repos
+    }
+
     /// One `[[repos]]` entry, resolved: its absolute path and its effective
     /// branches and gate.
     fn repo_of_section(&self, section: &RepoSection) -> Repo {

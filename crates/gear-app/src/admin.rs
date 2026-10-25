@@ -3,6 +3,7 @@
 //! else `Forbidden`.
 
 use crate::config;
+use crate::push;
 use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
 use gear_store::{BindingRow, BindingStatus, ProjectRow, SeatRow, Store, Tx};
@@ -16,6 +17,10 @@ pub struct InitResult {
     /// The seats of the project after this call (captain first, then the lanes
     /// in config order).
     pub seats: Vec<String>,
+    /// Where each repo of the project may be pushed to (T-73): the
+    /// destinations frozen by this call, the project root first. A repo with
+    /// no destination may not be pushed to at all.
+    pub destinations: Vec<push::Frozen>,
 }
 
 /// `gear admin init <config>` — register the project, or apply a changed
@@ -94,12 +99,20 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
         }
     }
 
+    // Where each repo of the project may be pushed is frozen here (T-73):
+    // the destinations the repo's own `origin` remote resolves to. Git runs
+    // before the transaction — the store is never held while a subprocess
+    // runs — and the list is written with the registration, so a project
+    // never exists without the destinations it was registered with. Every
+    // init reads them again: a project that moves its remote moves with it.
+    let frozen = push::read_destinations(&config);
+
     store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
-            Some(project) => re_register(tx, &project, &config, config_text, now),
+            Some(project) => re_register(tx, &project, &config, config_text, now, &frozen),
             // The project is new: it is registered.
-            None => register(tx, &config, config_text, now),
+            None => register(tx, &config, config_text, now, &frozen),
         }
     })
 }
@@ -112,6 +125,7 @@ fn register(
     config: &config::ProjectConfig,
     config_text: &str,
     now: Ts,
+    frozen: &[push::Frozen],
 ) -> GearResult<InitResult> {
     let project_id = config.project.id.clone();
 
@@ -126,6 +140,9 @@ fn register(
         plan_version: 0,
         created: now,
     })?;
+
+    // Where this project's repos may be pushed (T-73).
+    push::freeze(tx, &project_id, frozen, now)?;
 
     let mut seats: Vec<String> = Vec::new();
     let mut register = |name: &str, role: SeatRole, profile: &str| -> GearResult<()> {
@@ -173,7 +190,12 @@ fn register(
         created: now,
     })?;
 
-    Ok(InitResult { project: project_id, config_version: 1, seats })
+    Ok(InitResult {
+        project: project_id,
+        config_version: 1,
+        seats,
+        destinations: frozen.to_vec(),
+    })
 }
 
 /// Apply a changed config to a registered project (T-6, design/01 "repeated
@@ -204,6 +226,7 @@ fn re_register(
     config: &config::ProjectConfig,
     config_text: &str,
     now: Ts,
+    frozen: &[push::Frozen],
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
 
@@ -270,6 +293,10 @@ fn re_register(
     row.quota_includes_captain = config.quota.includes_captain;
     tx.update_project(&row)?;
 
+    // Where this project's repos may be pushed is read again (T-73): a
+    // project that moved its remote moves with it.
+    push::freeze(tx, &project_id, frozen, now)?;
+
     // The roster: the captain first, then the lanes in config order.
     let mut seats: Vec<String> = vec![captain_id.clone()];
     for lane in &config.lanes {
@@ -330,5 +357,10 @@ fn re_register(
         }
     }
 
-    Ok(InitResult { project: project_id, config_version: version, seats })
+    Ok(InitResult {
+        project: project_id,
+        config_version: version,
+        seats,
+        destinations: frozen.to_vec(),
+    })
 }

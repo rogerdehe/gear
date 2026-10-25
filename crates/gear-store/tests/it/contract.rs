@@ -60,6 +60,68 @@ fn refuses_newer_schema() {
     assert_eq!(err.code, ErrorCode::SchemaTooNew);
 }
 
+/// T-73: the destinations a repo of a project may be pushed to are stored per
+/// project and repo; a new list replaces the old one, and a cleared list
+/// leaves the repo with none.
+#[test]
+fn the_push_destinations_of_a_repo_are_replaced_and_cleared() {
+    let mut s = store();
+    s.write(|tx| {
+        tx.set_push_destinations("p", "", &["github.com/owner/repo".to_string()], NOW)?;
+        tx.set_push_destinations(
+            "p",
+            "api",
+            &["git.example.com/team/api".to_string(), "git.example.com/team/other".to_string()],
+            NOW,
+        )?;
+        tx.set_push_destinations("q", "", &["github.com/other/repo".to_string()], NOW)?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert_eq!(
+        s.read(|tx| tx.push_destinations("p", "")).unwrap(),
+        vec!["github.com/owner/repo".to_string()]
+    );
+    assert_eq!(
+        s.read(|tx| tx.push_destinations("p", "api")).unwrap(),
+        vec!["git.example.com/team/api".to_string(), "git.example.com/team/other".to_string()]
+    );
+    // Another project keeps its own.
+    assert_eq!(
+        s.read(|tx| tx.push_destinations("q", "")).unwrap(),
+        vec!["github.com/other/repo".to_string()]
+    );
+
+    // A new list replaces the old one.
+    s.write(|tx| tx.set_push_destinations("p", "api", &["git.example.com/team/moved".to_string()], NOW + 1))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.push_destinations("p", "api")).unwrap(),
+        vec!["git.example.com/team/moved".to_string()]
+    );
+
+    // Every destination of the project, by repo.
+    let all = s.read(|tx| tx.push_destinations_of_project("p")).unwrap();
+    assert_eq!(
+        all.iter().map(|row| (row.repo.as_str(), row.destination.as_str())).collect::<Vec<_>>(),
+        vec![("", "github.com/owner/repo"), ("api", "git.example.com/team/moved")]
+    );
+
+    // An empty list leaves the repo with no destination at all.
+    s.write(|tx| tx.set_push_destinations("p", "api", &[], NOW + 2)).unwrap();
+    assert!(s.read(|tx| tx.push_destinations("p", "api")).unwrap().is_empty());
+
+    // Clearing the project leaves nothing behind.
+    s.write(|tx| tx.clear_push_destinations("p")).unwrap();
+    assert!(s.read(|tx| tx.push_destinations_of_project("p")).unwrap().is_empty());
+    assert_eq!(
+        s.read(|tx| tx.push_destinations("q", "")).unwrap(),
+        vec!["github.com/other/repo".to_string()],
+        "another project is untouched"
+    );
+}
+
 #[test]
 fn next_id_is_per_project_and_kind_and_monotonic() {
     let mut s = store();
