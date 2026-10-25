@@ -6,10 +6,17 @@
 //! `~/.codex/models_cache.json` — the inventory a kickoff proposes from
 //! (design/01: "no silent discovery", the user confirms every choice).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use gear_model::{ErrorCode, GearError, GearResult};
+
+/// How deep below the project's root a nested repository is looked for (T-54).
+const MAX_REPO_DEPTH: usize = 3;
+
+/// The directories that are never scanned for a nested repository (T-54):
+/// build output and dependencies hold none of the user's repos.
+const SKIPPED_DIRS: &[&str] = &["target", "node_modules", ".git"];
 
 /// The kinds `herdr agent start --kind` accepts (herdr 0.9.1), each with the
 /// executable it is installed as (herdr.dev/docs/agents).
@@ -301,7 +308,18 @@ pub fn report(inventory: &Inventory) -> String {
 /// The gear.toml skeleton: the detected kinds and the proposed model chains,
 /// with the TODOs the user fills in. Valid TOML; `gear admin init` reports
 /// whatever is still unfinished.
+///
+/// The repositories below the project's root are listed as commented
+/// `[[repos]]` blocks (T-54): the captain confirms the ones this voyage
+/// changes.
 pub fn skeleton(inventory: &Inventory) -> String {
+    skeleton_for(inventory, current_root().as_deref())
+}
+
+/// The skeleton for a known project root: `repo` is that root and the
+/// repositories below it are listed. A root that is not known (`None`) leaves
+/// `repo` as a TODO and lists no repository.
+pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
     let lane = lane_kind(inventory);
     let captain = captain_kind(inventory);
     let models: &[String] = lane.map(|installed| installed.models.as_slice()).unwrap_or(&[]);
@@ -327,14 +345,10 @@ pub fn skeleton(inventory: &Inventory) -> String {
     let env_or_todo = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "TODO".into());
     let session = env_or_todo("HERDR_SESSION");
     let pane = env_or_todo("HERDR_PANE_ID");
-    let repo = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|r| !r.is_empty())
+    let repo = root
+        .map(|root| root.display().to_string())
         .unwrap_or_else(|| "TODO".into());
+    let repos = root.map(nested_repos).unwrap_or_default();
     let mut lines = vec![
         "# gear.toml — fill in the TODOs, then register it:".to_string(),
         "#   GEAR_ADMIN=1 gear admin init gear/gear.toml".to_string(),
@@ -361,6 +375,33 @@ pub fn skeleton(inventory: &Inventory) -> String {
         "not = []".to_string(),
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
+        pad(
+            "# repo = \"TODO\"",
+            "# the [[repos]] name this lane works in; empty = the project root",
+        ),
+    ];
+    // The repositories below the project's root, as proposals (T-54): the
+    // captain keeps the ones this voyage changes and names a lane after each.
+    for nested in &repos {
+        lines.push(String::new());
+        lines.push(pad(
+            "# [[repos]]",
+            "# one block per repository below the project's root",
+        ));
+        lines.push(pad(
+            &format!("# name = \"{}\"", nested.name),
+            &format!("# [a-z][a-z0-9-]*; a lane binds to it with repo = \"{}\"", nested.name),
+        ));
+        lines.push(pad(
+            &format!("# path = \"{}\"", nested.path),
+            "# relative to project.repo",
+        ));
+        lines.push(pad(
+            &format!("# integration = \"{}\"", nested.integration),
+            "# that repository's integration branch (its release branch must differ)",
+        ));
+    }
+    lines.extend([
         String::new(),
         "[temps]".to_string(),
         format!("kind = \"{lane_kind}\""),
@@ -383,7 +424,7 @@ pub fn skeleton(inventory: &Inventory) -> String {
         "integration = \"dev\"           # the branch results are merged into (it must exist)".to_string(),
         "release = \"main\"              # the release branch".to_string(),
         "gate = \"TODO\"                 # your build + test command, run before every merge (e.g. \"npm test\")".to_string(),
-    ];
+    ]);
     // A kind Herdr can start but GEAR has no built-in profile for (T-31): the
     // user fills the block in — the comment says which fields matter.
     for installed in &inventory.installed {
@@ -430,4 +471,120 @@ pub fn to_json(inventory: &Inventory) -> GearResult<String> {
     serde_json::to_string(&doc).map_err(|e| {
         GearError::new(ErrorCode::BadFormat, format!("cannot serialize the inventory: {e}"))
     })
+}
+
+// ---------------------------------------------------------------- the repos
+
+/// A git repository below the project's root (T-54).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedRepo {
+    /// The directory's name: the repo's name in the config.
+    pub name: String,
+    /// The repo's path, relative to the project's root.
+    pub path: String,
+    /// The branch the repo is on now: its integration branch.
+    pub integration: String,
+}
+
+/// The column the skeleton's comments start in, so the file reads as one.
+const COMMENT_COLUMN: usize = 30;
+
+/// A skeleton line: the value, then its comment in the same column, whatever
+/// the value is.
+fn pad(line: &str, comment: &str) -> String {
+    let width = line.chars().count();
+    if width >= COMMENT_COLUMN {
+        format!("{line} {comment}")
+    } else {
+        format!("{line}{}{comment}", " ".repeat(COMMENT_COLUMN - width))
+    }
+}
+
+/// The repositories below `root` (T-54): the directories that hold a `.git`,
+/// at most [`MAX_REPO_DEPTH`] levels down, without `target/`,
+/// `node_modules/` and `.git/`.
+///
+/// The root itself is not one of them: it is the project.
+pub fn nested_repos(root: &Path) -> Vec<NestedRepo> {
+    let mut repos = Vec::new();
+    collect_repos(root, root, 0, &mut repos);
+    repos.sort_by(|a, b| a.path.cmp(&b.path));
+    repos
+}
+
+/// The directories below `dir`, one level down: a repository is a directory
+/// that holds a `.git` (a clone's or a worktree's).
+fn collect_repos(root: &Path, dir: &Path, depth: usize, out: &mut Vec<NestedRepo>) {
+    if depth >= MAX_REPO_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .map(|entry| entry.path())
+        .collect();
+    dirs.sort();
+    for path in dirs {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if SKIPPED_DIRS.contains(&name) {
+            continue;
+        }
+        if path.join(".git").exists() {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.push(NestedRepo {
+                name: name.to_string(),
+                path: relative,
+                integration: current_branch(&path),
+            });
+        }
+        collect_repos(root, &path, depth + 1, out);
+    }
+}
+
+/// The branch a repository is on now, or "TODO" when git cannot say (a
+/// detached HEAD, a repository without a commit).
+fn current_branch(repo: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output();
+    let Ok(output) = output else {
+        return "TODO".to_string();
+    };
+    if !output.status.success() {
+        return "TODO".to_string();
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() || branch == "HEAD" {
+        "TODO".to_string()
+    } else {
+        branch
+    }
+}
+
+/// The repository the kickoff runs in, when it runs in one.
+fn current_root() -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(root))
+    }
 }

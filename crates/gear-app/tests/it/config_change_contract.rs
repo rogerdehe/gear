@@ -150,6 +150,35 @@ fn a_retired_lane_may_be_dropped() {
     assert!(s.read(|tx| tx.get_seat("harbor:pricing")).unwrap().is_some());
 }
 
+/// T-54: a retired lane that is in the new config is registered again — a new
+/// voyage may reuse the name — and the engine onboards it once more.
+#[test]
+fn a_retired_lane_in_the_new_config_is_registered_again() {
+    let mut s = Store::open_in_memory().unwrap();
+    init(&mut s, &admin(), &config(), T0).unwrap();
+    s.write(|tx| {
+        tx.set_seat_generation("harbor:heat", 1)?;
+        tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)
+    })
+    .unwrap();
+
+    // The lane "heat" is in the new config again.
+    let again = config_with(&format!("{HEAT}{PRICING}"), "\"minimax-cn/MiniMax-M3.1-Flash\"");
+    init(&mut s, &admin(), &again, T0 + 2).unwrap();
+
+    let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
+    assert_eq!(heat.state, SeatState::Queued, "the engine onboards it again");
+    assert_eq!(heat.state_reason.as_deref(), Some("registered again"));
+    // The seat is the same one: its generation and its history stay.
+    assert_eq!(heat.generation, 1);
+    assert_eq!(heat.role, SeatRole::Lane);
+
+    // A lane that is not retired keeps its state.
+    let pricing = s.read(|tx| tx.get_seat("harbor:pricing")).unwrap().unwrap();
+    assert_eq!(pricing.state, SeatState::Queued);
+    assert_eq!(pricing.state_reason.as_deref(), Some("registered"));
+}
+
 #[test]
 fn an_invalid_config_is_refused_and_nothing_is_written() {
     let mut s = Store::open_in_memory().unwrap();

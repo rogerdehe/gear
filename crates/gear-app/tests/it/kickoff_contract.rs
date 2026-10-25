@@ -176,3 +176,97 @@ fn the_json_carries_the_inventory_and_the_skeleton() {
     assert_eq!(doc["missing"][0], "codex");
     assert!(doc["skeleton"].as_str().unwrap().contains("[models]"));
 }
+
+// ---------------------------------------------------------------- the repos
+
+/// A git repository in a directory, on the branch `branch`.
+fn repo_at(dir: &std::path::Path, branch: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "kickoff")
+            .env("GIT_AUTHOR_EMAIL", "kickoff@example.com")
+            .env("GIT_COMMITTER_NAME", "kickoff")
+            .env("GIT_COMMITTER_EMAIL", "kickoff@example.com")
+            .output()
+            .unwrap_or_else(|e| panic!("cannot run git: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "--initial-branch=main"]);
+    std::fs::write(dir.join("README.md"), "a repo\n").unwrap();
+    git(&["add", "README.md"]);
+    git(&["commit", "-q", "-m", "first"]);
+    if branch != "main" {
+        git(&["switch", "-q", "-c", branch]);
+    }
+}
+
+/// T-54: the skeleton lists the repositories below the project's root, with
+/// the name of their directory, their path and the branch they are on.
+#[test]
+fn the_skeleton_lists_the_repositories_below_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    repo_at(&root.path().join("crates/api"), "dev");
+    repo_at(&root.path().join("apps/web"), "main");
+
+    let text = kickoff::skeleton_for(&inventory(), Some(root.path()));
+
+    // The repositories are proposals: the captain keeps the ones the voyage
+    // changes.
+    assert!(text.contains("# [[repos]]"), "{text}");
+    assert!(text.contains("# name = \"api\""), "{text}");
+    assert!(text.contains("# path = \"crates/api\""), "{text}");
+    assert!(text.contains("# integration = \"dev\""), "{text}");
+    assert!(text.contains("# name = \"web\""), "{text}");
+    assert!(text.contains("# path = \"apps/web\""), "{text}");
+    assert!(text.contains("# integration = \"main\""), "{text}");
+    // The project itself is the root, not one of its repositories.
+    assert!(!text.contains("# name = \"root\""), "{text}");
+    // The skeleton is still a config the parser reads.
+    let config = gear_app::config::parse(&text).expect("the skeleton is valid gear.toml");
+    assert!(config.repos.is_empty(), "the repositories are proposals only");
+    assert_eq!(config.project.repo, root.path().display().to_string());
+}
+
+/// A directory that is not a repository is not listed, and neither is a build
+/// directory or a dependency directory.
+#[test]
+fn only_the_directories_holding_a_git_directory_are_listed() {
+    let root = tempfile::tempdir().unwrap();
+    // A plain directory.
+    std::fs::create_dir_all(root.path().join("crates/api")).unwrap();
+    // A build directory and a dependency directory that hold a repository.
+    repo_at(&root.path().join("target/build/api"), "dev");
+    repo_at(&root.path().join("node_modules/pkg/web"), "dev");
+
+    let repos = kickoff::nested_repos(root.path());
+    assert_eq!(repos, vec![], "{repos:?}");
+
+    // A repository one level deeper is listed, with its path below the root.
+    repo_at(&root.path().join("crates/api"), "dev");
+    let repos = kickoff::nested_repos(root.path());
+    assert_eq!(repos.len(), 1, "{repos:?}");
+    assert_eq!(repos[0].name, "api");
+    assert_eq!(repos[0].path, "crates/api");
+    assert_eq!(repos[0].integration, "dev");
+}
+
+/// The repositories are looked for at most three levels below the root.
+#[test]
+fn a_repository_deeper_than_three_levels_is_not_listed() {
+    let root = tempfile::tempdir().unwrap();
+    repo_at(&root.path().join("a/b/c/too-deep"), "dev");
+    assert_eq!(kickoff::nested_repos(root.path()), vec![]);
+
+    repo_at(&root.path().join("a/b/c"), "dev");
+    let repos = kickoff::nested_repos(root.path());
+    assert_eq!(repos.len(), 1, "{repos:?}");
+    assert_eq!(repos[0].path, "a/b/c");
+}
