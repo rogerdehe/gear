@@ -9,3 +9,7 @@ GIT_AUTHOR_NAME = "gear-test"
 GIT_AUTHOR_EMAIL = "gear-test@localhost"
 GIT_COMMITTER_NAME = "gear-test"
 GIT_COMMITTER_EMAIL = "gear-test@localhost"
+# A test never runs as the seat whose shell started it: with the lane's
+# GEAR_CTX inherited, a test repo's GEAR pre-push hook (T-72) ran
+# `gear push-check` as that lane and sent urgent items to the captain (M3).
+GEAR_CTX = { value = "", force = true }

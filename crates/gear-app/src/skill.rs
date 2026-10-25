@@ -161,6 +161,18 @@ impl SkillAgent {
     }
 }
 
+/// Is the GEAR skill installed for `agent` under `home` (T-83)? The CLI loads
+/// `<skills root>/gear/SKILL.md`; a missing file means the agent never learns
+/// how to work as a seat. The home is explicit: the caller knows whose home it
+/// is (the user's, for `gear admin init`).
+pub fn installed(agent: SkillAgent, home: &Path) -> bool {
+    agent
+        .skills_root(home)
+        .join(SKILL_NAME)
+        .join("SKILL.md")
+        .is_file()
+}
+
 /// Install the skill for `agent` under `home`: every topic's text as a file in
 /// `<the CLI's skills dir>/gear/`. An existing file is overwritten (the
 /// installed copy follows the binary). Returns the files written.

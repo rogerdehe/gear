@@ -39,6 +39,6 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 ## Engineering the project
 
 17. **A gate over 300 s is cut.** One test binary per crate (macOS scans each new binary on first run).
-18. **Development never touches the production store.** Tests and lanes run with a scratch store and HOME.
+18. **Development never touches the production store, nor acts as a seat.** Tests run with a scratch store and HOME, and with GEAR_CTX blanked (`.cargo/config.toml`): a lane's GEAR_CTX reached the tests' pre-push hook in M3 and sent the captain 300+ urgent items.
 19. **Two writers push the integration branch** (the engine's merges, the captain's plan commits): a rejected push is a race, retried.
 20. **A hand merge cleans up like the engine's merge** (task and review branches, local and remote).

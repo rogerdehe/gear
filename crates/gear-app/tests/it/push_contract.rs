@@ -6,7 +6,7 @@
 
 use std::{path::Path, path::PathBuf, process::Command};
 
-use gear_app::admin::init;
+use gear_app::admin::init_with_home;
 use gear_app::push::{self, Reason};
 use gear_app::Env;
 use gear_store::Store;
@@ -164,7 +164,7 @@ fn init_freezes_the_destinations_of_every_repo() {
     let world = World::new();
     let mut store = Store::open_in_memory().unwrap();
 
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
 
     // The project root: the pushurl, after the rewrite — the place the push
     // goes, not the address the remote is written as.
@@ -191,7 +191,7 @@ fn init_freezes_the_destinations_of_every_repo() {
 fn the_check_passes_the_registered_destination_and_refuses_the_others() {
     let world = World::new();
     let mut store = Store::open_in_memory().unwrap();
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
 
     // The registered one: where the pushurl resolves to.
     assert!(push::check(
@@ -254,7 +254,7 @@ fn a_repo_may_be_named_by_its_path() {
     // path of a repo names it too.
     let world = World::new();
     let mut store = Store::open_in_memory().unwrap();
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
 
     // The project root by its path.
     assert!(push::check(
@@ -282,7 +282,7 @@ fn a_repo_may_be_named_by_its_path() {
 fn every_init_reads_the_destinations_again() {
     let world = World::new();
     let mut store = Store::open_in_memory().unwrap();
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
     assert_eq!(
         destinations_of(&mut store, ""),
         vec!["ext.example.com/owner/parent".to_string()]
@@ -293,7 +293,7 @@ fn every_init_reads_the_destinations_again() {
         &world.parent,
         "git remote set-url --push origin git@github.com:owner/moved.git",
     );
-    init(&mut store, &admin(), &world.config(), T0 + 1).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0 + 1).unwrap();
     assert_eq!(
         destinations_of(&mut store, ""),
         vec!["ext.example.com/owner/moved".to_string()]
@@ -305,7 +305,7 @@ fn every_init_reads_the_destinations_again() {
         .config()
         .replace("[[repos]]\nname = \"child\"\npath = \"child\"\n\n", "")
         .replace("repo = \"child\"\n", "");
-    init(&mut store, &admin(), &config, T0 + 2).unwrap();
+    init_with_home(&mut store, &admin(), &config,Some(crate::skill_home()), T0 + 2).unwrap();
     assert!(destinations_of(&mut store, "child").is_empty(), "the child's destinations are gone");
     let refusal = push::check(&mut store, "p", "child", &world.child_origin()).unwrap_err();
     assert_eq!(refusal.reason, Reason::UnknownRepo);
@@ -324,7 +324,7 @@ fn two_ipv6_hosts_of_one_path_are_two_destinations() {
         "git remote set-url --push origin 'ssh://git@[2001:db8::1]/team/repo.git'",
     );
     let mut store = Store::open_in_memory().unwrap();
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
 
     // The frozen destination carries the whole host — not `[2001/team/repo`,
     // which two different hosts would share.
@@ -357,7 +357,7 @@ fn a_unicode_destination_is_frozen_and_checked() {
         "git remote set-url --push origin 'https://git.example.com/团队/repo.git'",
     );
     let mut store = Store::open_in_memory().unwrap();
-    init(&mut store, &admin(), &world.config(), T0).unwrap();
+    init_with_home(&mut store, &admin(), &world.config(),Some(crate::skill_home()), T0).unwrap();
 
     assert_eq!(
         destinations_of(&mut store, ""),
