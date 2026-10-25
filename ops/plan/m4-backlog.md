@@ -29,3 +29,4 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 
 ## GitHub PR-mode landing (descoped from M3 T-91)
 `merge = "pr"` lands through the PR: on a passed gate the engine does not push or delete the head; it records readiness, sync marks the PR ready and merges it through the forge, then the engine records the merge and cleans up. Until then config refuses `merge = "pr"`. Also T-91 F4: reconcile an interrupted claim by its marker instead of quarantining the task.
+- T-69 R2 (moved at review): when review/t<n> is held by a dirty reviewer worktree, start the review in that holder's seat instead of failing three times.
