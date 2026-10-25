@@ -20,13 +20,26 @@ pub fn claim(agent: &str, issue: u64) -> String {
     format!("<!-- ORCHESTRATE:CLAIM agent={agent} issue={issue} -->")
 }
 
-/// The completion marker: the line a hand-in comment carries.
+/// The writer's completion marker: the line a hand-in comment carries, naming
+/// the **lane** that finished its part (T-98).
 ///
-/// `marker::completion("review-4", 2, "pass")` →
+/// `marker::hand_in("gear:base", 1)` →
+/// `<!-- ORCHESTRATE:COMPLETION agent=gear:base rounds=1 -->`
+pub fn hand_in(agent: &str, rounds: u32) -> String {
+    format!("<!-- ORCHESTRATE:COMPLETION agent={agent} rounds={rounds} -->")
+}
+
+/// The reviewer's completion marker: the line a verdict (or the landing that
+/// carried it) carries, naming the **temp seat that judged the work** (T-98).
+///
+/// `marker::completion("review-4", 2, Some("pass"))` →
 /// `<!-- ORCHESTRATE:COMPLETION reviewer=review-4 rounds=2 ci=pass -->`
 ///
-/// `ci` is the state of the project's own checks — `pass`, `fail`, `running`
-/// or `none` when the project has none.
-pub fn completion(reviewer: &str, rounds: u32, ci: &str) -> String {
-    format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} ci={ci} -->")
+/// `ci` is the project's own gate, and it is written only when it is known:
+/// `Some("pass")` at the merge that ran it, `None` everywhere else.
+pub fn completion(reviewer: &str, rounds: u32, ci: Option<&str>) -> String {
+    match ci {
+        Some(ci) => format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} ci={ci} -->"),
+        None => format!("<!-- ORCHESTRATE:COMPLETION reviewer={reviewer} rounds={rounds} -->"),
+    }
 }
