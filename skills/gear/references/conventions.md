@@ -56,7 +56,7 @@ A lane's worktree holds only its repo (§9).
    | schema / migration | migrate a real database + the store's tests |
 
    A bug fix is shown red before, green after. The same failure three times → `gear send --kind question`; do not grind.
-5. **Commit small, push, keep up with the integration branch.** Each commit builds. Before handing in, merge the latest integration branch into yours and build again.
+5. **One branch per task, every round.** Commit small and push to the task's branch; each commit builds. A rework continues on the same branch — never a new one. Before handing in, merge (never rebase) the latest integration branch into it, build, and push: the engine merges only what is on `origin/<lane>/t<n>`.
 6. **Hand in** with the exact command in your packet; the result text is the final brief:
 
    ```

@@ -23,3 +23,5 @@
 - **A hand-in must be pushed (M2.1, T-60).** The lane handed in cf58f57 on a local `config/t60` that tracked origin/dev and was never pushed; the reviewer (same machine) read it and passed it, the merge found no `origin/config/t60`. `gear send --kind result` refuses a candidate that is not on `origin/<lane>/t<n>`.
 
 - **The engine finishes a lane's retirement (M2.1 landing).** `- retire <lane>` sets the seat Retiring; release.rs closes only reviewers' panes, so the lanes stayed up until the captain closed their panes and set the seats Retired in the store by hand (as at M2's landing). An idle Retiring lane with no open attempt: exit the agent, close its pane, set it Retired.
+
+- **The captain registers the project (user, 2026-10-25).** The user asked why re-registering a changed config was handed to them. `gear admin init` refuses any caller with GEAR_CTX ("never in an agent"), so the captain cannot do it without dodging the guard. Allow the captain's seat to run `init` (the confirmed kickoff sheet is the user's consent), then drop README step 3 and the "user command" line in the captain guide.

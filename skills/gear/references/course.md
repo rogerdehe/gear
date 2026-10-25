@@ -39,7 +39,7 @@ A reviewer looks at one task and will always find more. Judge each finding with 
 
 ## 6. Find serial waits before they bite
 
-Every reasonable-looking "wait until it is safe / merged / reviewed / decided" can make every lane wait for the slowest step. For each wait in your plan ask: **who is idle while this waits, and does it have to be?** Depend only on code a task cannot be built without — never on a neighbour's review or merge.
+Every reasonable-looking "wait until it is safe / merged / reviewed / decided" can make every lane wait for the slowest step. For each wait in your plan ask: **who is idle while this waits, and does it have to be?** Dependencies: `gear --skill decompose` rule 3.
 
 ## 7. The signals, and what you do
 
