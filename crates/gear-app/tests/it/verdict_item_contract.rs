@@ -87,7 +87,9 @@ fn world_with(passed: bool) -> Store {
             },
             reply_to: None,
             needs_ack: false,
-            state: MsgState::Open,
+            // As `gear send` stores it: a pass is information, a fail is an
+            // action item.
+            state: if passed { MsgState::Info } else { MsgState::Open },
             created: T0,
         })?;
         Ok(())
@@ -183,7 +185,7 @@ fn after_the_plan_settles_it_resolving_works() {
 fn a_failed_merge_is_settled_by_a_verdict_too() {
     let mut s = world_with(true);
     // The review passed and the task is done; its merge then failed.
-    s.write(|tx| {
+    let merge_item = s.write(|tx| {
         gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 2)?;
         let op = tx.insert_op(&gear_store::NewOp {
             project: "p".into(),
@@ -200,7 +202,7 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
         tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 4)?;
         tx.set_op_state("p", &op.id, OpState::Failed, Some("conflict merging abc1234"), T0 + 5)?;
         // The engine's item, naming the task and attempt (T-90).
-        tx.insert_message(&NewMessage {
+        let item = tx.insert_message(&NewMessage {
             project: "p".into(),
             thread: "merge:1".into(),
             task: Some("T-1".into()),
@@ -216,7 +218,7 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
             state: MsgState::Open,
             created: T0 + 6,
         })?;
-        Ok(())
+        Ok(item.id)
     })
     .unwrap();
     assert_eq!(task_state(&mut s), TaskState::Done);
@@ -239,5 +241,68 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
         s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
         gear_model::AttemptState::Accepted,
         "the attempt did pass; the rework is a new attempt"
+    );
+
+    // F1 of the review: once the reopening fail is recorded the merge item is
+    // an ordinary one — the page stops naming the verdict (the failed op stays
+    // as history) and a reply resolves it.
+    let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 20).unwrap();
+    assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
+    let handled = resolve(&mut s, &merge_item).unwrap();
+    assert_eq!(handled.handled, vec![(merge_item.clone(), MsgState::Resolved.as_str().to_string())]);
+
+    // … and it stays ordinary once the lane starts the rework attempt.
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+        Ok(())
+    })
+    .unwrap();
+    let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 31).unwrap();
+    assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
+}
+
+/// F2 of the review: an ordinary question about a task whose attempt is
+/// handed in is still answered and closed by a reply — it is not a review
+/// fail, so no verdict is asked for.
+#[test]
+fn an_ordinary_question_is_answered_without_a_verdict() {
+    let mut s = world_with(true);
+    // The lane asks the captain something about the task it has handed in.
+    let question = s
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "T-1:2".into(),
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    sender: "p:heat".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Question,
+                    urgent: false,
+                    body: "Shall I also touch the docs?".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: T0 + 7,
+                })?
+                .id)
+        })
+        .unwrap();
+    assert_eq!(task_state(&mut s), TaskState::Verifying);
+    let verdicts_before = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len();
+
+    // The page offers the reply, and the reply goes through.
+    let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
+    assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
+    assert!(page.text.contains(&format!("gear reply {question} --resolve")), "{}", page.text);
+    resolve(&mut s, &question).unwrap();
+
+    // Nothing was settled: the task still verifies, no verdict was written.
+    assert_eq!(task_state(&mut s), TaskState::Verifying);
+    assert_eq!(
+        s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(),
+        verdicts_before
     );
 }

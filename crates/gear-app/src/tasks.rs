@@ -276,26 +276,56 @@ pub fn verdict_hint(
     let Some(attempt_row) = tx.get_attempt(project, task, attempt)? else {
         return Ok(None);
     };
-    // A verdict settles an attempt that is still handed in (a review fail, a
-    // decision over the rework cap) or reopens a task whose merge failed.
-    let handed_in = attempt_row.state == AttemptState::Submitted
-        && task_row.state == TaskState::Verifying;
-    let merge_failed = tx
-        .ops_in_state(project, gear_model::OpState::Failed)?
-        .iter()
-        .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task) && op.attempt == Some(attempt));
-    if !handed_in && !merge_failed {
-        return Ok(None);
-    }
     let Some(candidate) = attempt_row.candidate.clone() else {
         return Ok(None);
     };
+    let handed_in = attempt_row.state == AttemptState::Submitted
+        && task_row.state == TaskState::Verifying;
+    // A review fail: the item is the reviewer's verdict on this attempt (a
+    // fail; a pass is information), and the attempt is still handed in.
+    let review_fail = handed_in
+        && message.kind == MsgKind::Review
+        && tx
+            .get_review_verdict(project, task, attempt)?
+            .is_some_and(|verdict| !verdict.passed);
+    // The engine's decision item for one (a fail without blocking findings,
+    // or a rework over the cap): the captain decides, the task stays
+    // Verifying.
+    let captain_decision = handed_in && message.thread == format!("{task}:cap");
+    // A failed merge: the attempt passed, its work is not in the integration
+    // branch. Once the captain's reopening fail is recorded the item is an
+    // ordinary one — the historical op stays Failed, but it has been decided.
+    let merge_failed = !reopened(tx, project, task, attempt, &candidate)?
+        && tx
+            .ops_in_state(project, gear_model::OpState::Failed)?
+            .iter()
+            .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task) && op.attempt == Some(attempt));
+    // Any other item — an ordinary question about the same task — is answered
+    // and closed by a reply, and settles nothing.
+    if !review_fail && !captain_decision && !merge_failed {
+        return Ok(None);
+    }
     Ok(Some(VerdictHint {
         milestone: task_row.milestone.clone(),
         line: format!(
             "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
             attempt_row.adopted_version
         ),
+    }))
+}
+
+/// Has the captain already sent this attempt back after a failed merge (T-90)?
+/// The reopening fail is a fail verdict on the attempt's candidate while the
+/// attempt keeps its accepted state.
+fn reopened(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    candidate: &str,
+) -> GearResult<bool> {
+    Ok(tx.verdicts_of_task(project, task)?.iter().any(|verdict| {
+        verdict.attempt == attempt && !verdict.passed && verdict.candidate == candidate
     }))
 }
 
