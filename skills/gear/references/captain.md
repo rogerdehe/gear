@@ -9,7 +9,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    - the goal and the voyage (milestone): its `done:` sentence, its `bar:`, its `eta:` as a style ("quick landing" or "do it properly");
    - the repos this voyage changes: the skeleton lists what it found, but take only the repos the voyage touches — a repo joins the config in a later voyage, when it is needed;
    - the lanes: name, duty, owned paths (relative to the lane's repo), the repo it works in, agent kind (`<project>-<duty>` names); one lane per repo. The sheet's lane count and `[quota].lanes` agree before the user sees it: `init` refuses a quota below the lanes configured, and a larger one leaves lanes the project does not have;
-   - the model chain per role, by full model id (`lanes`: fast; `review`: a different, stronger model — a reviewer never runs the writer's model). An entry may name its own CLI and start args, for a model another CLI serves better: `{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] }` in place of the plain id;
+   - the model chain per role, by full model id (`lanes`: fast; `review`: a different, stronger model — a reviewer never runs the writer's model). An entry may name its own CLI and its start args instead of the plain id, for a model another CLI serves better — the `[models]` example below shows that form in `review`;
    - the quota policy per role: `fallback` (next model in the chain) or `wait` (park until the provider resets). It must work today: `init` refuses a `fallback` with no next model.
 
    **The bar is the user's choice.** Offer the three:
@@ -118,7 +118,7 @@ deps: -
 goal: A logged-in session survives a page reload.
 accept: The session is read at start-up, and the home page stays after a reload.
 estimate: 45
-deps: T-1
+deps: -
 ```
 
 ### Sections and fields
@@ -126,7 +126,7 @@ deps: T-1
 - `# Goal` — one paragraph.
 - `# Milestone <id>: <title>` — `done:`, `bar:`, `eta:` (all three required).
 - `# Decisions` — one `- ` line per decision, newest last. Special lines: `- tail: <lanes>` (these lanes may stand idle; `- tail: -` clears it) and `- station M-<n>: keep course|time-box|cut|move|land <why>` (answers a station or landing item).
-- `# Queue` — order = the order lanes work in. Header: `## <T-<n>|NEW> [now|must|should|could|wont] lane=<lane> milestone=<M> [required]`. Fields: `goal`, `accept`, `estimate` (minutes; required for `NEW`), `deps` (`-` or `T-a, T-b`), `state` (`ready`|`cancelled`), `followup-of`, `evidence-files`, `evidence-due`. A task you do not list keeps its state and place. Rewriting `goal`/`accept` makes a new contract version; a lane mid-task is told to rework to it. `deps` never sits between two tasks of one lane: a lane works its own queue in order, on its own branch, and a second task there starts after the first lands (`gear --skill decompose` rule 3).
+- `# Queue` — order = the order lanes work in. Header: `## <T-<n>|NEW> [now|must|should|could|wont] lane=<lane> milestone=<M> [required]`. Fields: `goal`, `accept`, `estimate` (minutes; required for `NEW`), `deps` (`-` or `T-a, T-b`), `state` (`ready`|`cancelled`), `followup-of`, `evidence-files`, `evidence-due`. A task you do not list keeps its state and place. Rewriting `goal`/`accept` makes a new contract version; a lane mid-task is told to rework to it. `deps` never sits between two tasks of one lane: a lane works its own queue in order, on its own branch, and takes its next task as soon as it hands the first in — the review runs in the background (`gear --skill decompose` rule 3).
 - `# Verdicts` — how you settle a task the engine did not settle (a fail, or an override):
 
   ```
