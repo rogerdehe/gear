@@ -310,3 +310,61 @@ fn every_init_reads_the_destinations_again() {
     let refusal = push::check(&mut store, "p", "child", &world.child_origin()).unwrap_err();
     assert_eq!(refusal.reason, Reason::UnknownRepo);
 }
+
+/// T-73 F1 (rework): an unregistered IPv6 host must not pass the allow-list
+/// because the registered one shares its path. The authority is not cut at
+/// its first colon: the whole bracketed host is the destination.
+#[test]
+fn two_ipv6_hosts_of_one_path_are_two_destinations() {
+    let world = World::new();
+    // The project root pushes to a bracketed IPv6 host. No network is
+    // touched: `init` only reads the remote's configuration.
+    sh(
+        &world.parent,
+        "git remote set-url --push origin 'ssh://git@[2001:db8::1]/team/repo.git'",
+    );
+    let mut store = Store::open_in_memory().unwrap();
+    init(&mut store, &admin(), &world.config(), T0).unwrap();
+
+    // The frozen destination carries the whole host — not `[2001/team/repo`,
+    // which two different hosts would share.
+    assert_eq!(
+        destinations_of(&mut store, ""),
+        vec!["[2001:db8::1]/team/repo".to_string()]
+    );
+
+    // The registered host passes, in either form.
+    assert!(push::check(&mut store, "p", "", "ssh://git@[2001:db8::1]/team/repo.git").is_ok());
+    assert!(push::check(&mut store, "p", "", "git@[2001:db8::1]:team/repo.git").is_ok());
+    // A port is not the host: the same host on another port is the same place.
+    assert!(push::check(&mut store, "p", "", "ssh://git@[2001:db8::1]:2222/team/repo.git").is_ok());
+
+    // Another IPv6 host of the same path is refused — the bypass F1 found.
+    let refusal =
+        push::check(&mut store, "p", "", "ssh://git@[2001:db8::2]/team/repo.git").unwrap_err();
+    assert_eq!(refusal.reason, Reason::NotRegistered);
+    assert_eq!(refusal.destination, "[2001:db8::2]/team/repo");
+    assert!(refusal.message().contains("[2001:db8::2]/team/repo"), "{}", refusal.message());
+}
+
+/// T-73 F2 (rework): a Unicode path is a destination, not a panic — in
+/// `init` and in `check` alike.
+#[test]
+fn a_unicode_destination_is_frozen_and_checked() {
+    let world = World::new();
+    sh(
+        &world.parent,
+        "git remote set-url --push origin 'https://git.example.com/团队/repo.git'",
+    );
+    let mut store = Store::open_in_memory().unwrap();
+    init(&mut store, &admin(), &world.config(), T0).unwrap();
+
+    assert_eq!(
+        destinations_of(&mut store, ""),
+        vec!["git.example.com/团队/repo".to_string()]
+    );
+    assert!(push::check(&mut store, "p", "", "https://git.example.com/团队/repo.git").is_ok());
+    let refusal =
+        push::check(&mut store, "p", "", "https://git.example.com/团队/other.git").unwrap_err();
+    assert_eq!(refusal.reason, Reason::NotRegistered);
+}

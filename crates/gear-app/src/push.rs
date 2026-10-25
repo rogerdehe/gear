@@ -194,7 +194,7 @@ pub fn normalise(url: &str) -> Option<String> {
     if url.is_empty() {
         return None;
     }
-    let (host, path) = split(url);
+    let (host, path) = split(url)?;
     let host = host.to_lowercase();
     let path = clean_path(path);
     if host.is_empty() {
@@ -210,8 +210,10 @@ pub fn normalise(url: &str) -> Option<String> {
     }
 }
 
-/// The host and the path of a URL.
-fn split(url: &str) -> (&str, &str) {
+/// The host and the path of a URL. `None` when the URL names no destination:
+/// a bracketed IPv6 host that is never closed has no host to compare, and
+/// half of it would collide with another host (T-73 F1).
+fn split(url: &str) -> Option<(&str, &str)> {
     // A scheme: `scheme://authority/path`. The user (`git@`) and the port
     // are not the host.
     if let Some((_, rest)) = url.split_once("://") {
@@ -221,31 +223,67 @@ fn split(url: &str) -> (&str, &str) {
         };
         // `file:///srv/git/repo` has no authority: its path keeps its slash.
         if authority.is_empty() {
-            return ("", rest);
+            return Some(("", rest));
         }
         let host = authority.rsplit('@').next().unwrap_or(authority);
-        let host = host.split(':').next().unwrap_or(host);
-        return (host, path);
+        return Some((host_of(host)?, path));
     }
-    // The scp form: `user@host:path`.
-    if let Some((head, path)) = url.split_once(':') {
+    // The scp form: `user@host:path`, where a bracketed IPv6 host ends at its
+    // closing bracket and the path starts after the colon that follows it.
+    if let Some((head, path)) = scp_split(url) {
         let host = head.rsplit('@').next().unwrap_or(head);
         if !host.is_empty() && !host.contains('/') {
-            return (host, path);
+            return Some((host, path));
         }
     }
     // A local path.
-    ("", url)
+    Some(("", url))
+}
+
+/// The host of an authority: a bracketed IPv6 host through its closing
+/// bracket — a port after it is not the host — else everything before the
+/// first colon. The brackets are kept: they are what makes an IPv6 host one
+/// host, not a host cut at its first colon (T-73 F1). A bracket that is never
+/// closed names no host at all.
+fn host_of(authority: &str) -> Option<&str> {
+    if authority.starts_with('[') {
+        let at = authority.find(']')?;
+        return Some(&authority[..at + 1]);
+    }
+    Some(authority.split(':').next().unwrap_or(authority))
+}
+
+/// The scp form `user@host:path` split into its head (user and host) and its
+/// path; `None` when the URL is not the scp form. A bracketed IPv6 host is
+/// kept whole: its colons are part of the address, so the separator is the
+/// colon after its closing bracket.
+fn scp_split(url: &str) -> Option<(&str, &str)> {
+    if let Some(at) = url.find('[') {
+        let end = url[at..].find(']')? + at;
+        let path = url[end + 1..].strip_prefix(':')?;
+        return Some((&url[..end + 1], path));
+    }
+    url.split_once(':')
 }
 
 /// The path of a destination: no trailing slash, no `.git` suffix.
+///
+/// The suffix is read through `str::get`, so a path whose last four bytes are
+/// not a character boundary (any path ending in a multi-byte character) is
+/// left whole instead of panicking (T-73 F2).
 fn clean_path(path: &str) -> String {
     let path = path.trim().trim_end_matches('/');
-    if path.len() > 4 && path[path.len() - 4..].eq_ignore_ascii_case(".git") {
-        path[..path.len() - 4].to_string()
+    let path = if path.len() > 4 {
+        let at = path.len() - 4;
+        match path.get(at..) {
+            Some(suffix) if suffix.eq_ignore_ascii_case(".git") => path.get(..at).unwrap_or(path),
+            _ => path,
+        }
     } else {
-        path.to_string()
-    }
+        path
+    };
+    // A `/.git` suffix leaves the slash before it: it is not part of the path.
+    path.trim_end_matches('/').to_string()
 }
 
 /// Read the push destinations of every repo of the project: the project root
@@ -418,5 +456,54 @@ mod tests {
         assert_eq!(normalise(""), None);
         assert_eq!(normalise("   "), None);
         assert_eq!(normalise("https://github.com").as_deref(), Some("github.com"));
+    }
+
+    /// T-73 F1: a bracketed IPv6 host is one host. Cutting the authority at
+    /// its first colon would turn two different hosts into one destination
+    /// and let an unregistered host pass the allow-list.
+    #[test]
+    fn an_ipv6_host_is_kept_whole() {
+        assert_eq!(
+            normalise("ssh://git@[2001:db8::1]/team/repo.git").as_deref(),
+            Some("[2001:db8::1]/team/repo")
+        );
+        // A port after the closing bracket is not the host.
+        assert_eq!(
+            normalise("ssh://git@[2001:db8::1]:2222/team/repo").as_deref(),
+            Some("[2001:db8::1]/team/repo")
+        );
+        // The scp form, where the separator is the colon after the bracket.
+        assert_eq!(
+            normalise("git@[2001:db8::1]:team/repo.git").as_deref(),
+            Some("[2001:db8::1]/team/repo")
+        );
+        // The host is still case-folded; the path is not.
+        assert_eq!(
+            normalise("ssh://git@[2001:DB8::1]/team/Repo").as_deref(),
+            Some("[2001:db8::1]/team/Repo")
+        );
+        // Two different IPv6 hosts of the same path are two destinations.
+        assert_ne!(
+            normalise("ssh://git@[2001:db8::1]/team/repo.git"),
+            normalise("ssh://git@[2001:db8::2]/team/repo.git")
+        );
+        // A bracket that is never closed names no host at all.
+        assert_eq!(normalise("ssh://git@[2001:db8::1/team/repo.git"), None);
+    }
+
+    /// T-73 F2: a path that ends in a multi-byte character is not a place to
+    /// slice for a `.git` suffix — it is left whole.
+    #[test]
+    fn a_unicode_path_does_not_panic() {
+        assert_eq!(
+            normalise("https://example.com/中文").as_deref(),
+            Some("example.com/中文")
+        );
+        assert_eq!(
+            normalise("https://example.com/中文.git").as_deref(),
+            Some("example.com/中文")
+        );
+        assert_eq!(normalise("/srv/git/中文").as_deref(), Some("/srv/git/中文"));
+        assert_eq!(normalise("/srv/git/中文/.git").as_deref(), Some("/srv/git/中文"));
     }
 }
