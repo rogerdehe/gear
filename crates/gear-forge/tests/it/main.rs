@@ -4,3 +4,4 @@
 mod github_contract;
 mod local_contract;
 mod marker_contract;
+mod sync_contract;
