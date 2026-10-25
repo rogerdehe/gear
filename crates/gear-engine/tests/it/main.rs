@@ -34,5 +34,6 @@ mod hand_in_notifications;
 mod station_contract;
 mod busy_contract;
 mod blocked_contract;
+mod blocked_delivery_contract;
 mod parallel_contract;
 mod multi_repo_contract;

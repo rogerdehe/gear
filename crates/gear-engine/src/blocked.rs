@@ -24,6 +24,15 @@ fn key(seat: &str) -> String {
     format!("seat-blocked:{seat}")
 }
 
+/// Whether the seat is in a blocked spell right now (its timer was started by
+/// the last tick and not cleared by a recovery). A delivery that is intended
+/// for it waits instead of being typed into the dialog (T-68).
+pub fn holding(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
+    Ok(tx
+        .get_meta(&format!("{}:since", key(seat)))?
+        .is_some_and(|since| !since.is_empty()))
+}
+
 /// Ring the captain for every lane or reviewer seat that has been blocked for
 /// more than [`BLOCKED_S`] seconds. Returns the seat ids that were rung.
 ///
