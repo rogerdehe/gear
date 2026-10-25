@@ -26,8 +26,10 @@ pub struct BaseGate {
 }
 
 /// The gate for a `gear send --kind result` in this process: the lane's working
-/// directory and the project's `[conventions].integration` (17 §11, default
-/// `dev`). No `GEAR_CTX`, or a config that cannot be read → `BadFormat`: a
+/// directory and the integration branch of the repo the lane works in (T-54):
+/// the repo the lane is bound to with `repo =`, else the project's root, with
+/// that repo's own integration branch (`[conventions].integration` for the
+/// root). No `GEAR_CTX`, or a config that cannot be read → `BadFormat`: a
 /// hand-in is never accepted unchecked.
 pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     let ctx = env.ctx.as_ref().ok_or_else(|| {
@@ -37,13 +39,16 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
         )
     })?;
     let config = crate::config::latest(store, &ctx.project)?;
+    // The lane's own repo: a lane in a child repo is checked against that
+    // repo's integration branch, not the root's (T-54).
+    let integration = config.repo_of_lane(&ctx.seat).integration;
     let worktree = std::env::current_dir().map_err(|e| {
         GearError::new(
             ErrorCode::BadFormat,
             format!("cannot read the working directory for the hand-in check: {e}"),
         )
     })?;
-    Ok(BaseGate { worktree, integration: config.conventions.integration })
+    Ok(BaseGate { worktree, integration })
 }
 
 /// Refuse unless `candidate` contains the current `origin/<integration>`:

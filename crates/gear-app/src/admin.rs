@@ -191,7 +191,10 @@ fn register(
 /// - a lane that is not registered yet becomes a Queued seat (generation 0) —
 ///   the engine onboards it;
 /// - a registered lane keeps its seat: its generation, state and bindings stay,
-///   only its profile follows the config.
+///   only its profile follows the config;
+/// - a **retired** lane that is in the new config is registered again: it goes
+///   back to Queued ("registered again"), so the engine onboards it once more
+///   (T-54).
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
 /// a plan change.
@@ -288,6 +291,17 @@ fn re_register(
                 }
                 if seat.profile != lane.profile {
                     tx.set_seat_profile(&seat_id, &lane.profile)?;
+                }
+                // A retired lane that is in the new config is registered again:
+                // a new voyage may reuse the name, and the engine onboards
+                // the seat once more (T-54).
+                if seat.state == SeatState::Retired {
+                    tx.set_seat_state(
+                        &seat_id,
+                        SeatState::Queued,
+                        Some("registered again"),
+                        now,
+                    )?;
                 }
             }
             // A new lane is registered Queued; the engine onboards it.

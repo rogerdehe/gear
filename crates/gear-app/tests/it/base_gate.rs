@@ -399,3 +399,93 @@ fn a_replay_needs_the_live_seat() {
     assert_eq!(s.read(|tx| tx.thread_messages("p", "T-1:1")).unwrap().len(), 1);
     assert_eq!(first.msg_id, "M-1");
 }
+
+// ---------------------------------------------------------------- the repos
+
+/// A project whose config holds a repository below its root, and one lane in
+/// it (`heat`) and one in the root (`pricing`).
+const WITH_REPOS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 2
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "thermal calculation"
+owns = ["src/heat/"]
+kind = "opencode"
+profile = "opencode"
+repo = "api"
+
+[[lanes]]
+name = "pricing"
+duty = "price engine"
+owns = ["src/pricing/"]
+kind = "opencode"
+profile = "opencode"
+
+[[repos]]
+name = "api"
+path = "crates/api"
+integration = "feat/api"
+release = "main"
+gate = "cargo test -p api"
+
+[conventions]
+integration = "dev"
+release = "main"
+"#;
+
+/// A store with the project above, and the seat of the lane `heat`.
+fn world_with_repos() -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        tx.insert_project(&gear_store::ProjectRow {
+            id: "p".into(),
+            herdr_session: "sess".into(),
+            config_toml: WITH_REPOS.to_string(),
+            config_version: 1,
+            quota_lanes: 2,
+            quota_temps: 0,
+            quota_includes_captain: false,
+            plan_version: 0,
+            created: T0,
+        })?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)
+    })
+    .unwrap();
+    s
+}
+
+/// The environment of a seat: the lane `heat` or the lane `pricing`.
+fn seat_env(seat: &str) -> Env {
+    Env {
+        ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
+        pane_id: Some(LANE_PANE.into()),
+        admin: false,
+    }
+}
+
+/// T-54: a hand-in is checked against the integration branch of the repo the
+/// lane works in: the child repo's own branch, not the root's.
+#[test]
+fn a_hand_in_uses_the_integration_branch_of_the_lanes_own_repo() {
+    let mut s = world_with_repos();
+
+    let gate = gear_app::base::gate_for(&mut s, &seat_env("heat")).unwrap();
+    assert_eq!(gate.integration, "feat/api", "the child repo's own branch");
+
+    // A lane in the root is checked against the root's branch.
+    let gate = gear_app::base::gate_for(&mut s, &seat_env("pricing")).unwrap();
+    assert_eq!(gate.integration, "dev", "the root's branch");
+}
