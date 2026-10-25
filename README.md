@@ -12,7 +12,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 - Herdr 0.9.1 or later, on macOS (Apple silicon or Intel) or Linux x86_64
 - at least one agent CLI, installed and logged in: Claude Code, Codex, OpenCode or Grok (two different models are best: one to write code, a stronger one to review)
-- git; your project in a git repository with an integration branch (e.g. `dev`) pushed to a remote
+- git; your project in one git repository, or a folder of several, each with an integration branch (e.g. `dev`) pushed to a remote
 
 ## Install
 
