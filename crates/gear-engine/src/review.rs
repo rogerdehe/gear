@@ -955,7 +955,10 @@ fn review_packet_for(
     attempt: i64,
     candidate: &str,
 ) -> GearResult<String> {
-    let (goal, accept, done, bar, lane) = store.read(|tx| {
+    // The version the hand-in was made against: the attempt's adopted contract
+    // (a hand-in must name it, T-8), never an older one the attempt once had
+    // (T-63: T-58's reviewer was sent v1 after the lane reworked to v2).
+    let (version, goal, accept, done, bar, lane) = store.read(|tx| {
         let version = tx
             .get_attempt(&config.project.id, task, attempt)?
             .map(|row| row.adopted_version)
@@ -985,7 +988,7 @@ fn review_packet_for(
             }
             None => (String::new(), String::new(), String::new()),
         };
-        Ok((goal, accept, done, bar, lane))
+        Ok((version, goal, accept, done, bar, lane))
     })?;
     // The diff is against the integration branch of the repo the work is in
     // (T-53): a child repo has its own branch.
@@ -993,6 +996,7 @@ fn review_packet_for(
     Ok(review_packet(
         task,
         attempt,
+        version,
         &goal,
         &accept,
         &done,
@@ -1134,6 +1138,7 @@ fn agent_name(config: &ProjectConfig, task: &str) -> String {
 fn review_packet(
     task: &str,
     attempt: i64,
+    version: i64,
     goal: &str,
     accept: &str,
     done: &str,
@@ -1145,6 +1150,7 @@ fn review_packet(
     format!(
         "Review {task} attempt {attempt}. Run `gear` first (it records that you got this).\n\
          \n\
+         Contract: v{version} (the version this hand-in was made against)\n\
          Goal: {goal}\n\
          Accept: {accept}\n\
          Done (the milestone's sentence): {done}\n\
@@ -1485,6 +1491,114 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 _ => None,
             })
             .collect()
+    }
+
+    /// T-63: the reviewer is sent the contract the hand-in was made against —
+    /// the newest version at hand-in time, not the attempt's first one (M2.1:
+    /// T-58's reviewer got v1 after the lane reworked to v2 and asked the
+    /// captain which governs).
+    #[test]
+    fn the_review_packet_follows_the_hand_ins_contract_version() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 1,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", T0)?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "the first goal".into(),
+                    accept: "the first criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        // The captain rewrites the contract while the lane works on it.
+        store
+            .write(|tx| {
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 2,
+                    goal: "the revised goal".into(),
+                    accept: "the revised criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 5,
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.pending_update = Some(2);
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        // The lane's page showed v2, so it works to v2 and hands in under it.
+        store
+            .write(|tx| gear_app::tasks::adopt_contract(tx, "p", "T-1", 1, 2, T0 + 10).map(|_| ()))
+            .unwrap();
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    2,
+                    "abc1234",
+                    "ops/reports/T-1.md",
+                    T0 + 20,
+                )
+            })
+            .unwrap();
+
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+
+        assert!(
+            packet.contains("Contract: v2 (the version this hand-in was made against)"),
+            "{packet}"
+        );
+        assert!(packet.contains("Goal: the revised goal"), "{packet}");
+        assert!(packet.contains("Accept: the revised criteria"), "{packet}");
+        assert!(!packet.contains("the first goal"), "not the old contract: {packet}");
     }
 
     #[test]
