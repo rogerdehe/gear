@@ -195,8 +195,10 @@ pub fn merge_passed(
                     task: op.task.clone().unwrap_or_default(),
                     branch: op.payload["branch"].as_str().unwrap_or("").to_string(),
                 });
-                // The wait is over: the captain's item about it closes (T-62).
+                // The wait is over and the failure (if any) is settled: the
+                // captain's items about them close (T-62, T-92).
                 resolve_wait(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
+                resolve_failed(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
             }
             Report::Busy => retry_merge(store, project, op, "merge will retry from origin", finished.at)?,
             // The merge waits for another task: it is not a failure. The op
@@ -468,17 +470,97 @@ fn fail_merge(store: &mut Store, project: &str, op: &OpRow, reason: &str, now: T
         // Unknown from a restart goes straight to Failed.
         tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)
     })?;
+    tell_captain_failed(store, project, op, reason, now)
+}
+
+/// The thread of the item that says a merge failed (T-92). One item per task:
+/// the captain is told once per failure and it closes when the merge goes
+/// through.
+fn failed_thread(task: &str) -> String {
+    format!("merge-failed:{task}")
+}
+
+/// Tell the captain that a merge failed, naming the plan line that retries it
+/// (T-92). An item that is still open is refreshed rather than duplicated. The
+/// item names the task and attempt it is about, so the captain's home page can
+/// suggest the verdict that settles it (T-90).
+fn tell_captain_failed(
+    store: &mut Store,
+    project: &str,
+    op: &OpRow,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
     let task = op.task.clone().unwrap_or_default();
-    // The item names the task and attempt it is about, so the captain's home
-    // page can suggest the verdict that settles it (T-90).
-    let about = op.task.as_deref().zip(op.attempt);
-    tell_captain(
-        store,
-        project,
-        about,
-        &format!("merge of {task} failed: {reason}\nnothing was pushed"),
-        now,
-    )
+    if task.is_empty() {
+        return tell_captain(store, project, None, &format!("merge failed: {reason}\nnothing was pushed"), now);
+    }
+    let body = format!(
+        "merge of {task} failed: {reason}\nnothing was pushed\n\
+         to retry it: `- remerge {task}` under `# Staff` in the plan, then `gear plan apply` \
+         (only while the candidate is not on the integration branch)"
+    );
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("project {project} has no captain"),
+            )
+        })?;
+        let thread = failed_thread(&task);
+        let open = tx
+            .thread_messages(project, &thread)?
+            .into_iter()
+            .find(|message| message.state == MsgState::Open);
+        if let Some(item) = open {
+            if item.body != body {
+                tx.update_message_body(project, &item.id, &body)?;
+            }
+            return Ok(());
+        }
+        tx.insert_message(&NewMessage {
+            project: project.to_string(),
+            thread,
+            task: Some(task.clone()),
+            attempt: op.attempt,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::Question,
+            urgent: false,
+            body,
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// Close the item that says a merge failed (T-92): the merge went through, by
+/// a retry or otherwise.
+fn resolve_failed(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    if task.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        let thread = failed_thread(task);
+        for item in tx.thread_messages(project, &thread)? {
+            if item.state == MsgState::Open {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some("the merge went through"),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Whether the op still merges what was passed: its attempt is the task's
@@ -1681,6 +1763,122 @@ mod tests {
     }
 
     /// T-62: a task that is not built on another task's branch is not held.
+    /// The task as a settled pass leaves it: attempt 1 accepted, the task done.
+    fn accept(store: &mut Store, task: &str, now: Ts) {
+        store
+            .write(|tx| {
+                let mut attempt = tx.get_attempt("p", task, 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)?;
+                let mut row = tx.get_task("p", task)?.unwrap();
+                row.state = TaskState::Done;
+                row.updated = now;
+                tx.update_task(&row)
+            })
+            .unwrap();
+    }
+
+    /// `gear plan apply` with a single `- remerge T-<n>` staff line.
+    fn plan_remerge(store: &mut Store, task: &str, now: Ts) -> GearResult<()> {
+        let text = format!("<!-- gear-plan project=p base=0 -->\n# Staff\n- remerge {task}\n");
+        let draft = gear_app::draft::parse(&text)?;
+        let env = gear_app::Env {
+            ctx: Some(gear_model::GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some("w9:p1".into()),
+            admin: false,
+        };
+        let fp = gear_app::identity::Fingerprint {
+            pane_id: "w9:p1".into(),
+            kind: Some("claude".into()),
+            session_ref: None,
+        };
+        gear_app::plan::apply(store, &env, Some(&fp), &draft, &text, &format!("remerge-{task}-{now}"), now)
+            .map(|_| ())
+    }
+
+    /// T-92: a merge that failed can be retried from the plan, and the failed
+    /// item closes when it lands. The gate fails once (a flaky test), as it
+    /// did on T-89.
+    #[test]
+    fn a_failed_merge_is_retried_from_the_plan_and_its_item_closes() {
+        let scratch = Scratch::new("remerge");
+        let marker = scratch.root.join("gate-ran");
+        let gate = format!(
+            "if [ ! -e '{marker}' ]; then touch '{marker}'; echo the flaky test >&2; exit 1; fi",
+            marker = marker.display()
+        );
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        accept(&mut store, "T-5", 0);
+
+        // The first merge fails on the gate; nothing is pushed.
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert!(merged.is_empty(), "{merged:?}");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        assert_eq!(scratch.dev_log(), "dev", "nothing was pushed");
+        // The item names the plan line that retries it.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(inbox[0].body.contains("merge of T-5 failed"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("- remerge T-5"), "{}", inbox[0].body);
+
+        // The captain retries it from the plan: a new op, which lands.
+        plan_remerge(&mut store, "T-5", 40).unwrap();
+        assert_eq!(op_state(&mut store, "O-2"), Some(OpState::Intended), "a new merge op");
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
+        assert!(scratch.dev_has_task_commit(), "the retry landed");
+        // The failed item closes with the merge.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 60)).unwrap();
+        assert!(inbox.is_empty(), "the item is settled: {inbox:?}");
+    }
+
+    /// T-92: a merge that is already in flight or merged has nothing to retry,
+    /// and the plan line says why.
+    #[test]
+    fn a_remerge_is_refused_without_a_failed_merge() {
+        let scratch = Scratch::new("remerge-refuse");
+        let (mut store, _herdr, _cfg) = queued_merge(&scratch, "true");
+        accept(&mut store, "T-5", 0);
+        // The merge op is Intended: nothing failed.
+        let error = plan_remerge(&mut store, "T-5", 40).unwrap_err();
+        assert!(error.detail.contains("already intended"), "{error:?}");
+        // Merged: the last op is Confirmed.
+        store
+            .write(|tx| {
+                tx.set_op_state("p", "O-1", OpState::Executing, None, 41)?;
+                tx.set_op_state("p", "O-1", OpState::Submitted, None, 41)?;
+                tx.set_op_state("p", "O-1", OpState::Confirmed, Some("merged"), 41)
+            })
+            .unwrap();
+        let error = plan_remerge(&mut store, "T-5", 42).unwrap_err();
+        assert!(error.detail.contains("already merged"), "{error:?}");
+    }
+
+    /// T-92: a task the engine never queued a merge for is refused, and so is
+    /// a task that is not there.
+    #[test]
+    fn a_remerge_needs_a_task_with_a_merged_attempt() {
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, "abc1234", "report", 0)
+            })
+            .unwrap();
+        accept(&mut store, "T-5", 0);
+        let error = plan_remerge(&mut store, "T-5", 40).unwrap_err();
+        assert!(error.detail.contains("no merge to retry"), "{error:?}");
+        let error = plan_remerge(&mut store, "T-99", 41).unwrap_err();
+        assert!(error.detail.contains("no task T-99"), "{error:?}");
+    }
+
     #[test]
     fn a_merge_that_carries_no_other_task_is_not_held() {
         let pair = Pair::new("independent", false);
