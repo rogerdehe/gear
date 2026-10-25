@@ -114,8 +114,9 @@ pub fn apply_quota_policy(
                         }
                     }
                     None => {
-                        flag_needs_check(
+                        flag_and_alert(
                             store,
+                            project,
                             seat,
                             "quota: the lane's chain is empty; no model to switch back to",
                             now,
@@ -275,7 +276,7 @@ fn start_switch(
             "{}: no [models.switch.\"{model}\"] labels (picker, bar) — needs check, not restarted",
             seat.id
         );
-        flag_needs_check(store, seat, &line, now)?;
+        flag_and_alert(store, project, seat, &line, now)?;
         return Ok(Some(line));
     };
     let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
@@ -312,7 +313,7 @@ fn resume_switch(
             "{}: the switch target {:?} has no [models.switch] labels any more — needs check",
             seat.id, plan.to
         );
-        flag_needs_check(store, seat, &line, now)?;
+        flag_and_alert(store, project, seat, &line, now)?;
         return Ok(Some(line));
     };
     let labels = config.models.switch.get(&model).cloned().expect("just found");
@@ -340,7 +341,7 @@ fn settle_switch(
                 "{}: the model switch to {model} did not confirm twice — needs check",
                 seat.id
             );
-            flag_needs_check(store, seat, &line, now)?;
+            flag_and_alert(store, project, seat, &line, now)?;
             Ok(Some(line))
         }
     }
@@ -444,27 +445,30 @@ fn park(
     meta_set(store, &meta_key("resume", &seat.id), &until.to_string())
 }
 
-/// Flag the seat for a human (`NeedsCheck`): the engine must not guess.
-fn flag_needs_check(
+/// Park a failed switch and notify the captain in one transaction. The state
+/// transition suppresses duplicate alerts on later ticks.
+pub(crate) fn flag_and_alert(
     store: &mut Store,
+    project: &str,
     seat: &SeatRow,
     reason: &str,
     now: Ts,
 ) -> GearResult<()> {
     store.write(|tx| {
-        let seat = tx.get_seat(&seat.id)?.ok_or_else(|| {
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
         })?;
-        if seat.state == SeatState::NeedsCheck {
-            return tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now);
+        if row.state == SeatState::NeedsCheck {
+            return Ok(());
         }
         gear_model::state::require_transition(
-            SeatState::can_transition(seat.role, seat.state, SeatState::NeedsCheck),
+            SeatState::can_transition(row.role, row.state, SeatState::NeedsCheck),
             "seat",
-            seat.state.as_str(),
+            row.state.as_str(),
             SeatState::NeedsCheck.as_str(),
         )?;
-        tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now)
+        tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now)?;
+        insert_alert(tx, project, &row, reason, now)
     })
 }
 
@@ -565,36 +569,62 @@ pub(crate) fn tell_captain(
 }
 
 /// An urgent action item for the captain: it rings the doorbell.
-fn alert_captain(
+///
+/// A failed model switch stops the lane (T-60): the seat is parked in
+/// `NeedsCheck` and waits for a human, so the captain has to hear about it —
+/// an info line would leave the lane silent.
+pub(crate) fn alert_captain(
     store: &mut Store,
     project: &str,
     seat: &SeatRow,
     line: &str,
     now: Ts,
 ) -> GearResult<()> {
-    store.write(|tx| {
-        let captain = tx.captain_of(project)?.ok_or_else(|| {
-            GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
-        })?;
-        let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
-        tx.insert_message(&NewMessage {
-            project: project.to_string(),
-            thread: format!("{}:{seq}", seat.name),
-            task: None,
-            attempt: None,
-            sender: seat.id.clone(),
-            sender_gen: seat.generation,
-            recipient: captain.id,
-            kind: MsgKind::System,
-            urgent: true,
-            body: format!("{line} — the lane is stopped: switch it to another model by hand, or let it wait"),
-            reply_to: None,
-            needs_ack: false,
-            state: MsgState::Open,
-            created: now,
-        })?;
-        Ok(())
-    })
+    store.write(|tx| insert_alert(tx, project, seat, line, now))
+}
+
+fn insert_alert(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    seat: &SeatRow,
+    line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let captain = tx.captain_of(project)?.ok_or_else(|| {
+        GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
+    })?;
+    // The seat's current generation: a restart on another CLI (T-35) gave
+    // the seat a new one.
+    let generation = tx
+        .get_seat(&seat.id)?
+        .map(|row| row.generation)
+        .unwrap_or(seat.generation);
+    let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
+    // The item names the seat and the reason (T-60): the captain has to
+    // know which lane stopped and why.
+    let prefix = format!("{}: ", seat.id);
+    let body = if line.starts_with(&prefix) {
+        line.to_string()
+    } else {
+        format!("{prefix}{line}")
+    };
+    tx.insert_message(&NewMessage {
+        project: project.to_string(),
+        thread: format!("{}:{seq}", seat.name),
+        task: None,
+        attempt: None,
+        sender: seat.id.clone(),
+        sender_gen: generation,
+        recipient: captain.id,
+        kind: MsgKind::System,
+        urgent: true,
+        body: format!("{body} — the lane is stopped: switch it to another model by hand, or let it wait"),
+        reply_to: None,
+        needs_ack: false,
+        state: MsgState::Open,
+        created: now,
+    })?;
+    Ok(())
 }
 
 /// The next free thread number for `prefix` (the same rule as `gear send`).
@@ -1076,6 +1106,9 @@ quota_reset_h = 5
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, false, T0 + 40);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
+        let told = captain_messages(&mut store);
+        assert_eq!(told.len(), 1, "one info item: {told:?}");
+        assert!(told[0].state == MsgState::Info && !told[0].urgent && told[0].body.contains("restarted on"));
     }
 
     #[test]
@@ -1267,6 +1300,226 @@ quota_reset_h = 5
         assert!(exits(&herdr).is_empty(), "no exit keys: {:?}", herdr.calls);
         assert!(starts(&herdr).is_empty(), "no agent start: {:?}", herdr.calls);
         assert!(texts(&herdr).is_empty(), "nothing typed");
+    }
+
+    /// T-60: a failed model switch stops the lane, so the captain is rung — an
+    /// urgent item that names the seat and the reason. Once per failure: a
+    /// later tick says nothing new.
+    #[test]
+    fn a_failed_switch_rings_the_captain_once() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
+        let mut herdr = herdr_with_quota();
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+
+        // The seat is flagged: no [models.switch] labels for the next model.
+        assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 30)).unwrap();
+        assert_eq!(open.len(), 1, "one urgent item: {open:?}");
+        assert!(open[0].urgent, "{open:?}");
+        assert!(open[0].body.contains("p:heat"), "it names the seat: {open:?}");
+        assert!(open[0].body.contains("models.switch"), "it names the reason: {open:?}");
+
+        // A later tick does not ring again.
+        tick_quota(&mut store, &mut herdr, true, T0 + 40);
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 50)).unwrap();
+        assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
+    }
+
+    #[test]
+    fn removing_labels_during_a_switch_rings_once_and_clears_the_plan() {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
+        let without_labels = text.clone();
+        text.push_str("\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n");
+        let mut store = world(&text);
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_some());
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = without_labels;
+            tx.update_project(&project)
+        }).unwrap();
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, false, T0 + 30 + tick);
+        }
+        assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_none());
+        let told = captain_messages(&mut store);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].urgent && told[0].body.contains("p:heat") && told[0].body.contains("no [models.switch] labels any more"));
+    }
+
+    #[test]
+    fn a_cross_cli_restart_timeout_rings_once() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        // The old agent never exits, so the replacement cannot start.
+        for tick in 0..40 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 10 + tick);
+        }
+        assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_none());
+        let told = captain_messages(&mut store);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].urgent && told[0].body.contains("p:heat") && told[0].body.contains("did not finish"));
+    }
+
+    #[test]
+    fn flagging_the_same_failure_with_a_stale_row_does_not_duplicate_the_alert() {
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback"));
+        let seat = lane_seat(&mut store);
+        for tick in 0..3 {
+            flag_and_alert(&mut store, "p", &seat, "model switch failed", T0 + tick).unwrap();
+        }
+        assert_eq!(captain_messages(&mut store).len(), 1);
+        // After recovery, another failure must create its own item.
+        store.write(|tx| tx.set_seat_state(&seat.id, SeatState::Active, None, T0 + 4)).unwrap();
+        flag_and_alert(&mut store, "p", &seat, "another switch failed", T0 + 5).unwrap();
+        assert_eq!(captain_messages(&mut store).len(), 2);
+    }
+
+    /// T-60: a switch that never confirms (the timeout in switch.rs) stops the
+    /// lane too, and rings the captain once.
+    #[test]
+    fn a_switch_that_never_confirms_rings_the_captain_once() {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        // The screen keeps showing the provider limit: the new model never
+        // appears on the status bar, so the switch cannot confirm.
+        let mut herdr = herdr_with_quota();
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        // The switch is bounded: the picker never renders and the status bar
+        // never confirms, so the plan runs out of ticks.
+        for tick in 0..24 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 20 + tick);
+        }
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
+        assert_eq!(open.len(), 1, "one urgent item: {open:?}");
+        assert!(
+            open[0].urgent && open[0].body.contains("did not confirm twice"),
+            "{open:?}"
+        );
+
+        // More ticks do not ring again.
+        for tick in 0..5 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 60 + tick);
+        }
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 80)).unwrap();
+        assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
+    }
+
+    /// T-60: a successful switch tells the captain in an **info** line — it
+    /// does not ring.
+    #[test]
+    fn a_successful_switch_does_not_ring_the_captain() {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
+            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
+        ];
+
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(report.events.is_empty(), "{:?}", report.events);
+        // Ticks 3..6: /model, the filter, then the bar check.
+        for tick in 0..4 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 30 + tick);
+        }
+
+        // The switch worked: the lane runs on the new model.
+        assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
+        // No urgent item: a successful switch is an information line.
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
+        assert!(open.is_empty(), "a successful switch does not ring: {open:?}");
+        let told = captain_messages(&mut store);
+        assert_eq!(told.len(), 1, "one info item: {told:?}");
+        assert!(
+            told.iter().all(|m| m.state == MsgState::Info && !m.urgent && m.body.contains("switched to")),
+            "the captain is told in an info line: {told:?}"
+        );
+    }
+
+    /// T-60: the cross-CLI restart back to OpenCode, whose model has no
+    /// `[models.switch]` labels, stops the lane — the captain is rung.
+    #[test]
+    fn a_restart_onto_a_model_without_labels_rings_the_captain_once() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        herdr.exit_agent(PANE);
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        // The chain is exhausted: the lane parks until the reset.
+        tick_quota(&mut store, &mut herdr, true, T0 + 40);
+        tick_quota(&mut store, &mut herdr, true, T0 + 50);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Parked);
+
+        // At the reset the lane goes back to the first model of its chain —
+        // on OpenCode, whose labels this config does not have.
+        let reset = T0 + 50 + 5 * 3600;
+        tick_quota(&mut store, &mut herdr, false, reset);
+        herdr.exit_agent(PANE);
+        herdr.start_screen = Some("Build auto · minimax-cn/MiniMax-M3.1-Flash · high".into());
+        tick_quota(&mut store, &mut herdr, false, reset + 10);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", reset + 20)).unwrap();
+        // The park before it is an urgent item of its own; the failed model
+        // switch is the one that names the missing labels.
+        assert!(
+            open.iter().any(|m| m.urgent && m.body.contains("models.switch")),
+            "{open:?}"
+        );
+        assert_eq!(open.iter().filter(|m| m.body.contains("models.switch")).count(), 1);
+        let failure = open.iter().find(|m| m.body.contains("models.switch")).unwrap();
+        assert_eq!(failure.sender_gen, seat.generation);
+        assert!(failure.body.contains("p:heat"));
+        let told = open.len();
+
+        // More ticks do not ring again about the same failure.
+        for tick in 0..5 {
+            tick_quota(&mut store, &mut herdr, false, reset + 30 + tick);
+        }
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", reset + 60)).unwrap();
+        assert_eq!(open.len(), told, "the failure was told once: {open:?}");
+    }
+
+    /// Every message the engine sent the captain about the lane, in thread
+    /// order (the threads are named after the lane).
+    fn captain_messages(store: &mut Store) -> Vec<gear_store::MessageRow> {
+        let mut all = Vec::new();
+        for seq in 1..=20 {
+            all.extend(store.read(|tx| tx.thread_messages("p", &format!("heat:{seq}"))).unwrap());
+        }
+        all
     }
 
     /// T-33 (F4): a parked lane waking at the provider reset is switched back

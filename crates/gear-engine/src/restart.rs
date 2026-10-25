@@ -562,7 +562,9 @@ fn finish(
             crate::switch::ModelGate::Ready => {}
             crate::switch::ModelGate::Waiting => return Ok(None),
             crate::switch::ModelGate::Failed(reason) => {
-                flag(store, seat, &reason, now)?;
+                // T-60: the agent is up but not on the chain's model — the
+                // lane stops here, so the captain is rung (once).
+                crate::quota::flag_and_alert(store, project, seat, &reason, now)?;
                 clear_pending(store, &seat.id)?;
                 crate::switch::clear_pending(store, &seat.id)?;
                 return Ok(None);
@@ -836,21 +838,7 @@ fn wait(
 
 /// Flag the seat for a human (`NeedsCheck`): the engine must not guess.
 fn flag(store: &mut Store, seat: &SeatRow, reason: &str, now: Ts) -> GearResult<()> {
-    store.write(|tx| {
-        let row = tx
-            .get_seat(&seat.id)?
-            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
-        if row.state == SeatState::NeedsCheck {
-            return tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now);
-        }
-        require_transition(
-            SeatState::can_transition(SeatRole::Lane, row.state, SeatState::NeedsCheck),
-            "seat",
-            row.state.as_str(),
-            SeatState::NeedsCheck.as_str(),
-        )?;
-        tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(reason), now)
-    })
+    crate::quota::flag_and_alert(store, &seat.project, seat, reason, now)
 }
 
 /// The path of the seat's worktree, when the engine knows it.
