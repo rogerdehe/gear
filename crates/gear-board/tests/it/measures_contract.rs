@@ -37,7 +37,7 @@ fn world() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
             }
             // Two hand-ins on T-1: the first was sent back, the second is in

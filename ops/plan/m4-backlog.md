@@ -24,3 +24,5 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - T-66: the engine warns the captain before a lane runs dry, each tick (not only at plan apply).
 - T-70: engine alerts de-duplicated by fact and closed when their cause is gone (trial G06, G10).
 - T-89 F1 (logged at review): a busy agent start is retried inside one onboarding call (up to ~20 s, blocking the tick) instead of on the next tick.
+- T-77: a switch to another CLI hands over the previous conversation (user idea).
+- T-92 F1/F2 (logged at review): remerge does not refuse a candidate already on the integration branch (harmless: the merge confirms it); op ids compared lexically at the same second.

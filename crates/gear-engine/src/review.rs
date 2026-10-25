@@ -1437,7 +1437,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),
@@ -1531,6 +1531,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
+                    issue: None,
                     updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
@@ -2395,7 +2396,7 @@ review = [
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),
