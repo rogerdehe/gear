@@ -389,10 +389,31 @@ pub fn ensure_model(
     model: &str,
     now: Ts,
 ) -> GearResult<ModelGate> {
-    let Some(labels) = config.models.switch.get(model) else {
-        return Ok(ModelGate::Failed(format!(
-            "no [models.switch.\"{model}\"] labels (picker, bar): the agent cannot be put on the chain's model"
-        )));
+    // T-94: a model without `[models.switch]` labels takes them from
+    // OpenCode's own catalogue (`<model name> <provider name>`, the text the
+    // picker and the status bar show); an explicit entry still wins.
+    let derived;
+    let labels = match config.models.switch.get(model) {
+        Some(labels) => labels,
+        None => {
+            // The chain names no variant (a `[models.switch]` entry is the
+            // only place one lives, and it overrides this path entirely).
+            // The catalogue is per directory: use the seat's own worktree (F2
+            // of the T-94 review), like the start path does.
+            let directory = store
+                .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+            match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
+                Some(labels) => {
+                    derived = labels;
+                    &derived
+                }
+                None => {
+                    return Ok(ModelGate::Failed(format!(
+                        "no [models.switch.\"{model}\"] labels (picker, bar) and {model} is not in OpenCode's model list: the agent cannot be put on the chain's model"
+                    )))
+                }
+            }
+        }
     };
     match switch_model(store, herdr, &seat.id, profile, None, labels, model, now)? {
         SwitchOutcome::Done | SwitchOutcome::Already => Ok(ModelGate::Ready),
