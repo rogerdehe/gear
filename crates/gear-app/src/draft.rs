@@ -51,6 +51,8 @@ pub enum StaffItem {
     Hold { line: usize, lane: String, reason: String },
     /// `- retire prompts`
     Retire { line: usize, lane: String },
+    /// `- remerge T-<n>`: retry the task's failed merge (T-92).
+    Remerge { line: usize, task: String },
 }
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
@@ -524,7 +526,7 @@ fn comma_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// `- temp …`, `- park …`, `- hold …`, `- retire …`.
+/// `- temp …`, `- park …`, `- hold …`, `- retire …`, `- remerge T-<n>`.
 fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
     let rest = text
         .strip_prefix("- ")
@@ -622,9 +624,21 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Retire { line, lane: lane.to_string() })
         }
+        "remerge" => {
+            let task = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`remerge` needs a task id"))?;
+            if !is_task_id(task) {
+                return Err(bad(line, format!("`remerge` needs a task id, got {task:?}")));
+            }
+            if tokens.next().is_some() {
+                return Err(bad(line, "`remerge` takes only a task id"));
+            }
+            Ok(StaffItem::Remerge { line, task: task.to_string() })
+        }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold or retire"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, retire or remerge"),
         )),
     }
 }
