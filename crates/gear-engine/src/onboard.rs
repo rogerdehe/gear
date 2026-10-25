@@ -351,7 +351,13 @@ fn onboard_seat(
             {
                 crate::switch::ModelGate::Ready => {}
                 crate::switch::ModelGate::Waiting => return Ok(false),
-                crate::switch::ModelGate::Failed(reason) => return Err(reason),
+                crate::switch::ModelGate::Failed(reason) => {
+                    // T-60: the lane cannot run on the chain's model — it is
+                    // parked in NeedsCheck below, so the captain is rung.
+                    crate::quota::alert_captain(store, &seat.project, seat, &reason, now)
+                        .map_err(|e| e.detail)?;
+                    return Err(reason);
+                }
             }
         }
     }
@@ -396,10 +402,13 @@ fn resume_start(
         .map(|(model, labels)| (model.clone(), labels.clone()))
     else {
         crate::switch::clear_pending(store, &seat.id).map_err(|e| e.detail)?;
-        return Err(format!(
+        let reason = format!(
             "the switch target {:?} has no [models.switch] labels any more",
             plan.to
-        ));
+        );
+        // T-60: the lane stops here — the captain is rung.
+        crate::quota::alert_captain(store, &seat.project, seat, &reason, now).map_err(|e| e.detail)?;
+        return Err(reason);
     };
     match crate::switch::switch_model(store, herdr, &seat.id, profile, None, &labels, &model, now)
         .map_err(|e| format!("model switch: {}", e.detail))?
@@ -407,7 +416,11 @@ fn resume_start(
         crate::switch::SwitchOutcome::Done | crate::switch::SwitchOutcome::Already => {}
         crate::switch::SwitchOutcome::Waiting => return Ok(false),
         crate::switch::SwitchOutcome::Failed => {
-            return Err(format!("the model switch to {:?} did not confirm twice", plan.to))
+            let reason = format!("the model switch to {:?} did not confirm twice", plan.to);
+            // T-60: the lane stops here — the captain is rung.
+            crate::quota::alert_captain(store, &seat.project, seat, &reason, now)
+                .map_err(|e| e.detail)?;
+            return Err(reason);
         }
     }
     // The session reference the start reported, when Herdr still shows it.

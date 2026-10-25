@@ -73,6 +73,63 @@ fn a_failed_step_parks_the_seat_in_needs_check() {
     assert!(seat.state_reason.unwrap_or_default().contains("worktree"));
 }
 
+/// T-60: a lane that cannot start on the chain's model (no `[models.switch]`
+/// labels for it) stops — the captain is rung, once.
+#[test]
+fn a_lane_that_cannot_start_on_its_model_rings_the_captain() {
+    let mut s = Store::open_in_memory().unwrap();
+    let with_models = CONFIG.to_owned()
+        + "\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \"deepseek/deepseek-flash\"]\n";
+    admin::init(&mut s, &Env { ctx: None, pane_id: None, admin: true }, &with_models, T0).unwrap();
+    let mut herdr = FakeHerdr::new();
+
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+    let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+
+    // The captain is rung: one urgent item naming the seat and the reason.
+    let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 2)).unwrap();
+    assert_eq!(open.len(), 1, "one urgent item: {open:?}");
+    assert!(open[0].urgent, "{open:?}");
+    assert!(open[0].body.contains("toy:heat"), "it names the seat: {open:?}");
+    assert!(open[0].body.contains("models.switch"), "it names the reason: {open:?}");
+
+    // The seat is never retried, so the captain is not rung again.
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap().is_empty());
+    let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 4)).unwrap();
+    assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
+}
+
+#[test]
+fn a_startup_switch_timeout_or_removed_labels_rings_once() {
+    for remove_labels in [false, true] {
+        let mut s = Store::open_in_memory().unwrap();
+        let without_labels = CONFIG.to_owned()
+            + "\n[models]\nlanes = [\"deepseek/deepseek-flash\", \"minimax-cn/MiniMax-M3.1-Flash\"]\n";
+        let with_labels = without_labels.clone()
+            + "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n";
+        let env = Env { ctx: None, pane_id: None, admin: true };
+        admin::init(&mut s, &env, &with_labels, T0).unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("Build auto · wrong-model · high".into());
+        assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+        assert!(gear_engine::switch::pending(&mut s, "toy:heat").unwrap().is_some());
+        if remove_labels {
+            admin::init(&mut s, &env, &without_labels, T0 + 2).unwrap();
+        }
+        for tick in 0..30 {
+            assert!(onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3 + tick).unwrap().is_empty());
+        }
+        let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        assert!(gear_engine::switch::pending(&mut s, "toy:heat").unwrap().is_none());
+        let open = s.read(|tx| tx.actionable_for("toy", "toy:captain", T0 + 40)).unwrap();
+        assert_eq!(open.len(), 1, "one alert, removed labels={remove_labels}: {open:?}");
+        let reason = if remove_labels { "no [models.switch] labels any more" } else { "did not confirm twice" };
+        assert!(open[0].urgent && open[0].body.contains("toy:heat") && open[0].body.contains(reason));
+    }
+}
+
 /// T-6: a lane that a config change adds is a queued seat, and the engine
 /// onboards it with the **latest** config (the repo it names now).
 #[test]
