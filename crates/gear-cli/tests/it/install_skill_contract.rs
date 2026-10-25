@@ -68,6 +68,7 @@ fn the_skill_is_written_for_every_agent() {
             "references/agents/claude.md",
             "references/agents/grok.md",
             "references/adopt.md",
+            "references/github.md",
             // The templates a captain copies into a project (T-85).
             "templates/adopt.md",
             "templates/standard.md",

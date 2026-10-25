@@ -24,7 +24,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | agent:opencode | agent:codex | agent:claude | agent:grok.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -145,6 +145,14 @@ enum PlanOp {
         #[arg(long = "request-id")]
         request_id: Option<String>,
     },
+    /// Print `## NEW` blocks for the open issues the plan does not carry yet.
+    ImportIssues {
+        /// The voyage file to check against; default: the plan the store holds.
+        path: Option<std::path::PathBuf>,
+        /// Only issues carrying this label; repeatable (the config's own labels apply too).
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -259,6 +267,9 @@ fn run(cli: Cli) -> GearResult<()> {
             PlanOp::Apply { path, keep, next, request_id } => {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
+            PlanOp::ImportIssues { path, label } => {
+                cmd_import_issues(path, label, cli.json)
+            }
         },
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
         Some(Cmd::Report { op }) => match op {
@@ -299,6 +310,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Board { .. })
             | Some(Cmd::Report { .. })
             | Some(Cmd::PushCheck { .. })
+            | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
     )
 }
 
@@ -978,6 +990,131 @@ fn cmd_plan(
     )?;
     println!("{out}");
     Ok(())
+}
+
+/// `gear plan import-issues`: the open issues a GitHub-mode project has not
+/// turned into tasks yet, as `## NEW` blocks (T-81).
+///
+/// Read-only: it reads the project's `[github]` mode and its issues through the
+/// forge, drops the ones the plan already names, and prints a block per issue
+/// for the captain to paste into the voyage file, edit (lane, milestone,
+/// estimate) and apply. It starts no engine: nothing is written.
+fn cmd_import_issues(
+    path: Option<std::path::PathBuf>,
+    labels: Vec<String>,
+    json: bool,
+) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let blocks = run_import_issues(&mut store, &env, path.as_deref(), &labels)?;
+    if json {
+        println!("{}", serde_json::to_string(&blocks).map_err(json_error)?);
+    } else {
+        for block in &blocks {
+            println!("{block}");
+        }
+    }
+    Ok(())
+}
+
+/// `gear plan import-issues` body, over injected state.
+///
+/// Read-only, so it asks for the captain's seat in the store (no Herdr
+/// fingerprint): the blocks are for the captain's plan, and nothing is written.
+fn run_import_issues(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    path: Option<&std::path::Path>,
+    labels: &[String],
+) -> GearResult<Vec<String>> {
+    let (project, _seat) = store.read(|tx| {
+        let ctx = env.ctx.as_ref().ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment: `gear plan import-issues` runs in the captain's pane",
+            )
+        })?;
+        let seat = tx.get_seat(&ctx.seat_id())?.ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("seat {} is not registered", ctx.seat_id()),
+            )
+        })?;
+        if seat.role != gear_model::SeatRole::Captain {
+            return Err(GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("seat {} has role {}: `gear plan import-issues` is the captain's", seat.id, seat.role.as_str()),
+            ));
+        }
+        Ok((ctx.project.clone(), seat))
+    })?;
+    let config = gear_app::config::latest(store, &project)?;
+    let Some(github) = config.github.as_ref().and_then(|section| section.resolved()) else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "project {project} is not in GitHub mode: `[github]` with a `repo` is what its issues come from"
+            ),
+        ));
+    };
+    let mut filter = gear_forge::Filter {
+        labels: github.issues_labels.clone(),
+        // Every open issue, not `gh`'s default first 30: an issue older than the
+        // newest page is exactly the one a long-lived plan is missing (T-81,
+        // F1). One bounded call still returns it all.
+        limit: u32::MAX,
+    };
+    filter.labels.extend(labels.iter().cloned());
+    let forge = gear_forge::GitHub::new();
+    use gear_forge::Forge as _;
+    let issues = forge.issues(&github.repo, &filter).map_err(|why| {
+        // No error code fits an unreachable forge; this one carries the detail
+        // the captain needs (auth, quota, offline) and exits 1.
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the issues of {}: {why}", github.repo),
+        )
+    })?;
+    let planned = planned_issues(store, &project, path)?;
+    Ok(issues
+        .into_iter()
+        .filter(|issue| !planned.contains(&issue.number))
+        .map(|issue| gear_app::github::issue_block(&issue))
+        .collect())
+}
+
+/// The issues the plan already names: the voyage file's own `issue: #<n>`
+/// lines when a file is given, else the tasks the store holds (the applied
+/// plan).
+fn planned_issues(
+    store: &mut gear_store::Store,
+    project: &str,
+    path: Option<&std::path::Path>,
+) -> GearResult<std::collections::BTreeSet<u64>> {
+    let mut planned = std::collections::BTreeSet::new();
+    if let Some(path) = path {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot read {}: {e}", path.display()),
+            )
+        })?;
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("issue:") else {
+                continue;
+            };
+            if let Ok(number) = rest.trim().trim_start_matches('#').parse::<u64>() {
+                planned.insert(number);
+            }
+        }
+        return Ok(planned);
+    }
+    for task in store.read(|tx| tx.tasks_of_project(project))? {
+        if let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) {
+            planned.insert(issue);
+        }
+    }
+    Ok(planned)
 }
 
 /// `gear plan apply` body, over injected state: read the draft, parse it and
