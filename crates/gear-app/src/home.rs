@@ -121,11 +121,18 @@ pub fn build_with_agents(
 
         // The replies and instructions the seat has not seen yet. A message
         // the batch above already printed is not printed again.
+        // Only this job's messages count (T-71): a warm seat keeps its id
+        // across jobs, so another task's answers must not read as
+        // instructions for this one — even when they were written after this
+        // job started (F1 of the T-71 review).
+        let since = crate::seats::generation_since(tx, &seat_id, ctx.generation)?;
         let unshown: Vec<_> = tx
-            .messages_to_since(&ctx.project, &seat_id, 0)?
+            .messages_to_since(&ctx.project, &seat_id, since)?
             .into_iter()
             .filter(|message| {
-                !already_shown.contains(&message.id) && !shown_msgs.contains(&message.id)
+                !already_shown.contains(&message.id)
+                    && !shown_msgs.contains(&message.id)
+                    && crate::seats::message_belongs(&seat, message, since)
             })
             .collect();
         if !unshown.is_empty() {

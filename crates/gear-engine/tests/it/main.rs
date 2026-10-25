@@ -7,6 +7,7 @@ mod deliver_contract;
 mod dispatch_contract;
 mod dispatch_tick_contract;
 mod doorbell_contract;
+mod doorbell_isolation;
 mod eng_confirm;
 mod eng_execute;
 mod eng_intend_recover;
