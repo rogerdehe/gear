@@ -75,6 +75,37 @@ pub(crate) fn target(
     Lookup::Target(target)
 }
 
+/// The labels a model switch needs, derived from OpenCode's own catalogue
+/// (T-94): the status bar and the picker both show `<model name> <provider
+/// name>` as OpenCode renders them. `variant` is the chain's, when it names
+/// one. `None` when the catalogue does not hold the model at all (the caller
+/// keeps its own "no labels" refusal).
+pub(crate) fn derived_labels(
+    herdr: &mut dyn HerdrAct,
+    model: &str,
+    variant: Option<&str>,
+    directory: Option<&str>,
+) -> Option<gear_app::config::ModelSwitch> {
+    let (provider, id) = model.split_once('/')?;
+    let mut args = vec!["model.list".into()];
+    if let Some(directory) = directory {
+        args.extend(["--param".into(), format!("location[directory]={directory}")]);
+    }
+    let catalog = herdr.opencode_api(&args).ok()?;
+    let models = data(&catalog).as_array()?;
+    let info = models
+        .iter()
+        .find(|m| m["providerID"] == provider && m["id"] == id)?;
+    let model_name = info["name"].as_str().unwrap_or(id);
+    let provider_name = info["providerName"].as_str().unwrap_or(provider);
+    let text = format!("{model_name} {provider_name}");
+    Some(gear_app::config::ModelSwitch {
+        picker: text.clone(),
+        bar: text,
+        variant: variant.map(str::to_string),
+    })
+}
+
 pub(crate) fn matches(session: &Value, target: &Value) -> bool {
     let model = &data(session)["model"];
     model["providerID"] == target["providerID"]
@@ -293,5 +324,38 @@ variant = "max"
             .unwrap()
             .session_ref
             .is_none());
+    }
+    /// T-94: a model without `[models.switch]` labels takes them from
+    /// OpenCode's catalogue: `<model name> <provider name>` for both the bar
+    /// and the picker, and no variant unless one is given.
+    #[test]
+    fn a_model_without_labels_takes_them_from_the_catalogue() {
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": [{
+            "providerID": "minimax-cn",
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax-M3.1-Flash",
+            "providerName": "minimax-cn"
+        }]})));
+        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
+            .expect("the catalogue holds it");
+        assert_eq!(labels.bar, "MiniMax-M3.1-Flash minimax-cn");
+        assert_eq!(labels.picker, "MiniMax-M3.1-Flash minimax-cn");
+        assert_eq!(labels.variant, None);
+
+        // A model the catalogue does not hold has no labels to derive.
+        herdr.api_replies.push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
+        assert!(derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")).is_none());
+
+        // The chain's variant rides along when it names one.
+        herdr.api_replies.push_back(Ok(json!({"data": [{
+            "providerID": "minimax-cn",
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax-M3.1-Flash",
+            "providerName": "minimax-cn"
+        }]})));
+        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
+            .expect("the catalogue holds it");
+        assert_eq!(labels.variant.as_deref(), Some("max"));
     }
 }
