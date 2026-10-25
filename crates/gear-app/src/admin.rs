@@ -49,7 +49,25 @@ const CAPTAIN: &str = "captain";
 ///      the next config version (see [`re_register`]).
 /// Checks that need Herdr or git (session, repo, branch) are not part of this
 /// cut.
-pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
+pub fn init(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    now: Ts,
+) -> GearResult<InitResult> {
+    init_with_home(store, env, config_text, None, now)
+}
+
+/// `gear admin init` with an explicit home for the skill check (T-83): the CLI
+/// passes the user's `HOME`; a test passes a scratch home with the skills
+/// installed. `None` means the process's `HOME`.
+pub fn init_with_home(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    home: Option<&std::path::Path>,
+    now: Ts,
+) -> GearResult<InitResult> {
     // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
     //    or the project's captain may act on it (T-86). Which project is
     //    checked once its config is parsed, below.
@@ -120,8 +138,8 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 .map(|temps| ("temps", temps.profile.as_str())),
         )
         .collect();
-    for (name, profile_name) in seats_to_check {
-        let Some(profile) = table.get(profile_name) else {
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
@@ -134,6 +152,53 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 ErrorCode::BadFormat,
                 format!(
                     "the profile {profile_name:?} has no unattended args: an agent that stops on permission dialogs cannot run unattended (T-31)"
+                ),
+            ));
+        }
+    }
+
+    // Every kind the project uses must have the GEAR skill installed (T-83,
+    // trial G06): an agent that never read it does not know how to work as a
+    // seat, and the voyage would need the captain's hands. The home is the
+    // caller's (the CLI's user); an unset one is the process's. GEAR never
+    // installs a skill behind the user's back — it names the command.
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home),
+            None => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
+                ))
+            }
+        },
+    };
+    let mut checked: Vec<String> = Vec::new();
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
+            continue; // reported above
+        };
+        let kind = profile.kind.as_str();
+        if kind.is_empty() || checked.iter().any(|seen| seen == kind) {
+            continue;
+        }
+        checked.push(kind.to_string());
+        let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{name} runs the kind {kind:?}, which GEAR has no skill for: install it with `gear admin install-skill --agent <{}>` is not possible — the kinds with a skill are claude, codex, opencode and grok",
+                    kind
+                ),
+            ));
+        };
+        if !crate::skill::installed(agent, &home) {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{name} runs {kind}, whose GEAR skill is not installed in {}: run `gear admin install-skill --agent {kind}` and init again",
+                    home.display()
                 ),
             ));
         }

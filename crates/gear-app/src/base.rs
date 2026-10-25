@@ -64,11 +64,28 @@ pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearRes
     let where_ = worktree.display();
     let reference = format!("refs/remotes/origin/{branch}");
     // Fetch the branch itself: a branch pushed since the lane's last fetch
-    // must be seen, and one that does not exist yet is the refusal.
-    let _ = Command::new("git")
+    // must be seen. A fetch that fails is a refusal, never a pass: the local
+    // remote-tracking ref may be stale (the branch deleted on the remote), and
+    // an unseen branch is one the merge worker could not fetch either.
+    let fetched = Command::new("git")
         .args(["fetch", "origin", &format!("{branch}:refs/remotes/origin/{branch}")])
         .current_dir(worktree)
-        .output();
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: {error}"),
+            )
+        })?;
+    if !fetched.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: push the task branch first (`git push origin {branch}`): {}",
+                String::from_utf8_lossy(&fetched.stderr).trim()
+            ),
+        ));
+    }
     let pushed = Command::new("git")
         .args(["merge-base", "--is-ancestor", candidate, &reference])
         .current_dir(worktree)

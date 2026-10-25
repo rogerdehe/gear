@@ -101,11 +101,7 @@ fn skill_installed(kind: &str) -> bool {
     let Some(home) = std::env::var_os("HOME") else {
         return false;
     };
-    agent
-        .skills_root(std::path::Path::new(&home))
-        .join(crate::skill::SKILL_NAME)
-        .join("SKILL.md")
-        .is_file()
+    crate::skill::installed(agent, std::path::Path::new(&home))
 }
 
 /// The executable of `names` that is on PATH, with its full path.

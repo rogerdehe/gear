@@ -1,6 +1,6 @@
 //! Contract for gear_app::admin::init (T-57).
 
-use gear_app::admin::init;
+use gear_app::admin::init_with_home;
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole, SeatState};
 use gear_store::Store;
@@ -44,7 +44,7 @@ fn admin() -> Env {
 #[test]
 fn init_registers_project_and_queued_seats() {
     let mut s = Store::open_in_memory().unwrap();
-    let r = init(&mut s, &admin(), CONFIG, T0).unwrap();
+    let r = init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), T0).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("harbor", 1));
     assert_eq!(r.seats, vec!["harbor:captain", "harbor:heat", "harbor:pricing"]);
     let p = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
@@ -64,16 +64,79 @@ fn init_registers_project_and_queued_seats() {
 fn only_the_user_and_only_valid_new_configs() {
     let mut s = Store::open_in_memory().unwrap();
     let agent = Env { ctx: Some(GearCtx { project: "harbor".into(), seat: "heat".into(), generation: 1 }), pane_id: None, admin: true };
-    assert_eq!(init(&mut s, &agent, CONFIG, T0).unwrap_err().code, ErrorCode::Forbidden, "an agent never inits");
-    assert_eq!(init(&mut s, &Env::default(), CONFIG, T0).unwrap_err().code, ErrorCode::Forbidden, "GEAR_ADMIN not set");
+    assert_eq!(init_with_home(&mut s, &agent, CONFIG,Some(crate::skill_home()), T0).unwrap_err().code, ErrorCode::Forbidden, "an agent never inits");
+    assert_eq!(init_with_home(&mut s, &Env::default(), CONFIG,Some(crate::skill_home()), T0).unwrap_err().code, ErrorCode::Forbidden, "GEAR_ADMIN not set");
     let overlap = CONFIG.replace(r#"owns = ["src/pricing/"]"#, r#"owns = ["src/heat/x.rs"]"#);
-    let e = init(&mut s, &admin(), &overlap, T0).unwrap_err();
+    let e = init_with_home(&mut s, &admin(), &overlap,Some(crate::skill_home()), T0).unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert!(e.detail.contains("lanes[1].owns"), "{}", e.detail);
     assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
-    init(&mut s, &admin(), CONFIG, T0).unwrap();
+    init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), T0).unwrap();
     // T-6: a re-init is a config change, not a second registration: the new
     // config is the next config version.
-    let again = init(&mut s, &admin(), CONFIG, T0 + 1).unwrap();
+    let again = init_with_home(&mut s, &admin(), CONFIG,Some(crate::skill_home()), T0 + 1).unwrap();
     assert_eq!(again.config_version, 2);
+}
+
+/// A home with the GEAR skill installed for every kind, in a fresh temp dir.
+fn home_with_skills() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home.path()).unwrap();
+    }
+    home
+}
+
+/// T-83 (trial G06): `init` refuses a config that uses a kind whose GEAR skill
+/// is not installed, naming the command — and writes nothing.
+#[test]
+fn a_kind_without_its_skill_is_refused() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = tempfile::tempdir().unwrap(); // no skill at all
+    let error = init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), T0).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("GEAR skill is not installed"), "{}", error.detail);
+    assert!(
+        error.detail.contains("gear admin install-skill --agent codex"),
+        "the fix is named: {}",
+        error.detail
+    );
+    assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
+
+    // With the skill there, the same config registers.
+    let home = home_with_skills();
+    init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), T0).unwrap();
+    assert_eq!(s.read(|tx| tx.get_project("harbor")).unwrap().unwrap().config_version, 1);
+}
+
+/// Every seat role is checked, and a re-init that adds a kind without its
+/// skill is refused with the project left as it was.
+#[test]
+fn a_lane_or_reviewer_kind_without_its_skill_is_refused_on_re_init() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    init_with_home(&mut s, &admin(), CONFIG, Some(home.path()), T0).unwrap();
+
+    // A profile for a kind GEAR has no skill install for at all.
+    let custom = "[profiles.custom]\nkind = \"gemini\"\nunattended_args = [\"--yolo\"]\n";
+    // The captain keeps codex (installed); a lane, and then the reviewer
+    // (temps), move to that kind.
+    for bad in [
+        format!(
+            "{CONFIG}\n{custom}"
+        )
+        .replace(
+            "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"",
+            "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"gemini\"\nprofile = \"custom\"",
+        ),
+        // The reviewer (temps) too.
+        format!("{CONFIG}\n{custom}\n[temps]\nkind = \"gemini\"\nprofile = \"custom\"\n"),
+    ] {
+        let error = init_with_home(&mut s, &admin(), &bad, Some(home.path()), T0 + 1).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("gemini"), "{}", error.detail);
+        // The project is exactly as it was: version 1, the old config text.
+        let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
+        assert_eq!((project.config_version, project.config_toml.as_str()), (1, CONFIG));
+    }
 }

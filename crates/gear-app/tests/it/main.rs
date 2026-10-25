@@ -31,3 +31,19 @@ mod time_report_contract;
 mod verdict_item_contract;
 mod voyage_contract;
 mod station_contract;
+
+/// A scratch home with the GEAR skill installed for every kind (T-83): `init`
+/// refuses a kind whose skill is missing, and these fixtures are not about
+/// that check. Built once per test process.
+pub fn skill_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir = HOME.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        for agent in gear_app::skill::SkillAgent::ALL {
+            gear_app::skill::install(*agent, dir.path()).unwrap();
+        }
+        dir
+    });
+    // The TempDir lives in the OnceLock for the whole run.
+    dir.path()
+}

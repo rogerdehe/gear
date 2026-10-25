@@ -277,8 +277,15 @@ fn an_unpushed_candidate_is_refused() {
     let err = mail::send(&mut s, &env, Some(&fp), &result(&unpushed, gate), T0 + 5).unwrap_err();
 
     assert_eq!(err.code, ErrorCode::BadFormat);
-    assert!(err.detail.contains("is not on refs/remotes/origin/heat/t1"), "{}", err.detail);
+    assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
     assert!(err.detail.contains("git push origin heat/t1"), "{}", err.detail);
+    // A candidate that is not on a branch that *does* exist is the other
+    // refusal: the branch is there, this commit is not on it.
+    git(&r.lane, &["push", "-q", "origin", "origin/dev:refs/heads/heat/t1"]);
+    let other = commit(&r.lane, "other.txt", "somewhere else");
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let err = mail::send(&mut s, &env, Some(&fp), &result(&other, gate), T0 + 5).unwrap_err();
+    assert!(err.detail.contains("is not on refs/remotes/origin/heat/t1"), "{}", err.detail);
     // Nothing was written: no message, the attempt is still being worked on.
     assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
@@ -516,4 +523,26 @@ fn a_hand_in_uses_the_integration_branch_of_the_lanes_own_repo() {
     // A lane in the root is checked against the root's branch.
     let gate = gear_app::base::gate_for(&mut s, &seat_env("pricing")).unwrap();
     assert_eq!(gate.integration, "dev", "the root's branch");
+}
+
+/// F2 of the review: a task branch deleted on the remote after the lane
+/// fetched it is refused — a stale remote-tracking ref never accepts a
+/// candidate the merge worker could not fetch.
+#[test]
+fn a_branch_deleted_on_the_remote_is_refused() {
+    let r = repos();
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
+    git(&r.lane, &["fetch", "-q", "origin"]);
+    git(&r.seed, &["push", "-q", "origin", "--delete", "heat/t1"]);
+    let mut s = world();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+
+    let err = mail::send(&mut s, &env, Some(&fp), &result(&candidate, gate), T0 + 5).unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
+    assert!(err.detail.contains("git push origin heat/t1"), "{}", err.detail);
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
 }
