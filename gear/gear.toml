@@ -1,4 +1,4 @@
-# GEAR's own project config. M2.1 kickoff confirmed by the user 2026-10-25.
+# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25.
 # Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
 
 [project]
@@ -16,44 +16,43 @@ kind = "claude"
 profile = "claude"
 
 [[lanes]]
-name = "config"
-duty = "M2.1 multi-repo in gear-app: [[repos]] and a lane's repo= in the config, its checks, the hand-in check, init per repo, the kickoff skeleton; re-init restarts a retired lane"
-owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/"]
+name = "steady"
+duty = "M3 engine reliability: merges, reviews, retirement, dry-lane forecast, doorbells, alerts, the push check, onboarding faults from the first trial"
+owns = ["crates/gear-engine/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "engine"
-duty = "M2.1 multi-repo in the engine: onboarding, reviews, merges, the gate and the parallel-change check follow the lane's repo"
-owns = ["crates/gear-engine/", "crates/gear-herdr/"]
+name = "course"
+duty = "M3 config, plan, home page and agent profiles: push destinations at init, the GitHub config, retry and seat reasons, kickoff checks, the project standard line, Codex back-off and trust, the CLI handover"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/", "crates/gear-herdr/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "docs"
-duty = "M2.1 multi-repo in the skill and docs: the [[repos]] format, choosing a voyage's repos, cutting a cross-repo requirement into per-repo tasks"
-owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/"]
+name = "base"
+duty = "M3 CLI, skills, docs and the GitHub layer: push-check, the forge crate and its sync, import-issues, the github and adopt skills, captain init, fixtures, the closing skill review"
+owns = ["crates/gear-cli/", "crates/gear-forge/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is Codex gpt-6-astra, reasoning high (user, 2026-10-25)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium; the fallback is OpenCode Go deepseek-v4-pro (M3 kickoff)
 kind = "codex"
 profile = "codex"
 
 [models]
-# A chain entry may name the CLI that runs the model and the arguments that
-# CLI starts with (T-35). The lane's fallback needs another CLI, so the
-# engine closes opencode and starts codex in the same pane and worktree. A
-# lane on gpt-6.1-sol is reviewed by gpt-6-astra (never the writer's model).
+# M3 kickoff (user): lanes MiniMax M3.1 Flash, then OpenCode Go DeepSeek V4.1
+# Flash (both on OpenCode: an in-place switch). Reviewers Codex sol medium, then
+# OpenCode Go DeepSeek V4 Pro (another CLI: closed and restarted in the pane).
+# Both exhausted: park quota_reset_h hours, then back to the first model.
 lanes = [
   "minimax-cn/MiniMax-M3.1-Flash",
-  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+  "opencode-go/deepseek-v4.1-flash",
 ]
-# The reviewer never runs the model it reviews. Both chains exhausted: the
-# seat parks until the reset and the captain tells the user (M2.1 kickoff).
+# The reviewer never runs the model it reviews.
 review = [
-  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
-  { model = "gpt-6-astra", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+  { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
 ]
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
@@ -64,6 +63,16 @@ quota_reset_h = 5
 [models.switch."minimax-cn/MiniMax-M3.1-Flash"]
 picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
 bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+variant = "high"
+
+[models.switch."opencode-go/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro (New) OpenCode Go"
+bar = "DeepSeek V4 Pro (New) OpenCode Go"
+variant = "high"
 
 [conventions]
 integration = "dev"
