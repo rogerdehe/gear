@@ -802,6 +802,10 @@ fn alert_captain(
 
 /// The item stored directly, when the `gear send` path cannot prove the
 /// caller is the seat: the captain hears about the refusal either way.
+///
+/// It lives in the lane's own thread (`push:<seat>`), the shape the engine
+/// uses for a lane's items (`lane:<name>`), so the captain reads it next to
+/// the lane's other news.
 fn insert_alert(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
@@ -829,10 +833,9 @@ fn insert_alert(
                 format!("seat {seat_id} is not registered"),
             )
         })?;
-        let seq = next_thread_seq(tx, &project, &captain.id, now, &seat.name)?;
         tx.insert_message(&gear_store::NewMessage {
             project: project.clone(),
-            thread: format!("{}:{seq}", seat.name),
+            thread: format!("push:{}", seat.name),
             task: None,
             attempt: None,
             sender: seat.id.clone(),
@@ -848,39 +851,6 @@ fn insert_alert(
         })?;
         Ok(())
     })
-}
-
-/// The next free thread number for `prefix` (the same rule as `gear send`).
-fn next_thread_seq(
-    tx: &gear_store::Tx<'_>,
-    project: &str,
-    recipient: &str,
-    now: i64,
-    prefix: &str,
-) -> GearResult<u32> {
-    let unhandled = tx.actionable_for(project, recipient, now)?;
-    let mut seq = unhandled
-        .iter()
-        .filter_map(|message| thread_seq(&message.thread, prefix))
-        .max()
-        .unwrap_or(0);
-    loop {
-        seq += 1;
-        if seq > 10_000 {
-            return Err(GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!("too many threads named {prefix}:* in project {project}"),
-            ));
-        }
-        if tx.thread_messages(project, &format!("{prefix}:{seq}"))?.is_empty() {
-            return Ok(seq);
-        }
-    }
-}
-
-/// The sequence number of `thread`, when the thread belongs to `prefix`.
-fn thread_seq(thread: &str, prefix: &str) -> Option<u32> {
-    thread.strip_prefix(prefix)?.strip_prefix(':')?.parse().ok()
 }
 
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
