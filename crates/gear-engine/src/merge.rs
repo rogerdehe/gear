@@ -1552,6 +1552,7 @@ mod tests {
                         wait_cond: None,
                         rework_note: None,
                         estimate_min: None,
+                        issue: None,
                         updated: 0,
                     })?;
                     gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, 0)?;
@@ -1830,6 +1831,7 @@ mod tests {
                         wait_cond: None,
                         rework_note: None,
                         estimate_min: None,
+                        issue: None,
                         updated: 0,
                     })?;
                     gear_app::tasks::start_attempt(tx, "p", &id, "p:heat", 1, 0)?;
