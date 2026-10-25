@@ -742,10 +742,25 @@ fn run_plan(
             ),
         )
     })?;
+    // After a successful apply: the captain hears about a lane that would
+    // stand idle (T-58, ops/lessons.md 7a). Printed only — the apply itself
+    // is unchanged.
+    let warnings: Vec<String> = store
+        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project))?
+        .iter()
+        .map(|lane| lane.warning())
+        .collect();
     if json {
-        return serde_json::to_string(&result).map_err(json_error);
+        let mut value = serde_json::to_value(&result).map_err(json_error)?;
+        value["warnings"] = serde_json::json!(warnings);
+        return serde_json::to_string(&value).map_err(json_error);
     }
-    Ok(render_apply(&result))
+    let mut lines = render_apply(&result);
+    for warning in warnings {
+        lines.push('\n');
+        lines.push_str(&warning);
+    }
+    Ok(lines)
 }
 
 /// Replace `path` with `text` through a temp file in the same directory, so a
@@ -1393,6 +1408,35 @@ mod tests {
         }
     }
 
+    /// The project with one more task: another lane is working on T-8, so a
+    /// task that waits for it cannot start (T-58).
+    fn world_with_waiting_dep() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-8".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some("wire".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    updated: T0,
+                })
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
     #[test]
     fn captain_snapshot_includes_the_observed_agent_state() {
         let (mut store, mut herdr) = world();
@@ -1536,8 +1580,130 @@ mod tests {
 
         assert!(out.contains("plan version 1"), "{out}");
         assert!(out.contains("created T-1"), "{out}");
+        // The lane has a task it can start now: nothing to tell the captain.
+        assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    /// T-58: after a successful apply the captain hears about a lane that
+    /// would stand idle — its only queued task waits for a dependency that is
+    /// not done.
+    #[test]
+    fn plan_apply_warns_about_a_lane_that_would_stand_idle() {
+        let (mut store, mut herdr) = world_with_waiting_dep();
+        let draft = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
+        let path = write_draft(draft);
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("created T-1"), "{out}");
+        assert!(
+            out.contains("warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"),
+            "{out}"
+        );
+        // The warning comes after the summary of the apply.
+        let summary = out.find("plan version 1").unwrap();
+        let warning = out.find("warning:").unwrap();
+        assert!(summary < warning, "the warning comes after the summary: {out}");
+    }
+
+    /// The JSON output carries the same warnings.
+    #[test]
+    fn plan_apply_json_carries_the_warnings() {
+        let (mut store, mut herdr) = world_with_waiting_dep();
+        let draft = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
+        let path = write_draft(draft);
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            true,
+        )
+        .unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["version"], 1);
+        assert_eq!(
+            doc["warnings"][0],
+            "warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"
+        );
+    }
+
+    /// T-58: a lane that is working on its last task with nothing startable
+    /// behind it is told before it stands idle.
+    #[test]
+    fn plan_apply_warns_before_a_lane_runs_dry() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                // The lane "heat" is working on T-5; the task queued behind it
+                // waits for T-7, which another lane is working on.
+                tx.insert_task(&lane_task("T-5", "heat", gear_model::TaskState::Running, &[]))?;
+                tx.insert_task(&lane_task("T-6", "heat", gear_model::TaskState::Ready, &["T-7"]))?;
+                tx.insert_task(&lane_task("T-7", "wire", gear_model::TaskState::Running, &[]))
+            })
+            .unwrap();
+        // The draft gives another lane the work, not this one.
+        let draft = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=wire\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+        let path = write_draft(draft);
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("warning: lane heat has nothing to start after T-5 (1 queued behind deps: T-6)"),
+            "{out}"
+        );
+    }
+
+    /// A task of the project, for the plan tests.
+    fn lane_task(id: &str, lane: &str, state: gear_model::TaskState, deps: &[&str]) -> TaskRow {
+        TaskRow {
+            project: "p".into(),
+            id: id.into(),
+            rank: 1,
+            state,
+            priority: "must".into(),
+            lane: Some(lane.into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: deps.iter().map(|dep| dep.to_string()).collect(),
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            updated: T0,
+        }
     }
 
     #[test]

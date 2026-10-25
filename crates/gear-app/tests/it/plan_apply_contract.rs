@@ -108,3 +108,141 @@ fn cancel_and_lane_cannot_apply() {
     let d = draft(2, "");
     assert_eq!(apply(&mut s, &lane, Some(&lfp), &d.0, &d.1, "r3", NOW).unwrap_err().code, ErrorCode::Forbidden);
 }
+
+// ---- the lanes that are about to stand idle (T-58, ops/lessons.md 7a)
+
+/// A task of the project: its lane, its state and the tasks it waits for.
+fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::TaskRow {
+    gear_store::TaskRow {
+        project: "p".into(),
+        id: id.into(),
+        rank: 1,
+        state,
+        priority: "must".into(),
+        lane: Some(lane.into()),
+        milestone: None,
+        required: false,
+        contract_version: 1,
+        deps: deps.iter().map(|dep| dep.to_string()).collect(),
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: None,
+        updated: NOW,
+    }
+}
+
+/// The lanes that are about to stand idle: the lane and its current task
+/// (None when it has none).
+fn idle(s: &mut Store) -> Vec<(String, Option<String>, Vec<String>)> {
+    s.read(|tx| gear_app::plan::idle_lanes(tx, "p"))
+        .unwrap()
+        .into_iter()
+        .map(|lane| (lane.lane, lane.current, lane.blocked))
+        .collect()
+}
+
+/// A lane working on its last task, with nothing queued behind it, is told
+/// before it stands idle.
+#[test]
+fn a_lane_with_nothing_behind_its_current_task_is_told() {
+    let mut s = world();
+    s.write(|tx| {
+        // The lane "heat" is working on T-2; the task queued behind it waits
+        // for T-1, which another lane is still working on.
+        tx.insert_task(&task("T-2", "heat", TaskState::Running, &[]))?;
+        tx.insert_task(&task("T-3", "heat", TaskState::Ready, &["T-1"]))?;
+        tx.insert_task(&task("T-1", "wire", TaskState::Running, &[]))
+    })
+    .unwrap();
+
+    assert_eq!(
+        idle(&mut s),
+        vec![("heat".to_string(), Some("T-2".to_string()), vec!["T-3".to_string()])],
+        "nothing startable behind the current task"
+    );
+}
+
+/// An idle lane whose only queued task waits for a dependency is told too.
+#[test]
+fn an_idle_lane_that_waits_for_a_dependency_is_told() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_task(&task("T-2", "heat", TaskState::Ready, &["T-1"]))?;
+        tx.insert_task(&task("T-1", "wire", TaskState::Running, &[]))
+    })
+    .unwrap();
+
+    assert_eq!(
+        idle(&mut s),
+        vec![("heat".to_string(), None, vec!["T-2".to_string()])],
+        "the queued task waits for a dependency"
+    );
+}
+
+/// A lane with a task it can start now is not told: it has work.
+#[test]
+fn a_lane_with_work_to_start_is_not_told() {
+    let mut s = world();
+    s.write(|tx| {
+        // The dependency is done: the task can start now.
+        tx.insert_task(&task("T-2", "heat", TaskState::Ready, &["T-1"]))?;
+        tx.insert_task(&task("T-1", "wire", TaskState::Done, &[]))
+    })
+    .unwrap();
+
+    assert_eq!(idle(&mut s), vec![]);
+}
+
+/// A lane that is working on a task with a startable one queued behind it is
+/// not told: the next task waits for it.
+#[test]
+fn a_lane_with_a_startable_task_behind_its_current_one_is_not_told() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_task(&task("T-2", "heat", TaskState::Running, &[]))?;
+        tx.insert_task(&task("T-3", "heat", TaskState::Ready, &[]))
+    })
+    .unwrap();
+
+    assert_eq!(idle(&mut s), vec![]);
+}
+
+/// A lane in the captain's tail may stand idle: it was declared as finishing.
+#[test]
+fn a_tail_lane_is_not_told() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_task(&task("T-2", "heat", TaskState::Ready, &["T-1"]))?;
+        tx.insert_task(&task("T-1", "wire", TaskState::Running, &[]))?;
+        tx.set_meta("lane-tail:p:heat", "1")
+    })
+    .unwrap();
+
+    assert_eq!(idle(&mut s), vec![]);
+}
+
+/// The warning the captain reads, one line per lane.
+#[test]
+fn the_warning_names_the_lane_and_what_waits() {
+    let lane = gear_app::plan::IdleLane {
+        lane: "heat".into(),
+        current: Some("T-2".into()),
+        blocked: vec!["T-5".into(), "T-6".into()],
+    };
+    assert_eq!(
+        lane.warning(),
+        "warning: lane heat has nothing to start after T-2 (2 queued behind deps: T-5, T-6)"
+    );
+
+    let idle_now = gear_app::plan::IdleLane {
+        lane: "heat".into(),
+        current: None,
+        blocked: vec![],
+    };
+    assert_eq!(
+        idle_now.warning(),
+        "warning: lane heat has nothing to start after now (0 queued behind deps)"
+    );
+}
