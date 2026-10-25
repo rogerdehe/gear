@@ -1,0 +1,13 @@
+[package]
+name = "gear-forge"
+version.workspace = true
+edition.workspace = true
+description = "The forge layer (T-78): issues and pull requests, GitHub through `gh`, and a no-op for local projects."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
