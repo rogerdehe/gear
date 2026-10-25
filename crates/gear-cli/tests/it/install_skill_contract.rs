@@ -67,6 +67,10 @@ fn the_skill_is_written_for_every_agent() {
             "references/agents/codex.md",
             "references/agents/claude.md",
             "references/agents/grok.md",
+            "references/adopt.md",
+            // The templates a captain copies into a project (T-85).
+            "templates/adopt.md",
+            "templates/standard.md",
         ] {
             let path = dir.join(rel);
             let text = std::fs::read_to_string(&path)
