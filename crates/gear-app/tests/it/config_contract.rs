@@ -1,6 +1,8 @@
 //! Contract for gear_app::config (T-7). Pure: no store, no Herdr.
 
-use gear_app::config::{parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Timing};
+use gear_app::config::{
+    parse, validate, ConfigIssue, Conventions, Models, QuotaPolicy, Repo, Timing,
+};
 use gear_model::ErrorCode;
 
 const MINIMAL: &str = r#"
@@ -292,4 +294,235 @@ fn busy_idle_period_is_configurable_and_nonzero() {
     let mut cfg = cfg;
     cfg.timing.lane_busy_idle_min = 0;
     assert_eq!(fields(&validate(&cfg)), vec!["timing.lane_busy_idle_min"]);
+}
+
+// ---- [[repos]]: a project made of several git repositories (T-52)
+
+/// A project with three lanes: one in the `api` repo, one in the `web` repo
+/// and one in the project root.
+const MULTI: &str = r#"
+[project]
+id = "harbor"
+herdr_session = "marina"
+repo = "/repo"
+
+[quota]
+lanes = 3
+temps = 1
+
+[captain]
+pane = "w2:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "thermal calculation"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "api"
+
+[[lanes]]
+name = "web"
+duty = "the web app"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "web"
+
+[[lanes]]
+name = "pricing"
+duty = "price engine"
+owns = ["lib/pricing/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+
+/// The project's repos. The `api` repo declares no branch and no gate: it
+/// uses the project's `[conventions]`.
+const REPOS: &str = r#"
+[[repos]]
+name = "api"
+path = "crates/api"
+
+[[repos]]
+name = "web"
+path = "apps/web"
+integration = "feat/web"
+release = "main"
+gate = "npm test"
+"#;
+
+/// A config without `[[repos]]` is a single-repo project: it behaves exactly
+/// as before.
+#[test]
+fn a_project_without_repos_has_only_the_root_repo() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert!(cfg.repos.is_empty());
+    assert!(cfg.lanes.iter().all(|lane| lane.repo.is_none()));
+    assert_eq!(
+        cfg.root_repo(),
+        Repo {
+            name: "".into(),
+            path: "/repo".into(),
+            integration: "dev".into(),
+            release: "main".into(),
+            gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
+        }
+    );
+    assert_eq!(validate(&cfg), vec![]);
+}
+
+/// A repo without branches or a gate uses the project's `[conventions]`.
+#[test]
+fn a_repo_without_its_own_branches_uses_the_conventions() {
+    let text = format!(
+        "{MULTI}{REPOS}\n[conventions]\nintegration = \"feat/dev\"\nrelease = \"feat/main\"\ngate = \"cargo test\"\n"
+    );
+    let cfg = parse(&text).unwrap();
+    let api = cfg.repo_of_lane("heat");
+    assert_eq!(api.name, "api");
+    assert_eq!(api.integration, "feat/dev");
+    assert_eq!(api.release, "feat/main");
+    assert_eq!(api.gate, "cargo test");
+    // The `web` repo declares its own.
+    let web = cfg.repo_of_lane("web");
+    assert_eq!(web.integration, "feat/web");
+    assert_eq!(web.release, "main");
+    assert_eq!(web.gate, "npm test");
+    // The root repo keeps the project's.
+    assert_eq!(cfg.root_repo().integration, "feat/dev");
+    assert_eq!(cfg.root_repo().release, "feat/main");
+    assert_eq!(cfg.root_repo().gate, "cargo test");
+}
+
+/// A repo's path is relative to `project.repo`: the resolved path is the
+/// project's own path joined with it.
+#[test]
+fn a_repo_path_is_joined_to_the_project_repo() {
+    let cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    assert_eq!(cfg.repo_of_lane("heat").path, "/repo/crates/api");
+    assert_eq!(cfg.repo_of_lane("web").path, "/repo/apps/web");
+    // A trailing slash on the project's path is the same path.
+    let text = MULTI.replace(r#"repo = "/repo""#, r#"repo = "/repo/""#);
+    let cfg = parse(&format!("{text}{REPOS}")).unwrap();
+    assert_eq!(cfg.repo_of_lane("heat").path, "/repo/crates/api");
+}
+
+/// A lane without a `repo`, and a lane that is not in the config at all, work
+/// in the project root.
+#[test]
+fn a_lane_without_a_repo_works_in_the_project_root() {
+    let cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    let root = cfg.root_repo();
+    assert_eq!(cfg.repo_of_lane("pricing"), root, "a lane without a repo");
+    assert_eq!(cfg.repo_of_lane("nobody"), root, "a lane that is not in the config");
+}
+
+#[test]
+fn repo_names_are_unique_and_well_formed() {
+    // The lanes of this config are not bound to a repo, so only the repo's
+    // own finding is expected.
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[1].name = "api".into();
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["repos[1].name"],
+        "the repo name is used twice"
+    );
+
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].name = "Api".into();
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["repos[0].name"],
+        "the repo name is not [a-z][a-z0-9-]*"
+    );
+}
+
+#[test]
+fn a_repo_path_is_relative_to_the_project_repo() {
+    for (path, why) in [
+        ("/elsewhere", "absolute"),
+        ("../elsewhere", "leaves the project"),
+        ("crates/../elsewhere", "leaves the project"),
+        ("", "empty"),
+    ] {
+        let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+        cfg.repos[0].path = path.into();
+        assert_eq!(fields(&validate(&cfg)), vec!["repos[0].path"], "{why}");
+    }
+}
+
+#[test]
+fn a_repo_gate_is_never_left_as_a_todo() {
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].gate = Some("TODO: the build command".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["repos[0].gate"]);
+
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].gate = Some("   ".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["repos[0].gate"]);
+}
+
+#[test]
+fn a_repo_branches_are_non_empty_and_different() {
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].integration = Some("  ".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["repos[0].integration"]);
+
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].release = Some("".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["repos[0].release"]);
+
+    // The repo's own integration branch is the branch it releases from.
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].integration = Some("main".into());
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["repos[0].release"],
+        "the repo's release branch is the project's main"
+    );
+
+    // The repo's own release branch is its integration branch.
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].release = Some("dev".into());
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["repos[0].release"],
+        "the repo releases into its own integration branch"
+    );
+}
+
+/// A lane's `repo` must name one of the project's repos.
+#[test]
+fn a_lane_binds_to_a_repo_that_exists() {
+    let mut cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    cfg.lanes[0].repo = Some("nope".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["lanes[0].repo"]);
+
+    let mut cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    cfg.lanes[0].repo = None;
+    assert_eq!(validate(&cfg), vec![], "a lane without a repo works in the root");
+}
+
+/// `owns` is relative to the lane's repo: the same paths in two repos are
+/// two different files, and only lanes of the same repo may not overlap.
+#[test]
+fn owns_overlap_is_checked_between_lanes_of_the_same_repo() {
+    let cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    assert_eq!(
+        validate(&cfg),
+        vec![],
+        "the same paths in two repos are two different files"
+    );
+
+    let mut cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
+    cfg.lanes[1].repo = Some("api".into());
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[1].owns"],
+        "two lanes of one repo own the same paths"
+    );
 }
