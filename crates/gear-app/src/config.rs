@@ -42,8 +42,9 @@ pub struct ProjectConfig {
     /// Per-kind profile overrides, kept as raw TOML; merged by the engine (04).
     #[serde(default)]
     pub profiles: BTreeMap<String, toml::Table>,
-    /// The GitHub mode of the project (T-79). Absent = local-only: issues are
-    /// not read and no pull request is opened.
+    /// The GitHub mode of the project root (T-79). Absent = local-only: issues
+    /// are not read and no pull request is opened. A `[[repos]]` entry needs
+    /// its own section: it never inherits this one.
     #[serde(default)]
     pub github: Option<GithubSection>,
 }
@@ -108,12 +109,12 @@ impl ProjectConfig {
                 .gate
                 .clone()
                 .unwrap_or_else(|| self.conventions.gate.clone()),
-            // A repo's own `[github]` replaces the project's (T-79).
-            github: section
-                .github
-                .as_ref()
-                .or(self.github.as_ref())
-                .and_then(GithubSection::resolved),
+            // A repo's own `[github]`, and only that (T-79): a child repo
+            // without one is local-only. It never inherits the project's
+            // section, which names another repository — a GitHub mode that
+            // pointed a child at the root's repo would write in the wrong
+            // place.
+            github: section.github.as_ref().and_then(GithubSection::resolved),
         }
     }
 }
@@ -185,14 +186,15 @@ pub struct RepoSection {
     /// `[conventions].gate`.
     #[serde(default)]
     pub gate: Option<String>,
-    /// This repo's own GitHub mode (T-79); absent = the project's `[github]`.
+    /// This repo's own GitHub mode (T-79); absent = local-only. It does not
+    /// inherit the project's section: that one names the root's repository.
     #[serde(default)]
     pub github: Option<GithubSection>,
 }
 
-/// The GitHub mode of a project or a repo (T-79): `repo = "owner/name"`, the
-/// labels that select issues, and how a merge reaches GitHub. Absent at both
-/// levels = local-only.
+/// The GitHub mode of a project root or a repo (T-79): `repo =
+/// "owner/name"`, the labels that select issues, and how a merge reaches
+/// GitHub. Absent = local-only; each level names its own repository.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GithubSection {
@@ -268,8 +270,8 @@ impl MergeMethod {
     }
 }
 
-/// The GitHub mode of a repo, resolved (T-79): the project's `[github]`, or
-/// the repo's own when it has one.
+/// The GitHub mode of a repo, resolved (T-79): the repo's own `[github]` — or
+/// the project's, for the project root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Github {
     /// `owner/name`.

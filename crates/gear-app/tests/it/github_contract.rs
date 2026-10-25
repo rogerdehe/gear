@@ -82,6 +82,34 @@ fn a_repo_github_section_replaces_the_projects_and_absent_means_local_only() {
     assert_eq!(cfg.repo_of_lane("heat").github, None);
 }
 
+/// F2 of the review: a `[[repos]]` entry without its own `[github]` is
+/// local-only — it never inherits the root's repository identity, which would
+/// write in the wrong place.
+#[test]
+fn a_child_repo_without_a_section_is_local_only() {
+    let text = format!(
+        "{BASE}\n[github]\nrepo = \"root/project\"\nmerge = \"pr\"\n\n[[repos]]\nname = \"child\"\npath = \"child\"\n\n[[repos]]\nname = \"api\"\npath = \"services/api\"\n\n[repos.github]\nrepo = \"root/api\"\n"
+    );
+    let cfg = config::parse(&text).unwrap();
+    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+
+    // The root keeps the project's identity.
+    let root = cfg.root_repo();
+    let github = root.github.as_ref().expect("the root's mode");
+    assert_eq!(github.repo, "root/project");
+    assert_eq!(github.merge, config::MergeMode::Pr);
+
+    // The child has none — through both ways to reach it.
+    let repos = cfg.repos();
+    let child = repos.iter().find(|repo| repo.name == "child").unwrap();
+    assert_eq!(child.github, None, "a child does not inherit the root's mode");
+    let lane = cfg.lanes.iter().find(|lane| lane.name == "heat").unwrap();
+    assert!(lane.repo.is_none());
+    // The configured child keeps its own identity.
+    let api = repos.iter().find(|repo| repo.name == "api").unwrap();
+    assert_eq!(api.github.as_ref().map(|g| g.repo.as_str()), Some("root/api"));
+}
+
 #[test]
 fn a_github_section_without_a_repo_or_with_a_bad_repo_is_refused() {
     let no_repo = format!("{BASE}\n[github]\nmerge = \"pr\"\n");
@@ -218,7 +246,7 @@ fn an_issue_round_trips_through_apply_and_is_kept_when_a_draft_omits_it() {
 
 #[test]
 fn an_issue_that_is_not_hash_number_is_refused_at_its_line() {
-    for bad in ["12", "#x", "#-1", "#"] {
+    for bad in ["12", "#x", "#-1", "#", "#0", "#+12", "#9223372036854775808", "#18446744073709551615"] {
         let text = format!(
             "<!-- gear-plan project=toy base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nissue: {bad}\n"
         );

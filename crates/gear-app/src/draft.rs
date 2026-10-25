@@ -358,6 +358,18 @@ fn parse_priority(token: &str) -> Option<Priority> {
     }
 }
 
+/// An issue number as `#<n>`: ASCII digits, positive, and small enough for
+/// the store's integer (T-79). `#0`, `#+12` and a number that does not fit
+/// are not issue numbers.
+fn parse_issue(value: &str) -> Option<u64> {
+    let digits = value.strip_prefix('#')?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+    (1..=i64::MAX as u64).contains(&number).then_some(number)
+}
+
 impl Priority {
     /// The plan's word for a priority: `now`, `must`, …
     pub fn as_str(self) -> &'static str {
@@ -546,7 +558,7 @@ fn parse_queue_field(
         }
         "reopen" => item.reopen = Some(value.to_string()),
         "issue" => {
-            item.issue = Some(value.strip_prefix('#').and_then(|n| n.parse::<u64>().ok()).ok_or_else(|| {
+            item.issue = Some(parse_issue(value).ok_or_else(|| {
                 bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
             })?)
         }
