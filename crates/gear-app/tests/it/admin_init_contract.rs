@@ -140,3 +140,138 @@ fn a_lane_or_reviewer_kind_without_its_skill_is_refused_on_re_init() {
         assert_eq!((project.config_version, project.config_toml.as_str()), (1, CONFIG));
     }
 }
+
+/// A fresh home with only these kinds' GEAR skills installed.
+fn home_with(kinds: &[gear_app::skill::SkillAgent]) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    for agent in kinds {
+        gear_app::skill::install(*agent, home.path()).unwrap();
+    }
+    home
+}
+
+/// The review's reproduction (T-83 round 2, F1): codex seats whose lane chain
+/// runs its primary model on OpenCode. The guard checks the CLI the chain
+/// names, not only the seat's profile.
+const CODEX_CHAIN_CONFIG: &str = r#"
+[project]
+id = "harbor"
+herdr_session = "marina"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w2:p1"
+kind = "codex"
+profile = "codex"
+
+[[lanes]]
+name = "heat"
+duty = "thermal calculation"
+owns = ["src/heat/"]
+kind = "codex"
+profile = "codex"
+
+[models]
+lanes = [
+  { model = "test-model", cli = "opencode" },
+  { model = "fallback", cli = "codex" },
+]
+"#;
+
+/// A model entry may run its model on another CLI than its seat's profile (T-35)
+/// — a primary one, and a fallback — and that CLI's GEAR skill must be there
+/// too: the review's codex-seats/OpenCode-model config is refused, the same
+/// config registers once the skill is installed, and a re-init that names a
+/// third CLI is refused with the project untouched.
+#[test]
+fn a_model_chain_cli_without_its_skill_is_refused() {
+    use gear_app::skill::SkillAgent;
+
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with(&[SkillAgent::Codex]);
+
+    let error =
+        init_with_home(&mut s, &admin(), CODEX_CHAIN_CONFIG, Some(home.path()), T0).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("opencode"), "{}", error.detail);
+    assert!(
+        error.detail.contains("gear admin install-skill --agent opencode"),
+        "the fix is named: {}",
+        error.detail
+    );
+    assert!(
+        s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+        "nothing written"
+    );
+
+    // The missing skill installed: the same config registers.
+    gear_app::skill::install(SkillAgent::OpenCode, home.path()).unwrap();
+    let r = init_with_home(&mut s, &admin(), CODEX_CHAIN_CONFIG, Some(home.path()), T0).unwrap();
+    assert_eq!(r.config_version, 1);
+
+    // A re-init with a fallback on a third CLI without its skill: refused, and
+    // the registered config is the old one, at the old version.
+    let with_grok = CODEX_CHAIN_CONFIG.replace(
+        "  { model = \"fallback\", cli = \"codex\" },",
+        "  { model = \"fallback\", cli = \"codex\" },\n  { model = \"third\", cli = \"grok\" },",
+    );
+    assert_ne!(with_grok, CODEX_CHAIN_CONFIG, "the config changed");
+    let error = init_with_home(&mut s, &admin(), &with_grok, Some(home.path()), T0 + 1).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("gear admin install-skill --agent grok"), "{}", error.detail);
+    let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
+    assert_eq!(
+        (project.config_version, project.config_toml.as_str()),
+        (1, CODEX_CHAIN_CONFIG),
+        "a refused re-init changes nothing"
+    );
+
+    // And with it, the same config is a config change.
+    gear_app::skill::install(SkillAgent::Grok, home.path()).unwrap();
+    let r = init_with_home(&mut s, &admin(), &with_grok, Some(home.path()), T0 + 2).unwrap();
+    assert_eq!(r.config_version, 2);
+}
+
+/// Role and per-lane chains are checked as well: a lane's own `models`
+/// (overriding `models.lanes`), the review chain, and the captain chain.
+#[test]
+fn per_lane_and_role_chains_are_checked() {
+    use gear_app::skill::SkillAgent;
+
+    let home = home_with(&[SkillAgent::Codex, SkillAgent::OpenCode]);
+    // The lane's own chain, which overrides `models.lanes`: grok has no skill.
+    let own = CODEX_CHAIN_CONFIG.replace(
+        "kind = \"codex\"\nprofile = \"codex\"\n\n[models]",
+        "kind = \"codex\"\nprofile = \"codex\"\nmodels = [{ model = \"own\", cli = \"grok\" }]\n\n[models]",
+    );
+    // The review chain names another CLI than the seats do.
+    let review = CODEX_CHAIN_CONFIG.replace(
+        "[models]\nlanes = [",
+        "[models]\nreview = [{ model = \"reviewer-model\", cli = \"claude\" }, { model = \"reviewer-model-2\", cli = \"codex\" }]\nlanes = [",
+    );
+    // The captain chain too.
+    let captain = CODEX_CHAIN_CONFIG.replace(
+        "[models]\nlanes = [",
+        "[models]\ncaptain = [{ model = \"captain-model\", cli = \"grok\" }, { model = \"captain-model-2\", cli = \"codex\" }]\nlanes = [",
+    );
+
+    for (config, kind) in [(own, "grok"), (review, "claude"), (captain, "grok")] {
+        assert_ne!(config, CODEX_CHAIN_CONFIG, "the config changed: {kind}");
+        let mut s = Store::open_in_memory().unwrap();
+        let error = init_with_home(&mut s, &admin(), &config, Some(home.path()), T0).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadFormat, "{kind}: {}", error.detail);
+        assert!(
+            error.detail.contains(&format!("gear admin install-skill --agent {kind}")),
+            "{kind}: {}",
+            error.detail
+        );
+        assert!(
+            s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+            "{kind}: nothing written"
+        );
+    }
+}
