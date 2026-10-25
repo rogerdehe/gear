@@ -26,8 +26,10 @@ pub struct SeatObs {
     pub flags: BTreeSet<ScreenFlag>,
     /// Idle/done with no Busy flag.
     pub idle: bool,
-    /// The last screen lines of an agent Herdr reports `blocked` — the dialog
-    /// it waits on. None when the screen was not read.
+    /// The last screen lines of the agent, when the screen was read: an idle
+    /// or done agent, a blocked one (the dialog it waits on) or a working
+    /// agent of a kind that shows a provider back-off (T-75). None when the
+    /// screen was not read.
     pub screen: Option<String>,
 }
 
@@ -119,57 +121,64 @@ fn observe_seat(
         });
     }
 
-    let (flags, idle) = screen_flags(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
-    let screen = blocked_screen(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
+    let (flags, idle, screen) =
+        screen_of(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
     Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle, screen })
 }
 
-/// The screen flags of the seat's agent and whether it is idle.
+/// The screen of the seat's agent, the flags it shows and whether the agent
+/// is idle.
 ///
-/// The screen is read only for an idle/done agent, and only when the profile
-/// is known. Every other case fails closed: the seat is not idle, so no
-/// doorbell goes out on a guess.
-fn screen_flags(
+/// The screen is read for an idle or done agent (its flags say what the seat
+/// may do next) and for a blocked one (the captain's alert quotes the dialog
+/// it waits on). A **working** agent's screen is read only for a kind that
+/// shows a provider back-off (T-75): such an agent waits for the provider
+/// for minutes without any output, and that is not a stall. Every other
+/// working agent costs no read.
+///
+/// A screen that cannot be read, and a seat whose profile is unknown, fail
+/// closed: no flags and no idle.
+fn screen_of(
     herdr: &mut dyn HerdrRead,
     seat: &SeatRow,
     pane_id: &str,
     status: AgentStatus,
     profiles: &BTreeMap<String, Profile>,
-) -> (BTreeSet<ScreenFlag>, bool) {
-    if !matches!(status, AgentStatus::Idle | AgentStatus::Done) {
-        // A working agent is not idle, and its screen is not read.
-        return (BTreeSet::new(), false);
+) -> (BTreeSet<ScreenFlag>, bool, Option<String>) {
+    let profile = profiles.get(&seat.profile);
+    let idle_or_done = matches!(status, AgentStatus::Idle | AgentStatus::Done);
+    let blocked = status == AgentStatus::Blocked;
+    // A working agent is read only for a kind that shows a back-off.
+    let shows_backoff = profile.map(|profile| !profile.backoff_markers.is_empty()).unwrap_or(false);
+    if !idle_or_done && !blocked && !shows_backoff {
+        return (BTreeSet::new(), false, None);
     }
-    let Some(profile) = profiles.get(&seat.profile) else {
-        // Unknown profile: the screen cannot be read the way it must be.
-        return (BTreeSet::new(), false);
-    };
-    let Ok(tail) = herdr.read_tail(pane_id, profile.tail_lines) else {
+    let lines = profile.map(|profile| profile.tail_lines).unwrap_or(16);
+    let Ok(tail) = herdr.read_tail(pane_id, lines) else {
         // The screen could not be read: fail closed.
-        return (BTreeSet::new(), false);
+        return (BTreeSet::new(), false, None);
     };
-    let flags = classify_screen(profile, &tail);
-    let idle = !flags.contains(&ScreenFlag::Busy);
-    (flags, idle)
-}
-
-/// The last screen lines of a **blocked** agent: the dialog it waits on.
-///
-/// Only a blocked agent is read, and only for the captain's alert — every
-/// other case is None. A screen that cannot be read is None as well: the
-/// alert says the seat is blocked, not what it waits on.
-fn blocked_screen(
-    herdr: &mut dyn HerdrRead,
-    seat: &SeatRow,
-    pane_id: &str,
-    status: AgentStatus,
-    profiles: &BTreeMap<String, Profile>,
-) -> Option<String> {
-    if status != AgentStatus::Blocked {
-        return None;
+    if idle_or_done {
+        let Some(profile) = profile else {
+            // Unknown profile: the screen cannot be read the way it must be.
+            return (BTreeSet::new(), false, None);
+        };
+        let flags = classify_screen(profile, &tail);
+        let idle = !flags.contains(&ScreenFlag::Busy);
+        return (flags, idle, Some(tail));
     }
-    let lines = profiles.get(&seat.profile).map(|p| p.tail_lines).unwrap_or(16);
-    herdr.read_tail(pane_id, lines).ok()
+    if blocked {
+        // A blocked agent is judged by its status, not by its flags.
+        return (BTreeSet::new(), false, Some(tail));
+    }
+    // A working agent: only a provider back-off is of interest (T-75).
+    let mut flags = BTreeSet::new();
+    if let Some(profile) = profile {
+        if profile.backoff(&tail) {
+            flags.insert(ScreenFlag::Backoff);
+        }
+    }
+    (flags, false, Some(tail))
 }
 
 /// States considered "may receive a doorbell/delivery".
