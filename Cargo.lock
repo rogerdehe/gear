@@ -239,6 +239,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gear-forge"
+version = "0.2.4"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "gear-herdr"
 version = "0.2.4"
 dependencies = [
