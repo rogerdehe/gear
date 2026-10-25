@@ -55,6 +55,7 @@ fn the_new_topics_print_their_file() {
     let home = scratch::home("skill-topics");
     for (topic, rel) in [
         ("review", "references/review.md"),
+        ("adopt", "references/adopt.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
@@ -78,6 +79,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "decompose",
         "review",
         "captain",
+        "adopt",
         "agent:opencode",
         "agent:codex",
         "agent:claude",

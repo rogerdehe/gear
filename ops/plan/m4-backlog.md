@@ -26,3 +26,6 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - T-89 F1 (logged at review): a busy agent start is retried inside one onboarding call (up to ~20 s, blocking the tick) instead of on the next tick.
 - T-77: a switch to another CLI hands over the previous conversation (user idea).
 - T-92 F1/F2 (logged at review): remerge does not refuse a candidate already on the integration branch (harmless: the merge confirms it); op ids compared lexically at the same second.
+
+## GitHub PR-mode landing (descoped from M3 T-91)
+`merge = "pr"` lands through the PR: on a passed gate the engine does not push or delete the head; it records readiness, sync marks the PR ready and merges it through the forge, then the engine records the merge and cleans up. Until then config refuses `merge = "pr"`. Also T-91 F4: reconcile an interrupted claim by its marker instead of quarantining the task.

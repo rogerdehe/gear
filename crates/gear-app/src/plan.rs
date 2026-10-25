@@ -7,8 +7,8 @@ use crate::draft::{Draft, Priority, QueueItem, StaffItem};
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{ContractRow, PlanRow, RequestOutcome, Store, TaskRow, Tx};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
+use gear_store::{ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -187,10 +187,17 @@ fn apply_queue(
                 match item.state.as_deref() {
                     None => {}
                     Some("cancelled") => {
-                        if task.state.is_terminal() {
+                        // Cancelling a cancelled task is a no-op, not an error
+                        // (T-93: a plan keeps saying so after the cancel, and
+                        // re-applying it failed three times in M3). A finished
+                        // task is not cancelled after the fact.
+                        if matches!(task.state, TaskState::Done | TaskState::Failed) {
                             return Err(bad(
                                 item.line,
-                                format!("task {id} is already {}", task.state.as_str()),
+                                format!(
+                                    "task {id} is {}, it cannot be cancelled",
+                                    task.state.as_str()
+                                ),
                             ));
                         }
                     }
@@ -331,7 +338,17 @@ fn apply_queue(
                     task.issue = Some(issue);
                 }
                 match item.state.as_deref() {
-                    Some("cancelled") => task.state = TaskState::Cancelled,
+                    Some("cancelled") => {
+                        // T-93: cancelling a task finishes it. Its open attempt
+                        // is abandoned — the seat is free for the next task —
+                        // and the lane is told in one line. A cancelled task
+                        // that kept a started attempt left the lane looking
+                        // busy with a full queue behind it (M3: T-80).
+                        if task.state != TaskState::Cancelled {
+                            cancel_task(tx, project, &task, by_seat, by_gen, now)?;
+                        }
+                        task.state = TaskState::Cancelled;
+                    }
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
                 }
@@ -1065,6 +1082,78 @@ fn departure_from_history(
 /// the draft does not mention keeps what it has (grandfathered): the
 /// requirement applies to what the captain edits, not to old plans.
 ///
+/// Finish a task the captain cancels from the plan (T-93): every open attempt
+/// becomes Abandoned, so the lane is free for its next task, and the lane gets
+/// one line telling it to stop. The message is created once, when the task is
+/// newly cancelled.
+fn cancel_task(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &TaskRow,
+    by_seat: &str,
+    by_gen: i64,
+    now: Ts,
+) -> GearResult<()> {
+    let mut closed = false;
+    for mut attempt in tx.attempts_of_task(project, &task.id)? {
+        if attempt.state.is_terminal() {
+            continue;
+        }
+        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
+            // The model keeps UNKNOWN from Abandoned directly — the engine
+            // never guesses an outcome. A cancelled task does not guess
+            // either: it stops the attempt first, then abandons it, so the
+            // lane is not left busy with a task nobody wants (T-93).
+            if attempt.state == AttemptState::Unknown
+                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
+                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
+            {
+                attempt.state = AttemptState::Stopped;
+                attempt.updated = now;
+                tx.update_attempt(&attempt)?;
+            } else {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "attempt {} of task {} is {}, it cannot be abandoned",
+                        attempt.n,
+                        task.id,
+                        attempt.state.as_str()
+                    ),
+                ));
+            }
+        }
+        attempt.state = AttemptState::Abandoned;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        closed = true;
+    }
+    // The lane that was working on it hears why, in one line.
+    let Some(lane) = task.lane.as_deref() else {
+        return Ok(());
+    };
+    let lane_seat = format!("{project}:{lane}");
+    if closed && tx.get_seat(&lane_seat)?.is_some() {
+        tx.insert_message(&NewMessage {
+            project: project.to_string(),
+            thread: format!("{}:cancel", task.id),
+            task: Some(task.id.clone()),
+            attempt: None,
+            sender: by_seat.to_string(),
+            sender_gen: by_gen,
+            recipient: lane_seat,
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body: format!("{} is cancelled; stop work on it, nothing to hand in", task.id),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+    }
+    Ok(())
+}
+
 /// The departure is fixed when the milestone gets its first task: the time of
 /// that apply (the tasks it creates are created then) and how many tasks the
 /// milestone holds. Later applies update the words but never move it.

@@ -69,11 +69,15 @@ pub struct EngineCfg {
     /// that is "not yet", not a failure, until this wait runs out.
     pub pane_busy_limit_s: i64,
     pub pane_busy_wait_ms: u64,
+    /// How long an OpenCode lane waits for its directory's model list to load
+    /// before it parks (T-67), and how long between two looks.
+    pub model_list_wait_s: u64,
+    pub model_list_poll_ms: u64,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_limit_s: 20, pane_busy_wait_ms: 250 }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_limit_s: 20, pane_busy_wait_ms: 250, model_list_wait_s: 60, model_list_poll_ms: 500 }
     }
 }
 
