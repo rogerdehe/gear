@@ -15,3 +15,5 @@
 - **Hand the conversation over on a cross-CLI switch (user, 2026-10-25).** An in-place OpenCode switch keeps the session; a switch to another CLI (OpenCode → Codex) starts a fresh agent that gets only the task packet, the worktree and the progress lines. Add the previous agent's kind and session id to the continue message, with the one command that reads it (e.g. `opencode export <session>`, `codex resume`'s transcript), so the new agent may look at what the old one was doing. Verify each CLI's read command live; the session id comes from Herdr (`session_ref`) or, for OpenCode, the session API the engine already uses.
 
 - **Parallel-change check skips landed tasks (M2.1).** It warned "T-58 and integration dev share main.rs" after T-58 had merged (state verifying/done): a task whose branch is already in the integration branch is not a parallel change.
+
+- **A task built on another unreviewed branch merges after it (M2.1).** T-59 was built on T-53's branch and merged while T-53 was in rework, carrying T-53's failed attempt into dev. The merge of a task should wait until every task whose commits it carries has passed.
