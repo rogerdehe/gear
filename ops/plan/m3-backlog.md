@@ -21,3 +21,5 @@
 - **Merge the approved commit, not the branch name (M2.1, T-53).** The lane pushed its rebased rework to a new branch `engine/t53-v2` (to avoid a force push); the engine merges `<lane>/t<n>` and refused: "the branch moved after the review". The approved candidate was fine. The merge should take the approved candidate commit wherever it is, and a failed merge needs a retry path (today the captain had to point the branch and reset the op in the store by hand).
 
 - **A hand-in must be pushed (M2.1, T-60).** The lane handed in cf58f57 on a local `config/t60` that tracked origin/dev and was never pushed; the reviewer (same machine) read it and passed it, the merge found no `origin/config/t60`. `gear send --kind result` refuses a candidate that is not on `origin/<lane>/t<n>`.
+
+- **The engine finishes a lane's retirement (M2.1 landing).** `- retire <lane>` sets the seat Retiring; release.rs closes only reviewers' panes, so the lanes stayed up until the captain closed their panes and set the seats Retired in the store by hand (as at M2's landing). An idle Retiring lane with no open attempt: exit the agent, close its pane, set it Retired.
