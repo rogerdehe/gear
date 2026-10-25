@@ -36,24 +36,24 @@ owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is OpenCode Go deepseek-v4-pro (M2.1 kickoff)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is Codex gpt-6-astra, reasoning high (user, 2026-10-25)
 kind = "codex"
 profile = "codex"
 
 [models]
 # A chain entry may name the CLI that runs the model and the arguments that
-# CLI starts with (T-35). Both lane models run on OpenCode (an in-place
-# switch, T-33); the reviewer's fallback needs another CLI, so the engine
-# closes codex and starts opencode in the same pane and worktree.
+# CLI starts with (T-35). The lane's fallback needs another CLI, so the
+# engine closes opencode and starts codex in the same pane and worktree. A
+# lane on gpt-6.1-sol is reviewed by gpt-6-astra (never the writer's model).
 lanes = [
   "minimax-cn/MiniMax-M3.1-Flash",
-  "opencode-go/deepseek-v4.1-flash",
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
 ]
 # The reviewer never runs the model it reviews. Both chains exhausted: the
 # seat parks until the reset and the captain tells the user (M2.1 kickoff).
 review = [
   { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
-  { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
+  { model = "gpt-6-astra", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
 ]
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
@@ -64,16 +64,6 @@ quota_reset_h = 5
 [models.switch."minimax-cn/MiniMax-M3.1-Flash"]
 picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
 bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
-
-[models.switch."opencode-go/deepseek-v4.1-flash"]
-picker = "DeepSeek V4.1 Flash OpenCode Go"
-bar = "DeepSeek V4.1 Flash OpenCode Go"
-variant = "high"
-
-[models.switch."opencode-go/deepseek-v4-pro"]
-picker = "DeepSeek V4 Pro (New) OpenCode Go"
-bar = "DeepSeek V4 Pro (New) OpenCode Go"
-variant = "high"
 
 [conventions]
 integration = "dev"
