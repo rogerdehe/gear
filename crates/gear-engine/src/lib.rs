@@ -17,6 +17,7 @@
 
 pub mod captain_quota;
 mod attention;
+pub mod blocked;
 pub mod busy;
 pub mod dispatch;
 pub mod doorbell;
@@ -105,6 +106,8 @@ pub struct TickReport {
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
+    /// Seats rung for being blocked by a dialog for too long (lesson 7b).
+    pub blocked: Vec<String>,
     /// Parallel-change warning message ids (`project:M-n`).
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
@@ -166,6 +169,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
+        // A seat blocked by a dialog for minutes reaches the captain (lesson
+        // 7b): the agent waits on a dialog nobody sees.
+        report
+            .blocked
+            .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
 
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
 

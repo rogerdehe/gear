@@ -45,7 +45,7 @@ fn world() -> (Store, SeatRow) {
 }
 
 fn idle(seat: &SeatRow) -> Vec<SeatObs> {
-    vec![SeatObs { seat: seat.clone(), presence: Presence::Present, status: None, flags: BTreeSet::new(), idle: true }]
+    vec![SeatObs { seat: seat.clone(), presence: Presence::Present, status: None, flags: BTreeSet::new(), idle: true, screen: None }]
 }
 
 /// Settle the last nudge so the next one may go out.

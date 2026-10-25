@@ -26,6 +26,9 @@ pub struct SeatObs {
     pub flags: BTreeSet<ScreenFlag>,
     /// Idle/done with no Busy flag.
     pub idle: bool,
+    /// The last screen lines of an agent Herdr reports `blocked` — the dialog
+    /// it waits on. None when the screen was not read.
+    pub screen: Option<String>,
 }
 
 /// One `agents()` call for the whole session. `Err` = observation failed:
@@ -72,6 +75,7 @@ fn observe_seat(
             status: None,
             flags: BTreeSet::new(),
             idle: false,
+            screen: None,
         });
     }
 
@@ -86,6 +90,7 @@ fn observe_seat(
             status: None,
             flags: BTreeSet::new(),
             idle: false,
+            screen: None,
         });
     };
 
@@ -98,6 +103,7 @@ fn observe_seat(
             status: None,
             flags: BTreeSet::new(),
             idle: false,
+            screen: None,
         });
     };
 
@@ -109,11 +115,13 @@ fn observe_seat(
             status: Some(agent.agent_status),
             flags: BTreeSet::new(),
             idle: false,
+            screen: None,
         });
     }
 
     let (flags, idle) = screen_flags(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
-    Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle })
+    let screen = blocked_screen(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
+    Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle, screen })
 }
 
 /// The screen flags of the seat's agent and whether it is idle.
@@ -143,6 +151,25 @@ fn screen_flags(
     let flags = classify_screen(profile, &tail);
     let idle = !flags.contains(&ScreenFlag::Busy);
     (flags, idle)
+}
+
+/// The last screen lines of a **blocked** agent: the dialog it waits on.
+///
+/// Only a blocked agent is read, and only for the captain's alert — every
+/// other case is None. A screen that cannot be read is None as well: the
+/// alert says the seat is blocked, not what it waits on.
+fn blocked_screen(
+    herdr: &mut dyn HerdrRead,
+    seat: &SeatRow,
+    pane_id: &str,
+    status: AgentStatus,
+    profiles: &BTreeMap<String, Profile>,
+) -> Option<String> {
+    if status != AgentStatus::Blocked {
+        return None;
+    }
+    let lines = profiles.get(&seat.profile).map(|p| p.tail_lines).unwrap_or(16);
+    herdr.read_tail(pane_id, lines).ok()
 }
 
 /// States considered "may receive a doorbell/delivery".

@@ -17,7 +17,7 @@ fn seat(state: SeatState, role: SeatRole) -> SeatRow {
 fn obs(state: SeatState, idle: bool, flags: &[ScreenFlag]) -> SeatObs {
     SeatObs { seat: seat(state, SeatRole::Lane), presence: Presence::Present,
         status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
-        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle }
+        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle, screen: None }
 }
 
 fn task(id: &str) -> TaskRow {

@@ -33,6 +33,24 @@ fn grok_is_built_in_and_verified() {
 }
 
 #[test]
+fn codex_is_built_in_and_never_shows_its_update_dialog() {
+    // T-57: without the update check off, Codex shows an "Update available"
+    // dialog at start and the agent sits blocked, unseen (2026-10-25, codex
+    // 0.163.0 → 0.164.0).
+    let p = builtin("codex").expect("codex is built in");
+    assert_eq!(p.kind, "codex");
+    assert!(p.verified);
+    assert_eq!(
+        p.unattended_args,
+        vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            "-c".to_string(),
+            "check_for_update_on_startup=false".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn unverified_kinds_are_not_built_in() {
     // `codex` left this list with T-5: its SOP is verified
     // (`gear --skill agent:codex`), so it is built in like `opencode`.

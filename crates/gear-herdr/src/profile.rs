@@ -109,7 +109,8 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
 /// codex: busy `esc to interrupt`; no quota/rate-limit/auth markers yet (the
 /// SOP says the limits are still to be recorded); tail 16 lines, confirm 2
-/// rounds; unattended `--dangerously-bypass-approvals-and-sandbox`;
+/// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
+/// `-c check_for_update_on_startup=false`;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
 /// grok: busy `Ctrl+c:cancel`; unattended `--always-approve`; session_ref
@@ -264,7 +265,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         // `gear --skill agent:codex`): busy `esc to interrupt` (the screen
         // shows `• Working (<time> • esc to interrupt)`); no quota markers
         // yet — the SOP says the five-hour and weekly limits are still to be
-        // recorded; unattended `--dangerously-bypass-approvals-and-sandbox`;
+        // recorded; unattended `--dangerously-bypass-approvals-and-sandbox`
+        // and `-c check_for_update_on_startup=false` — without the second one
+        // Codex shows its "Update available" dialog at start and the agent
+        // sits blocked, unseen (2026-10-25, codex 0.163.0 → 0.164.0);
         // Herdr reports the session uuid, so session_ref is true; resume is
         // the subcommand `codex resume <uuid>`.
         "codex" => Some(Profile {
@@ -276,7 +280,11 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
-            unattended_args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+            unattended_args: vec![
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+                "-c".into(),
+                "check_for_update_on_startup=false".into(),
+            ],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
             // Two: after a turn the first ctrl+c only interrupts ("Conversation

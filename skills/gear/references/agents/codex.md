@@ -10,6 +10,7 @@ Tested with codex-cli 0.163, Herdr 0.9.1, macOS.
 |---|---|
 | Herdr kind | `codex` |
 | Unattended flag (required) | `--dangerously-bypass-approvals-and-sandbox` — the header then says `permissions: YOLO mode` |
+| Update check | start flag `-c check_for_update_on_startup=false` — without it Codex shows an "Update available" dialog at start and the agent sits blocked, unseen (2026-10-25, codex 0.163.0 → 0.164.0) |
 | Model | start flag `-m <slug>` (e.g. `gpt-6.1-sol`); always pass it — otherwise the user's default model from `~/.codex/config.toml` is used |
 | Reasoning effort | start flag `-c model_reasoning_effort=<low\|medium\|high\|xhigh>` |
 | Session id | Herdr reports it (`agent get` → `agent_session.value`) after the first turn |
@@ -33,7 +34,7 @@ The pane must show the shell prompt of the agent's worktree (a freshly made pane
 
 ```bash
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
-  -m <slug> -c model_reasoning_effort=<effort> --dangerously-bypass-approvals-and-sandbox
+  -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox
 ```
 
 Check: `"agent_status":"idle"` and the header `permissions: YOLO mode`; the status bar shows the model (the effort may read `default` until the first turn — `/status` shows it). Startup warnings about the user's own `~/.codex/config.toml` (`⚠ N warnings`) are harmless.
@@ -51,7 +52,7 @@ A long turn makes `--wait` time out; that does not mean the prompt was lost — 
 ```bash
 herdr agent send-keys <name> ctrl+c ctrl+c
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
-  resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> --dangerously-bypass-approvals-and-sandbox
+  resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox
 ```
 
 After the exit the screen shows `codex resume <uuid>` and the shell prompt. After a resume wait until the status bar shows `Context N% used` before prompting. Never resume with an empty id: it opens a picker, and the next prompt lands in its search box.

@@ -765,6 +765,7 @@ quota_reset_h = 5
             status: Some(gear_herdr::AgentStatus::Idle),
             flags,
             idle: true,
+            screen: None,
         }]
     }
 
@@ -1043,6 +1044,8 @@ quota_reset_h = 5
             starts[0].2,
             vec![
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "-c".to_string(),
+                "check_for_update_on_startup=false".to_string(),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),
