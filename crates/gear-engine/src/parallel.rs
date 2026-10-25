@@ -5,6 +5,12 @@
 //! T-53: the scan runs per repo. A task's repo is its lane's repo, so only
 //! tasks of the same repo are compared: two lanes in two repos share no file,
 //! and each repo is scanned against its own integration branch.
+//!
+//! T-64: a task whose candidate is already in the integration branch has
+//! landed. The engine merges the approved candidate, not the branch (T-61),
+//! and a branch may still point past it — at a commit the merge never took.
+//! Such a task is not an open change: it is skipped, so a merged task raises
+//! no item and an open task is not paired with work that already landed.
 
 use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, process::Command};
 use gear_app::config::Repo;
@@ -24,6 +30,17 @@ pub struct Check {
     pub problems: Vec<String>,
 }
 
+/// One task of the scan: its branch is the open change, unless the work it
+/// handed in has already landed.
+struct TaskIn {
+    task: String,
+    lane: String,
+    /// The candidate of the task's latest attempt: the commit the engine
+    /// merges when the review passes (T-61), and the one that tells a landed
+    /// task from an open one (T-64).
+    candidate: Option<String>,
+}
+
 /// One scan: the repo, the tasks of that repo and the state it remembers.
 struct Input {
     /// The repo's key in the meta: its name, "-" for the project root.
@@ -32,7 +49,7 @@ struct Input {
     project: String,
     repo: PathBuf,
     integration: String,
-    tasks: Vec<(String, String)>,
+    tasks: Vec<TaskIn>,
     handins: String,
 }
 
@@ -151,11 +168,16 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
         }
         let mut inputs = Vec::new();
         for (key, (repo, tasks)) in groups {
-            // The hand-ins of this repo: a new one starts the scan early.
+            // The hand-ins of this repo: a new one starts the scan early. The
+            // latest candidate of every task is the one a merge would take
+            // (T-64), so the scan can tell a landed task from an open one.
             let mut handins = Vec::new();
+            let mut candidates: BTreeMap<String, String> = BTreeMap::new();
             for task in &tasks {
+                // Oldest first: the last candidate is the latest attempt's.
                 for attempt in tx.attempts_of_task(project, &task.id)? {
                     if let Some(candidate) = attempt.candidate {
+                        candidates.insert(task.id.clone(), candidate.clone());
                         handins.push((task.id.clone(), attempt.n, candidate));
                     }
                 }
@@ -172,7 +194,12 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             }
             let tasks = tasks.into_iter()
                 .filter(|t| !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed))
-                .filter_map(|t| t.lane.map(|lane| (t.id, lane))).collect();
+                .filter_map(|t| {
+                    let lane = t.lane?;
+                    let candidate = candidates.get(&t.id).cloned();
+                    Some(TaskIn { task: t.id, lane, candidate })
+                })
+                .collect();
             inputs.push(Input {
                 key,
                 project: project.to_string(),
@@ -217,8 +244,18 @@ fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
     };
     let mut branches = Vec::new();
     let mut conflicts = BTreeMap::new();
-    for (task, lane) in &input.tasks {
-        let name = crate::dispatch::task_branch(lane, task);
+    for task in &input.tasks {
+        // A task whose candidate is already in the integration branch has
+        // landed: the engine merged that commit, and whatever its branch still
+        // points at is work no merge will take (T-64). It is not an open
+        // change, so it neither conflicts with integration nor pairs with an
+        // open task.
+        if let Some(candidate) = &task.candidate {
+            if ancestor(&input.repo, candidate, &integration)? {
+                continue;
+            }
+        }
+        let name = crate::dispatch::task_branch(&task.lane, &task.task);
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),
@@ -230,11 +267,11 @@ fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
         let integration_files = changed(&input.repo, &head, &integration)?;
         let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
         if !shared.is_empty() {
-            conflicts.insert(format!("integration:{task}"), Conflict {
-                left: format!("{task} ({lane})"), right: format!("integration {}", input.integration), files: shared,
+            conflicts.insert(format!("integration:{}", task.task), Conflict {
+                left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
             });
         }
-        branches.push(Branch { task: task.clone(), lane: lane.clone(), files });
+        branches.push(Branch { task: task.task.clone(), lane: task.lane.clone(), files });
     }
     branches.sort_by(|a, b| a.task.cmp(&b.task));
     for (index, left) in branches.iter().enumerate() {
