@@ -1151,7 +1151,7 @@ quota_reset_h = 5
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
         herdr.exit_agent(PANE);
-        herdr.refuse_next_start = Some("agent_pane_busy".into());
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
         assert!(deliveries(&mut store).is_empty());

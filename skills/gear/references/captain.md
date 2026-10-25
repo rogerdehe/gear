@@ -25,7 +25,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    - **Then the kickoff sheet** in one question: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. Offer two options, "confirm" and "not now" (more to discuss before departure) — a question tool needs two, and two options that mean the same are noise; the user writes any change as their own text answer. Apply the changes and show the sheet again until it is confirmed. Never offer a "change something" option that takes no input, and never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
-4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then ask the user to register the project in their own shell — `init` is a user command, never an agent's. After it succeeds, apply the plan:
+4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then register the project yourself (T-86): the confirmed sheet is the user's consent, and it is the only reason your pane carries `GEAR_ADMIN=1`. Register again after every config change. Then apply the plan:
 
    ```toml
    [project]
@@ -83,7 +83,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
-   `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model). The engine then starts the lanes and delivers their first tasks.
+   Run it in your own pane, from the project's repository: `init` accepts the user's shell and the project's captain, and refuses every other seat. `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model); fix the config and run it again — a second init is the config change, and it writes the next config version. The engine then starts the lanes and delivers their first tasks.
 
 ## 2. The plan file
 

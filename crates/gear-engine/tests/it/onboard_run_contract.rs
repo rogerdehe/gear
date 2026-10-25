@@ -258,6 +258,9 @@ on_quota = { lanes = "wait", review = "wait" }
             .subsec_nanos()
     ));
     std::fs::create_dir_all(&home).unwrap();
+    // HOME is process-wide: no other test may onboard a grok lane (or set
+    // HOME) in this window.
+    let _home = crate::HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let previous = std::env::var("HOME").ok();
     std::env::set_var("HOME", &home);
 

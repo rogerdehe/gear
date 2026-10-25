@@ -24,4 +24,3 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - T-66: the engine warns the captain before a lane runs dry, each tick (not only at plan apply).
 - T-70: engine alerts de-duplicated by fact and closed when their cause is gone (trial G06, G10).
 - T-89 F1 (logged at review): a busy agent start is retried inside one onboarding call (up to ~20 s, blocking the tick) instead of on the next tick.
-- Plan apply is not idempotent for `state: cancelled`: re-applying a plan that still says it fails ("task T-n is already cancelled"), so the captain must delete the line after the first apply (M3, three times).

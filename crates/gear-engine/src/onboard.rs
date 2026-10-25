@@ -327,15 +327,24 @@ fn onboard_seat(
     crate::trust::trust_worktree(&plan.kind, &created.path, now)
         .map_err(|reason| format!("trust: {reason}"))?;
     // The shell may still be running the environment line when the start
-    // comes (a slow shell init): Herdr then refuses with agent_pane_busy.
-    // That is a race, not a failure — wait a moment and try again.
-    let mut tries = 0;
+    // comes (a slow shell init — nvm, a plugin manager): Herdr then refuses
+    // with agent_pane_busy. That is "not yet", not a failure (T-89): wait for
+    // the shell, bounded, and only park when the wait runs out. The first
+    // refusal never parks a lane.
+    let limit = std::time::Duration::from_secs(cfg.pane_busy_limit_s.max(0) as u64);
+    let wait = std::time::Duration::from_millis(cfg.pane_busy_wait_ms);
+    let began = std::time::Instant::now();
     let started = loop {
         match herdr.agent_start(&plan.agent_name, &plan.kind, &pane, &plan.args) {
             Outcome::Ok(info) => break info,
-            Outcome::Refused { code, .. } if code == "agent_pane_busy" && tries < PANE_BUSY_RETRIES => {
-                tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(PANE_BUSY_WAIT_MS));
+            Outcome::Refused { code, .. } if code == "agent_pane_busy" && began.elapsed() < limit => {
+                std::thread::sleep(wait);
+            }
+            Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
+                return Err(format!(
+                    "agent_start: refused (agent_pane_busy): the shell was still busy after {}s (the environment line has not finished)",
+                    cfg.pane_busy_limit_s.max(0)
+                ));
             }
             other => return Err(step_failure("agent_start", &other)),
         }
@@ -440,11 +449,6 @@ fn resume_start(
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
     Ok(true)
 }
-
-/// How often a start refused because the shell is still busy is retried, and
-/// how long to wait between tries.
-const PANE_BUSY_RETRIES: u32 = 5;
-const PANE_BUSY_WAIT_MS: u64 = 1000;
 
 /// The key of a seat's worktree path in the engine's meta (the seat row has
 /// no field for it).
@@ -740,13 +744,53 @@ repo = "web"
     fn a_busy_shell_at_start_is_retried() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-        herdr.refuse_next_start = Some("agent_pane_busy".into());
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
         let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(seat.state, SeatState::Active, "not NeedsCheck");
+    }
+
+    /// A shell that stays busy for several tries is waited for, not parked
+    /// (T-89): a slow shell init is the normal case on a fresh worktree.
+    #[test]
+    fn a_shell_busy_for_a_while_is_waited_for() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 3));
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "four attempts, then the start");
+    }
+
+    /// Past the wait the shell is not coming back on its own: the seat parks
+    /// in NeedsCheck, and the reason names the shell and the wait.
+    #[test]
+    fn a_shell_busy_past_the_wait_parks_the_seat() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1000));
+        let mut cfg = cfg();
+        cfg.pane_busy_limit_s = 1;
+        cfg.pane_busy_wait_ms = 10;
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+        assert!(active.is_empty());
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(reason.contains("agent_pane_busy"), "{reason}");
+        assert!(reason.contains("still busy after 1s"), "{reason}");
+        assert!(
+            !herdr.started_agents.contains(&"toy-heat".to_string()),
+            "no agent was started"
+        );
     }
 
     #[test]
