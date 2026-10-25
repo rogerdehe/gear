@@ -19,3 +19,7 @@
 
 ## Station projection ignores parallel lanes (M3)
 The station's "projected finish" multiplies the sum of all open estimates by the pace (M3: 800m × 1.73 = 1470m against a 6h eta), as if one lane did all the work. Project per lane (its own open estimates × measured actual/estimate) and take the slowest lane; show which lane sets the finish, so the captain sees an imbalance instead of a false overrun.
+
+## Cut from M3 at station M-916
+- T-66: the engine warns the captain before a lane runs dry, each tick (not only at plan apply).
+- T-70: engine alerts de-duplicated by fact and closed when their cause is gone (trial G06, G10).
