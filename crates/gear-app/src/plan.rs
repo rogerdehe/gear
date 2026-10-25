@@ -1303,6 +1303,11 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("Estimate: {minutes} minutes\n"));
     }
+    // The project standard (T-84): the writer judges against it too.
+    if let Some(line) = crate::standard::line_for(tx, project)? {
+        text.push_str(&line);
+        text.push('\n');
+    }
     // The voyage this task sails on (T-22): the one sentence the phase is
     // judged by, its quality bar, the planned landing and where it departed.
     if let Some(milestone) = row.milestone.as_deref() {
