@@ -5,7 +5,6 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| `[profiles.codex]` in `gear/gear.toml` (unattended args with `check_for_update_on_startup=false`) | Codex reviewers stood blocked on the start-up "Update available" dialog (T-52, T-56) | T-57 lands (the built-in codex profile carries the flag) | captain |
 
 ## Removed
 
@@ -18,3 +17,4 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 - 2026-10-23 manual release of review temps: the engine releases them (T-17).
 - 2026-10-23 `inbox.sh`, `board.sh`, `ops/mail`, `ops/PLAN.md`, `ops/tasks` packets: archived/removed — GEAR's store, home page and board replaced them.
 - 2026-10-23 `start-reviewer.sh`, `models.conf`, warm seats `home-review-<k>`: the engine starts reviewers (T-5) on the config's `[models].review`; warm seats return with T-18.
+- 2026-10-25 `[profiles.codex]` override in `gear/gear.toml` (update check off): T-57 put the flag in the built-in codex profile.

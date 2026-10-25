@@ -68,8 +68,3 @@ bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
 [conventions]
 integration = "dev"
 release = "main"
-
-# Stopgap until T-57 lands (ops/STOPGAPS.md): Codex shows an "Update
-# available" dialog at start and the reviewer sits blocked.
-[profiles.codex]
-unattended_args = ["--dangerously-bypass-approvals-and-sandbox", "-c", "check_for_update_on_startup=false"]
