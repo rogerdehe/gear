@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.1.0 is released — prebuilt `gear` for macOS (Apple silicon, Intel) and Linux x86_64 under [Releases](https://github.com/rogerdehe/gear/releases).
+> **Status:** v0.2.0 is released — prebuilt `gear` for macOS (Apple silicon, Intel) and Linux x86_64 under [Releases](https://github.com/rogerdehe/gear/releases).
 
 ## Requirements
 
