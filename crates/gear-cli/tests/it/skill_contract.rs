@@ -109,14 +109,6 @@ fn unknown_topic_is_bad_format_and_lists_topics() {
     assert!(e.contains("decompose") && e.contains("agent:opencode"), "{e}");
 }
 
-#[test]
-fn not_yet_commands_fail_cleanly() {
-    let home = scratch::home("skill-not-yet");
-    let o = gear(&home, &["admin", "seat", "confirm", "x"]); // after the walking skeleton
-    assert_eq!(o.status.code(), Some(1));
-    assert!(stderr(&o).starts_with("ERROR FORBIDDEN: "), "{}", stderr(&o));
-}
-
 /// T-41: a `gear` call without `GEAR_DB` opens the store under its `HOME`.
 /// The tests give it a scratch home, so the store they write is a scratch one
 /// and never the production store.

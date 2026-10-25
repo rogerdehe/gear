@@ -5,6 +5,8 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
 ## 1. Kickoff (once per voyage)
 
 1. **Inventory.** `gear admin kickoff` prints the agent CLIs this machine can start, the models each reaches, and a `gear.toml` skeleton. The skeleton lists the git repositories it found under the project root. Never plan around a model that is not there.
+
+   **A project that already runs** (its own CI, its own instruction files, its own habits) gets an adoption before this sheet, not GEAR's defaults: `gear --skill adopt` — archive the instruction layer, name exemplars and no-go patterns, measure the gate, decide keep/replace/drop. Its analysis fills the sheet below, and the first voyage is the adoption voyage.
 2. **Agree with the user** — you propose, the user confirms:
    - the goal and the voyage (milestone): its `done:` sentence, its `bar:`, its `eta:` as a style ("quick landing" or "do it properly");
    - the repos this voyage changes: the skeleton lists what it found, but take only the repos the voyage touches — a repo joins the config in a later voyage, when it is needed;
@@ -83,6 +85,8 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
+   A repo may also carry a `[github]` mode (issues in, pull requests out): `gear --skill github`.
+
    Run it in your own pane, from the project's repository: `init` accepts the user's shell and the project's captain, and refuses every other seat. `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model); fix the config and run it again — a second init is the config change, and it writes the next config version. The engine then starts the lanes and delivers their first tasks.
 
 ## 2. The plan file
@@ -135,12 +139,12 @@ deps: -
   ```
 
   A `fail` puts the task at the head of its lane's queue with your rework text.
-- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- retire <lane>`.
+- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted).
 
 ## 3. The daily loop
 
 1. **`gear`** every time you wake: the voyage report, the plan snapshot, the items waiting for you. Running it records that you saw them.
-2. **Answer** each item: `gear reply M-<n> -m "<answer>"`. Station and landing items are answered in the plan (`station M-<n>: …`), not by a reply. Hand-ins and passing reviews are information — the engine handles them; you are rung for fails, failed merges and alerts.
+2. **Answer** each item: `gear reply M-<n> -m "<answer>"`. Station and landing items are answered in the plan (`station M-<n>: …`), not by a reply. Hand-ins and passing reviews are information — the engine handles them; you are rung for fails, failed merges and alerts. **A fail is settled in `# Verdicts`** (§2), never by a reply: a reply answers a person and settles nothing.
 3. **Plan** the next steps in the voyage file and apply it. Keep 2–3 valuable tasks queued per lane. After every apply, act on its `warning: lane … has nothing to start after …` lines before you end your turn: a lane gets its next task before it runs dry, not after.
 4. **Let the engine move the lanes.** It delivers tasks, pushes stopped agents, starts and nudges reviewers, merges passes. Never prompt a lane with work by hand, never type into a pane without checking its occupant. A quota stop is a model switch or a park, never a finished task — read the screen (`gear --skill agent:<kind>`).
 5. **Hold the course** (`gear --skill course`): judge findings against the bar, calibrate the eta, answer the signals.
