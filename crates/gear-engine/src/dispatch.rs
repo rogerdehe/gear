@@ -476,7 +476,7 @@ mod tests {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: NOW,
+                 issue: None,updated: NOW,
             }],
             safe_for_next: false,
         }

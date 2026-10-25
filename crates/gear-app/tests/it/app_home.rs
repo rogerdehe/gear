@@ -325,7 +325,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: NOW,
+                 issue: None,updated: NOW,
             })?;
         }
         Ok(())
