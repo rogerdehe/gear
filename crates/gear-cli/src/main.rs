@@ -2705,6 +2705,9 @@ mod tests {
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
+                // T-76: the folder the agent runs in is trusted.
+                "-c".to_string(),
+                "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
             ]
         );
     }

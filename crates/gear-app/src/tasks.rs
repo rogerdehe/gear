@@ -210,6 +210,20 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
             format!("no task {task} in project {project}"),
         )
     })?;
+    // The hand-in must name the task's *current* contract (T-63): the reviewer
+    // is sent the contract the hand-in was made against, so a lane that read an
+    // older version has to read the task again and adopt the current one
+    // before it hands in. Nothing is written when this refuses.
+    if contract_version != task_row.contract_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is on contract v{}, not the v{contract_version} this hand-in names: \
+                 run `gear` and `gear --show {task}` to work to v{}, then hand in again",
+                task_row.contract_version, task_row.contract_version
+            ),
+        ));
+    }
     require_transition(
         TaskState::can_transition(task_row.state, TaskState::Verifying),
         "task",
