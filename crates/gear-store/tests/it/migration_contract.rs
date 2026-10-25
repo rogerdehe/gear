@@ -254,3 +254,34 @@ fn a_store_without_a_version_is_migrated_up() {
     let mut store = Store::open(&path).unwrap();
     assert_eq!(version_of(&mut store), SCHEMA_VERSION.to_string());
 }
+
+#[test]
+fn a_store_of_v2_gains_the_push_destinations_of_t73() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.db");
+    {
+        // A store of v2: the version before T-73's table, with its rows.
+        let mut store = Store::open(&path).unwrap();
+        store
+            .write(|tx| {
+                tx.set_meta("schema_version", "2")?;
+                tx.set_push_destinations("p", "", &["github.com/owner/repo".to_string()], 100)?;
+                Ok(())
+            })
+            .unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE push_destinations").unwrap();
+    }
+
+    // The binary opens the store: it is carried up and the table is there.
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(version_of(&mut store), SCHEMA_VERSION.to_string());
+    let shape = shape_of(&path);
+    assert!(
+        shape.iter().any(|(table, _)| table == "push_destinations"),
+        "the table of T-73 is missing: {shape:?}"
+    );
+    // The rows of the store are still there.
+    let marker = store.read(|tx| tx.get_meta("schema_version")).unwrap();
+    assert_eq!(marker.as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+}
