@@ -11,6 +11,8 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 5. **An agent that is busy is never given work** — so a lane must end its turn after a hand-in, and the captain must never prompt a lane with work by hand.
 6. **The safety net must exist before the risk.** A quota fallback that is itself a pending task is not a fallback; kickoff refuses a policy the engine cannot carry out.
 
+7a. **An interface between two tasks is a contract, not a dependency** (M2.1, 2026-10-25). The captain made T-53 wait for T-52 because T-53 used T-52's API — the API was already written out in T-52's goal, so nothing stopped T-53 from starting. The engine lane stood idle from the first minute, and the captain's own snapshot showed it (`engine · no current task · 1 queued`) and was ignored; the user had to point it out. A `deps:` is for work that cannot start without the other's result; shared names are fixed in both contracts and the later task rebases. At every apply, every lane must have a task it can start now.
+
 ## Holding the course
 
 7. **The captain judges findings against the voyage's bar**; reviewers give the smallest exact fix; one round is the norm. Copying reviewer severities into rework cost M1 36 rounds for 28 tasks; judging them cost M2 3 rounds for 17.
