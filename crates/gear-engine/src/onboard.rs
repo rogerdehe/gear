@@ -312,7 +312,15 @@ fn onboard_seat(
     if kind == "opencode" {
         if let Some(entry) = entry {
             plan.args.extend(crate::opencode::start_args(
-                store, herdr, &seat.id, generation, &created.path, config, entry.model(),
+                store,
+                herdr,
+                &seat.id,
+                generation,
+                &created.path,
+                config,
+                entry.model(),
+                cfg.model_list_wait_s,
+                cfg.model_list_poll_ms,
             )?);
         }
     }
@@ -723,6 +731,93 @@ repo = "web"
         assert_eq!(body["model"], model);
         let path = store.read(|tx| tx.get_meta(&worktree_path_key("toy:heat"))).unwrap().unwrap();
         assert_eq!(body["location"]["directory"], path);
+    }
+
+    /// T-67 (trial G01): an empty `model.list` for a fresh directory means
+    /// "not loaded yet". The lane waits for it and starts — no other model,
+    /// no other provider.
+    #[test]
+    fn an_empty_model_list_is_waited_for() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("┃ Build auto · MiniMax-M3.1-Flash".into());
+        let model = serde_json::json!({"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"});
+        herdr.api_replies.extend([
+            // The directory's catalogue is not loaded yet …
+            Ok(serde_json::json!({"data":[]})),
+            // … then it is.
+            Ok(serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_waited", "model":model}})),
+            // The model gate after the start.
+            Ok(serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "variants":[]}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_waited", "model":model}})),
+        ]);
+        let mut cfg = cfg();
+        cfg.model_list_wait_s = 5;
+        cfg.model_list_poll_ms = 10;
+
+        assert_eq!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap(), ["toy:heat"]);
+
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "not NeedsCheck");
+        let binding = store.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.session_ref.as_deref(), Some("ses_waited"));
+        // The same directory is asked again — never another one.
+        let looks: Vec<Vec<String>> = herdr
+            .calls
+            .iter()
+            .filter_map(|call| match call {
+                gear_herdr::fake::Call::OpenCodeApi { args } if args[0] == "model.list" => {
+                    Some(args.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(looks.len() >= 2, "{looks:?}");
+        assert_eq!(looks[0], looks[1], "the same directory is asked again");
+        // Never a model switch typed into the TUI: the API decided.
+        assert!(!herdr.calls.iter().any(|call| matches!(call,
+            gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. })));
+    }
+
+    /// The list is there and does not hold the model: a config fault, named.
+    #[test]
+    fn a_model_absent_from_a_loaded_list_parks_the_lane() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.extend([Ok(serde_json::json!({
+            "data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.0-old", "variants":[]}]
+        }))]);
+
+        assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(reason.contains("invalid OpenCode model"), "{reason}");
+        assert!(reason.contains("absent from model.list"), "{reason}");
+        assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })));
+    }
+
+    /// Still empty when the wait runs out: NeedsCheck says so, with the
+    /// directory — the model is neither valid nor invalid.
+    #[test]
+    fn a_model_list_that_stays_empty_parks_the_lane() {
+        let mut store = world(CONFIG_WITH_MODELS);
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.extend([Ok(serde_json::json!({"data":[]}))]);
+        let mut cfg = cfg();
+        cfg.model_list_wait_s = 0;
+
+        assert!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap().is_empty());
+
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(reason.contains("model list is not loaded"), "{reason}");
+        let path = store.read(|tx| tx.get_meta(&worktree_path_key("toy:heat"))).unwrap().unwrap();
+        assert!(reason.contains(&path), "the directory is named: {reason}");
+        assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })));
     }
 
     #[test]
