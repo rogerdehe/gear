@@ -108,6 +108,9 @@ pub struct TickReport {
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
     pub blocked: Vec<String>,
+    /// Seats that wait for their provider (T-75): a provider back-off is not
+    /// a stall, and the home page shows it.
+    pub backoff: Vec<String>,
     /// Parallel-change warning message ids (`project:M-n`).
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
@@ -174,6 +177,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report
             .blocked
             .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
+
+        // T-75: a seat whose provider is in a back-off waits for the provider.
+        // It is not stuck, so no stall item is raised for it, and the captain's
+        // home page shows it as a back-off.
+        let waiting = stall::waiting_for_provider(&profiles, &observed);
+        store.write(|tx| tx.set_seats_in_backoff(&project, &waiting))?;
+        report.backoff.extend(waiting);
 
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
 
