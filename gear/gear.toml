@@ -1,4 +1,4 @@
-# GEAR's own project config. M2 kickoff confirmed by the user 2026-10-23.
+# GEAR's own project config. M2.1 kickoff confirmed by the user 2026-10-25.
 # Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
 
 [project]
@@ -16,44 +16,44 @@ kind = "claude"
 profile = "claude"
 
 [[lanes]]
-name = "steady"
-duty = "Stability, so GEAR never stops: cross-CLI model fallback, the captain's quota, merging beside the tick, finishing a lane's retirement, early low-queue warnings, a hand-in that does not ring the captain"
-owns = ["crates/gear-engine/", "crates/gear-herdr/"]
-kind = "opencode"
-profile = "opencode"
-
-[[lanes]]
-name = "course"
-duty = "Holding the course: per-attempt timestamps and time accounting, the voyage report, drift signals found in practice, stale-item re-alerts, the tail declaration, board wording"
+name = "config"
+duty = "M2.1 multi-repo in gear-app: [[repos]] and a lane's repo= in the config, its checks, the hand-in check, init per repo, the kickoff skeleton; re-init restarts a retired lane"
 owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "base"
-duty = "The base for other users: store schema version, gear --version, the kickoff skeleton, the deletion pass, the install path"
+name = "engine"
+duty = "M2.1 multi-repo in the engine: onboarding, reviews, merges, the gate and the parallel-change check follow the lane's repo"
+owns = ["crates/gear-engine/", "crates/gear-herdr/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "docs"
+duty = "M2.1 multi-repo in the skill and docs: the [[repos]] format, choosing a voyage's repos, cutting a cross-repo requirement into per-repo tasks"
 owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/"]
 kind = "opencode"
 profile = "opencode"
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is Claude Code claude-sonnet-5-5 --effort high (T-35)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is OpenCode Go deepseek-v4-pro (M2.1 kickoff)
 kind = "codex"
 profile = "codex"
 
 [models]
 # A chain entry may name the CLI that runs the model and the arguments that
-# CLI starts with (T-35). The first entry runs on the lane's own CLI (the
-# in-place switch of T-33); the second one needs another CLI, so the engine
-# closes the agent and starts codex in the same pane and worktree.
+# CLI starts with (T-35). Both lane models run on OpenCode (an in-place
+# switch, T-33); the reviewer's fallback needs another CLI, so the engine
+# closes codex and starts opencode in the same pane and worktree.
 lanes = [
   "minimax-cn/MiniMax-M3.1-Flash",
-  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+  "opencode-go/deepseek-v4.1-flash",
 ]
-# The reviewer never runs the model it reviews: when a lane fell back to
-# gpt-6.1-sol, the review runs the next entry of this chain (Claude Code).
+# The reviewer never runs the model it reviews. Both chains exhausted: the
+# seat parks until the reset and the captain tells the user (M2.1 kickoff).
 review = [
   { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
-  { model = "claude-sonnet-5-5", cli = "claude", args = ["--effort", "high"] },
+  { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
 ]
 on_quota = { lanes = "fallback", review = "fallback" }
 quota_reset_h = 5
@@ -64,6 +64,16 @@ quota_reset_h = 5
 [models.switch."minimax-cn/MiniMax-M3.1-Flash"]
 picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
 bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+variant = "high"
+
+[models.switch."opencode-go/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro (New) OpenCode Go"
+bar = "DeepSeek V4 Pro (New) OpenCode Go"
+variant = "high"
 
 [conventions]
 integration = "dev"
