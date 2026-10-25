@@ -5,6 +5,13 @@
 //!
 //! The one exception is [`latest`]: it reads the config a project is
 //! registered with, so the engine and every command read the same version.
+//!
+//! A project may be made of several git repositories (T-52): the root the
+//! project is registered with, plus a `[[repos]]` entry per child repo below
+//! it. Each lane works in one repo — [`ProjectConfig::repo_of_lane`] — and
+//! that repo's own integration branch and gate carry its work. A config
+//! without `[[repos]]` is a single-repo project and behaves exactly as
+//! before.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use gear_store::Store;
@@ -19,6 +26,10 @@ pub struct ProjectConfig {
     pub captain: CaptainSection,
     #[serde(default)]
     pub lanes: Vec<LaneSection>,
+    /// The project's other repos, below `project.repo` (T-52). Empty = a
+    /// single-repo project: every lane works in the root.
+    #[serde(default)]
+    pub repos: Vec<RepoSection>,
     #[serde(default)]
     pub temps: Option<TempsSection>,
     #[serde(default)]
@@ -31,6 +42,59 @@ pub struct ProjectConfig {
     /// Per-kind profile overrides, kept as raw TOML; merged by the engine (04).
     #[serde(default)]
     pub profiles: BTreeMap<String, toml::Table>,
+}
+
+impl ProjectConfig {
+    /// The project's root repo (T-52): the checkout the project is
+    /// registered with, with the project's own branches and gate.
+    pub fn root_repo(&self) -> Repo {
+        Repo {
+            name: String::new(),
+            path: self.project.repo.clone(),
+            integration: self.conventions.integration.clone(),
+            release: self.conventions.release.clone(),
+            gate: self.conventions.gate.clone(),
+        }
+    }
+
+    /// The repo a lane works in (T-52): the `[[repos]]` entry its `repo`
+    /// names, with that repo's own branches and gate (its own, or the
+    /// project's `[conventions]`).
+    ///
+    /// A lane without a `repo`, a lane that is not in the config and a lane
+    /// naming a repo that is not there all work in the project root.
+    pub fn repo_of_lane(&self, lane: &str) -> Repo {
+        let bound = self
+            .lanes
+            .iter()
+            .find(|section| section.name == lane)
+            .and_then(|section| section.repo.as_deref());
+        match bound.and_then(|name| self.repos.iter().find(|repo| repo.name == name)) {
+            Some(section) => self.repo_of_section(section),
+            None => self.root_repo(),
+        }
+    }
+
+    /// One `[[repos]]` entry, resolved: its absolute path and its effective
+    /// branches and gate.
+    fn repo_of_section(&self, section: &RepoSection) -> Repo {
+        Repo {
+            name: section.name.clone(),
+            path: join_path(&self.project.repo, &section.path),
+            integration: section
+                .integration
+                .clone()
+                .unwrap_or_else(|| self.conventions.integration.clone()),
+            release: section
+                .release
+                .clone()
+                .unwrap_or_else(|| self.conventions.release.clone()),
+            gate: section
+                .gate
+                .clone()
+                .unwrap_or_else(|| self.conventions.gate.clone()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -71,6 +135,52 @@ pub struct LaneSection {
     /// Overrides `models.lanes` for this lane; empty = use the role chain.
     #[serde(default)]
     pub models: Vec<ModelEntry>,
+    /// The `[[repos]]` entry this lane works in (T-52); absent = the project
+    /// root.
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+/// One repo of a multi-repo project (T-52): a child repository below
+/// `project.repo`, with its own branches and gate.
+///
+/// `integration`, `release` and `gate` are optional: a repo without them
+/// uses the project's `[conventions]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepoSection {
+    /// The repo's name: `[a-z][a-z0-9-]*`. A lane binds to it with `repo =`.
+    pub name: String,
+    /// The repo's path, relative to `project.repo`: never absolute, never
+    /// leaving `project.repo` with `..`.
+    pub path: String,
+    /// The repo's integration branch; absent = `[conventions].integration`.
+    #[serde(default)]
+    pub integration: Option<String>,
+    /// The repo's release branch; absent = `[conventions].release`.
+    #[serde(default)]
+    pub release: Option<String>,
+    /// The gate that runs in this repo before a merge; absent =
+    /// `[conventions].gate`.
+    #[serde(default)]
+    pub gate: Option<String>,
+}
+
+/// A repo of the project, resolved (T-52): the project root or one of the
+/// `[[repos]]` entries, with the path, branches and gate the engine uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repo {
+    /// The repo's name; "" for the project root.
+    pub name: String,
+    /// The repo's path: the project's own path for the root, `project.repo`
+    /// joined with the entry's path for a `[[repos]]` entry.
+    pub path: String,
+    /// The repo's integration branch.
+    pub integration: String,
+    /// The repo's release branch.
+    pub release: String,
+    /// The gate that runs in this repo before a merge.
+    pub gate: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -407,15 +517,21 @@ pub fn profile_table(
 }
 
 /// All findings, in field order (project, quota, captain, lanes in order,
-/// conventions, timing, models); empty = valid. Rules:
+/// repos in order, conventions, timing, models); empty = valid. Rules:
 /// - `project.id`, every lane `name`: `[a-z][a-z0-9-]*` (`gear_model::valid_name`
 ///   is NOT this rule — check it here);
 /// - `<project.id>-<lane.name>` and `<project.id>-captain` ≤ 32 chars (Herdr agent names);
 /// - lane names unique; lane `duty` non-empty after trim; `owns` non-empty;
 /// - `owns` entries of two different lanes must not overlap: equal, or one is a
 ///   path prefix of the other on a `/` boundary (`src/a/` vs `src/a/b.rs` overlap;
-///   `src/a` vs `src/ab` do not);
+///   `src/a` vs `src/ab` do not) — only between lanes of the **same** repo
+///   (T-52): the same paths in two repos are two different files;
 /// - number of lanes ≤ `quota.lanes`;
+/// - every `[[repos]]` name: `[a-z][a-z0-9-]*` and unique;
+/// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
+/// - every `[[repos]]` gate: not empty and no TODO; its integration and
+///   release: non-empty and different (its own, else `[conventions]`'s);
+/// - a lane's `repo` names one of the `[[repos]]` entries;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
 /// - `timing.cooldown_s > timing.tick_s`;
@@ -528,6 +644,16 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             ));
         }
 
+        // The lane's repo must be one of the project's repos (T-52).
+        if let Some(repo) = &lane.repo {
+            if !cfg.repos.iter().any(|entry| &entry.name == repo) {
+                issues.push(issue(
+                    &format!("lanes[{index}].repo"),
+                    format!("the lane's repo {repo:?} is not one of the project's repos"),
+                ));
+            }
+        }
+
         let owns_field = format!("lanes[{index}].owns");
         let owns: Vec<&str> = lane.owns.iter().map(|entry| entry.trim()).collect();
         if owns.is_empty() {
@@ -542,12 +668,110 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             ));
         } else if let Some(other) = cfg.lanes[..index]
             .iter()
-            .find(|earlier| owns_overlap(&earlier.owns, &lane.owns))
+            .find(|earlier| {
+                // Two lanes overlap only when they work in the same repo
+                // (T-52): the same paths in two repos are two different
+                // files, and a lane's `owns` is relative to its repo.
+                earlier.repo == lane.repo && owns_overlap(&earlier.owns, &lane.owns)
+            })
         {
             issues.push(issue(
                 &owns_field,
                 format!("overlaps the paths owned by lane {:?}", other.name),
             ));
+        }
+    }
+
+    // ---- repos, in order (T-52): every entry names a repo below
+    // `project.repo`, with its own integration branch, release branch and
+    // gate. A repo without branches or a gate uses the project's
+    // `[conventions]`.
+    let mut first_repo_with_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for (index, repo) in cfg.repos.iter().enumerate() {
+        let name_field = format!("repos[{index}].name");
+        if !is_name(&repo.name) {
+            issues.push(issue(
+                &name_field,
+                format!("repo name {:?} must match [a-z][a-z0-9-]*", repo.name),
+            ));
+        }
+        match first_repo_with_name.get(repo.name.as_str()) {
+            Some(first) => issues.push(issue(
+                &name_field,
+                format!("repo name {:?} is already used by repos[{first}]", repo.name),
+            )),
+            None => {
+                first_repo_with_name.insert(repo.name.as_str(), index);
+            }
+        }
+
+        // The path is relative to `project.repo`: the engine opens the repo
+        // there, so an absolute path or one that leaves the project would
+        // point the work at another checkout.
+        let path_field = format!("repos[{index}].path");
+        let path = repo.path.trim();
+        if path.is_empty() {
+            issues.push(issue(
+                &path_field,
+                "a repo must state its path, relative to project.repo".to_string(),
+            ));
+        } else if path.starts_with('/') {
+            issues.push(issue(
+                &path_field,
+                format!("the repo path {path:?} must be relative to project.repo, not absolute"),
+            ));
+        } else if path.split('/').any(|part| part == "..") {
+            issues.push(issue(
+                &path_field,
+                format!("the repo path {path:?} must not leave project.repo with \"..\""),
+            ));
+        }
+
+        // The repo's own branches, else the project's.
+        let repo_integration = repo
+            .integration
+            .as_deref()
+            .unwrap_or(&cfg.conventions.integration)
+            .trim();
+        let repo_release = repo
+            .release
+            .as_deref()
+            .unwrap_or(&cfg.conventions.release)
+            .trim();
+        if repo_integration.is_empty() {
+            issues.push(issue(
+                &format!("repos[{index}].integration"),
+                "the integration branch must not be empty".to_string(),
+            ));
+        }
+        if repo_release.is_empty() {
+            issues.push(issue(
+                &format!("repos[{index}].release"),
+                "the release branch must not be empty".to_string(),
+            ));
+        }
+        if !repo_integration.is_empty()
+            && !repo_release.is_empty()
+            && repo_integration == repo_release
+        {
+            issues.push(issue(
+                &format!("repos[{index}].release"),
+                format!(
+                    "the release branch must differ from the integration branch {repo_integration:?}"
+                ),
+            ));
+        }
+
+        // The gate runs before every merge in that repo: it must be the
+        // repo's own build + test command. A repo without one runs the
+        // project's gate, which is checked above.
+        if let Some(gate) = &repo.gate {
+            if gate.trim().is_empty() || gate.contains("TODO") {
+                issues.push(issue(
+                    &format!("repos[{index}].gate"),
+                    "the gate must be the repo's own build + test command (it runs before every merge in that repo)".to_string(),
+                ));
+            }
         }
     }
 
@@ -686,6 +910,24 @@ fn agent_name(project: &str, seat: &str) -> String {
     format!("{project}-{seat}")
 }
 
+/// The absolute path of a repo (T-52): the project's own path joined with the
+/// repo's path, which is relative to it. `./` in front and a trailing `/` on
+/// the project path are the same path, not two.
+fn join_path(base: &str, relative: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = if base.is_empty() { "/" } else { base };
+    let relative = relative.trim();
+    let relative = relative.trim_start_matches("./");
+    let relative = relative.trim_matches('/');
+    if relative.is_empty() || relative == "." {
+        return base.to_string();
+    }
+    if base == "/" {
+        return format!("/{relative}");
+    }
+    format!("{base}/{relative}")
+}
+
 /// Herdr agent names are at most 32 characters long.
 fn agent_name_fits(project: &str, seat: &str) -> bool {
     agent_name(project, seat).len() <= 32
@@ -770,5 +1012,18 @@ mod tests {
         assert!(!paths_overlap("src/a", "src/ab"));
         assert!(!paths_overlap("src/heat/", "tests/heat/"));
         assert!(!paths_overlap("src/heat/", "src/pricing/"));
+    }
+
+    /// A repo's path is relative to the project's own path: the joined path
+    /// is the same path however it is written.
+    #[test]
+    fn a_repo_path_is_joined_to_the_project_path() {
+        assert_eq!(join_path("/repo", "crates/api"), "/repo/crates/api");
+        assert_eq!(join_path("/repo", "./crates/api"), "/repo/crates/api");
+        assert_eq!(join_path("/repo", "crates/api/"), "/repo/crates/api");
+        assert_eq!(join_path("/repo/", "crates/api"), "/repo/crates/api");
+        assert_eq!(join_path("/repo", ""), "/repo");
+        assert_eq!(join_path("/repo", "."), "/repo");
+        assert_eq!(join_path("/", "crates/api"), "/crates/api");
     }
 }
