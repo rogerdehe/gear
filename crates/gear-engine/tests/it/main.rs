@@ -1,4 +1,5 @@
 //! All integration tests of gear-engine in one binary: each test binary is scanned by macOS on its first run, so one binary per crate keeps the gate fast.
+mod backoff_contract;
 mod config_profile_onboard;
 mod contract_update;
 mod deliver_confirm_contract;

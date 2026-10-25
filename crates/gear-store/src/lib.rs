@@ -1221,6 +1221,30 @@ impl<'s> Tx<'s> {
         Ok(self.captain_quota(project)?.is_some_and(|state| !state.resumed))
     }
 
+    /// The seats of the project that wait for their provider (T-75): their
+    /// screen shows a provider back-off. Kept in meta, so it survives a
+    /// restart and needs no migration.
+    pub fn seats_in_backoff(&self, project: &str) -> GearResult<Vec<String>> {
+        let raw = self.get_meta(&format!("engine.backoff.{project}"))?;
+        match raw.filter(|raw| !raw.is_empty()) {
+            Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+                GearError::new(ErrorCode::BadFormat, format!("the back-off seats: {error}"))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Keep the seats that wait for their provider (T-75). Nothing is written
+    /// when the set is the same as the stored one.
+    pub fn set_seats_in_backoff(&self, project: &str, seats: &[String]) -> GearResult<()> {
+        if self.seats_in_backoff(project)? == seats {
+            return Ok(());
+        }
+        let raw = serde_json::to_string(seats)
+            .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?;
+        self.set_meta(&format!("engine.backoff.{project}"), &raw)
+    }
+
     // ---- views
 
     pub fn insert_view(&self, v: &ViewRecord) -> GearResult<()> {

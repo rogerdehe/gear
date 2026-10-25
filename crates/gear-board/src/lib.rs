@@ -259,6 +259,9 @@ pub fn project_with_agents(
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
+    // The seats whose provider is in a back-off (T-75): the engine recorded
+    // the wait, and the board says so instead of "working".
+    let backoff = tx.seats_in_backoff(project)?;
 
     // Keep active empty lanes visible, but never recreate a retired lane
     // from a historical task assignment below.
@@ -268,8 +271,10 @@ pub fn project_with_agents(
     let mut lanes = Vec::new();
     for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
         lanes.push(LaneBoard {
-            lane: seat.name.clone(), agent_state: observed_agent_state(tx, seat, agents)?,
-            tasks: Vec::new(), rework: Rework::default(),
+            lane: seat.name.clone(),
+            agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
+            tasks: Vec::new(),
+            rework: Rework::default(),
         });
     }
 
@@ -413,9 +418,15 @@ pub fn project_with_agents(
 }
 
 /// Only label the agent in this generation's active binding.
+///
+/// A seat whose provider is in a back-off says so before anything else
+/// (T-75): it waits for the provider, and that is not a stall.
 fn observed_agent_state(
-    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>,
+    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>, backoff: &[String],
 ) -> GearResult<&'static str> {
+    if backoff.iter().any(|waiting| waiting == &seat.id) {
+        return Ok("provider back-off");
+    }
     let Some(agents) = agents else { return Ok("unknown"); };
     let Some(binding) = tx.get_binding(&seat.id, seat.generation)?
         .filter(|binding| binding.status == BindingStatus::Active)
