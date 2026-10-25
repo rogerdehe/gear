@@ -437,6 +437,11 @@ fn apply_queue(
             remerge(tx, project, task, staff_line(item), now)?;
             continue;
         }
+        if let StaffItem::Retry { lane, .. } = item {
+            retry_lane(tx, project, lane, staff_line(item), now)?;
+            staffed.push(format!("retry {lane}"));
+            continue;
+        }
         let (lane, verb, target, reason) = match item {
             StaffItem::Park { lane, until, until_task, .. } => {
                 let reason = match (until, until_task) {
@@ -461,6 +466,7 @@ fn apply_queue(
                 return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"))
             }
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
+            StaffItem::Retry { .. } => unreachable!("retry is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -559,8 +565,62 @@ fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Park { line, .. }
         | StaffItem::Hold { line, .. }
         | StaffItem::Retire { line, .. }
+        | StaffItem::Retry { line, .. }
         | StaffItem::Remerge { line, .. } => *line,
     }
+}
+
+/// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
+/// (Unknown), goes back to Queued with the reason "retried by the captain", so
+/// the engine onboards it again — the captain's way back without an edit in
+/// the store (trial G02, G04). Any other state is a transition the seat cannot
+/// make: `BadTransition`.
+fn retry_lane(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx
+        .get_seat(&seat_id)?
+        .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
+    if seat.role != SeatRole::Lane {
+        return Err(bad(
+            line,
+            format!(
+                "seat {seat_id} is a {} seat, staff lines name lanes",
+                seat.role.as_str()
+            ),
+        ));
+    }
+    if seat.state == SeatState::Queued {
+        return Ok(()); // already there: a target, not a command
+    }
+    require_transition(
+        SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Queued),
+        "seat",
+        seat.state.as_str(),
+        SeatState::Queued.as_str(),
+    )
+    .map_err(|_| {
+        GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {seat_id} cannot go from {} to {}: only a lane in NeedsCheck or Unknown is retried",
+                seat.state.as_str(),
+                SeatState::Queued.as_str()
+            ),
+        )
+    })?;
+    tx.set_seat_state(
+        &seat_id,
+        SeatState::Queued,
+        Some("retried by the captain"),
+        now,
+    )?;
+    Ok(())
 }
 
 /// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
