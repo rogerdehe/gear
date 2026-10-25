@@ -126,7 +126,8 @@ impl Input {
 
 /// The prefix of the meta of a repo's scan.
 fn prefix_of(project: &str, key: &str) -> String {
-    format!("parallel:{project}:{key}")
+    // Keep the pre-multi-repo root namespace and its existing alert IDs.
+    if key == ROOT { format!("parallel:{project}") } else { format!("parallel:{project}:{key}") }
 }
 
 /// The scans of one project: one per repo that has tasks (T-53). A task

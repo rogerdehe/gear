@@ -148,6 +148,38 @@ fn overlapping_branches_name_both_tasks_and_the_shared_file_once() {
 }
 
 #[test]
+fn legacy_root_overlap_keeps_its_item_and_resolves_it() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SHARED);
+    repo.branch("steady/t2", SHARED);
+    let mut store = repo.store();
+    // Seed the pre-multi-repo namespace, including its original open item.
+    let item = store.write(|tx| {
+        let item = tx.insert_message(&gear_store::NewMessage {
+            project: "p".into(), thread: "parallel:tasks:T-1:T-2".into(),
+            task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
+            recipient: "p:captain".into(), kind: gear_model::MsgKind::System,
+            urgent: false, body: "legacy overlap".into(), reply_to: None,
+            needs_ack: false, state: MsgState::Open, created: T0 - 600,
+        })?;
+        tx.set_meta("parallel:p:pairs", r#"["tasks:T-1:T-2"]"#)?;
+        tx.set_meta("parallel:p:pair:tasks:T-1:T-2:files", &serde_json::json!([SHARED]).to_string())?;
+        tx.set_meta("parallel:p:pair:tasks:T-1:T-2:item", &item.id)?;
+        Ok(item.id)
+    }).unwrap();
+    assert!(scan(&mut store, 0).opened.is_empty(), "upgrade must not duplicate an alert");
+    assert_eq!(pair_items(&mut store).len(), 1);
+    for branch in ["heat/t1", "steady/t2"] {
+        git(&repo.path, &["update-ref", &format!("refs/heads/{branch}"), &repo.base]);
+    }
+    assert!(scan(&mut store, 600).opened.is_empty());
+    let items = pair_items(&mut store);
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, item);
+    assert_eq!(items[0].state, MsgState::Resolved);
+}
+
+#[test]
 fn disjoint_and_same_lane_branches_raise_nothing() {
     let repo = Repo::new();
     repo.branch("heat/t1", SHARED);

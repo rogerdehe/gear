@@ -414,9 +414,11 @@ fn start_reviewer(
         Some(pane) => pane,
         None => {
             // A warm seat is reopened by its path: its checkout is on the last
-            // job's review branch, not on the seat's own branch. A seat whose
-            // last worktree is in another repo gets one in this repo (T-53):
-            // the checkout of another repo holds none of this repo's branches.
+            // job's review branch, not on the seat's own branch. A seat keeps
+            // one checkout per repo (T-53): a seat whose last worktree is in
+            // another repo gets one in this repo — the checkout of another
+            // repo holds none of this repo's branches — and a seat that comes
+            // back to a repo it used before finds its own checkout there.
             let by_path = match worktree_in(store, &seat.id, &repo, &config.root_repo().path)? {
                 Some(path) => herdr.worktree_open_path(&repo.path, &path, &seat_label),
                 None => Outcome::Refused { code: "worktree_not_found".into(), message: String::new() },
@@ -449,9 +451,16 @@ fn start_reviewer(
                 }
             };
             store.write(|tx| {
+                // Archive the previous checkout before replacing the current
+                // path. Older seats have only that path; a missing repo means root.
+                if let Some(previous) = tx.get_meta(&path_key(&seat.id))? {
+                    let previous_repo = tx.get_meta(&repo_key(&seat.id))?
+                        .unwrap_or_else(|| config.root_repo().path);
+                    tx.set_meta(&repo_path_key(&seat.id, &previous_repo), &previous)?;
+                }
+                tx.set_meta(&repo_path_key(&seat.id, &repo.path), &worktree.path)?;
+                // Checkout submission still reads the current-path key.
                 tx.set_meta(&path_key(&seat.id), &worktree.path)?;
-                // The repo the seat's worktree is in: the next job in another
-                // repo must not reopen this one (T-53).
                 tx.set_meta(&repo_key(&seat.id), &repo.path)
             })?;
             worktree.pane_id
@@ -1058,34 +1067,38 @@ fn path_key(seat: &str) -> String {
     format!("engine.review_path.{seat}")
 }
 
-/// Where the repo of a seat's worktree is kept: a warm seat whose last
-/// worktree is in another repo must not reopen it (T-53).
+/// The repo path of the seat's current checkout (the existing metadata format).
 fn repo_key(seat: &str) -> String {
     format!("engine.review_repo.{seat}")
 }
 
-/// The seat's worktree path, once its first job created the worktree.
+/// The seat's current worktree, used to submit its checkout command.
 fn worktree_path(store: &mut Store, seat: &str) -> GearResult<Option<String>> {
     store.read(|tx| tx.get_meta(&path_key(seat)))
 }
 
-/// The seat's worktree path when that worktree is in `repo`: `None` when the
-/// seat has no worktree yet, or when its last worktree is in another repo
-/// (T-53). The checkout of another repo holds none of this repo's branches,
-/// so it is opened by branch instead.
+/// A seat keeps a checkout in each repo it has reviewed.
+fn repo_path_key(seat: &str, repo: &str) -> String {
+    format!("engine.review_path.{seat}.{repo}")
+}
+
+/// Reopen a repo's saved checkout even after the seat worked in another repo.
+/// Fall back to the current-path metadata for seats created before this change.
 fn worktree_in(
     store: &mut Store,
     seat: &str,
     repo: &Repo,
     root: &str,
 ) -> GearResult<Option<String>> {
-    let path = worktree_path(store, seat)?;
-    let Some(path) = path else { return Ok(None) };
-    let last = store.read(|tx| tx.get_meta(&repo_key(seat)))?;
-    // A seat with no recorded repo is an old one: its worktree is the
-    // project's root, as before.
-    let last = last.as_deref().unwrap_or(root);
-    if last == repo.path { Ok(Some(path)) } else { Ok(None) }
+    if let Some(path) = store.read(|tx| tx.get_meta(&repo_path_key(seat, &repo.path)))? {
+        return Ok(Some(path));
+    }
+    let current = store.read(|tx| tx.get_meta(&repo_key(seat)))?;
+    if current.as_deref().unwrap_or(root) == repo.path {
+        worktree_path(store, seat)
+    } else {
+        Ok(None)
+    }
 }
 
 /// The label of a review seat's worktree: `<project>-<seat>`, plus the repo
@@ -2494,6 +2507,117 @@ review = [
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
         assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+    }
+
+    #[test]
+    fn a_warm_reviewer_returns_to_its_saved_repo_checkout() {
+        let config = config_with_repos().replace("lanes = 1", "lanes = 2") + r#"
+[[lanes]]
+name = "root"
+duty = "root work"
+owns = ["root/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+        let mut store = world(&config);
+        // Isolated repo doors prevent the fake's branch-only map from letting
+        // root's home/review-1 stand in for web's checkout. Distinct paths and
+        // panes also make a checkout in the wrong repo observable.
+        let mut web = FakeHerdr::new();
+        let mut root = FakeHerdr::new();
+        for (door, path, pane) in [
+            (&mut web, "/web-review-1", "web:p1"),
+            (&mut root, "/root-review-1", "root:p1"),
+        ] {
+            door.add_shell(pane);
+            door.add_worktree("home/review-1", path, pane);
+        }
+        for (n, lane, door, path, pane, repo, base) in [
+            (1, "heat", &mut web, "/web-review-1", "web:p1", "/repo/web", "web-dev"),
+            (2, "root", &mut root, "/root-review-1", "root:p1", "/repo", "dev"),
+        ] {
+            if n == 2 {
+                queue_review_job(&mut store, n, lane);
+            }
+            start_reviews(&mut store, door, &cfg(), &cfg().profiles, "p", T0 + n * 10).unwrap();
+            confirm_checkout(&mut store, door, "p:review-1", n, "abc1234", &format!("review/t{n}"));
+            assert_eq!(start_reviews(&mut store, door, &cfg(), &cfg().profiles, "p", T0 + n * 10 + 1)
+                .unwrap().started, vec!["p:review-1"]);
+            assert!(door.calls.iter().any(|call| matches!(call,
+                Call::WorktreeOpen { repo: got, .. } if got == repo)));
+            let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
+            assert!(packet.contains(&format!("Diff to review: `{base}..abc1234`")), "{packet}");
+            release_review_job(&mut store, n);
+            // The real checkout is now on the job branch. Remove the fake's
+            // anchor lookup and register that branch at the unchanged path.
+            assert!(matches!(door.worktree_remove("wt-home-review-1"), Outcome::Ok(())));
+            door.add_shell(pane);
+            door.add_worktree(&format!("review/t{n}"), path, pane);
+        }
+        queue_review_job(&mut store, 3, "heat");
+        let before = web.calls.len();
+        start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
+        let calls = &web.calls[before..];
+        assert!(calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { repo, path, label }
+            if repo == "/repo/web" && path == "/web-review-1" && label == "p-review-1-web")), "{calls:?}");
+        assert!(!calls.iter().any(|call| matches!(call, Call::WorktreeCreate { .. } | Call::WorktreeOpen { .. })), "{calls:?}");
+        assert!(calls.iter().any(|call| matches!(call, Call::PaneRun { pane, command }
+            if pane == "web:p1" && command.contains("/web-review-1") && command.contains("git checkout -f -B review/t3 abc1234"))), "{calls:?}");
+        confirm_checkout(&mut store, &mut web, "p:review-1", 3, "abc1234", "review/t3");
+        assert_eq!(start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 31)
+            .unwrap().started, vec!["p:review-1"]);
+    }
+
+    fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.id = format!("T-{n}");
+            task.rank = n;
+            task.state = TaskState::Ready;
+            task.lane = Some(lane.into());
+            tx.insert_task(&task)?;
+            tx.insert_contract(&ContractRow {
+                project: "p".into(), task: task.id.clone(), version: 1,
+                goal: "next job".into(), accept: "review it".into(),
+                evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", &task.id, "p:heat", 1, T0)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", &task.id, 1, T0)?;
+            gear_app::tasks::submit_result(tx, "p", &task.id, 1, 1, "abc1234", "report.md", T0)
+        }).unwrap();
+    }
+
+    fn release_review_job(store: &mut Store, n: i64) {
+        store.write(|tx| {
+            let mut task = tx.get_task("p", &format!("T-{n}"))?.unwrap();
+            task.state = TaskState::Done;
+            tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), T0 + n * 10 + 2)?;
+            tx.set_binding_status("p:review-1", n, BindingStatus::Void)
+        }).unwrap();
+    }
+
+    #[test]
+    fn legacy_review_paths_are_archived_before_switching_repos() {
+        for recorded in [None, Some("/repo"), Some("/repo/web")] {
+            let mut store = world(&config_with_repos());
+            store.write(|tx| {
+                tx.set_meta(&path_key("p:review-1"), "/legacy-review")?;
+                if let Some(repo) = recorded { tx.set_meta(&repo_key("p:review-1"), repo)?; }
+                Ok(())
+            }).unwrap();
+            // Force the next review into the other repo.
+            let config = if recorded == Some("/repo/web") { CONFIG } else { &config_with_repos() };
+            store.write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config.into();
+                tx.update_project(&project)
+            }).unwrap();
+            start_reviews(&mut store, &mut FakeHerdr::new(), &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+            let old_repo = gear_app::config::parse(&config_with_repos()).unwrap()
+                .repo_of_lane(if recorded == Some("/repo/web") { "heat" } else { "root" });
+            assert_eq!(worktree_in(&mut store, "p:review-1", &old_repo, "/repo").unwrap().as_deref(), Some("/legacy-review"));
+        }
     }
 
     /// T-53: a warm reviewer whose last worktree is in another repo gets a
