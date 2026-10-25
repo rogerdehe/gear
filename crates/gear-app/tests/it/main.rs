@@ -7,6 +7,7 @@ mod app_reply;
 mod app_select_batch;
 mod app_send;
 mod base_gate;
+mod cancel_contract;
 mod backoff_home_contract;
 mod config_change_contract;
 mod config_contract;
