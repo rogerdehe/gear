@@ -322,14 +322,27 @@ pub fn skeleton(inventory: &Inventory) -> String {
         }
     };
 
+    // Filled from where kickoff runs when it can (inside a Herdr pane, in the
+    // project's repository); otherwise left as TODO.
+    let env_or_todo = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "TODO".into());
+    let session = env_or_todo("HERDR_SESSION");
+    let pane = env_or_todo("HERDR_PANE_ID");
+    let repo = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|r| !r.is_empty())
+        .unwrap_or_else(|| "TODO".into());
     let mut lines = vec![
         "# gear.toml — fill in the TODOs, then register it:".to_string(),
         "#   GEAR_ADMIN=1 gear admin init gear/gear.toml".to_string(),
         String::new(),
         "[project]".to_string(),
         "id = \"TODO\"                  # [a-z][a-z0-9-]*: the project's short name".to_string(),
-        "herdr_session = \"TODO\"       # the Herdr session it runs in".to_string(),
-        "repo = \"TODO\"                # the repository the lanes work in".to_string(),
+        format!("herdr_session = \"{session}\"   # the Herdr session the agents live in"),
+        format!("repo = \"{repo}\"   # the repository the lanes work in"),
         String::new(),
         "[quota]".to_string(),
         "lanes = 3                     # long-lived lanes".to_string(),
@@ -337,11 +350,11 @@ pub fn skeleton(inventory: &Inventory) -> String {
         "includes_captain = false".to_string(),
         String::new(),
         "[captain]".to_string(),
-        "pane = \"TODO\"                # the pane the captain runs in (w<n>:p<n>)".to_string(),
+        format!("pane = \"{pane}\"   # the pane the captain runs in (w<n>:p<n>)"),
         format!("kind = \"{captain_kind}\""),
         format!("profile = \"{captain_kind}\""),
         String::new(),
-        "[[lanes]]                     # one block per long-lived lane (17 §1)".to_string(),
+        "[[lanes]]                     # one block per long-lived lane".to_string(),
         "name = \"lane-1\"               # [a-z][a-z0-9-]*; its duty is one sentence".to_string(),
         "duty = \"TODO: what this lane is for\"".to_string(),
         "owns = [\"TODO/\"]               # the paths it writes; lanes must not overlap".to_string(),
@@ -353,7 +366,7 @@ pub fn skeleton(inventory: &Inventory) -> String {
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
         String::new(),
-        "[models]                      # the user confirms these at kickoff (17 §0)".to_string(),
+        "[models]                      # full model ids; the user confirms them at kickoff".to_string(),
         format!(
             "lanes = [{}]   # fast and cheap: tasks are cut small",
             chain(&lanes)
@@ -365,6 +378,11 @@ pub fn skeleton(inventory: &Inventory) -> String {
         "on_quota = { lanes = \"fallback\", review = \"fallback\" }   # then wait for the reset"
             .to_string(),
         "quota_reset_h = 5".to_string(),
+        String::new(),
+        "[conventions]".to_string(),
+        "integration = \"dev\"           # the branch results are merged into (it must exist)".to_string(),
+        "release = \"main\"              # the release branch".to_string(),
+        "gate = \"TODO\"                 # your build + test command, run before every merge (e.g. \"npm test\")".to_string(),
     ];
     // A kind Herdr can start but GEAR has no built-in profile for (T-31): the
     // user fills the block in — the comment says which fields matter.

@@ -430,6 +430,15 @@ pub fn profile_table(
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
+    // ---- the gate runs before every merge: it must be the project's own
+    // build + test command, never left as the skeleton's TODO.
+    if cfg.conventions.gate.trim().is_empty() || cfg.conventions.gate.contains("TODO") {
+        issues.push(issue(
+            "conventions.gate",
+            "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
+        ));
+    }
+
     // ---- quota policy: a fallback needs a next model (L-74). A one-model
     // chain with `fallback` is really "park for quota_reset_h hours" — say so
     // at kickoff instead of finding out when every lane stops.

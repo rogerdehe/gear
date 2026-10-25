@@ -59,6 +59,7 @@ fn the_skill_is_written_for_every_agent() {
         for rel in [
             "SKILL.md",
             "references/conventions.md",
+            "references/course.md",
             "references/decompose.md",
             "references/review.md",
             "references/captain.md",
@@ -70,12 +71,7 @@ fn the_skill_is_written_for_every_agent() {
             let path = dir.join(rel);
             let text = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-            if rel == "references/conventions.md" {
-                // The conventions ship as the design text of this version.
-                assert!(text.contains("# 17 Default working conventions"), "{rel}");
-            } else {
-                assert_eq!(text, repo_skill(rel), "{agent}: {rel}");
-            }
+            assert_eq!(text, repo_skill(rel), "{agent}: {rel}");
             assert!(out.contains(&path.display().to_string()), "{agent}: {out}");
         }
 

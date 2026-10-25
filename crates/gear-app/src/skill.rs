@@ -29,7 +29,12 @@ pub const TOPICS: &[Topic] = &[
     Topic {
         name: "conventions",
         file: "references/conventions.md",
-        text: include_str!("../../../docs/design/17-conventions.md"),
+        text: include_str!("../../../skills/gear/references/conventions.md"),
+    },
+    Topic {
+        name: "course",
+        file: "references/course.md",
+        text: include_str!("../../../skills/gear/references/course.md"),
     },
     Topic {
         name: "decompose",

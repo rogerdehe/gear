@@ -74,6 +74,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
     for topic in [
         "main",
         "conventions",
+        "course",
         "decompose",
         "review",
         "captain",
