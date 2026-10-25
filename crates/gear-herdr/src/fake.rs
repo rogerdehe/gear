@@ -52,9 +52,10 @@ pub struct FakeHerdr {
     /// Worktrees by branch: (workspace id if open, root pane if open, path).
     worktrees: BTreeMap<String, (Option<String>, Option<String>, String)>,
     next_workspace: u32,
-    /// When set, the next `agent_start` is refused with this code (the shell
-    /// of a fresh worktree is still starting). Other calls are unaffected.
-    pub refuse_next_start: Option<String>,
+    /// When set, the next `agent_start` calls are refused with this code (the
+    /// shell of a fresh worktree is still starting), as many as the count
+    /// says. Other calls are unaffected.
+    pub refuse_starts: Option<(String, u32)>,
     /// The names of the agents the fake started successfully (a refused start
     /// is not in here).
     pub started_agents: Vec<String>,
@@ -274,8 +275,9 @@ impl HerdrAct for FakeHerdr {
         };
         let (pane, kind) = (pane_id.to_string(), kind.to_string());
         let start_screen = self.start_screen.clone();
-        if let Some(code) = self.refuse_next_start.take() {
+        if let Some((code, left)) = self.refuse_starts.clone() {
             self.calls.push(call);
+            self.refuse_starts = (left > 1).then(|| (code.clone(), left - 1));
             return Outcome::Refused { code, message: "refused".into() };
         }
         self.act(call, move |s| match s.panes.get_mut(&pane) {

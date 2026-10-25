@@ -63,11 +63,17 @@ pub struct EngineCfg {
     pub auto_settle: bool,
     /// Background merge jobs shared across ticks and configuration clones.
     pub merges: merge::MergeWorkers,
+    /// How long onboarding waits for a fresh worktree's shell before it gives
+    /// up (T-89), and how long between two start attempts. A shell that still
+    /// runs the environment line refuses the start with `agent_pane_busy`;
+    /// that is "not yet", not a failure, until this wait runs out.
+    pub pane_busy_limit_s: i64,
+    pub pane_busy_wait_ms: u64,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_limit_s: 20, pane_busy_wait_ms: 250 }
     }
 }
 
