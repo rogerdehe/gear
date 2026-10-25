@@ -24,7 +24,7 @@ struct Cli {
     /// User only: read-only overview of every project.
     #[arg(long)]
     all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | agent:opencode | agent:codex | agent:claude | agent:grok.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -483,15 +483,40 @@ fn run_show(
         ));
     }
     let fp = gear_app::identity::observe(env, herdr)?;
-    let text = store.read(|tx| {
+    let (text, project) = store.read(|tx| {
         // The identity of the home page: a registered seat of the project.
         let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
-        gear_app::plan::render_task_packet(tx, &ctx.project, target)
+        let text = gear_app::plan::render_task_packet(tx, &ctx.project, target)?;
+        Ok((text, ctx.project.clone()))
     })?;
+    // The project's own standard travels with its task packets (T-85).
+    let mut text = text;
+    if let Some(standard) = project_standard(store, &project) {
+        text.push_str("\n## Project standard (`gear/standard.md`)\n\n");
+        text.push_str(&standard);
+        text.push('\n');
+    }
     if json {
         return serde_json::to_string(&text).map_err(json_error);
     }
     Ok(text)
+}
+
+/// The project's own standard (T-85): `gear/standard.md` in its checkout, when
+/// it keeps one, so every lane reads the rules of *this* project and not only
+/// GEAR's. A project without one — every project that has not adopted — is
+/// unchanged.
+fn project_standard(store: &mut gear_store::Store, project: &str) -> Option<String> {
+    let config = gear_app::config::latest(store, project).ok()?;
+    let path = std::path::Path::new(&config.project.repo)
+        .join("gear")
+        .join("standard.md");
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// A task id is `T-<n>`; every other `--show` target is rejected by name.
@@ -2802,6 +2827,47 @@ mod tests {
         assert!(out.contains("## Goal"), "{out}");
         assert!(out.contains("## Acceptance"), "{out}");
         assert!(out.contains("gear send --kind result --task T-1"), "{out}");
+    }
+
+    /// T-85: a project that keeps a standard (`gear/standard.md`) has it in
+    /// every task packet; a project without one is unchanged (the test above).
+    #[test]
+    fn show_carries_the_projects_standard() {
+        let (mut store, mut herdr) = world();
+        seed_task(&mut store, "T-1", Some("heat"));
+        let dir = std::env::temp_dir().join(format!("gear-standard-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("gear")).expect("the checkout");
+        std::fs::write(
+            dir.join("gear/standard.md"),
+            "# Project standard\n\nNew code meets the standard even if its neighbours do not.\n",
+        )
+        .expect("the standard");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {:?}\n\
+                     \n[quota]\nlanes = 1\ntemps = 0\n\
+                     \n[captain]\npane = \"{CAP_PANE}\"\nkind = \"codex\"\nprofile = \"codex\"\n",
+                    dir.to_string_lossy()
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", false).unwrap();
+        assert!(out.contains("# T-1 — Ship the thing"), "{out}");
+        assert!(out.contains("## Project standard (`gear/standard.md`)"), "{out}");
+        assert!(
+            out.contains("New code meets the standard even if its neighbours do not."),
+            "{out}"
+        );
+        // The section is an appendix: the packet's own parts come first.
+        assert!(
+            out.find("## Project standard").unwrap() > out.find("## Report").unwrap(),
+            "{out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
