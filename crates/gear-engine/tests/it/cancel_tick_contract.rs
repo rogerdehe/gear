@@ -48,6 +48,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: Some(30),
+                issue: None,
                 updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
