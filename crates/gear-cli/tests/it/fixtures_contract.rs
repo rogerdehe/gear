@@ -123,6 +123,17 @@ fn the_fixtures_build_replace_and_pass_their_gates() {
     // the bad pattern.
     let running = dir.join("running");
     assert_eq!(git(&running, &["branch", "--show-current"]), "main");
+    // T-98: the project that already runs has its own local origin, on `main`.
+    let running_origin = local_remote(&running);
+    assert!(
+        running_origin.ends_with("origins/running.git"),
+        "running/'s origin is {running_origin}"
+    );
+    assert!(
+        git(&dir.join("origins/running.git"), &["for-each-ref", "--format=%(refname)"])
+            .contains("refs/heads/main"),
+        "the running fixture's main was not pushed"
+    );
     for path in [
         ".github/workflows/ci.yml",
         "CLAUDE.md",

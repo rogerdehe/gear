@@ -74,6 +74,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 - `prefix+g` opens the plan board; `q` closes it.
 - The captain is rung when something needs it; the lanes, reviews and merges run by themselves.
 - When a voyage lands, the captain reports it and asks whether to reclaim the lanes. Merging into your release branch is always your decision.
+- If the work lives on GitHub, the captain adds a `[github]` mode to the project: issues become tasks (`gear plan import-issues`), and each task's claim, hand-in, verdict and landing are commented on its pull request. Agents never write with `gh`; the engine does. `gear --skill github` has the details — landing *through* a pull request is not in this release.
 - Stop the engine (upgrade, uninstall): `gear admin stop`. Any later `gear` call starts it again.
 - The engine's log: `~/.local/state/gear/engine.log`.
 
@@ -85,6 +86,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 | `gear send` | lanes, reviewers | report progress, a question, a result, a review |
 | `gear reply` | captain | answer an item |
 | `gear plan apply` | captain | apply the voyage's plan file |
+| `gear plan import-issues` | captain | print task blocks for open GitHub issues the plan does not carry yet |
 | `gear report time` | captain | where the time went, per task and per voyage |
 | `gear --skill [topic]` | everyone | the version-matched instructions |
 | `gear board` | you | the plan, full screen |

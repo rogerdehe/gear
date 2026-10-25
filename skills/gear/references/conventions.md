@@ -33,6 +33,8 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 
 Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches.
 
+A push goes only where the project registered it: `init` froze each repo's own push destinations, and a GEAR worktree's pre-push check (`gear push-check`) refuses any other. A refusal is one captain alert and the push does not happen — never route around it (another remote, a URL edit, a hook skipped).
+
 ## 4. Worktrees — always through Herdr
 
 Herdr creates and removes every worktree; its config decides the path. A lane keeps one worktree for life (its build cache persists); a reviewer seat keeps one between jobs. One agent, one worktree. Nobody edits in the main checkout. Removing a worktree, closing a session and deleting a branch are separate acts; nothing uncommitted or unmerged is ever thrown away.
@@ -96,6 +98,8 @@ integration = "dev"     # the integration branch
 release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge
 ```
+
+A repo may also carry a `[github]` mode (issues in, pull requests out); what the engine writes there and when: `gear --skill github`.
 
 Everything else here is not overridable.
 
