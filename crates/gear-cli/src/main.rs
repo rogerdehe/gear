@@ -341,15 +341,17 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin init <config>`: the user registers a project (design/01). The
-/// caller check comes first, so an agent or a shell without `GEAR_ADMIN=1`
-/// is refused before anything is read. The store is `GEAR_DB`.
+/// `gear admin init <config>`: register a project — from the user's own shell
+/// or from the captain's pane (T-86). `GEAR_ADMIN=1` is the user's consent and
+/// is checked before anything is read; which seat may act on it is decided by
+/// `gear_app::admin::init`, against the project the config names. The store is
+/// `GEAR_DB`.
 fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
-    if env.ctx.is_some() || !env.admin {
+    if !env.admin {
         return Err(GearError::new(
             gear_model::ErrorCode::Forbidden,
-            "`gear admin init` runs in the user's own shell with GEAR_ADMIN=1, never in an agent",
+            "`gear admin init` needs GEAR_ADMIN=1: the user's own shell, or the captain's pane",
         ));
     }
     let text = std::fs::read_to_string(config).map_err(|e| {

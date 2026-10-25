@@ -1,6 +1,9 @@
-//! `gear admin …` (design/01 registration, /13 ops commands). User only:
-//! `Env.admin` must be true and `Env.ctx` None (an agent never runs these),
-//! else `Forbidden`.
+//! `gear admin …` (design/01 registration, /13 ops commands).
+//!
+//! `init` may be run by the user's own shell and, since T-86, by the project's
+//! own captain: `GEAR_ADMIN=1` is the user's consent in both cases (the
+//! confirmed kickoff sheet is the captain's). Any other seat is `Forbidden`.
+//! Every other `admin` command stays user-only.
 
 use crate::config;
 use crate::push;
@@ -23,12 +26,17 @@ pub struct InitResult {
     pub destinations: Vec<push::Frozen>,
 }
 
+/// The seat that may register a project: the user's own shell (no ctx), or
+/// the project's captain (T-86).
+const CAPTAIN: &str = "captain";
+
 /// `gear admin init <config>` — register the project, or apply a changed
 /// config to a project that is registered already (T-6).
 ///
-/// 1. caller check (see module doc);
+/// 1. `GEAR_ADMIN=1` (the user's consent);
 /// 2. `config::parse` (errors as is) and `config::validate` — any issue →
-///    `BadFormat` whose detail lists every `field: problem`;
+///    `BadFormat` whose detail lists every `field: problem`; then the caller:
+///    the user's shell, or the captain of the project the config names;
 /// 3. one transaction, one of two ways:
 ///    - **first registration**: `insert_project` (config text verbatim,
 ///      config_version 1, quotas from `[quota]`, plan_version 0) and one seat
@@ -42,11 +50,13 @@ pub struct InitResult {
 /// Checks that need Herdr or git (session, repo, branch) are not part of this
 /// cut.
 pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
-    // 1. only the user runs this: an agent never does.
-    if env.ctx.is_some() || !env.admin {
+    // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
+    //    or the project's captain may act on it (T-86). Which project is
+    //    checked once its config is parsed, below.
+    if !env.admin {
         return Err(GearError::new(
             ErrorCode::Forbidden,
-            "`gear admin init` runs in the user's own shell with GEAR_ADMIN=1, never in an agent",
+            "`gear admin init` needs GEAR_ADMIN=1: it runs in the user's own shell, or in the captain's pane",
         ));
     }
 
@@ -66,6 +76,36 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
     }
 
     let project_id = config.project.id.clone();
+
+    // 2b. A caller with a context may only be this project's captain: the
+    //     seat's name, the project the context names, and — when the seat is
+    //     registered already — its role and generation. A first registration
+    //     has no seat yet, so the name and the project are what can be asked.
+    if let Some(ctx) = &env.ctx {
+        if ctx.seat != CAPTAIN || ctx.project != project_id {
+            return Err(GearError::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "`gear admin init` in an agent runs only in the captain's pane of {project_id}, at generation 1; {} carries {}",
+                    ctx.seat_id(),
+                    ctx.generation
+                ),
+            ));
+        }
+        if let Some(seat) = store.read(|tx| tx.get_seat(&ctx.seat_id()))? {
+            if seat.role != SeatRole::Captain || seat.generation != ctx.generation {
+                return Err(GearError::new(
+                    ErrorCode::Forbidden,
+                    format!(
+                        "`gear admin init` runs in the captain's pane: {} is {}, generation {}",
+                        seat.id,
+                        seat.role.as_str(),
+                        seat.generation
+                    ),
+                ));
+            }
+        }
+    }
 
     // Every seat's profile must resolve against the table (built-ins + the
     // project's own) and must be able to run unattended (T-31): an agent that
