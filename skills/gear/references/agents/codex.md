@@ -34,8 +34,12 @@ The pane must show the shell prompt of the agent's worktree (a freshly made pane
 
 ```bash
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
-  -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox
+  -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false \
+  -c 'projects={"/abs/path/to/the/worktree"={trust_level="trusted"}}' \
+  --dangerously-bypass-approvals-and-sandbox
 ```
+
+The `projects` table is what keeps Codex's first-run "Trust this folder?" dialog from blocking a seat: name **only the canonical worktree of the registered repo** the agent runs in, never a wider directory, and use the inline-table form — the dotted `projects."<path>".trust_level` spelling is silently ignored. The bypass flag alone does not answer that dialog.
 
 Check: `"agent_status":"idle"` and the header `permissions: YOLO mode`; the status bar shows the model (the effort may read `default` until the first turn — `/status` shows it). Startup warnings about the user's own `~/.codex/config.toml` (`⚠ N warnings`) are harmless.
 
@@ -52,7 +56,9 @@ A long turn makes `--wait` time out; that does not mean the prompt was lost — 
 ```bash
 herdr agent send-keys <name> ctrl+c ctrl+c
 herdr agent start <name> --kind codex --pane <pane> --timeout 60000 -- \
-  resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false --dangerously-bypass-approvals-and-sandbox
+  resume <session-uuid> -m <slug> -c model_reasoning_effort=<effort> -c check_for_update_on_startup=false \
+  -c 'projects={"/abs/path/to/the/worktree"={trust_level="trusted"}}' \
+  --dangerously-bypass-approvals-and-sandbox
 ```
 
 After the exit the screen shows `codex resume <uuid>` and the shell prompt. After a resume wait until the status bar shows `Context N% used` before prompting. Never resume with an empty id: it opens a picker, and the next prompt lands in its search box.
@@ -60,6 +66,8 @@ After the exit the screen shows `codex resume <uuid>` and the shell prompt. Afte
 ## Quota
 
 The status bar carries the limits (`5h …`, `weekly N% left`). A stop on a limit or a server error ("model at capacity") looks like a finished turn: read the screen before treating a stop as completion.
+
+A provider back-off is different: after a 429, Codex retries on its own and shows no output for minutes while the screen still says it is working. GEAR reads the back-off signs and shows the seat as a provider back-off — it is not a stall, do not kill it, and do not spend a switch on it.
 
 ## Pitfalls
 

@@ -39,8 +39,10 @@ Read the task packet (`gear --show T-<n>`): the contract (goal, acceptance, the 
 - Hand the verdict in with exactly:
 
   ```bash
-  gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<the path to your review file, or the text>"
+  gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail [--blocking F1,F3] "<the path to your review file, or the text>"
   ```
+
+  `--blocking` names the findings that must be fixed before the task can land (their ids, comma separated); the others are logged. A `fail` with no blocking ids sends the task back for nothing.
 
   GEAR reads the file and keeps the **text** of your findings: the writer reads them from GEAR — the rework note and the task packet — so your worktree, your branch and your file may be gone afterwards. A path that names no file is refused (`BAD_FORMAT`) and nothing is stored; a file longer than 64 KiB is cut with a note.
 - A `fail` becomes the writer's rework: write every finding so the writer can act on it without asking. A `pass` lets the captain merge.
@@ -65,7 +67,8 @@ Reviewed: <branch> @ <short sha>   Reviewer: <agent name> (<model>)   Round: 1 |
 - ok | missing: … | extra: … | misunderstood: …
 
 ## Findings
-- [P1] <what is wrong> — `<file>:<line>` — <why it matters>
+- F1 [P1, blocking] <what is wrong> — `<file>:<line>` — <why it matters>
+- F2 [P2, logged] <what is wrong> — `<file>:<line>` — <why it matters>
 - … | none
 
 ## Set aside
