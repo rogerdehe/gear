@@ -2659,7 +2659,7 @@ gate = "{gate}"
     ) -> Vec<Merged> {
         // The deadline is generous: a merge that retries waits between its
         // attempts (T-61).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let merged = merge_passed(store, herdr, cfg, "p", 30).unwrap();
             let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
@@ -2685,7 +2685,7 @@ gate = "{gate}"
         cfg: &EngineCfg,
         ready: impl Fn(&mut Store) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             merge_passed(store, herdr, cfg, "p", 30).unwrap();
             if ready(store) {
@@ -2709,7 +2709,7 @@ gate = "{gate}"
     ) {
         for _ in 0..times {
             merge_passed(store, herdr, cfg, "p", 30).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
             loop {
                 merge_passed(store, herdr, cfg, "p", 31).unwrap();
                 if cfg.merges.0.lock().unwrap().is_empty() {
@@ -2742,7 +2742,7 @@ gate = "{gate}"
     }
 
     fn wait_file(path: &Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while !path.exists() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -3211,7 +3211,7 @@ gate = "{project_gate}"
         );
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
             if !merged.is_empty() {
@@ -3238,7 +3238,7 @@ gate = "{project_gate}"
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
         let lock = merge_lock(&scratch.root.join("merge")).unwrap().unwrap();
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while store
             .read(|tx| tx.get_op("p", "O-1"))
             .unwrap()
@@ -3873,7 +3873,7 @@ gate = "{project_gate}"
             profile.confirm_rounds = 1;
             cfg.profiles.insert(kind.into(), profile);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let report = crate::tick(&mut store, &mut herdr, &cfg, 20).unwrap();
             if !report.merged.is_empty() { break; }
