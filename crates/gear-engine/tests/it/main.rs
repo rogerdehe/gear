@@ -6,6 +6,7 @@
 pub static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 mod backoff_contract;
+mod cancel_tick_contract;
 mod config_profile_onboard;
 mod contract_update;
 mod deliver_confirm_contract;
