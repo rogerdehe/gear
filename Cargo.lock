@@ -219,6 +219,7 @@ dependencies = [
  "gear-app",
  "gear-board",
  "gear-engine",
+ "gear-forge",
  "gear-herdr",
  "gear-model",
  "gear-store",
