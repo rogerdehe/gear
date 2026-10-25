@@ -51,7 +51,8 @@ pub struct ApplyResult {
 ///      and `estimate` (the planned time in minutes, T-38);
 ///    - every dep names an existing task or a task of this draft; no cycle;
 ///    - `state=` only on existing tasks: `cancelled` from any non-terminal state,
-///      `ready` only from Draft (DONE→READY with `reopen` comes with verdicts);
+///      `ready` only from Draft (a Done task reopens by a `# Verdicts` fail,
+///      T-90, not by a queue line);
 /// 6. writes: `NEW` → `T-<n>` via `next_id`, state Ready, contract v1; an existing
 ///    task whose goal/accept/evidence differs from its current contract → new
 ///    contract version; rank = position in the draft (1, 2, …), unmentioned
