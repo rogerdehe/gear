@@ -401,7 +401,7 @@ fn start_reviewer(
     // long-lived; the agent of a job is named after its task).
     let branch = review_branch(&task.task);
     let seat_branch = format!("home/{}", seat.name);
-    let seat_label = seat_label(config, &seat.name, &repo);
+    let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
     let model = entry.map(ModelEntry::model);
 
@@ -417,7 +417,7 @@ fn start_reviewer(
             // job's review branch, not on the seat's own branch. A seat whose
             // last worktree is in another repo gets one in this repo (T-53):
             // the checkout of another repo holds none of this repo's branches.
-            let by_path = match worktree_in(store, &seat.id, &repo)? {
+            let by_path = match worktree_in(store, &seat.id, &repo, &config.root_repo().path)? {
                 Some(path) => herdr.worktree_open_path(&repo.path, &path, &seat_label),
                 None => Outcome::Refused { code: "worktree_not_found".into(), message: String::new() },
             };
@@ -1077,23 +1077,21 @@ fn worktree_in(
     store: &mut Store,
     seat: &str,
     repo: &Repo,
+    root: &str,
 ) -> GearResult<Option<String>> {
     let path = worktree_path(store, seat)?;
     let Some(path) = path else { return Ok(None) };
     let last = store.read(|tx| tx.get_meta(&repo_key(seat)))?;
-    match last {
-        // A seat with no recorded repo is an old one: its worktree is the
-        // project's own, as before.
-        None => Ok(Some(path)),
-        Some(last) if last == repo.path => Ok(Some(path)),
-        Some(_) => Ok(None),
-    }
+    // A seat with no recorded repo is an old one: its worktree is the
+    // project's root, as before.
+    let last = last.as_deref().unwrap_or(root);
+    if last == repo.path { Ok(Some(path)) } else { Ok(None) }
 }
 
 /// The label of a review seat's worktree: `<project>-<seat>`, plus the repo
 /// name for a seat that works in a child repo (T-53) — one seat, one
 /// worktree per repo.
-fn seat_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
+fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     if repo.name.is_empty() {
         format!("{}-{}", config.project.id, seat)
     } else {
@@ -2502,26 +2500,33 @@ review = [
     /// worktree in the repo of the task it takes now.
     #[test]
     fn a_warm_reviewer_in_another_repo_gets_a_worktree_in_this_one() {
-        let mut store = world(&config_with_repos());
-        // The seat's last worktree was in the project root.
-        store
-            .write(|tx| {
-                tx.set_meta(&path_key("p:review-1"), "/root-review-1")?;
-                tx.set_meta(&repo_key("p:review-1"), "/repo")
-            })
-            .unwrap();
-        let mut herdr = FakeHerdr::new();
+        // Two ways the seat's last worktree can be in another repo: it was
+        // recorded as the project's root, or it is an old seat with no repo
+        // recorded at all (its worktree is the project's root).
+        for recorded in [Some("/repo".to_string()), None] {
+            let mut store = world(&config_with_repos());
+            store
+                .write(|tx| {
+                    tx.set_meta(&path_key("p:review-1"), "/root-review-1")?;
+                    if let Some(repo) = &recorded {
+                        tx.set_meta(&repo_key("p:review-1"), repo)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
 
-        let (repo, _, base, _) = created_worktree(&herdr);
-        assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(base, "web-dev");
-        assert!(
-            !herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { .. })),
-            "the checkout of another repo is never reopened: {:?}",
-            herdr.calls
-        );
+            let (repo, _, base, _) = created_worktree(&herdr);
+            assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
+            assert_eq!(base, "web-dev");
+            assert!(
+                !herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { .. })),
+                "the checkout of another repo is never reopened: {:?}",
+                herdr.calls
+            );
+        }
     }
 }
 

@@ -365,6 +365,7 @@ fn tasks_of_different_repos_are_never_compared() {
     assert_eq!(checked.opened.len(), 1, "only the two tasks of the child repo overlap");
     let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
     assert!(item.body.contains("T-2 (steady) and T-3 (web2)"), "{}", item.body);
+    assert!(item.body.contains("in web"), "the item names the repo: {}", item.body);
     assert!(item.body.contains(SHARED), "{}", item.body);
     assert!(!item.body.contains("T-1"), "the task of the root repo is another repo: {}", item.body);
 }

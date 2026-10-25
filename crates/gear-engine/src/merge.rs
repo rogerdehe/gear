@@ -138,8 +138,11 @@ pub fn merge_passed(
         .map(|(key, _)| key.clone())
         .collect();
     if let Some(key) = finished_keys.first() {
-        let worker = workers.remove(key).expect("the worker was just found");
-        let finished = worker.finished.lock().unwrap().clone().expect("just found");
+        let worker = workers.get(key).expect("the worker was just found");
+        let finished = worker.finished.lock().unwrap().clone();
+        let Some(finished) = finished else {
+            return Ok(merged);
+        };
         let op = &worker.op;
         match finished.result {
             Ok(Some(lines)) => {
@@ -173,6 +176,9 @@ pub fn merge_passed(
             }
             Err(reason) => fail_merge(store, project, op, &reason, finished.at)?,
         }
+        // Keep the completion until its database write succeeded: a transient
+        // store error must not lose the result or launch a second worker.
+        workers.remove(key);
         return Ok(merged);
     }
 

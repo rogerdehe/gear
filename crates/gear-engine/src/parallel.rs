@@ -13,6 +13,10 @@ use gear_store::{NewMessage, Store, TaskRow, Tx};
 
 const PERIOD: i64 = 600;
 
+/// The key of the project root in the meta: a repo name never starts with a
+/// dash.
+const ROOT: &str = "-";
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Check {
     pub opened: Vec<String>,
@@ -48,22 +52,36 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
     let inputs = inputs(store, project, now)?;
     let mut report = Check::default();
     for input in inputs {
+        let prefix = input.prefix();
         let scanned = scan(&input);
         let result = store.write(|tx| {
             // A failed read backs off too; preserve known pair state, because a
             // read failure is not evidence that an overlap disappeared.
-            tx.set_meta(&format!("{}:at", input.prefix()), &now.to_string())?;
-            tx.set_meta(&format!("{}:handins", input.prefix()), &input.handins)?;
+            tx.set_meta(&format!("{prefix}:at"), &now.to_string())?;
+            tx.set_meta(&format!("{prefix}:handins"), &input.handins)?;
             let conflicts = match &scanned {
                 Ok(conflicts) => conflicts,
-                Err(error) => return Ok(Check { opened: vec![], problems: vec![error.clone()] }),
+                // A read that failed names the repo it failed in: a project of
+                // several repos has one read each.
+                Err(error) => {
+                    let error = match input.name() {
+                        Some(name) => format!("{name}: {error}"),
+                        None => error.clone(),
+                    };
+                    return Ok(Check { opened: vec![], problems: vec![error] });
+                }
             };
             let Some(captain) = tx.captain_of(project)? else { return Ok(Check::default()); };
-            let previous = tx.get_meta(&format!("{}:pairs", input.prefix()))?
+            let previous = tx.get_meta(&format!("{prefix}:pairs"))?
                 .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default();
             let mut opened = Vec::new();
+            // The repo the overlap is in: the captain must know which one.
+            let where_ = match input.name() {
+                Some(name) => format!(" in {name}"),
+                None => String::new(),
+            };
             for (pair, conflict) in conflicts {
-                let key = format!("{}:pair:{pair}", input.prefix());
+                let key = format!("{prefix}:pair:{pair}");
                 let files = serde_json::json!(conflict.files).to_string();
                 if tx.get_meta(&format!("{key}:files"))?.as_deref() == Some(&files) { continue; }
                 close(tx, project, &key, "the shared file set changed", now)?;
@@ -71,7 +89,7 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                     project: project.into(), thread: format!("parallel:{pair}"), task: None, attempt: None,
                     sender: "engine".into(), sender_gen: 0, recipient: captain.id.clone(),
                     kind: MsgKind::System, urgent: false,
-                    body: format!("parallel changes: {} and {} share files: {files}", conflict.left, conflict.right),
+                    body: format!("parallel changes{where_}: {} and {} share files: {files}", conflict.left, conflict.right),
                     reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
                 })?;
                 tx.set_meta(&format!("{key}:files"), &files)?;
@@ -79,11 +97,11 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                 opened.push(message.id);
             }
             for pair in previous.iter().filter(|pair| !conflicts.contains_key(*pair)) {
-                let key = format!("{}:pair:{pair}", input.prefix());
+                let key = format!("{prefix}:pair:{pair}");
                 close(tx, project, &key, "the branches no longer share changed files", now)?;
                 tx.set_meta(&format!("{key}:files"), "[]")?;
             }
-            tx.set_meta(&format!("{}:pairs", input.prefix()), &serde_json::json!(conflicts.keys().collect::<Vec<_>>()).to_string())?;
+            tx.set_meta(&format!("{prefix}:pairs"), &serde_json::json!(conflicts.keys().collect::<Vec<_>>()).to_string())?;
             Ok(Check { opened, problems: vec![] })
         })?;
         report.opened.extend(result.opened);
@@ -96,8 +114,19 @@ impl Input {
     /// The prefix of the meta this scan keeps its state under: the project's
     /// and the repo's, so two repos never share a back-off or a pair set.
     fn prefix(&self) -> String {
-        format!("parallel:{}:{}", self.project, self.key)
+        prefix_of(&self.project, &self.key)
     }
+
+    /// The repo's name, when it is a child repo: the project root has none,
+    /// and its messages read as they always did.
+    fn name(&self) -> Option<&str> {
+        if self.key == ROOT { None } else { Some(&self.key) }
+    }
+}
+
+/// The prefix of the meta of a repo's scan.
+fn prefix_of(project: &str, key: &str) -> String {
+    format!("parallel:{project}:{key}")
 }
 
 /// The scans of one project: one per repo that has tasks (T-53). A task
@@ -134,7 +163,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             let handins = serde_json::json!([row.config_version, handins]).to_string();
             // The back-off of this repo: nothing changed and the last scan
             // was recent, so this repo waits for the next period.
-            let prefix = format!("parallel:{project}:{key}");
+            let prefix = prefix_of(project, &key);
             let last = tx.get_meta(&format!("{prefix}:at"))?.and_then(|s| s.parse::<Ts>().ok());
             let unchanged = tx.get_meta(&format!("{prefix}:handins"))?.as_deref() == Some(&handins);
             if unchanged && last.is_some_and(|last| now >= last && now - last < PERIOD) {
@@ -159,7 +188,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
 /// The key of a repo in the meta: its name, or "-" for the project root (a
 /// repo name never starts with a dash).
 fn repo_key(repo: &Repo) -> String {
-    if repo.name.is_empty() { "-".to_string() } else { repo.name.clone() }
+    if repo.name.is_empty() { ROOT.to_string() } else { repo.name.clone() }
 }
 
 fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearResult<()> {
