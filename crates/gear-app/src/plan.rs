@@ -738,6 +738,111 @@ pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> 
     Ok(tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() == Some("1"))
 }
 
+/// A lane that is about to stand idle after an apply (T-58, ops/lessons.md 7a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdleLane {
+    /// The lane's name.
+    pub lane: String,
+    /// The lane's current task, when it has one: the task it is working on
+    /// (Running), waiting on (Waiting) or in review (Verifying).
+    pub current: Option<String>,
+    /// The lane's queued tasks that wait for a dependency that is not done.
+    pub blocked: Vec<String>,
+}
+
+impl IdleLane {
+    /// The warning the captain reads after an apply (T-58):
+    /// `warning: lane heat has nothing to start after T-3 (1 queued behind deps: T-5)`.
+    pub fn warning(&self) -> String {
+        let after = self.current.clone().unwrap_or_else(|| "now".to_string());
+        let queued = if self.blocked.is_empty() {
+            "0 queued behind deps".to_string()
+        } else {
+            format!(
+                "{} queued behind deps: {}",
+                self.blocked.len(),
+                self.blocked.join(", ")
+            )
+        };
+        format!(
+            "warning: lane {} has nothing to start after {after} ({queued})",
+            self.lane
+        )
+    }
+}
+
+/// The lanes that are **about to** stand idle after an apply (T-58, ops/lessons.md
+/// 7a): a lane that is up (Active or Standby — the states the engine's feed
+/// watches), **not** in the voyage's tail, with no queued task it could start
+/// now — every dependency of its queued tasks is still open.
+///
+/// The lane is told before it stands idle, not after: a lane working on its
+/// last task with nothing queued behind it is warned too (the user: warn
+/// before the lane runs dry — idle is only the last net).
+///
+/// A task in Verifying does not occupy the lane: it handed the task in and the
+/// review runs in the background (never-stop), so the lane may take the next
+/// one — and stands idle when there is none.
+///
+/// Read-only: the apply is not changed by this, the captain is only told.
+pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
+    let tasks = tx.tasks_of_project(project)?;
+    let done: BTreeSet<&str> = tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Done)
+        .map(|task| task.id.as_str())
+        .collect();
+    let mut idle = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane
+            || !matches!(seat.state, SeatState::Active | SeatState::Standby)
+        {
+            continue;
+        }
+        // The captain's tail: these lanes may stand idle (design/05).
+        if lane_in_tail(tx, project, &seat.name)? {
+            continue;
+        }
+        let lane_tasks: Vec<&TaskRow> = tasks
+            .iter()
+            .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
+            .collect();
+        // The lane's current task: the one it is working on, waiting on, or
+        // in review (the board's wording).
+        let current = lane_tasks
+            .iter()
+            .find(|task| task.state == TaskState::Running)
+            .or_else(|| lane_tasks.iter().find(|task| task.state == TaskState::Waiting))
+            .or_else(|| lane_tasks.iter().find(|task| task.state == TaskState::Verifying))
+            .map(|task| task.id.clone());
+        // The lane's queued tasks: the one it can start now, and the ones
+        // that wait for a dependency that is not done.
+        let mut startable = false;
+        let mut blocked = Vec::new();
+        for task in lane_tasks
+            .iter()
+            .filter(|task| task.state == TaskState::Ready)
+            .filter(|task| task.priority != "wont")
+        {
+            if task.deps.iter().all(|dep| done.contains(dep.as_str())) {
+                startable = true;
+            } else {
+                blocked.push(task.id.clone());
+            }
+        }
+        if startable {
+            continue;
+        }
+        idle.push(IdleLane {
+            lane: seat.name.clone(),
+            current,
+            blocked,
+        });
+    }
+    idle.sort_by(|a, b| a.lane.cmp(&b.lane));
+    Ok(idle)
+}
+
 /// `# Decisions` / `- tail: heat wire` replaces the named tail lanes;
 /// `- tail: -` clears the declaration. Omitted declarations keep the state.
 fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
