@@ -139,6 +139,7 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
             executable: "/usr/local/bin/pi".into(),
             models: vec!["pi-1".into()],
             note: None,
+            skill: false,
         }],
         missing: vec![],
     };
@@ -153,6 +154,7 @@ fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
             executable: "/usr/local/bin/opencode".into(),
             models: vec![],
             note: None,
+            skill: true,
         }],
         missing: vec![],
     };

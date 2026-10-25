@@ -56,6 +56,9 @@ pub struct Installed {
     pub models: Vec<String>,
     /// Why there is no model list, when the CLI cannot print one.
     pub note: Option<String>,
+    /// Whether the GEAR skill is installed for this kind (T-83, trial G06):
+    /// without it the agent does not know how to work as a seat.
+    pub skill: bool,
 }
 
 /// What this machine offers.
@@ -79,6 +82,7 @@ impl Inventory {
                         executable,
                         models,
                         note,
+                        skill: skill_installed(kind),
                     });
                 }
                 None => inventory.missing.push((*kind).to_string()),
@@ -86,6 +90,22 @@ impl Inventory {
         }
         inventory
     }
+}
+
+/// Is the GEAR skill installed for this kind (T-83)? A kind GEAR has no skill
+/// install for cannot be driven unattended, so it counts as not installed.
+fn skill_installed(kind: &str) -> bool {
+    let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
+        return false;
+    };
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    agent
+        .skills_root(std::path::Path::new(&home))
+        .join(crate::skill::SKILL_NAME)
+        .join("SKILL.md")
+        .is_file()
 }
 
 /// The executable of `names` that is on PATH, with its full path.
@@ -123,17 +143,33 @@ fn is_executable(path: &std::path::Path) -> bool {
 /// The models a kind can use, and the reason when it cannot list them.
 fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
     match kind {
-        // OpenCode prints its model ids, one per line.
-        "opencode" => match Command::new("opencode").arg("models").output() {
-            Ok(out) if out.status.success() => {
-                (parse_opencode_models(&String::from_utf8_lossy(&out.stdout)), None)
+        // OpenCode prints its model ids, one per line. An empty list right
+        // after a start is "not loaded yet" (trial G03), never "no models":
+        // look once more before saying so.
+        "opencode" => {
+            let mut last = (Vec::new(), None);
+            for attempt in 0..2 {
+                last = match Command::new("opencode").arg("models").output() {
+                    Ok(out) if out.status.success() => {
+                        let models = parse_opencode_models(&String::from_utf8_lossy(&out.stdout));
+                        if !models.is_empty() {
+                            return (models, None);
+                        }
+                        // Nothing yet: say so, and look again once.
+                        (models, Some("model list not loaded yet".to_string()))
+                    }
+                    Ok(out) => (
+                        Vec::new(),
+                        Some(format!("`opencode models` exited {}", out.status)),
+                    ),
+                    Err(e) => (Vec::new(), Some(format!("cannot run `opencode models`: {e}"))),
+                };
+                if attempt == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
             }
-            Ok(out) => (
-                Vec::new(),
-                Some(format!("`opencode models` exited {}", out.status)),
-            ),
-            Err(e) => (Vec::new(), Some(format!("cannot run `opencode models`: {e}"))),
-        },
+            last
+        }
         // Codex caches the models it knows in its cache file.
         "codex" => match std::fs::read_to_string(codex_cache()) {
             Ok(text) => match parse_codex_models(&text) {
@@ -277,12 +313,26 @@ pub fn report(inventory: &Inventory) -> String {
     for installed in &inventory.installed {
         let count = match (installed.models.len(), &installed.note) {
             (0, Some(note)) => note.clone(),
-            (0, None) => "no models".to_string(),
+            // T-83: a list that is empty and says nothing is not loaded yet —
+            // never "no models" (trial G03).
+            (0, None) => "model list not loaded yet".to_string(),
             (1, _) => "1 model".to_string(),
             (n, _) => format!("{n} models"),
         };
+        // Trial G06: a seat whose CLI does not have the skill cannot work as
+        // one — say so per kind, with the command that fixes it.
+        let skill = if installed.skill {
+            " · GEAR skill installed".to_string()
+        } else if crate::skill::SkillAgent::parse(&installed.kind).is_ok() {
+            format!(
+                " · GEAR skill MISSING — run `gear admin install-skill --agent {}`",
+                installed.kind
+            )
+        } else {
+            " · no GEAR skill for this kind".to_string()
+        };
         lines.push(format!(
-            "  {:<10} {} — {count}",
+            "  {:<10} {} — {count}{skill}",
             installed.kind,
             installed.executable.display()
         ));

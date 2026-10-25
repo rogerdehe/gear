@@ -105,9 +105,13 @@ fn repos() -> Repos {
 
 impl Repos {
     /// A candidate commit on a new branch, based on `from`.
+    /// A candidate on `branch`, pushed: a hand-in must be on
+    /// `origin/<lane>/t<n>` (T-83), so every fixture hands in a pushed one.
     fn candidate(&self, branch: &str, from: &str, text: &str) -> String {
         git(&self.lane, &["switch", "-q", "-c", branch, from]);
-        commit(&self.lane, &format!("{}.txt", branch.replace('/', "-")), text)
+        let commit = commit(&self.lane, &format!("{}.txt", branch.replace('/', "-")), text);
+        git(&self.lane, &["push", "-q", "origin", &format!("{branch}:{branch}")]);
+        commit
     }
 
     /// Advance `dev` on the remote (a commit pushed from the seed clone).
@@ -123,7 +127,7 @@ impl Repos {
 #[test]
 fn a_candidate_that_contains_the_integration_branch_is_accepted() {
     let r = repos();
-    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     require_current_base(&r.lane, "dev", &candidate).unwrap();
 }
 
@@ -144,7 +148,7 @@ fn a_candidate_behind_the_integration_branch_is_refused() {
 #[test]
 fn a_failing_fetch_is_refused_not_ignored() {
     let r = repos();
-    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
     let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
@@ -257,10 +261,34 @@ fn a_stale_hand_in_stores_nothing() {
     assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
 }
 
+/// T-83: a hand-in from a branch nobody pushed is refused — M2.1's T-60 was
+/// reviewed from an unpushed branch and could not be merged, and the captain
+/// fixed it by hand.
+#[test]
+fn an_unpushed_candidate_is_refused() {
+    let r = repos();
+    // The candidate exists in the lane's clone only.
+    git(&r.lane, &["switch", "-q", "-c", "heat/t1", "origin/dev"]);
+    let unpushed = commit(&r.lane, "work.txt", "my work");
+    let mut s = world();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+
+    let err = mail::send(&mut s, &env, Some(&fp), &result(&unpushed, gate), T0 + 5).unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains("is not on refs/remotes/origin/heat/t1"), "{}", err.detail);
+    assert!(err.detail.contains("git push origin heat/t1"), "{}", err.detail);
+    // Nothing was written: no message, the attempt is still being worked on.
+    assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+}
+
 #[test]
 fn a_current_candidate_is_accepted() {
     let r = repos();
-    let current = r.candidate("data/t19", "origin/dev", "my work");
+    let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
     let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
@@ -301,7 +329,7 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
 #[test]
 fn a_deleted_remote_integration_branch_is_refused() {
     let r = repos();
-    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     git(&r.seed, &["push", "-q", "origin", "--delete", "dev"]);
 
     let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
@@ -314,7 +342,7 @@ fn a_deleted_remote_integration_branch_is_refused() {
 #[test]
 fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
     let r = repos();
-    let current = r.candidate("data/t19", "origin/dev", "my work");
+    let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
     let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
@@ -342,7 +370,7 @@ fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
 #[test]
 fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
     let r = repos();
-    let candidate = r.candidate("data/t19", "origin/dev", "my work");
+    let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     // A valid pathname shape (every component below NAME_MAX) that does not
     // exist, long enough that the fatal line passes the excerpt limit and the
     // limit falls inside a multibyte character.
@@ -371,7 +399,7 @@ fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
 #[test]
 fn a_replay_needs_the_live_seat() {
     let r = repos();
-    let current = r.candidate("data/t19", "origin/dev", "my work");
+    let current = r.candidate("heat/t1", "origin/dev", "my work");
 
     // (a) no fingerprint: the pane hosts no agent, so there is no seat.
     let mut s = world();
