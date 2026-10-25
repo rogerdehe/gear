@@ -1,0 +1,11 @@
+# Every git a test starts reads none of the user's or the system's git config:
+# no global hooks (a company pre-push / data-loss-prevention hook fired on the
+# tests' local pushes), no credential helpers, no URL rewrites. The tests'
+# remotes are local bare repositories in the temp dir; identity is set here.
+[env]
+GIT_CONFIG_GLOBAL = "/dev/null"
+GIT_CONFIG_NOSYSTEM = "1"
+GIT_AUTHOR_NAME = "gear-test"
+GIT_AUTHOR_EMAIL = "gear-test@localhost"
+GIT_COMMITTER_NAME = "gear-test"
+GIT_COMMITTER_EMAIL = "gear-test@localhost"

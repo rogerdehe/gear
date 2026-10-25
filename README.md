@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.2.3, an early release for trial use. Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.2.4, an early release for trial use. Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.2.3
+   herdr plugin install rogerdehe/gear --ref v0.2.4
    ```
 
    Add `--yes` in a non-interactive shell.
@@ -30,7 +30,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    export PATH="$(herdr plugin list --json | sed -n 's/.*"plugin_id":"herdr-gear","plugin_root":"\([^"]*\)".*/\1/p')/bin:$PATH"
    ```
 
-   Check: `gear --version` prints `gear 0.2.3`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
+   Check: `gear --version` prints `gear 0.2.4`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
 
 3. **A key for the plan board**, in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
@@ -101,4 +101,4 @@ Please send one feedback file per trial, written from [`FEEDBACK.md`](FEEDBACK.m
 
 ## Developing GEAR
 
-GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The skill texts are in `skills/gear/`.
+GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The tests never touch a real remote: every remote they push to is a local bare repository in the temp dir, and `.cargo/config.toml` keeps every git they start away from your global and system git config (hooks, credentials, URL rewrites). The skill texts are in `skills/gear/`.
