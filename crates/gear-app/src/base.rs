@@ -51,6 +51,62 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     Ok(BaseGate { worktree, integration })
 }
 
+/// The task branch of a lane: `<lane>/t<n>` (conventions 17 §3).
+pub fn task_branch(lane: &str, task: &str) -> String {
+    format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+}
+
+/// Refuse unless `candidate` is on `origin/<branch>` (T-83): M2.1's T-60 was
+/// reviewed from an unpushed branch and could not be merged, and the captain
+/// fixed it by hand. The branch is fetched first, so the check is about the
+/// remote as it is now.
+pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearResult<()> {
+    let where_ = worktree.display();
+    let reference = format!("refs/remotes/origin/{branch}");
+    // Fetch the branch itself: a branch pushed since the lane's last fetch
+    // must be seen. A fetch that fails is a refusal, never a pass: the local
+    // remote-tracking ref may be stale (the branch deleted on the remote), and
+    // an unseen branch is one the merge worker could not fetch either.
+    let fetched = Command::new("git")
+        .args(["fetch", "origin", &format!("{branch}:refs/remotes/origin/{branch}")])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: {error}"),
+            )
+        })?;
+    if !fetched.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: push the task branch first (`git push origin {branch}`): {}",
+                String::from_utf8_lossy(&fetched.stderr).trim()
+            ),
+        ));
+    }
+    let pushed = Command::new("git")
+        .args(["merge-base", "--is-ancestor", candidate, &reference])
+        .current_dir(worktree)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot check {candidate} against {reference} in {where_}: {error}"),
+            )
+        })?;
+    if pushed.status.success() {
+        return Ok(());
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!(
+            "{candidate} is not on {reference}: push the task branch before handing in (`git push origin {branch}`)"
+        ),
+    ))
+}
+
 /// Refuse unless `candidate` contains the current `origin/<integration>`:
 /// `git fetch origin`, then `git merge-base --is-ancestor origin/<integration>
 /// <candidate>` in `worktree`. Nothing is written here; the caller runs this

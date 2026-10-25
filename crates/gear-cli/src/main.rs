@@ -372,7 +372,8 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
     })?;
     let mut store = open_store()?;
-    let r = gear_app::admin::init(&mut store, &env, &text, now_ts())?;
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let r = gear_app::admin::init_with_home(&mut store, &env, &text, home.as_deref(), now_ts())?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
