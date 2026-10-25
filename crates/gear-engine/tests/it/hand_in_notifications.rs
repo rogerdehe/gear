@@ -42,7 +42,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: NOW,
+                 issue: None,updated: NOW,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),

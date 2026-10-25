@@ -49,7 +49,7 @@ impl Repo {
                     project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                     priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                     contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
-                    wait_cond: None, rework_note: None, estimate_min: Some(30), updated: T0,
+                    wait_cond: None, rework_note: None, estimate_min: Some(30),  issue: None,updated: T0,
                 })?;
             }
             let mut project = tx.get_project("p")?.unwrap();
@@ -327,7 +327,7 @@ fn multi_repo_store(root: &Repo) -> Store {
                 project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                 priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                 contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
-                wait_cond: None, rework_note: None, estimate_min: Some(30), updated: T0,
+                wait_cond: None, rework_note: None, estimate_min: Some(30),  issue: None,updated: T0,
             })?;
         }
         let mut project = tx.get_project("p")?.unwrap();

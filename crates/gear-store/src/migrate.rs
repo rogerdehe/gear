@@ -16,6 +16,7 @@
 //! **v3** adds the `push_destinations` of T-73 (the places a repo of the
 //! project may be pushed to). It is a table of its own, so the step only
 //! creates it; nothing else changes.
+//! **v4** adds `tasks.issue` (the GitHub issue a task came from, T-79).
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -23,7 +24,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -42,6 +43,7 @@ pub struct Step {
 pub const STEPS: &[Step] = &[
     Step { from: 1, apply: step_1_to_2 },
     Step { from: 2, apply: step_2_to_3 },
+    Step { from: 3, apply: step_3_to_4 },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -126,6 +128,16 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
 /// `IF NOT EXISTS`), so a store that already has the table keeps it.
 fn step_2_to_3(tx: &Transaction<'_>) -> GearResult<()> {
     tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
+    Ok(())
+}
+
+/// v3 → v4: `tasks.issue` (T-79). A nullable column, so an older binary keeps
+/// working on the store.
+fn step_3_to_4(tx: &Transaction<'_>) -> GearResult<()> {
+    if !column_exists(tx, "tasks", "issue")? {
+        tx.execute_batch("ALTER TABLE tasks ADD COLUMN issue INTEGER")
+            .map_err(map_sqlite)?;
+    }
     Ok(())
 }
 

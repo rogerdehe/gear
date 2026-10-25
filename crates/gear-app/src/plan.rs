@@ -288,6 +288,9 @@ fn apply_queue(
                     // The planned time of the task (T-38); a NEW block must
                     // carry it (checked above).
                     estimate_min: item.estimate.map(i64::from),
+                    // The GitHub issue the task came from (T-79); the
+                    // parser keeps it inside the store's range.
+                    issue: item.issue.and_then(|number| i64::try_from(number).ok()),
                     updated: now,
                 };
                 tx.insert_task(&task)?;
@@ -321,6 +324,11 @@ fn apply_queue(
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
                     task.estimate_min = Some(i64::from(estimate));
+                }
+                // The GitHub issue (T-79): a draft that names one sets it; a
+                // block without `issue:` keeps the issue the task came from.
+                if let Some(issue) = item.issue.and_then(|number| i64::try_from(number).ok()) {
+                    task.issue = Some(issue);
                 }
                 match item.state.as_deref() {
                     Some("cancelled") => task.state = TaskState::Cancelled,
