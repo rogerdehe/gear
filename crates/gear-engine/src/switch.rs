@@ -398,7 +398,11 @@ pub fn ensure_model(
         None => {
             // The chain names no variant (a `[models.switch]` entry is the
             // only place one lives, and it overrides this path entirely).
-            match crate::opencode::derived_labels(herdr, model, None, None) {
+            // The catalogue is per directory: use the seat's own worktree (F2
+            // of the T-94 review), like the start path does.
+            let directory = store
+                .read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+            match crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
                 Some(labels) => {
                     derived = labels;
                     &derived

@@ -573,6 +573,34 @@ picker = "MiniMax-M3.1-Flash"
 bar = "MiniMax-M3.1-Flash"
 "#;
 
+    /// The same project, but with no `[models.switch]` labels at all (T-94):
+    /// the labels must come from OpenCode's own catalogue.
+    const CONFIG_WITH_MODELS_NO_SWITCH: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+"#;
+
     /// The same project, but the lane brings its own chain.
     const CONFIG_WITH_LANE_MODELS: &str = r#"
 [project]
@@ -731,6 +759,35 @@ repo = "web"
         assert_eq!(body["model"], model);
         let path = store.read(|tx| tx.get_meta(&worktree_path_key("toy:heat"))).unwrap().unwrap();
         assert_eq!(body["location"]["directory"], path);
+    }
+
+    /// T-94 (F3 of the review): a lane whose model has no `[models.switch]`
+    /// labels starts on it. The labels come from OpenCode's own lists
+    /// (`model.list` for the name, `provider.list` for the provider's display
+    /// name), the API switch puts the session on the model, and the seat
+    /// becomes Active. Nothing is typed as a model key.
+    #[test]
+    fn a_lane_starts_on_a_model_with_no_switch_labels() {
+        let mut store = world(CONFIG_WITH_MODELS_NO_SWITCH);
+        let mut herdr = FakeHerdr::new();
+        herdr.start_screen = Some("┃ Build auto · MiniMax-M3.1-Flash MiniMax (minimax.cn)".into());
+        let model = serde_json::json!({"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash"});
+        let listed = serde_json::json!({"data":[{"providerID":"minimax-cn", "id":"MiniMax-M3.1-Flash", "name":"MiniMax-M3.1-Flash", "variants":[]}]});
+        herdr.api_replies.extend([
+            Ok(listed.clone()),
+            Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
+            Ok(listed.clone()),
+            Ok(serde_json::json!({"data":[{"id":"minimax-cn", "name":"MiniMax (minimax.cn)"}]})),
+            Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
+            Ok(listed),
+            Ok(serde_json::json!({"data":{"id":"ses_t94", "model":model}})),
+        ]);
+        assert_eq!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(), ["toy:heat"]);
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
+        assert!(!herdr.calls.iter().any(|call| matches!(call,
+            gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. })),
+            "no terminal model keys: {:?}", herdr.calls);
     }
 
     /// T-67 (trial G01): an empty `model.list` for a fresh directory means

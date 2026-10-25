@@ -97,13 +97,36 @@ pub(crate) fn derived_labels(
         .iter()
         .find(|m| m["providerID"] == provider && m["id"] == id)?;
     let model_name = info["name"].as_str().unwrap_or(id);
-    let provider_name = info["providerName"].as_str().unwrap_or(provider);
+    // The display name as OpenCode renders it in the status bar: the provider's
+    // own name from `provider.list` (F1 of the T-94 review), e.g. "MiniMax
+    // (minimax.cn)" or "OpenCode Go", not its id.
+    let provider_name = provider_display_name(herdr, provider, directory).unwrap_or_else(|| provider.to_string());
     let text = format!("{model_name} {provider_name}");
     Some(gear_app::config::ModelSwitch {
         picker: text.clone(),
         bar: text,
         variant: variant.map(str::to_string),
     })
+}
+
+/// The provider's display name from OpenCode's `provider.list` (F1 of the
+/// T-94 review), for the directory when one is known. The model list carries
+/// only the provider id.
+fn provider_display_name(
+    herdr: &mut dyn HerdrAct,
+    provider: &str,
+    directory: Option<&str>,
+) -> Option<String> {
+    let mut args = vec!["provider.list".into()];
+    if let Some(directory) = directory {
+        args.extend(["--param".into(), format!("location[directory]={directory}")]);
+    }
+    let catalog = herdr.opencode_api(&args).ok()?;
+    let providers = data(&catalog).as_array()?;
+    providers
+        .iter()
+        .find(|p| p["id"] == provider)
+        .and_then(|p| p["name"].as_str().map(str::to_string))
 }
 
 pub(crate) fn matches(session: &Value, target: &Value) -> bool {
@@ -334,13 +357,17 @@ variant = "max"
         herdr.api_replies.push_back(Ok(json!({"data": [{
             "providerID": "minimax-cn",
             "id": "MiniMax-M3.1-Flash",
-            "name": "MiniMax-M3.1-Flash",
-            "providerName": "minimax-cn"
+            "name": "MiniMax-M3.1-Flash"
         }]})));
+        // The display name is the provider's own, from provider.list (F1).
+        herdr.api_replies.push_back(Ok(json!({"data": [
+            {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"},
+            {"id": "opencode-go", "name": "OpenCode Go"}
+        ]})));
         let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
             .expect("the catalogue holds it");
-        assert_eq!(labels.bar, "MiniMax-M3.1-Flash minimax-cn");
-        assert_eq!(labels.picker, "MiniMax-M3.1-Flash minimax-cn");
+        assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
+        assert_eq!(labels.picker, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.variant, None);
 
         // A model the catalogue does not hold has no labels to derive.
@@ -351,9 +378,9 @@ variant = "max"
         herdr.api_replies.push_back(Ok(json!({"data": [{
             "providerID": "minimax-cn",
             "id": "MiniMax-M3.1-Flash",
-            "name": "MiniMax-M3.1-Flash",
-            "providerName": "minimax-cn"
+            "name": "MiniMax-M3.1-Flash"
         }]})));
+        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]})));
         let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
             .expect("the catalogue holds it");
         assert_eq!(labels.variant.as_deref(), Some("max"));
