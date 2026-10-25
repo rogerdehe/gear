@@ -456,12 +456,17 @@ pub fn switch_model(
     }
     let directory = meta_get(store, &crate::onboard::worktree_path_key(seat_id))?;
     let target = match crate::opencode::target(herdr, model, labels.variant.as_deref(), directory.as_deref()) {
-        Ok(target) => target,
-        Err(error) if error.starts_with("invalid OpenCode") => {
+        crate::opencode::Lookup::Target(target) => target,
+        // The model is not in a loaded catalogue: a config fault.
+        crate::opencode::Lookup::Invalid(_) => {
             clear_pending(store, seat_id)?;
             return Ok(SwitchOutcome::Failed);
         }
-        Err(_) => return api_fallback(store, herdr, seat_id, profile, obs, labels, now),
+        // A catalogue that is not loaded yet, or no answer: the typed-key path
+        // is the only thing left (it never picks another model either).
+        crate::opencode::Lookup::NotLoaded | crate::opencode::Lookup::Unavailable => {
+            return api_fallback(store, herdr, seat_id, profile, obs, labels, now)
+        }
     };
     let get = vec!["GET".into(), format!("/api/session/{session}")];
     let value = match herdr.opencode_api(&get) {
