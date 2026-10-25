@@ -110,9 +110,10 @@ pub fn plan_onboard(
 ///
 /// Per seat, in this order:
 /// 1. the project's config (`config_toml`, `gear_app::config::parse`, outside
-///    the read transaction) for `repo`, `conventions.integration` and the
-///    lane's `kind`; the profile is `cfg.profiles[seat.profile]` (missing →
-///    seat NeedsCheck, reason says so);
+///    the read transaction) for the lane's repo (`repo_of_lane`: the repo the
+///    lane works in, with its own integration branch), the lane's `kind`; the
+///    profile is `cfg.profiles[seat.profile]` (missing → seat NeedsCheck,
+///    reason says so);
 /// 2. `plan_onboard(seat, kind, profile, generation = seat.generation + 1, repo,
 ///    integration, cfg.db_path, None)` (Err → NeedsCheck with the reason);
 /// 3. Herdr `worktree_create` → the root pane;
@@ -239,13 +240,16 @@ fn onboard_seat(
         .ok_or_else(|| format!("no profile drives the CLI {kind:?}"))?;
 
     // 2. the plan: worktree, environment line, agent name and start args.
+    //    The lane's worktree is in the lane's own repo, cut from that repo's
+    //    integration branch (T-53): a lane bound to a child repo works there.
+    let repo = config.repo_of_lane(&seat.name);
     let mut plan = plan_onboard(
         seat,
         &kind,
         profile,
         seat.generation + 1,
-        &config.project.repo,
-        &config.conventions.integration,
+        &repo.path,
+        &repo.integration,
         &cfg.db_path,
         None,
     )?;
@@ -590,6 +594,36 @@ picker = "MiniMax-M3.1-Flash"
 bar = "MiniMax-M3.1-Flash"
 "#;
 
+    /// The same project with a child repo: the lane works in it (T-53).
+    const CONFIG_WITH_REPOS: &str = r#"
+[project]
+id = "toy"
+herdr_session = "sess"
+repo = "/repo"
+
+[[repos]]
+name = "web"
+path = "web"
+integration = "web-dev"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+repo = "web"
+"#;
+
     /// An engine that knows the opencode profile.
     fn cfg() -> crate::EngineCfg {
         let mut cfg = crate::EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
@@ -848,5 +882,31 @@ bar = "MiniMax-M3.1-Flash"
         assert_eq!(active, vec!["toy:heat".to_string()]);
         assert_eq!(env_line(&herdr), "export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db");
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
+    }
+
+    /// T-53: a lane bound to a child repo is onboarded in that repo: its
+    /// worktree is cut there, from that repo's own integration branch.
+    #[test]
+    fn a_lane_bound_to_a_child_repo_is_onboarded_in_that_repo() {
+        let mut store = world(CONFIG_WITH_REPOS);
+        let mut herdr = FakeHerdr::new();
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let (repo, branch, base, label) = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                gear_herdr::fake::Call::WorktreeCreate { repo, branch, base, label } => {
+                    Some((repo.clone(), branch.clone(), base.clone(), label.clone()))
+                }
+                _ => None,
+            })
+            .expect("the engine created the lane's worktree");
+        assert_eq!(repo, "/repo/web", "the worktree is in the lane's repo");
+        assert_eq!(branch, "home/heat");
+        assert_eq!(base, "web-dev", "the repo's own integration branch");
+        assert_eq!(label, "toy-heat");
     }
 }
