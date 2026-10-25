@@ -53,6 +53,9 @@ pub enum StaffItem {
     Hold { line: usize, lane: String, reason: String },
     /// `- retire prompts`
     Retire { line: usize, lane: String },
+    /// `- retry heat`: a parked (NeedsCheck) or lost (Unknown) lane goes back
+    /// to Queued, so the engine onboards it again (T-82).
+    Retry { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
@@ -676,6 +679,15 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Retire { line, lane: lane.to_string() })
         }
+        "retry" => {
+            let lane = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`retry` needs a lane"))?;
+            if tokens.next().is_some() {
+                return Err(bad(line, "`retry` takes only a lane"));
+            }
+            Ok(StaffItem::Retry { line, lane: lane.to_string() })
+        }
         "remerge" => {
             let task = tokens
                 .next()
@@ -690,7 +702,7 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, retire or remerge"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, retire, retry or remerge"),
         )),
     }
 }
