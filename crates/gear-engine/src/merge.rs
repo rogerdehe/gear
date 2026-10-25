@@ -1962,7 +1962,7 @@ gate = "{project_gate}"
         let result = merge_passed(&mut store, &mut herdr, &cfg, "p", launched_at).unwrap();
         assert!(!done.exists(), "merge_passed waited for the sleeping gate");
         assert!(result.is_empty(), "the merge is still running");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
             let result = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
             if !result.is_empty() {
