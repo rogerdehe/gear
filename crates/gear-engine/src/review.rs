@@ -581,6 +581,8 @@ fn start_reviewer(
                 park(store, &seat.id, &format!("trust: {reason}"), now)?;
                 return Ok(Started::NotYet);
             }
+            // T-76: the reviewer runs in its own worktree; the args name it.
+            let args = gear_herdr::render_args(&args, &path);
             match herdr.agent_start(&label, kind, &pane, &args) {
                 Outcome::Ok(info) => info,
                 Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
@@ -1496,7 +1498,14 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         assert_eq!(report.started, vec!["p:review-1"]);
-        assert_eq!(starts(&herdr)[0].1, cfg().profiles["codex"].unattended_args);
+        // T-76: the folder the reviewer runs in is trusted, so the args are
+        // the profile's with the worktree filled in.
+        assert_eq!(
+            starts(&herdr)[0].1,
+            gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/home-review-1"),
+            "{:?}",
+            starts(&herdr)
+        );
     }
 
     #[test]
@@ -1738,6 +1747,9 @@ review = [
                     "--dangerously-bypass-approvals-and-sandbox".to_string(),
                     "-c".to_string(),
                     "check_for_update_on_startup=false".to_string(),
+                    // T-76: the reviewer's worktree is the folder it runs in.
+                    "-c".to_string(),
+                    "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),

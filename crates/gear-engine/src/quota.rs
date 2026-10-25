@@ -1076,6 +1076,10 @@ quota_reset_h = 5
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
+                // T-76: the folder the agent runs in (the lane's repo here:
+                // the seat's worktree is not recorded in this fixture).
+                "-c".to_string(),
+                "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),
