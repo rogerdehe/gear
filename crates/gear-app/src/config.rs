@@ -1037,6 +1037,16 @@ fn github_issues(section: &GithubSection, field: &str, issues: &mut Vec<ConfigIs
             ));
         }
     }
+    // Landing a task through its pull request is not in this release (T-91's
+    // review, F1): the engine's merge still lands locally, and the forge merge
+    // would run after it had consumed the branch. Refused here until M4, so no
+    // project is configured for a landing that cannot work.
+    if section.merge == MergeMode::Pr {
+        issues.push(issue(
+            &format!("{field}.merge"),
+            "`merge = \"pr\"` is not in this release: a task lands through the engine's merge and its pull request comments it; use `merge = \"push\"` (M4 brings the pull-request landing)".to_string(),
+        ));
+    }
 }
 
 /// `owner/name`: one slash, both sides non-empty, no whitespace and no URL
