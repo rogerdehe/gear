@@ -546,7 +546,7 @@ fn start_reviewer(
                 park(store, &seat.id, "the seat's worktree path is unknown", now)?;
                 return Ok(Started::NotYet);
             };
-            if !checkout_ready(
+            match checkout_ready(
                 store,
                 herdr,
                 &seat.id,
@@ -556,9 +556,17 @@ fn start_reviewer(
                 &branch,
                 &task.candidate,
             )? {
-                // The checkout is pending or failed: no reviewer starts on a
-                // tree nobody checked out.
-                return Ok(Started::NotYet);
+                Checked::Ready => {}
+                // The checkout is pending: no reviewer starts on a tree nobody
+                // checked out.
+                Checked::Waiting => return Ok(Started::NotYet),
+                Checked::Stuck(reason) => {
+                    // It keeps failing: the seat is parked for a human and the
+                    // captain gets one item, not a fight every tick (T-69).
+                    park(store, &seat.id, &reason, now)?;
+                    tell_captain(store, &config.project.id, task, &reason, now)?;
+                    return Ok(Started::NotYet);
+                }
             }
 
             // 6. the agent's args: the profile's unattended args, the model
@@ -719,13 +727,43 @@ const CHECKOUT_TAIL_LINES: u32 = 24;
 /// never be read as the report of a finished checkout.
 fn checkout_command(path: &str, branch: &str, candidate: &str, token: &str) -> String {
     format!(
-        "T={token}; cd {path} && git fetch origin && git checkout -f -B {branch} {candidate} \
+        // T-69 (trial G10): a re-review on another seat may find the branch
+        // still checked out in the previous reviewer's worktree. `git checkout
+        // -B` would refuse it. A worktree that holds the branch and is clean
+        // is detached first (its HEAD is kept); one with changes is left
+        // alone and this checkout fails, so the engine can stop and tell the
+        // captain instead of fighting it every tick.
+        "T={token}; cd {path} && git fetch origin \
+         && for wt in $(git worktree list --porcelain | sed -n 's/^worktree //p'); do \
+              [ \"$wt\" = \"$(pwd)\" ] && continue; \
+              [ \"$(git -C \"$wt\" rev-parse --abbrev-ref HEAD 2>/dev/null)\" = '{branch}' ] || continue; \
+              if [ -z \"$(git -C \"$wt\" status --porcelain 2>/dev/null)\" ]; then \
+                  git -C \"$wt\" checkout --detach >/dev/null 2>&1; \
+              else \
+                  echo {fail}${{T}}; exit 1; \
+              fi; \
+            done \
+         && git checkout -f -B {branch} {candidate} \
          && git clean -fd && echo {ok}${{T}}_$(git rev-parse HEAD)_$(git rev-parse --abbrev-ref HEAD) \
          || echo {fail}${{T}}",
         ok = OK_MARKER,
         fail = FAIL_MARKER,
     )
 }
+
+/// What the engine should do after reading the checkout's state.
+enum Checked {
+    /// The checkout is at the job's candidate: the reviewer may start.
+    Ready,
+    /// Not yet: the chain runs, or a fresh one was submitted.
+    Waiting,
+    /// It failed [`CHECKOUT_TRIES`] times: nothing starts, the captain is told.
+    Stuck(String),
+}
+
+/// How often a checkout is submitted before the seat is parked and the captain
+/// is rung (T-69).
+const CHECKOUT_TRIES: i64 = 3;
 
 /// What the checkout chain reported.
 enum Checkout {
@@ -799,7 +837,7 @@ fn checkout_ready(
     path: &str,
     branch: &str,
     candidate: &str,
-) -> GearResult<bool> {
+) -> GearResult<Checked> {
     let key = checkout_key(seat, generation);
     let recorded = store
         .read(|tx| tx.get_meta(&key))?
@@ -807,28 +845,53 @@ fn checkout_ready(
     let Some(token) = recorded else {
         // The checkout was never submitted: submit it and wait for its report.
         submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
-        return Ok(false);
+        return Ok(Checked::Waiting);
     };
     // The chain ran on an earlier tick: read what it did.
     let tail = herdr.read_tail(pane, CHECKOUT_TAIL_LINES).unwrap_or_default();
     match observe_checkout(&tail, &token) {
         Checkout::Finished { sha, branch: got } => {
             if same_commit(&sha, candidate) && got == branch {
-                Ok(true)
+                Ok(Checked::Ready)
             } else {
                 // It landed somewhere else: check out again.
                 submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
-                Ok(false)
+                Ok(Checked::Waiting)
             }
         }
         Checkout::Failed => {
-            // The fetch or the checkout failed: try again with a fresh token,
-            // so the old report is not read as the new one's.
+            // The fetch or the checkout failed. T-69: a branch that another
+            // worktree holds with changes of its own fails every time; the
+            // engine stops after a few tries and tells the captain instead of
+            // fighting it tick after tick.
+            let used = bump_checkout_fails(store, seat, generation)?;
+            if used >= CHECKOUT_TRIES {
+                let detail = tail
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                return Ok(Checked::Stuck(format!(
+                    "the checkout of {branch} at {candidate} failed {used} times (the worktree {path}): {detail}"
+                )));
+            }
             submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate)?;
-            Ok(false)
+            Ok(Checked::Waiting)
         }
-        Checkout::Pending => Ok(false),
+        Checkout::Pending => Ok(Checked::Waiting),
     }
+}
+
+/// Count one failed checkout for this seat generation.
+fn bump_checkout_fails(store: &mut Store, seat: &str, generation: i64) -> GearResult<i64> {
+    store.write(|tx| {
+        let key = format!("engine.review_checkout_fails.{seat}.{generation}");
+        let used = tx.get_meta(&key)?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
+        tx.set_meta(&key, &used.to_string())?;
+        Ok(used)
+    })
 }
 
 /// Submit the checkout of a job and remember its token, so that the next tick
@@ -1602,6 +1665,93 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Goal: the revised goal"), "{packet}");
         assert!(packet.contains("Accept: the revised criteria"), "{packet}");
         assert!(!packet.contains("the first goal"), "not the old contract: {packet}");
+    }
+
+    /// The command's output, whether or not it succeeded (the checkout's
+    /// failure path exits non-zero on purpose).
+    fn sh_out(dir: &std::path::Path, command: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    }
+
+    fn sh(dir: &std::path::Path, command: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// T-69 (trial G10): the re-review of a task on another seat. A worktree
+    /// that holds `review/t1` and is clean is detached (its HEAD kept) and the
+    /// checkout goes on; one with uncommitted changes is left alone and the
+    /// checkout reports a failure, so the engine stops after a few tries.
+    #[test]
+    fn a_clean_holder_of_the_review_branch_is_detached_a_dirty_one_is_not() {
+        let root = std::env::temp_dir().join(format!(
+            "gear-review-detach-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, "git init -q --bare origin.git");
+        sh(&root, "git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("README.md"), "dev\n").unwrap();
+        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+        sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+        sh(&work, "git switch -qc review/t1 && echo one > one.txt && git add -A \
+                   && git -c user.email=a@b -c user.name=a commit -qm one && git push -q origin review/t1");
+        let candidate = sh(&work, "git rev-parse review/t1");
+        sh(&work, "git switch -q dev");
+        // The previous reviewer's worktree holds the branch; the new seat's is
+        // free.
+        let old = root.join("old-seat");
+        let new = root.join("new-seat");
+        sh(&work, &format!("git worktree add -q {} review/t1", old.display()));
+        sh(&work, &format!("git worktree add -q -b home/seat {} origin/dev", new.display()));
+
+        // A clean holder: detached, its HEAD kept, and the checkout succeeds.
+        let token = "t1";
+        let report = sh(&new, &checkout_command(&new.display().to_string(), "review/t1", &candidate, token));
+        assert!(report.contains(&format!("{OK_MARKER}{token}_")), "{report}");
+        assert_eq!(sh(&old, "git rev-parse HEAD"), candidate, "its HEAD is kept");
+        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD", "detached");
+        assert_eq!(sh(&new, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        assert_eq!(sh(&new, "git rev-parse HEAD"), candidate);
+
+        // A dirty holder: nothing is detached and the checkout reports it.
+        sh(&work, &format!("git -C {} checkout -q --detach", new.display()));
+        sh(&work, &format!("git -C {} checkout -q review/t1", old.display()));
+        std::fs::write(old.join("uncommitted.txt"), "mine\n").unwrap();
+        sh(&work, &format!("git worktree add -q -b home/seat2 {} origin/dev", root.join("new-seat-2").display()));
+        let second = root.join("new-seat-2");
+        let report = sh_out(&second, &checkout_command(&second.display().to_string(), "review/t1", &candidate, "t2"));
+        assert!(report.contains(&format!("{FAIL_MARKER}t2")), "{report}");
+        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1", "not detached");
+        assert!(old.join("uncommitted.txt").exists(), "its changes are kept");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
