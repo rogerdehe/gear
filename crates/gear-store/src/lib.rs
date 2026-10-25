@@ -162,6 +162,18 @@ pub struct OpRow {
     pub updated: Ts,
 }
 
+/// One place a repo of the project may be pushed to (T-73): a destination
+/// frozen from the repo's own remote, normalised as host + path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushDestinationRow {
+    pub project: String,
+    /// The repo's name: `""` for the project root, else the `[[repos]]` name.
+    pub repo: String,
+    /// The normalised destination: host + path.
+    pub destination: String,
+    pub created: Ts,
+}
+
 /// One task (design/06). `deps` is stored as a JSON array.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
@@ -750,6 +762,91 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    // ---- push destinations (T-73)
+
+    /// Replace the frozen destinations of one repo: the list is what the
+    /// repo's own remote resolved to when the destinations were read. An
+    /// empty list leaves the repo with no destination at all — every push to
+    /// it is refused.
+    pub fn set_push_destinations(
+        &self,
+        project: &str,
+        repo: &str,
+        destinations: &[String],
+        now: Ts,
+    ) -> GearResult<()> {
+        self.tx
+            .execute(
+                "DELETE FROM push_destinations WHERE project=?1 AND repo=?2",
+                params![project, repo],
+            )
+            .map_err(map_sqlite)?;
+        for destination in destinations {
+            self.tx
+                .execute(
+                    "INSERT INTO push_destinations (project, repo, destination, created)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![project, repo, destination, now],
+                )
+                .map_err(map_sqlite)?;
+        }
+        Ok(())
+    }
+
+    /// Drop every destination of the project: the list is read again from
+    /// the repos themselves, so a repo that is gone leaves nothing behind.
+    pub fn clear_push_destinations(&self, project: &str) -> GearResult<()> {
+        self.tx
+            .execute(
+                "DELETE FROM push_destinations WHERE project=?1",
+                params![project],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// The frozen destinations of one repo, ascending.
+    pub fn push_destinations(&self, project: &str, repo: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT destination FROM push_destinations
+                 WHERE project=?1 AND repo=?2 ORDER BY destination",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, repo], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut destinations = Vec::new();
+        for row in rows {
+            destinations.push(row.map_err(map_sqlite)?);
+        }
+        Ok(destinations)
+    }
+
+    /// Every frozen destination of the project: (repo, destination), by repo
+    /// and then by destination.
+    pub fn push_destinations_of_project(
+        &self,
+        project: &str,
+    ) -> GearResult<Vec<PushDestinationRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, repo, destination, created FROM push_destinations
+                 WHERE project=?1 ORDER BY repo, destination",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], push_destination_from_row)
+            .map_err(map_sqlite)?;
+        let mut destinations = Vec::new();
+        for row in rows {
+            destinations.push(row.map_err(map_sqlite)?);
+        }
+        Ok(destinations)
+    }
+
     // ---- projects
 
     pub fn insert_project(&self, row: &ProjectRow) -> GearResult<()> {
@@ -1219,6 +1316,30 @@ impl<'s> Tx<'s> {
 
     pub fn captain_quota_paused(&self, project: &str) -> GearResult<bool> {
         Ok(self.captain_quota(project)?.is_some_and(|state| !state.resumed))
+    }
+
+    /// The seats of the project that wait for their provider (T-75): their
+    /// screen shows a provider back-off. Kept in meta, so it survives a
+    /// restart and needs no migration.
+    pub fn seats_in_backoff(&self, project: &str) -> GearResult<Vec<String>> {
+        let raw = self.get_meta(&format!("engine.backoff.{project}"))?;
+        match raw.filter(|raw| !raw.is_empty()) {
+            Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+                GearError::new(ErrorCode::BadFormat, format!("the back-off seats: {error}"))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Keep the seats that wait for their provider (T-75). Nothing is written
+    /// when the set is the same as the stored one.
+    pub fn set_seats_in_backoff(&self, project: &str, seats: &[String]) -> GearResult<()> {
+        if self.seats_in_backoff(project)? == seats {
+            return Ok(());
+        }
+        let raw = serde_json::to_string(seats)
+            .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?;
+        self.set_meta(&format!("engine.backoff.{project}"), &raw)
     }
 
     // ---- views
@@ -2461,6 +2582,15 @@ fn voyage_from_row(row: &rusqlite::Row) -> rusqlite::Result<VoyageRow> {
         departure_tasks: row.get(7)?,
         departure_estimate_min: row.get(9)?,
         updated: row.get(8)?,
+    })
+}
+
+fn push_destination_from_row(row: &rusqlite::Row) -> rusqlite::Result<PushDestinationRow> {
+    Ok(PushDestinationRow {
+        project: row.get(0)?,
+        repo: row.get(1)?,
+        destination: row.get(2)?,
+        created: row.get(3)?,
     })
 }
 
