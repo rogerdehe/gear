@@ -152,6 +152,7 @@ impl SeatState {
                     | (Parked, Active | Standby | Held | Retiring | Missing | NeedsCheck)
                     | (Held, Active | Standby | Retiring | Missing | NeedsCheck)
                     | (Retiring, Retired | Missing)
+                    | (Retired, Queued) // registered again: a new voyage reuses the name (T-54)
                     | (Missing, Starting | NeedsCheck | Retired)
                     | (NeedsCheck, Active | Starting | Retired)
             ),
@@ -253,6 +254,17 @@ mod tests {
         assert!(!SeatState::Released.expects_agent());
         assert!(!SeatState::Queued.expects_agent());
         assert!(SeatState::Active.expects_agent());
+    }
+
+    /// T-54: a retired lane may be registered again — a new voyage reuses the
+    /// name — and the engine onboards it once more.
+    #[test]
+    fn a_retired_lane_may_be_registered_again() {
+        use SeatState::*;
+        assert!(SeatState::can_transition(SeatRole::Lane, Retired, Queued));
+        assert!(SeatState::can_transition(SeatRole::Lane, Queued, Starting));
+        // A temp seat is not a lane: it keeps its own rules.
+        assert!(!SeatState::can_transition(SeatRole::Temp, Retired, Queued));
     }
 
     #[test]

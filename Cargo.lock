@@ -194,6 +194,7 @@ dependencies = [
  "gear-store",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 
