@@ -15,6 +15,9 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 
 7b. **A dialog at an agent's start is a stop nobody sees** (M2.1). A Codex reviewer sat on the "Update available" dialog and nothing rang the captain. Turn such dialogs off in the profile's start args, and ring the captain for any seat blocked for minutes.
 
+
+7c. **Self-hosting runs the build it was started with** (M2.1). The engine ran a binary from before the voyage, so merged fixes were not live and a stopgap was removed too early. Rebuild and restart after the merges you need live — and only when no merge op is in flight (a restart interrupted T-58's merge; it recovered).
+
 ## Holding the course
 
 7. **The captain judges findings against the voyage's bar**; reviewers give the smallest exact fix; one round is the norm. Copying reviewer severities into rework cost M1 36 rounds for 28 tasks; judging them cost M2 3 rounds for 17.
