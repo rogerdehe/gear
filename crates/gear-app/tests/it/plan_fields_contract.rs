@@ -226,7 +226,7 @@ fn a_fail_asks_for_the_minutes_of_the_rework() {
     let mut s = world_with_a_failed_review();
     run_at(
         &mut s,
-        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"handle the edge case\" estimate=25\n",
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"handle the edge case\"\n",
         "r2",
     )
     .unwrap();
@@ -312,7 +312,7 @@ fn a_pass_may_name_the_task_that_landed_it() {
     let mut s = world_with_a_failed_review();
     run_at(
         &mut s,
-        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=ops/reports/T-1.md why=\"the review missed the edge case\" integrated-by=T-2\n",
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=ops/reports/T-1.md integrated-by=T-2 why=\"the review missed the edge case\"\n",
         "r2",
     )
     .unwrap();
@@ -334,12 +334,12 @@ fn a_misplaced_field_is_refused() {
         ),
         (
             "b",
-            "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"x\" why=\"y\"\n",
+            "- T-1 attempt=1 contract=1 candidate=abc1234 fail why=\"y\"\n",
             "`why=` belongs to a pass",
         ),
         (
             "c",
-            "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"x\" integrated-by=T-2\n",
+            "- T-1 attempt=1 contract=1 candidate=abc1234 fail integrated-by=T-2 rework=\"x\"\n",
             "`integrated-by=` belongs to a pass",
         ),
     ] {

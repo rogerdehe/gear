@@ -765,56 +765,34 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         }
     };
 
-    // The tail runs to the end of the line: `evidence=<path>`, `rework="<text>"`,
-    // `estimate=<min>`, `why="<text>"` or `integrated-by=T-m`.
+    // The tail runs to the end of the line: `evidence=<path>`, `estimate=<min>`,
+    // `integrated-by=T-m` and the quoted value (`rework="<text>"` or
+    // `why="<text>"`).
     let tail = rest
         .splitn(6, char::is_whitespace)
         .nth(5)
         .unwrap_or("")
         .trim();
+    let (fields, quoted) = parse_verdict_tail(tail, line)?;
     let mut evidence = None;
     let mut rework = None;
     let mut estimate = None;
     let mut why = None;
     let mut integrated_by = None;
-    for (key, value) in tail_fields(tail) {
+    for (key, value) in fields {
         match key.as_str() {
             "evidence" => {
                 let value = value.trim();
                 if value.is_empty() {
                     return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
                 }
-                // A pass verdict carries exactly one `evidence=<path>`: a second
-                // field after it (or a path with a space) is a different tail.
-                if pass && value.chars().any(char::is_whitespace) {
-                    return Err(bad(
-                        line,
-                        "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
-                    ));
-                }
                 evidence = Some(value.to_string());
-            }
-            "rework" => {
-                let inner = quoted_text(&value)
-                    .ok_or_else(|| bad(line, "a `fail` verdict needs `rework=\"<text>\"`"))?;
-                if inner.trim().is_empty() {
-                    return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
-                }
-                rework = Some(inner.trim().to_string());
             }
             "estimate" => {
                 let minutes = value.trim().parse::<i64>().map_err(|_| {
                     bad(line, format!("`estimate=` takes a number of minutes, got {value:?}"))
                 })?;
                 estimate = Some(minutes);
-            }
-            "why" => {
-                let inner = quoted_text(&value)
-                    .ok_or_else(|| bad(line, "`why=\"<text>\"` takes a quoted text"))?;
-                if inner.trim().is_empty() {
-                    return Err(bad(line, "`why=\"<text>\"` takes a non-empty text"));
-                }
-                why = Some(inner.trim().to_string());
             }
             "integrated-by" => {
                 let task = value.trim();
@@ -828,7 +806,47 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
             }
         }
     }
+    // The quoted value: the rework text or the why.
+    if let Some((key, value)) = quoted {
+        match key.as_str() {
+            "rework" => {
+                if value.trim().is_empty() {
+                    return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
+                }
+                rework = Some(value.trim().to_string());
+            }
+            "why" => {
+                if value.trim().is_empty() {
+                    return Err(bad(line, "`why=\"<text>\"` takes a non-empty text"));
+                }
+                why = Some(value.trim().to_string());
+            }
+            other => {
+                return Err(bad(line, format!("unexpected verdict field {other:?}")));
+            }
+        }
+    }
 
+    // The fields that belong to the other verdict are refused first: they say
+    // what the captain meant to write.
+    if !pass && why.is_some() {
+        return Err(bad(
+            line,
+            "`why=` belongs to a pass over a failed review: a fail carries its rework text",
+        ));
+    }
+    if !pass && integrated_by.is_some() {
+        return Err(bad(
+            line,
+            "`integrated-by=` belongs to a pass: only a pass can be landed by another task's merge",
+        ));
+    }
+    if pass && estimate.is_some() {
+        return Err(bad(
+            line,
+            "a `pass` verdict must not carry `estimate=`: the minutes a rework asks for belong to a fail",
+        ));
+    }
     if pass && evidence.is_none() {
         return Err(bad(line, "a `pass` verdict needs `evidence=<path>`"));
     }
@@ -841,26 +859,8 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
     if !pass && evidence.is_some() {
         return Err(bad(line, "a `fail` verdict must not carry `evidence=`"));
     }
-    if pass && estimate.is_some() {
-        return Err(bad(
-            line,
-            "a `pass` verdict must not carry `estimate=`: the minutes a rework asks for belong to a fail",
-        ));
-    }
-    if !pass && estimate.is_some() && estimate.map(|min| min <= 0).unwrap_or(false) {
+    if !pass && estimate.map(|min| min <= 0).unwrap_or(false) {
         return Err(bad(line, "`estimate=` takes a positive number of minutes"));
-    }
-    if !pass && why.is_some() {
-        return Err(bad(
-            line,
-            "`why=` belongs to a pass over a failed review: a fail carries its rework text",
-        ));
-    }
-    if !pass && integrated_by.is_some() {
-        return Err(bad(
-            line,
-            "`integrated-by=` belongs to a pass: only a pass can be landed by another task's merge",
-        ));
     }
 
     Ok(VerdictLine {
@@ -878,40 +878,105 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
     })
 }
 
-/// The fields of a verdict line's tail: `key=value` pairs, where a quoted
-/// value may hold spaces (`rework="…"`, `why="…"`).
-fn tail_fields(tail: &str) -> Vec<(String, String)> {
-    let mut fields = Vec::new();
-    let mut rest = tail.trim();
-    while !rest.is_empty() {
-        let Some((key, value)) = rest.split_once('=') else {
-            fields.push((rest.trim().to_string(), String::new()));
-            break;
-        };
-        let value = value.trim_start();
-        let (value, tail) = if let Some(quoted) = value.strip_prefix('"') {
-            match quoted.split_once('"') {
-                Some((inner, after)) => (format!("\"{inner}\""), after.trim_start()),
-                None => (format!("\"{quoted}\""), ""),
-            }
-        } else {
-            match value.find(char::is_whitespace) {
-                Some(at) => (value[..at].to_string(), value[at..].trim_start()),
-                None => (value.to_string(), ""),
-            }
-        };
-        fields.push((key.trim().to_string(), value));
-        rest = tail;
+/// The tail of a verdict line: the `key=value` fields and the one quoted
+/// value (the rework text or the why).
+///
+/// The captain's rule (design §10.7, T-141's rework): the tail carries at
+/// most one quoted value, and it is the **last** field — it runs from its
+/// first quote to its closing quote, so the prose may contain quotes of its
+/// own. The `key=value` fields (`estimate=`, `integrated-by=`, `evidence=`)
+/// come before it; one after it is refused, and a value without a closing
+/// quote is refused too.
+fn parse_verdict_tail(
+    tail: &str,
+    line: usize,
+) -> GearResult<(Vec<(String, String)>, Option<(String, String)>)> {
+    let tail = tail.trim();
+    let Some(open) = tail.find('"') else {
+        // No quoted value: the tail is `key=value` fields.
+        return Ok((key_value_fields(tail, line)?, None));
+    };
+    // The quoted value belongs to the last key of the head: its value starts
+    // at the quote.
+    let mut fields = key_value_fields(tail[..open].trim_end(), line)?;
+    let quoted_key = match fields.last() {
+        Some((key, value)) if value.is_empty() => {
+            let key = key.clone();
+            fields.pop();
+            key
+        }
+        _ => {
+            return Err(bad(
+                line,
+                "a verdict line's quoted value needs its key: `rework=\"…\"` or `why=\"…\"`",
+            ))
+        }
+    };
+    // The closing quote: the first quote that ends the value. The prose
+    // between the quotes may contain quotes.
+    let rest = &tail[open + 1..];
+    let closing = find_closing_quote(rest, line)?;
+    let value = rest[..closing].to_string();
+    let after = rest[closing + 1..].trim();
+    if !after.is_empty() {
+        // The order is the captain's rule: the quoted value is the last field.
+        return Err(bad(
+            line,
+            format!("a verdict line's quoted value is the last field: {after:?} comes after it"),
+        ));
     }
-    fields
+    Ok((fields, Some((quoted_key, value))))
 }
 
-/// The text inside a quoted value (`"…"`), `None` when it is not quoted.
-fn quoted_text(value: &str) -> Option<&str> {
-    value
-        .trim()
-        .strip_prefix('"')
-        .and_then(|text| text.strip_suffix('"'))
+/// The `key=value` fields of a verdict line's tail.
+fn key_value_fields(head: &str, line: usize) -> GearResult<Vec<(String, String)>> {
+    let mut fields = Vec::new();
+    for token in head.split(char::is_whitespace) {
+        if token.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = token.split_once('=') else {
+            return Err(bad(line, format!("unexpected verdict text {token:?}")));
+        };
+        if key.is_empty() {
+            return Err(bad(line, format!("unexpected verdict text {token:?}")));
+        }
+        fields.push((key.to_string(), value.to_string()));
+    }
+    Ok(fields)
+}
+
+/// The closing quote of a quoted value: the first quote that ends it — the
+/// end of the tail or the start of the next field. The prose between the
+/// quotes may contain quotes of its own.
+fn find_closing_quote(rest: &str, line: usize) -> GearResult<usize> {
+    let mut at = 0;
+    while at < rest.len() {
+        let Some(next) = rest[at..].find('"').map(|found| at + found) else {
+            // No closing quote: the value is not terminated.
+            return Err(bad(
+                line,
+                "a verdict line's quoted value has no closing quote",
+            ));
+        };
+        let after = rest[next + 1..].trim_start();
+        if after.is_empty() || starts_a_field(after) {
+            return Ok(next);
+        }
+        at = next + 1;
+    }
+    Err(bad(
+        line,
+        "a verdict line's quoted value has no closing quote",
+    ))
+}
+
+/// Whether the text starts a `key=value` field.
+fn starts_a_field(text: &str) -> bool {
+    match text.split_once('=') {
+        Some((key, _)) => !key.is_empty() && !key.contains(char::is_whitespace),
+        None => false,
+    }
 }
 
 fn number_field(token: Option<&str>, name: &str, line: usize) -> GearResult<i64> {
