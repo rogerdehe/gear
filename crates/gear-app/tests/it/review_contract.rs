@@ -50,7 +50,8 @@ fn review(outcome: Outcome, findings: &str, rid: &str) -> SendArgs {
         urgent: false,
         left: None,
         blocker: None,
-        on: None, request_id: rid.into() }
+        on: None,
+        friction: None, request_id: rid.into() }
 }
 
 #[test]

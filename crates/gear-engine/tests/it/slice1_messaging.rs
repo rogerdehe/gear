@@ -101,6 +101,7 @@ fn ask(w: &mut World, body: &str, rid: &str, now: i64) -> mail::SendResult {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: rid.into(),
     };
     mail::send(&mut w.store, &env("heat", 1, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, now).unwrap()
@@ -218,6 +219,7 @@ fn stale_generation_and_wrong_pane_are_rejected() {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: "r".into(),
     };
     let e = mail::send(&mut w.store, &env("heat", 2, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, T0)

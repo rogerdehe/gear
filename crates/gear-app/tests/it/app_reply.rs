@@ -63,6 +63,7 @@ fn ask(s: &mut Store, seat: &str, pane: &str, body: &str, request_id: &str, now:
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: request_id.into(),
     };
     mail::send(s, &seat_env(seat, pane), Some(&fp(pane, "opencode")), &args, now).unwrap().msg_id
@@ -88,6 +89,7 @@ fn raise_own(s: &mut Store, body: &str, request_id: &str, now: i64) -> String {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: request_id.into(),
     };
     mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now).unwrap().msg_id
@@ -112,6 +114,7 @@ fn instruct(s: &mut Store, seat: &str, request_id: &str, now: i64) -> String {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: request_id.into(),
     };
     mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now).unwrap().msg_id
