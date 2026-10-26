@@ -605,3 +605,97 @@ The captain runs these itself before the tasks that depend on them are delivered
 2. Same after `compact`: does Herdr report `working` then ready, and does the session id stay?
 3. pi `--session <file>` and Codex `resume <id>` started in the same pane: does the agent come back with its history and is it recognized by Herdr?
 4. The MiniMax and OpenCode Go usage endpoints with the configured keys (one call each).
+
+---
+
+## 13. Interfaces between lanes
+
+Tasks of different lanes meet only at these names. A task writes against them before the other side has landed (lesson 7a), and merges dev in when it lands. A change to a name here is a captain decision, never a lane's.
+
+### 13.1 Store (`crates/gear-store`, deck)
+
+```rust
+// TaskRow gains: pub repo: Option<String>, pub base: Option<String>, pub gate: Option<String>
+// AttemptRow gains: pub session_ref: Option<String>, pub session_cli: Option<String>,
+//                   pub session_action: Option<String>, pub sent_at: Option<Ts>
+impl Tx<'_> {
+    pub fn set_attempt_session(&self, project: &str, task: &str, n: i64, session_ref: &str, cli: &str) -> GearResult<()>;
+    pub fn set_attempt_action(&self, project: &str, task: &str, n: i64, action: &str) -> GearResult<()>;
+    pub fn set_attempt_sent(&self, project: &str, task: &str, n: i64, at: Ts) -> GearResult<()>;
+
+    pub fn insert_round(&self, r: &NewRound) -> GearResult<()>;                 // fails if the key exists
+    pub fn open_round_of_seat(&self, seat: &str) -> GearResult<Option<RoundRow>>; // end_at IS NULL
+    pub fn close_round(&self, key: &RoundKey, end_at: Ts) -> GearResult<()>;
+    pub fn add_round_session(&self, key: &RoundKey, session_ref: &str) -> GearResult<()>; // no duplicates
+    pub fn add_round_pause(&self, key: &RoundKey, secs: i64) -> GearResult<()>;
+    pub fn set_round_active(&self, key: &RoundKey, active_s: i64) -> GearResult<()>;
+    pub fn set_round_tokens(&self, key: &RoundKey, t: &RoundTokens, at: Ts) -> GearResult<()>;
+    pub fn rounds_of_task(&self, project: &str, task: &str) -> GearResult<Vec<RoundRow>>;
+    pub fn rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>>;
+
+    pub fn insert_friction(&self, f: &NewFriction) -> GearResult<String>;       // returns "F-<n>"
+    pub fn open_frictions(&self, project: &str) -> GearResult<Vec<FrictionRow>>;
+    pub fn frictions_of_project(&self, project: &str) -> GearResult<Vec<FrictionRow>>;
+    pub fn close_friction(&self, project: &str, id: &str, outcome: &str, at: Ts) -> GearResult<()>;
+
+    pub fn insert_decision_if_new(&self, d: &NewDecision) -> GearResult<bool>; // false: key exists
+    pub fn decisions_of(&self, project: &str, voyage: &str) -> GearResult<Vec<DecisionRow>>;
+}
+pub struct RoundKey { pub project: String, pub task: String, pub attempt: i64, pub role: String }
+pub struct NewRound { pub key: RoundKey, pub seat: String, pub generation: i64, pub cli: String, pub model: Option<String>, pub start_at: Ts }
+pub struct RoundTokens { pub input: Option<i64>, pub output: Option<i64>, pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>, pub reasoning: Option<i64>, pub cost_usd: Option<f64>, pub cost_source: String }
+// RoundRow, FrictionRow, DecisionRow: one field per column of §1, same names.
+// NewFriction / NewDecision: the columns of §1 without id/seq/created.
+```
+
+### 13.2 Usage and quota readers (new crate `crates/gear-usage`, deck)
+
+```rust
+pub enum UsageLog { PiJsonl, CodexRollout, ClaudeJsonl, OpencodeDb }       // profile `usage_log`
+pub struct Usage { pub input: i64, pub output: i64, pub cache_read: i64, pub cache_write: i64,
+                   pub reasoning: i64, pub cost_usd: Option<f64>, pub records: i64 }
+/// Sum of the records of one session with from <= time < to (§4.3). None: the log cannot be read.
+pub fn usage(log: UsageLog, session_ref: &str, from: Ts, to: Ts) -> Option<Usage>;
+/// input + cache_read + cache_write of the last assistant record (§3.5). None: unknown.
+pub fn last_context(log: UsageLog, session_ref: &str) -> Option<i64>;
+
+pub enum QuotaReader { Minimax, OpencodeGo, Codex }
+pub struct Window { pub name: String, pub used_percent: f64, pub resets_at: Option<Ts> }
+pub struct Reading { pub provider: String, pub windows: Vec<Window>, pub read_at: Ts }
+/// One call (§9.1). HTTP through `curl -sS --max-time 15` (no HTTP crate in the workspace).
+pub fn read_quota(reader: QuotaReader, key: &str, codex_session: Option<&str>, now: Ts) -> Result<Reading, String>;
+```
+
+### 13.3 Profiles (`crates/gear-herdr/src/profile.rs`, deck)
+
+`Profile` gains `pub new_session: String`, `pub compact: String` (empty = none), `pub usage_log: Option<String>` (the names of §2, kebab case); `classify` returns no busy class (§10.2).
+
+### 13.4 Engine: sessions (`crates/gear-engine/src/session.rs`, hull)
+
+```rust
+pub enum Prep { Ready, Wait }       // Ready: send the packet now; Wait: try again next tick
+/// §3.2 steps 2-3 for a lane round: creates the round row on the first call, chooses the
+/// action (§3.3), runs it one step per tick (§3.4), records attempts.session_action.
+pub fn prepare_lane(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow,
+                    task: &str, attempt: i64, now: Ts) -> GearResult<Prep>;
+/// The same for a review round; the reviewer worktree (§3.7) is prepared inside.
+pub fn prepare_review(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow,
+                      task: &str, attempt: i64, now: Ts) -> GearResult<Prep>;
+```
+
+Keel's dispatch (lanes) and hull's review start call these before the packet; on `Ready` they send it and call `store.set_attempt_sent`.
+
+### 13.5 Engine: rounds and waits (keel)
+
+`crates/gear-engine/src/rounds.rs`: `pub fn tick(store, herdr, cfg, now)` adds session refs to open rounds, closes rounds (§4.1), counts tokens of closed rounds (§4.3-4.4). `crates/gear-engine/src/overrun.rs`: `pub fn tick(...)` (§5.1-5.2). `crates/gear-engine/src/waits.rs`: `pub fn tick(...)` (§5.3). All three are called from `lib.rs::tick`.
+
+### 13.6 Idle reasons (`crates/gear-board/src/idle.rs`, deck)
+
+```rust
+pub enum IdleReason { Quota { until: Ts }, Parked { until: Option<Ts> }, Held { reason: String },
+    Waiting { on: String }, DepWait { task: String, on: String }, Undelivered { task: String }, NoWork }
+pub fn idle_reason(tx: &Tx, project: &str, lane: &str, now: Ts) -> GearResult<Option<IdleReason>>; // None: working
+pub fn describe(r: &IdleReason, tx: &Tx, project: &str) -> String; // the "Shown" texts of §8.2
+```
+gear-board is below gear-app, so the board, `gear queue` (mast) and the imbalance item (keel) all use this one function.
