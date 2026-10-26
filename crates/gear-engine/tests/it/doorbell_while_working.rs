@@ -109,7 +109,12 @@ fn a_working_pi_lane_gets_the_captains_instruction_in_the_same_tick() {
 fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
     let mut w = world(AgentStatus::Working, AgentStatus::Idle);
     // The captain is busy too, so the only prompt of this tick is the lane's
-    // at-once doorbell — the one Herdr refuses here.
+    // at-once doorbell — the one Herdr refuses here. Every agent already
+    // carries its name (T-134), so no rename spends the injected refusal: the
+    // next side-effecting call of the tick must be this test's doorbell.
+    w.herdr.set_agent_name(CAP_PANE, Some("p-captain"));
+    w.herdr.set_agent_name(PI_PANE, Some("p-heat"));
+    w.herdr.set_agent_name(LANE_PANE, Some("p-wire"));
     w.herdr.set_status(CAP_PANE, AgentStatus::Working);
     let id = w.captain_message("p:heat", MsgKind::Instruction, false, T0 + 10);
     w.herdr.inject_next = Some(Inject::Refuse { code: "agent_not_ready".into() });
