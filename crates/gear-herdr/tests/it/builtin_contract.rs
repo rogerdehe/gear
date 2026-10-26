@@ -58,7 +58,74 @@ fn codex_is_built_in_and_never_shows_its_update_dialog() {
 fn unverified_kinds_are_not_built_in() {
     // `codex` left this list with T-5: its SOP is verified
     // (`gear --skill agent:codex`), so it is built in like `opencode`.
-    for kind in ["pi", "nope"] {
+    for kind in ["nope", "omp"] {
         assert!(builtin(kind).is_none(), "{kind}");
     }
+}
+
+/// T-113: pi's facts, taken from pi 1.4.0's own output on this machine
+/// (a live run in a scratch pane; the SOP `gear --skill agent:pi`).
+#[test]
+fn pi_is_built_in_and_verified() {
+    let p = builtin("pi").expect("pi is built in");
+    assert_eq!(p.kind, "pi");
+    assert!(p.verified);
+    // `--approve` is pi's project-trust override: without it a lane in a
+    // fresh worktree waits on a trust prompt.
+    assert_eq!(p.unattended_args, vec!["--approve".to_string()]);
+    // Herdr reports pi's session file, and `--session` takes that path.
+    assert!(p.session_ref, "Herdr reports pi's session file");
+    assert_eq!(
+        p.resume_args,
+        Some(vec!["--session".to_string(), "{session}".to_string()])
+    );
+    // It exits on `/quit`, not on a key.
+    assert_eq!(p.exit_keys, Vec::<String>::new());
+    assert_eq!(p.exit_command.as_deref(), Some("/quit"));
+}
+
+/// The busy sign of pi: the spinner line of a running turn. The glyph
+/// changes, the word does not.
+#[test]
+fn the_pi_busy_sign_is_the_working_line() {
+    let p = builtin("pi").unwrap();
+    assert!(classify_screen(&p, "── ⠋ Working ─────────────────────────").contains(&ScreenFlag::Busy));
+    assert!(classify_screen(&p, "── ⠧ Working ─────────────────────────").contains(&ScreenFlag::Busy));
+    // The idle screen has no working line.
+    assert!(!classify_screen(&p, "LSP Inactive").contains(&ScreenFlag::Busy));
+}
+
+/// The provider signs of pi, taken from its own output (1.4.0).
+#[test]
+fn the_pi_provider_signs_are_recognised() {
+    let p = builtin("pi").unwrap();
+    // A spent quota.
+    let quota = " Error: 429: {\"message\":\"You exceeded your current quota, please check your plan and billing details.\",\"type\":\"insufficient_quota\",\"code\":\"insufficient_quota\"}";
+    assert!(classify_screen(&p, quota).contains(&ScreenFlag::Quota));
+    // A rate limit (a stop for the retry, not a quota stop).
+    let limited = " Error: 429: {\"message\":\"Rate limit reached for mock-model\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}";
+    let flags = classify_screen(&p, limited);
+    assert!(flags.contains(&ScreenFlag::RateLimit));
+    assert!(!flags.contains(&ScreenFlag::Quota), "a rate limit is not a spent quota");
+    // No credentials.
+    assert!(classify_screen(&p, " Error: No API key found for anthropic.").contains(&ScreenFlag::Auth));
+    // The provider back-off: pi retries on its own, so it is not a stall.
+    assert!(classify_screen(&p, "── ⠙ Retrying (3/3) in 7s... (escape to cancel) ──").contains(&ScreenFlag::Backoff));
+}
+
+/// The guardrails refusals of `@aliou/pi-guardrails` (T-113): the agent goes
+/// on after them, so the captain is told.
+#[test]
+fn the_pi_guardrails_refusals_are_recognised() {
+    let p = builtin("pi").unwrap();
+    assert!(
+        classify_screen(&p, "   Command auto-denied: No privileged commands in an unattended lane.")
+            .contains(&ScreenFlag::Blocked)
+    );
+    assert!(
+        classify_screen(&p, "   Access to ~/probe.txt is blocked (outside working directory).")
+            .contains(&ScreenFlag::Blocked)
+    );
+    // Ordinary output is not a refusal.
+    assert!(!classify_screen(&p, " Took 0.0s\n done-sleeping").contains(&ScreenFlag::Blocked));
 }

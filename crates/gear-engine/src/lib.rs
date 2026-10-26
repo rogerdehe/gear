@@ -23,6 +23,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod guardrails;
 pub mod merge;
 pub mod model;
 pub mod observe;
@@ -124,6 +125,8 @@ pub struct TickReport {
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
     pub blocked: Vec<String>,
+    /// Seats whose own guardrails refused one of their actions (T-113).
+    pub guardrails: Vec<String>,
     /// Seats that wait for their provider (T-75): a provider back-off is not
     /// a stall, and the home page shows it.
     pub backoff: Vec<String>,
@@ -202,6 +205,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report
             .blocked
             .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
+        // A lane refused by its own guardrails (pi: @aliou/pi-guardrails) goes
+        // on with the refusal in its transcript; the captain is told (T-113).
+        report
+            .guardrails
+            .extend(store.write(|tx| guardrails::check(tx, &project, &observed, now))?);
 
         // T-75: a seat whose provider is in a back-off waits for the provider.
         // It is not stuck, so no stall item is raised for it, and the captain's

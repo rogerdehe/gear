@@ -36,6 +36,37 @@ fn bare_skill_prints_skill_md() {
     assert_eq!(stdout(&o), skill_file("SKILL.md"));
 }
 
+/// The bare skill names every topic it has: a reader who runs
+/// `gear --skill` must find the agent SOPs (T-30, T-113).
+#[test]
+fn the_bare_skill_names_every_topic() {
+    let home = scratch::home("skill-bare-topics");
+    let o = gear(&home, &["--skill"]);
+    assert!(o.status.success(), "{}", stderr(&o));
+    let text = stdout(&o);
+    for topic in [
+        "conventions",
+        "captain",
+        "course",
+        "decompose",
+        "review",
+        "adopt",
+        "github",
+        "agent:opencode",
+        "agent:codex",
+        "agent:claude",
+        "agent:grok",
+        "agent:pi",
+    ] {
+        assert!(text.contains(topic), "the bare skill does not name {topic}:\n{text}");
+    }
+    // The installer is named with every kind it writes for.
+    assert!(
+        text.contains("gear admin install-skill --agent <claude|codex|opencode|grok|pi>"),
+        "{text}"
+    );
+}
+
 #[test]
 fn reference_topics_print_their_file() {
     let home = scratch::home("skill-reference");
@@ -60,6 +91,7 @@ fn the_new_topics_print_their_file() {
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
+        ("agent:pi", "references/agents/pi.md"),
     ] {
         let o = gear(&home, &["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));
@@ -86,6 +118,7 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "agent:codex",
         "agent:claude",
         "agent:grok",
+        "agent:pi",
     ] {
         let o = gear(&home, &["--skill", topic]);
         assert!(o.status.success(), "{topic}: {}", stderr(&o));

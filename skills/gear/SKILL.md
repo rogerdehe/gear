@@ -45,9 +45,9 @@ The captain's guide: `gear --skill captain`. Holding the course: `gear --skill c
 | `review` | what a temp reviewer delivers |
 | `adopt` | taking over a project that already runs: its instruction layer, exemplars, gate and working agreement |
 | `github` | issues and pull requests on GitHub: the mode, what the engine writes and when, issues into tasks |
-| `agent:claude`, `agent:codex`, `agent:opencode`, `agent:grok` | driving one agent CLI through Herdr: start, model, resume, exit, quota signs |
+| `agent:claude`, `agent:codex`, `agent:opencode`, `agent:grok`, `agent:pi` | driving one agent CLI through Herdr: start, model, resume, exit, quota signs |
 
-The user installs this skill into an agent CLI with `gear admin install-skill --agent <claude|codex|opencode|grok>`.
+The user installs this skill into an agent CLI with `gear admin install-skill --agent <claude|codex|opencode|grok|pi>`.
 
 ## 7. Errors
 
