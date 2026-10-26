@@ -215,6 +215,9 @@ impl HerdrRead for NoKeys {
     ) -> Result<gear_herdr::PaneProcessInfo, ObserveError> {
         self.0.pane_process_info(pane)
     }
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
+        self.0.panes()
+    }
 }
 impl HerdrAct for NoKeys {
     fn opencode_api(&mut self, args: &[String]) -> Result<serde_json::Value, String> {

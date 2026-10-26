@@ -97,6 +97,10 @@ pub trait HerdrRead {
     /// The pane's shell and foreground processes (T-104): an identity check
     /// proves the caller runs in the pane it claims with them.
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError>;
+    /// Every pane of the session, agents and shells alike (T-104): the pane a
+    /// caller really runs in may be a shell with no agent (the user's own
+    /// terminal).
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError>;
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -175,6 +179,14 @@ impl HerdrRead for SocketHerdr {
             Err(board_herdr::HerdrError::Protocol { code, .. }) if is_missing(&code) => Ok(None),
             Err(e) => Err(ObserveError(format!("agent.get failed: {e}"))),
         }
+    }
+
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
+        let panes = self
+            .client
+            .pane_list(None)
+            .map_err(|e| ObserveError(format!("pane.list failed: {e}")))?;
+        Ok(panes.into_iter().map(|pane| pane.pane_id).collect())
     }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {

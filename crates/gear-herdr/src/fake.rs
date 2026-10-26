@@ -240,6 +240,10 @@ impl HerdrRead for FakeHerdr {
         Ok(self.panes.get(pane_id).and_then(|p| Self::info(pane_id, p)))
     }
 
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
+        Ok(self.panes.keys().cloned().collect())
+    }
+
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
         if !self.panes.contains_key(pane_id) && !self.processes.contains_key(pane_id) {
             return Err(ObserveError(format!("no pane {pane_id}")));

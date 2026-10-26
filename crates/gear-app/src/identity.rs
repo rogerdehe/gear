@@ -34,7 +34,11 @@ pub enum Caller {
 
 /// Phase 1 (no transaction). Returns None when there is no GEAR_CTX or no pane.
 /// Herdr failure is returned as an error: identity cannot be confirmed.
-pub fn observe(env: &Env, herdr: &mut dyn HerdrRead) -> GearResult<Option<Fingerprint>> {
+pub fn observe(
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+) -> GearResult<Option<Fingerprint>> {
     if env.ctx.is_none() {
         return Ok(None);
     }
@@ -50,25 +54,25 @@ pub fn observe(env: &Env, herdr: &mut dyn HerdrRead) -> GearResult<Option<Finger
     })?;
     // T-104: GEAR_CTX and HERDR_PANE_ID are environment variables, and any
     // agent can set them in its own shell. The seat is the pane this process
-    // really runs in; the pane's own processes are the fact Herdr has about it
-    // and a shell cannot forge.
+    // really runs in, found by matching the caller's process ancestry (OS
+    // parent pids) against each pane's shell and foreground pids — the fact
+    // Herdr has about the pane and a shell cannot forge.
     let processes = herdr.pane_process_info(pane).map_err(|e| {
         GearError::new(
             ErrorCode::NotRegistered,
             format!("cannot read the processes of pane {pane}: {}", e.0),
         )
     })?;
-    if !claims_pane(&processes) {
-        let real = pane_of_this_process(herdr);
-        let where_ = match &real {
-            Some(real) if real != pane => format!("this process runs in pane {real}"),
+    if !claims_pane(&processes, ancestors) {
+        let where_ = match real_pane(herdr, ancestors) {
+            Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
             None => "no pane of this session runs this process".to_string(),
         };
         return Err(GearError::new(
             ErrorCode::NotRegistered,
             format!(
-                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the pane's processes cannot"
+                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot"
             ),
         ));
     }
@@ -251,31 +255,10 @@ pub fn process_ancestors() -> Vec<u32> {
     chain
 }
 
-/// This process's controlling terminal as `/dev/<tty>`, when it has one
-/// (T-104).
-fn current_tty() -> Option<String> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "tty=", "-p", &std::process::id().to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let tty = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let tty = tty.trim_start_matches("/dev/").to_string();
-    if tty.is_empty() || tty == "?" || tty == "??" {
-        None
-    } else {
-        Some(format!("/dev/{tty}"))
-    }
-}
-
-/// Whether the caller really runs in `info`'s pane (T-104): the pane's shell
-/// or one of its foreground processes is an ancestor of this process, or the
-/// pane's terminal is this process's controlling terminal. Both are Herdr's
-/// facts; neither can be set with an environment variable.
-pub fn claims_pane(info: &PaneProcessInfo) -> bool {
-    let ancestors = process_ancestors();
+/// Whether the caller runs in `info`'s pane (T-104): the pane's shell or one of
+/// its foreground processes is one of the caller's ancestors. Both sides are
+/// OS facts — no environment variable can put a pid in a parent chain.
+pub fn claims_pane(info: &PaneProcessInfo, ancestors: &[u32]) -> bool {
     let pane_pids = std::iter::once(info.shell_pid)
         .flatten()
         .chain(
@@ -284,31 +267,17 @@ pub fn claims_pane(info: &PaneProcessInfo) -> bool {
                 .map(|process| Some(process.pid))
                 .flatten(),
         );
-    if pane_pids.into_iter().any(|pid| ancestors.contains(&pid)) {
-        return true;
-    }
-    match (info.tty.as_deref(), current_tty()) {
-        (Some(pane_tty), Some(our_tty)) => {
-            let pane_tty = pane_tty.trim_start_matches("/dev/");
-            let our_tty = our_tty.trim_start_matches("/dev/");
-            !pane_tty.is_empty() && pane_tty == our_tty
-        }
-        _ => false,
-    }
+    pane_pids.into_iter().any(|pid| ancestors.contains(&pid))
 }
 
-/// The pane of this session whose processes are this caller's own (T-104):
-/// where a caller that claims another pane really runs.
-pub fn pane_of_this_process(herdr: &mut dyn HerdrRead) -> Option<String> {
-    let panes: Vec<String> = herdr
-        .agents()
-        .ok()?
-        .into_iter()
-        .map(|agent| agent.pane_id)
-        .collect();
+/// The pane this session runs the caller in (T-104): every pane of the session
+/// (agents and the user's own shells) is asked whether its shell or a
+/// foreground process is one of the caller's ancestors.
+pub fn real_pane(herdr: &mut dyn HerdrRead, ancestors: &[u32]) -> Option<String> {
+    let panes = herdr.panes().ok()?;
     for pane in panes {
         if let Ok(info) = herdr.pane_process_info(&pane) {
-            if claims_pane(&info) {
+            if claims_pane(&info, ancestors) {
                 return Some(pane);
             }
         }
@@ -325,12 +294,13 @@ pub fn report_claim(
     env: &Env,
     herdr: &mut dyn HerdrRead,
     error: &GearError,
+    ancestors: &[u32],
     now: Ts,
 ) -> GearResult<bool> {
     let Some(ctx) = env.ctx.as_ref() else {
         return Ok(false);
     };
-    let real = pane_of_this_process(herdr);
+    let real = real_pane(herdr, ancestors);
     let claimed = env.pane_id.clone().unwrap_or_else(|| "no pane".to_string());
     let real_label = real.clone().unwrap_or_else(|| "a pane this session does not know".to_string());
     store.write(|tx| {

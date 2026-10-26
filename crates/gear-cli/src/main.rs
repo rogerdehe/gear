@@ -56,6 +56,21 @@ enum Cmd {
         #[command(subcommand)]
         op: AdminOp,
     },
+    /// Captain: the seat itself.
+    Captain {
+        #[command(subcommand)]
+        op: CaptainOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptainOp {
+    /// Rebind the captain seat to another pane (a new generation).
+    Handover {
+        /// The pane the captain's agent runs in now.
+        #[arg(long, value_name = "PANE")]
+        pane: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -248,6 +263,9 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
+        Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
+            cmd_captain_handover(&pane, cli.json)
+        }
     }
 }
 
@@ -264,6 +282,8 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   T-10). `--skill` and `--help` never get here.
 /// - `push-check` is a git hook: it runs inside a push, it must not start
 ///   anything, and it must not keep the push waiting (T-74).
+/// - `captain handover` moves a seat's binding: it must not start an engine
+///   (T-104).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     !matches!(
         cmd,
@@ -275,6 +295,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Report { .. })
             | Some(Cmd::PushCheck { .. })
             | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
+            | Some(Cmd::Captain { .. })
     )
 }
 
@@ -430,13 +451,14 @@ fn observe_identity(
     env: &gear_app::Env,
     herdr: &mut dyn gear_herdr::HerdrRead,
 ) -> GearResult<Option<gear_app::identity::Fingerprint>> {
-    match gear_app::identity::observe(env, herdr) {
+    let ancestors = gear_app::identity::process_ancestors();
+    match gear_app::identity::observe(env, herdr, &ancestors) {
         Ok(fp) => Ok(fp),
         Err(error) => {
             if error.code == gear_model::ErrorCode::NotRegistered {
                 // Best effort: the refusal is the answer even if the item
                 // cannot be written (the store may be the thing that is wrong).
-                let _ = gear_app::identity::report_claim(store, env, herdr, &error, now_ts());
+                let _ = gear_app::identity::report_claim(store, env, herdr, &error, &ancestors, now_ts());
             }
             Err(error)
         }
@@ -850,7 +872,8 @@ fn alert_captain(
     };
     let sent = match herdr {
         Some(herdr) => {
-            let fp = gear_app::identity::observe(env, herdr).ok().flatten();
+            let ancestors = gear_app::identity::process_ancestors();
+            let fp = gear_app::identity::observe(env, herdr, &ancestors).ok().flatten();
             gear_app::mail::send(store, env, fp.as_ref(), &args, now).map(|_| ())
         }
         None => Err(GearError::new(
@@ -956,6 +979,44 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 ///
 /// A user command: an agent never writes into the user's home. It needs no
 /// store, so it starts no engine.
+/// `gear captain handover --pane <id>`: rebind the captain seat to another pane
+/// (T-104). Allowed from the captain's own real pane or the user's own terminal
+/// (a shell with no agent); a lane or reviewer asking is refused and the
+/// captain is told which pane asked.
+fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let ancestors = gear_app::identity::process_ancestors();
+    let cwd = std::env::current_dir().map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let result =
+        gear_app::captain::handover(&mut store, &env, &mut herdr, &ancestors, &cwd, pane, now_ts())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": result.project,
+                "captain": result.captain,
+                "from": result.from,
+                "to": result.to,
+                "generation": result.generation,
+                "kind": result.kind,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "captain of {} handed over from pane {} to pane {} (generation {}, {})",
+        result.project, result.from, result.to, result.generation, result.kind
+    );
+    Ok(())
+}
+
 fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
