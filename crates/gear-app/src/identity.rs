@@ -64,7 +64,20 @@ pub fn observe(
         )
     })?;
     if !claims_pane(&processes, ancestors) {
-        let where_ = match real_pane(herdr, ancestors) {
+        let real = real_pane(herdr, ancestors);
+        // OpenCode runs its tools in its shared service (`opencode serve`),
+        // not under the agent's pane, so its ancestry reaches no pane at all.
+        // Such a caller keeps the env claim for an OpenCode pane, still checked
+        // against the seat's binding; a caller that runs in another pane, or
+        // that claims a pane whose agent runs its tools in the pane, is refused.
+        let tools_outside_pane = occupant
+            .as_ref()
+            .and_then(|info| info.agent.as_deref())
+            .is_some_and(|kind| kind == "opencode");
+        if real.is_none() && tools_outside_pane {
+            return Ok(occupant.as_ref().map(fingerprint_of));
+        }
+        let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
             None => "no pane of this session runs this process".to_string(),
