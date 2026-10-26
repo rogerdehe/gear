@@ -2,7 +2,7 @@
 
 use gear_engine::observe::{reconcile, Presence};
 use gear_herdr::fake::FakeHerdr;
-use gear_herdr::{AgentStatus, HerdrRead, Profile, ScreenFlag};
+use gear_herdr::{AgentStatus, HerdrRead, Profile};
 use gear_model::{SeatRole, SeatState};
 use gear_store::{testing, SeatRow, Store, Tx};
 
@@ -13,6 +13,10 @@ const SEAT: &str = "p:captain";
 fn profile(kind: &str) -> Profile {
     Profile {
         kind: kind.into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["Error: Rate limit exceeded".into()],
         quota_markers: vec![],
@@ -172,7 +176,9 @@ fn idle_when_quiet() {
 }
 
 #[test]
-fn busy_marker_not_idle() {
+fn a_busy_marker_does_not_make_an_agent_busy() {
+    // M4 §10.2: whether an agent is busy is Herdr's state, never the text on
+    // its screen. Herdr says idle: the agent is idle, busy marker or not.
     let mut store = store_with_seat();
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
@@ -180,8 +186,8 @@ fn busy_marker_not_idle() {
 
     let observed = observe(&mut store, &mut herdr, &profiles());
 
-    assert!(!observed[0].idle, "a busy marker means the agent is not idle");
-    assert!(observed[0].flags.contains(&ScreenFlag::Busy));
+    assert!(observed[0].idle, "Herdr's state decides, not the screen");
+    assert!(observed[0].flags.is_empty());
 }
 
 #[test]

@@ -34,6 +34,10 @@ fn texts_match_design_09() {
 fn texts_carry_no_screen_marker() {
     let p = Profile {
         kind: "opencode".into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["rate limit".into()],
         quota_markers: vec!["Session failed".into(), "Token Plan".into(), "usage limit reached".into()],
