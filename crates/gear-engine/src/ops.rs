@@ -795,9 +795,23 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
 /// The session the attempt ran in (design §3.2 step 5): at the check-in the
 /// seat's binding knows the session the agent is in.
 fn record_attempt_session(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<()> {
+    // A review delivery names the **writer's** attempt, while its binding
+    // belongs to the reviewer: the writer's session is not the reviewer's, and
+    // a review says nothing about the session the writer worked in.
+    if is_reviewer(tx, &op.seat)? {
+        return Ok(());
+    }
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
         return Ok(());
     };
+    // Only the seat's own attempt, in its own generation: a delivery of
+    // another seat's round leaves the attempt alone.
+    let Some(row) = tx.get_attempt(project, task, attempt)? else {
+        return Ok(());
+    };
+    if row.seat != op.seat || row.generation != op.generation {
+        return Ok(());
+    }
     let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
         return Ok(());
     };

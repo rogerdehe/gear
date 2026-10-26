@@ -216,7 +216,6 @@ fn the_check_in_sets_the_attempts_session() {
         })
         .unwrap();
 
-    let mut herdr = FakeHerdr::new();
     let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 30).unwrap();
     assert_eq!(confirmed.len(), 1, "{confirmed:?}");
 
@@ -224,4 +223,141 @@ fn the_check_in_sets_the_attempts_session() {
     assert_eq!(attempt.state, AttemptState::Started);
     assert_eq!(attempt.session_ref.as_deref(), Some("ses_A"), "the session of the check-in");
     assert_eq!(attempt.session_cli.as_deref(), Some("opencode"), "the CLI of the seat");
+}
+
+/// T-151 (the review of attempt 1, F2): a round that is closed by the
+/// release of its seat keeps the session of its last work: the tick closes the
+/// superseded rounds, then gives the open round the session the seat carries
+/// now, and closes the released round last.
+#[test]
+fn a_released_round_keeps_the_session_of_its_last_work() {
+    let mut store = world();
+    round(&mut store, "T-1", 1, "review", T0);
+    let mut herdr = FakeHerdr::new();
+
+    // The first tick: the round owns the session the seat carries now.
+    gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 10).unwrap();
+    assert_eq!(round_of(&mut store, "T-1", 1, "review").sessions, vec!["ses_A"]);
+
+    // The agent is restarted (a new session) and the seat is released in the
+    // same tick.
+    store
+        .write(|tx| tx.set_binding_session_ref(LANE, 1, "ses_B"))
+        .unwrap();
+    store
+        .write(|tx| tx.set_seat_state(LANE, SeatState::Released, Some("released"), T0 + 50))
+        .unwrap();
+
+    let report = gear_engine::rounds::tick(&mut store, &mut herdr, &Default::default(), T0 + 60)
+        .unwrap();
+    assert_eq!(report.closed, vec!["T-1/1/review"], "{report:?}");
+
+    let row = round_of(&mut store, "T-1", 1, "review");
+    assert_eq!(row.sessions, vec!["ses_A", "ses_B"], "the last work is in the round");
+    assert_eq!(row.end_at, Some(T0 + 50), "the release time is kept");
+}
+
+/// T-151 (the review of attempt 1, F1): a review delivery names the
+/// **writer's** attempt, while its binding belongs to the reviewer. The
+/// writer's session is the writer's: the review says nothing about it.
+#[test]
+fn a_review_confirmation_leaves_the_writers_session_alone() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w1:p3", "codex", T0)?;
+            // The writer works in its own session.
+            tx.set_binding_session_ref("p:heat", 1, "ses_A")?;
+            tx.set_binding_session_ref("p:review-1", 1, "ses_REVIEWER")?;
+            // The task the writer works on (its attempt waits for its
+            // check-in, so the task is still Ready).
+            tx.insert_task(&TaskRow {
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: None,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                updated: T0,
+            })?;
+            // The writer's attempt, already in its session.
+            tx.insert_attempt(&AttemptRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Delivered,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+                session_ref: Some("ses_A".into()),
+                session_cli: Some("opencode".into()),
+                session_action: None,
+                sent_at: None,
+            })?;
+            // The reviewer's delivery: it names the writer's attempt.
+            let op = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:review-1".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": "Review T-1 attempt 1"}),
+                created: T0 + 10,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 10)?;
+            tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 11)?;
+            // The reviewer hands in its verdict: the delivery is confirmed.
+            tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                passed: true,
+                findings: "ops/reviews/T-1.md".into(),
+                by_seat: "p:review-1".into(),
+                created: T0 + 20,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 30).unwrap();
+    assert_eq!(confirmed.len(), 1, "the review delivery is confirmed: {confirmed:?}");
+
+    let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(
+        attempt.session_ref.as_deref(),
+        Some("ses_A"),
+        "the writer keeps its session"
+    );
+    assert_eq!(
+        attempt.session_cli.as_deref(),
+        Some("opencode"),
+        "the writer keeps its CLI"
+    );
 }

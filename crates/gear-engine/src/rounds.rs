@@ -43,14 +43,13 @@ pub fn tick(
     for project in projects {
         store.write(|tx| {
             let rounds = tx.rounds_of_project(&project)?;
+            // 1. §4.1: a round ends when the next round on the same seat
+            //    starts. The seat's open round is the newest one, so every
+            //    other open round of that seat ends here.
             for round in &rounds {
-                // A round that is already closed stays closed.
                 if round.end_at.is_some() {
                     continue;
                 }
-                // §4.1: the round ends when the next round on the same seat
-                // starts. The seat's open round is the newest one, so every
-                // other open round of that seat ends here.
                 let next = rounds
                     .iter()
                     .filter(|other| other.seat == round.seat && other.start_at > round.start_at)
@@ -58,19 +57,11 @@ pub fn tick(
                 if let Some(next) = next {
                     tx.close_round(&key_of(round), next.start_at)?;
                     report.closed.push(label(round));
-                    continue;
-                }
-                // §4.1: or when the seat is released — the agent is gone and
-                // its records belong to the round it handed in.
-                let Some(seat) = tx.get_seat(&round.seat)? else {
-                    continue;
-                };
-                if matches!(seat.state, SeatState::Released | SeatState::Retired) {
-                    tx.close_round(&key_of(round), seat.state_since)?;
-                    report.closed.push(label(round));
                 }
             }
-            // The session the seat carries now belongs to its open round.
+            // 2. The session the seat carries now belongs to its open round —
+            //    before the release below closes it, so the round keeps the
+            //    session of its last work.
             for seat in tx.seats_of_project(&project)? {
                 let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
                     continue;
@@ -87,6 +78,21 @@ pub fn tick(
                 }
                 tx.add_round_session(&key_of(&round), session)?;
                 report.sessions.push(label(&round));
+            }
+            // 3. §4.1: or when the seat is released — the agent is gone and
+            //    its records belong to the round it handed in. The round keeps
+            //    the release time, not the time of this tick.
+            for round in tx.rounds_of_project(&project)? {
+                if round.end_at.is_some() {
+                    continue;
+                }
+                let Some(seat) = tx.get_seat(&round.seat)? else {
+                    continue;
+                };
+                if matches!(seat.state, SeatState::Released | SeatState::Retired) {
+                    tx.close_round(&key_of(&round), seat.state_since)?;
+                    report.closed.push(label(&round));
+                }
             }
             Ok(())
         })?;
