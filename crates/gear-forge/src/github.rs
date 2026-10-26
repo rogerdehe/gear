@@ -25,13 +25,19 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the call checks whether the child has finished.
 const POLL: Duration = Duration::from_millis(20);
 
+/// The environment variable that names the `gh` to run (T-111). Under
+/// `cargo test` it names a path that does not exist — `.cargo/config.toml`
+/// sets it — so a test that forgets its fake fails at once instead of calling
+/// the real `gh`, and a developer in a restricted network runs the suite
+/// without a single forge call.
+pub const GH_ENV: &str = "GEAR_GH";
+
 /// GitHub, through `gh` (T-78).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHub {
-    /// The `PATH` to find `gh` in; `None` = the inherited one. A test points
-    /// it at the directory that holds its fake `gh`, so no test can reach a
-    /// real one.
-    path: Option<PathBuf>,
+    /// The executable to run, a test's fake `gh`; `None` = [`GH_ENV`], else
+    /// `gh` from the inherited `PATH`.
+    program: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -39,15 +45,14 @@ impl GitHub {
     /// The `gh` of `PATH`, with [`DEFAULT_TIMEOUT`].
     pub fn new() -> GitHub {
         GitHub {
-            path: None,
+            program: None,
             timeout: DEFAULT_TIMEOUT,
         }
     }
 
-    /// Look for `gh` in `dir` instead of the inherited `PATH` (a test's fake
-    /// `gh`).
+    /// Run `dir/gh` instead of [`GH_ENV`] (a test's fake `gh`).
     pub fn with_path(mut self, dir: impl Into<PathBuf>) -> GitHub {
-        self.path = Some(dir.into());
+        self.program = Some(dir.into().join("gh"));
         self
     }
 
@@ -57,9 +62,21 @@ impl GitHub {
         self
     }
 
+    /// The `gh` one call runs: the test's fake when it set one, else the one
+    /// [`GH_ENV`] names, else `gh` from the inherited `PATH`.
+    fn program(&self) -> PathBuf {
+        if let Some(program) = &self.program {
+            return program.clone();
+        }
+        match std::env::var_os(GH_ENV) {
+            Some(gh) if !gh.is_empty() => PathBuf::from(gh),
+            _ => PathBuf::from("gh"),
+        }
+    }
+
     /// The command for one call: explicit, silent, and never paging.
     fn command(&self, args: &[String]) -> Command {
-        let mut command = Command::new("gh");
+        let mut command = Command::new(self.program());
         command
             .args(args)
             .stdin(Stdio::null())
@@ -70,10 +87,22 @@ impl GitHub {
             // The update notifier writes to stderr and costs seconds.
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_PAGER", "cat");
-        if let Some(dir) = &self.path {
-            command.env("PATH", dir);
-        }
         command
+    }
+
+    /// A call that never started. When [`GH_ENV`] named it — the cargo config
+    /// under `cargo test` — say so: it is the test harness, not a missing
+    /// `gh`, and the test forgot its fake.
+    fn tool_error(&self, what: &str, e: std::io::Error) -> Error {
+        if self.program.is_none() && e.kind() == std::io::ErrorKind::NotFound {
+            if let Some(gh) = std::env::var_os(GH_ENV) {
+                return Error::Tool(format!(
+                    "no gh in tests: {GH_ENV}={} could not be run ({e}); a test sets {GH_ENV} to its fake",
+                    PathBuf::from(gh).display()
+                ));
+            }
+        }
+        Error::Tool(format!("{what}: {e}"))
     }
 
     /// Make a pull request ready for review when it is still a draft.
@@ -120,7 +149,7 @@ impl GitHub {
         let mut child = self
             .command(args)
             .spawn()
-            .map_err(|e| Error::Tool(format!("{what}: {e}")))?;
+            .map_err(|e| self.tool_error(&what, e))?;
         // Read both pipes off the call's thread: a big answer must not fill
         // the pipe while we wait for the child to finish.
         let mut stdout = child.stdout.take();

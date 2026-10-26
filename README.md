@@ -105,4 +105,25 @@ Please send one feedback file per trial, written from [`FEEDBACK.md`](FEEDBACK.m
 
 ## Developing GEAR
 
-GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The tests never touch a real remote: every remote they push to is a local bare repository in the temp dir, and `.cargo/config.toml` keeps every git they start away from your global and system git config (hooks, credentials, URL rewrites). The skill texts are in `skills/gear/`.
+GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The skill texts are in `skills/gear/`.
+
+### Tests
+
+Run the whole suite with `cargo test --workspace` (or one crate: `cargo test -p gear-app`). The tests are offline and push nothing, by construction:
+
+- every repository a test uses is a local bare repository in the temp dir, and every merge a test makes moves a ref on the remote's side;
+- `.cargo/config.toml` names no `gh`: `GEAR_GH` points at a path that does not exist, so a test that forgets its fake fails with `no gh in tests` instead of calling GitHub;
+- it allows git's file transport only (`GIT_ALLOW_PROTOCOL=file`), so a clone or fetch over https or ssh is refused;
+- it keeps every git a test starts away from your global and system git config (hooks, credentials, URL rewrites), and runs with no seat identity (`GEAR_CTX` empty).
+
+To prove it, run the same suite with outbound network denied — `sandbox-exec` on macOS, `unshare -rn` on Linux:
+
+```bash
+sh scripts/test-offline.sh
+```
+
+It builds first (that step may fetch crates), then runs the suite `--offline`, and fails if any test fails or reaches out.
+
+A test that truly needs the network is `#[ignore]`d and runs only when asked: `GEAR_LIVE=1 cargo test -- --ignored`. There is none today.
+
+`.cargo/config.toml` applies to `cargo run` too, and its `GEAR_GH` cannot be overridden from the shell (it is forced). To use the workspace's binary for real work, run it directly — `target/debug/gear …` — since the file only affects the processes cargo starts.
