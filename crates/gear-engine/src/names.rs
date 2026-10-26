@@ -17,7 +17,7 @@
 //! — except a temp reviewer, whose agent is named after the task it reviews
 //! (17 §2: `<project>-review-<task>`), not after its warm seat.
 
-use gear_herdr::HerdrAct;
+use gear_herdr::{HerdrAct, Outcome};
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
 use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 use std::collections::BTreeMap;
@@ -56,6 +56,93 @@ pub use gear_herdr::{
     ensure_agent_name as ensure, ensure_agent_name_with as ensure_snapshot, Ensured as Ensure,
 };
 
+/// What a text aimed at a seat's pane may do (design §10.1: never type into
+/// the wrong thing).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// The pane's agent carries `name`: the text goes to that name. Herdr
+    /// refuses a prompt when no agent of that name runs, so a pane that lost
+    /// its agent never receives the text.
+    Prompt { name: String },
+    /// The pane's agent had lost its name (M3.1): it was renamed now and the
+    /// text goes **next tick**. Nothing is typed and nothing is restarted.
+    Renamed,
+    /// No agent of the seat's kind is in the pane: the seat's agent is gone.
+    /// The text is not sent at all.
+    Gone(String),
+    /// The name is held by another pane: nothing may be typed into it.
+    Blocked(String),
+    /// The pane could not be read: nothing is typed; the next tick looks
+    /// again (an observation failure is never "the agent is gone").
+    Unreadable(String),
+}
+
+/// The live name of the agent in `pane_id` (design §10.1: a prompt targets
+/// the agent's name, never the pane id).
+///
+/// `None` when the pane hosts no agent, when the agent carries no name, or
+/// when the names could not be read: the caller must not type then — a pane
+/// whose agent is gone is a shell, and the text would be typed into it.
+pub fn live_name(herdr: &mut dyn HerdrAct, pane_id: &str) -> Option<String> {
+    let names = herdr.agent_names().ok()?;
+    names.get(pane_id).and_then(|name| name.clone())
+}
+
+/// Aim a text at the agent of `pane_id` (design §10.1).
+///
+/// The agent of the pane is read first (`agent_get`): only an agent of the
+/// seat's kind is the seat's agent. Then the name it carries decides:
+/// - it carries a name → [`Target::Prompt`]: the text goes to **that** name,
+///   and Herdr refuses it if no agent of that name runs. The name belongs to
+///   the agent of this pane, so the text cannot reach another pane;
+/// - it lost its name (M3.1) → it is renamed to the seat's name now and the
+///   text goes next tick ([`Target::Renamed`]);
+/// - the name cannot be given → nothing is typed ([`Target::Blocked`]);
+/// - there is no agent of the seat's kind → the seat's agent is gone
+///   ([`Target::Gone`]).
+///
+/// `names` is a snapshot of [`HerdrRead::agent_names`] read by the caller, so
+/// one read serves every op of a tick.
+pub fn resolve_target(
+    herdr: &mut dyn HerdrAct,
+    names: &BTreeMap<String, Option<String>>,
+    pane_id: &str,
+    name: &str,
+    kind: &str,
+) -> Target {
+    // The pane's occupant: an agent of another kind is not the seat's agent.
+    let occupant = match herdr.agent_get(pane_id) {
+        Ok(occupant) => occupant,
+        Err(error) => return Target::Unreadable(error.0),
+    };
+    let Some(info) = occupant else {
+        return Target::Gone(format!("no agent in the pane {pane_id}"));
+    };
+    if info.agent.as_deref() != Some(kind) {
+        return Target::Gone(format!(
+            "the pane {pane_id} hosts a {} agent, not the seat's {kind}",
+            info.agent.as_deref().unwrap_or("unknown")
+        ));
+    }
+    // The name the agent carries now (`None`: Herdr cleared it).
+    match names.get(pane_id) {
+        // The live name of this pane's agent: the text goes to it, never to
+        // the pane id (design §10.1).
+        Some(Some(live)) => Target::Prompt { name: live.clone() },
+        // It lost its name: give it back now; the text goes next tick.
+        Some(None) => match herdr.agent_rename(pane_id, name) {
+            Outcome::Ok(()) => Target::Renamed,
+            Outcome::Refused { code, message } => {
+                Target::Blocked(format!("the name {name} could not be given to the agent of {pane_id}: {code}: {message}"))
+            }
+            Outcome::Uncertain { reason } => Target::Unreadable(reason),
+        },
+        // The pane is not in Herdr's list: the read is partial, so nothing is
+        // typed and the next tick looks again.
+        None => Target::Unreadable(format!("the pane {pane_id} is not in Herdr's agent list")),
+    }
+}
+
 /// Every agent-bearing pane and the name Herdr holds for it, in one call.
 pub fn read(
     herdr: &mut dyn HerdrAct,
@@ -90,7 +177,11 @@ pub fn restore(
         let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
             continue;
         };
-        if binding.status != BindingStatus::Active {
+        // A **Pending** binding is a seat that expects its agent: the engine
+        // asked Herdr to start it and has not confirmed it yet (the review of
+        // T-18: an agent Herdr accepted while the seat stayed `Starting`). Its
+        // agent carries the seat's name like every other one.
+        if !matches!(binding.status, BindingStatus::Active | BindingStatus::Pending) {
             continue;
         }
         let name = desired(&seat);
