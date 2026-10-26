@@ -114,6 +114,10 @@ fn cancel_and_lane_cannot_apply() {
 /// A task of the project: its lane, its state and the tasks it waits for.
 fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::TaskRow {
     gear_store::TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank: 1,

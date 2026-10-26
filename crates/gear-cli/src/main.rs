@@ -1903,6 +1903,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-8".into(),
                     rank: 1,
@@ -2174,6 +2178,10 @@ mod tests {
     /// A task of the project, for the plan tests.
     fn lane_task(id: &str, lane: &str, state: gear_model::TaskState, deps: &[&str]) -> TaskRow {
         TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: id.into(),
             rank: 1,
@@ -2345,6 +2353,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -2363,6 +2375,10 @@ mod tests {
                      issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: "T-7".into(),
                     n: 1,
@@ -2438,6 +2454,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -2494,6 +2514,10 @@ mod tests {
             .write(|tx| {
                 testing::seed_temp_seat(tx, "p", "r-1", "T-7", TEMP_PANE, "opencode", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -3082,6 +3106,7 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "T-1:1".into(),
                     task: None,
@@ -3136,6 +3161,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: id.into(),
                     rank: 1,

@@ -316,6 +316,7 @@ pub fn send(
                 }
             };
             let message = NewMessage {
+                meta: None,
                 project: ctx.project.clone(),
                 thread: thread.clone(),
                 task: args.task.clone(),
@@ -800,6 +801,7 @@ pub fn reply(
                 if !answered.contains(&key) {
                     answered.push(key);
                     let answer = NewMessage {
+                        meta: None,
                         project: ctx.project.clone(),
                         thread: original.thread.clone(),
                         task: original.task.clone(),

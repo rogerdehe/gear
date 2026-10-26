@@ -77,6 +77,7 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         };
         let screen = obs.screen.as_deref().unwrap_or_default().trim();
         let message = tx.insert_message(&NewMessage {
+            meta: None,
             project: project.into(),
             thread: thread(&seat.id),
             task: None,

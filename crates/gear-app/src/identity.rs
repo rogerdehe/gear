@@ -563,6 +563,7 @@ pub fn report_claim(
             return Ok(false);
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: ctx.project.clone(),
             thread,
             task: None,

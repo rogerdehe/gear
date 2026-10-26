@@ -81,6 +81,7 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
             return Ok(None);
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: thread().to_string(),
             task: None,
@@ -179,6 +180,10 @@ mod tests {
                 seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
                 seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p2", "opencode", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,

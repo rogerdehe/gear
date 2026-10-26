@@ -98,6 +98,7 @@ impl World {
             .write(|tx| {
                 Ok(tx
                     .insert_message(&NewMessage {
+                        meta: None,
                         project: "p".into(),
                         thread: format!("{task}:1"),
                         task: Some(task.into()),
@@ -124,6 +125,7 @@ impl World {
             .write(|tx| {
                 Ok(tx
                     .insert_message(&NewMessage {
+                        meta: None,
                         project: "p".into(),
                         thread: format!("q:{}", at),
                         task: None,
@@ -186,6 +188,10 @@ fn warm_reviewer(w: &mut World) -> SeatRow {
         .write(|tx| {
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-7".into(),
                 rank: 1,
@@ -311,6 +317,10 @@ fn a_reregistered_lane_starts_with_its_task_not_a_doorbell() {
     w.store
         .write(|tx| {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,
@@ -364,6 +374,10 @@ fn a_tick_with_a_doorbell_and_a_delivery_for_one_seat_sends_only_the_delivery() 
     w.store
         .write(|tx| {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,

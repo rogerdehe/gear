@@ -43,6 +43,10 @@ quota_reset_h = 1
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "claude", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,

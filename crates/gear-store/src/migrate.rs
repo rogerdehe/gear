@@ -18,6 +18,12 @@
 //! gone (T-108), and the step only drops the table.
 //! **v4** adds `tasks.issue` (the GitHub issue a task came from, T-79).
 //! **v5** drops `push_destinations` (T-108: no push allow-list).
+//! **v6** is the M4 schema (§1 of ops/plan/m4-design.md): the session of an
+//! attempt, the repo/base/gate a task keeps, the rounds and their tokens, the
+//! stretches a seat could not work, the friction reports and the captain's
+//! decision log. The migration leaves every new column NULL: the store
+//! cannot read the project config, so a reader of `tasks.repo/base/gate`
+//! that finds NULL falls back to the lane's current config.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -25,7 +31,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -46,6 +52,7 @@ pub const STEPS: &[Step] = &[
     Step { from: 2, apply: step_2_to_3 },
     Step { from: 3, apply: step_3_to_4 },
     Step { from: 4, apply: step_4_to_5 },
+    Step { from: 5, apply: step_5_to_6 },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -147,6 +154,37 @@ fn step_3_to_4(tx: &Transaction<'_>) -> GearResult<()> {
     if !column_exists(tx, "tasks", "issue")? {
         tx.execute_batch("ALTER TABLE tasks ADD COLUMN issue INTEGER")
             .map_err(map_sqlite)?;
+    }
+    Ok(())
+}
+
+/// v5 → v6: the M4 schema (§1 of ops/plan/m4-design.md).
+///
+/// The new tables (`rounds`, `seat_pauses`, `frictions`, `decisions`) are
+/// created by the schema itself (every statement of it is `IF NOT EXISTS`).
+/// The new columns of the old tables are added here, each nullable: a store
+/// of v5 keeps every row it has, and the new columns are NULL until a writer
+/// fills them (the store cannot read the project config, so `tasks.repo`,
+/// `tasks.base` and `tasks.gate` stay NULL for the old tasks and their
+/// readers fall back to the lane's current config).
+fn step_5_to_6(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
+
+    for (table, column, decl) in [
+        ("attempts", "session_ref", "TEXT"),
+        ("attempts", "session_cli", "TEXT"),
+        ("attempts", "session_action", "TEXT"),
+        ("attempts", "sent_at", "INTEGER"),
+        ("tasks", "repo", "TEXT"),
+        ("tasks", "base", "TEXT"),
+        ("tasks", "gate", "TEXT"),
+        ("tasks", "rework_estimate_min", "INTEGER"),
+        ("messages", "meta", "TEXT"),
+    ] {
+        if !column_exists(tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+                .map_err(map_sqlite)?;
+        }
     }
     Ok(())
 }

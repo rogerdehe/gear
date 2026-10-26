@@ -22,6 +22,10 @@ fn world() -> Store {
             testing::seed_active_seat(tx, "p", "runtime", SeatRole::Lane, "w1:p3", "opencode", T0)?;
             for (id, rank, state) in [("T-1", 1, TaskState::Verifying), ("T-2", 2, TaskState::Ready)] {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: id.into(),
                     rank,
@@ -44,6 +48,10 @@ fn world() -> Store {
             // review.
             for (n, state) in [(1, AttemptState::Rejected), (2, AttemptState::Submitted)] {
                 tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: "T-1".into(),
                     n,
@@ -154,6 +162,10 @@ fn temp_hand_ins_count_in_the_project_rate() {
     store
         .write(|tx| {
             tx.insert_attempt(&gear_store::AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(),
                 task: "T-1".into(),
                 n: 3,

@@ -135,6 +135,7 @@ fn insert_question(
 ) -> String {
     s.write(|tx| {
         let row = NewMessage {
+            meta: None,
             project: "p".into(),
             thread: thread.into(),
             task: None,
@@ -352,6 +353,7 @@ fn a_resolve_of_the_engines_item_sends_nothing() {
         .write(|tx| {
             Ok(tx
                 .insert_message(&NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "review-seat:1".into(),
                     task: None,
@@ -652,6 +654,7 @@ fn reply_is_replayed() {
 fn resolving_information_is_silent_and_replays_without_a_reply() {
     let mut s = world();
     let id = s.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "routine:1".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Progress, urgent: false, body: "finished a step".into(),
@@ -672,6 +675,7 @@ fn resolving_information_is_silent_and_replays_without_a_reply() {
 fn resolving_a_legacy_open_result_does_not_echo_to_the_lane() {
     let mut s = world();
     let id = s.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "legacy:1".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Result, urgent: false, body: "old hand-in".into(),

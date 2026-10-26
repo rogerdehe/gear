@@ -93,6 +93,10 @@ fn handed_in_world(tasks: usize) -> Store {
 /// task `Verifying`.
 fn hand_in(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<()> {
     tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank,

@@ -66,6 +66,10 @@ fn world(lane: AgentStatus, tasks: usize) -> World {
 
 fn task(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<()> {
     tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank,
@@ -155,6 +159,7 @@ fn an_item_from_a_previous_engine_is_not_duplicated() {
     w.store
         .write(|tx| {
             tx.insert_message(&NewMessage {
+                meta: None,
                 project: "p".into(),
                 thread: "lane:heat".into(),
                 task: None,
@@ -187,6 +192,10 @@ fn a_task_taken_by_a_delivery_is_not_ready_work() {
     w.store
         .write(|tx| {
             tx.insert_attempt(&gear_store::AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(),
                 task: "T-1".into(),
                 n: 1,
@@ -304,6 +313,10 @@ fn measured_history(w: &mut World) {
         done.state = TaskState::Done;
         tx.update_task(&done)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-90".into(), n: 1, seat: "p:heat".into(),
             generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Accepted, candidate: None, report: None, safe_point: None,
@@ -361,6 +374,7 @@ fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
     w.store.write(|tx| tx.set_seat_state("p:heat", SeatState::Held,
         Some("captain reminder fixture"), T0)).unwrap();
     let id = w.store.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "question".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),
@@ -424,6 +438,10 @@ fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
         task.state = TaskState::Running;
         tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-1".into(), n: 1, seat: "p:heat".into(),
             generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Started, candidate: None, report: None, safe_point: None,
@@ -493,6 +511,7 @@ captain_item_stale_min = 30
 "#.into();
         tx.update_project(&project)?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(), thread: "question".into(), task: None, attempt: None,
             sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
             kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),

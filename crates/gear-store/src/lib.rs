@@ -22,6 +22,16 @@ pub use migrate::{OLDEST_VERSION, SCHEMA_VERSION, STEPS};
 /// SQLite busy timeout for every connection.
 pub const BUSY_TIMEOUT_MS: u64 = 5_000;
 
+/// The budget of a round whose task has no estimate (§5.1). The design
+/// names the estimate for a dev round and the measured median for a review
+/// round; a task without an estimate has none to read, so the store falls
+/// back to the same default a review round without measurements gets.
+pub const DEFAULT_ROUND_BUDGET_MIN: i64 = 30;
+
+/// The budget of a review round with fewer than three finished review rounds
+/// of the same model to measure (§5.1).
+pub const DEFAULT_REVIEW_BUDGET_MIN: i64 = 30;
+
 pub struct Store {
     conn: rusqlite::Connection,
 }
@@ -100,6 +110,9 @@ pub struct NewMessage {
     pub needs_ack: bool,
     pub state: MsgState,
     pub created: Ts,
+    /// v6 (§5.2): the structured fields of a progress answer, JSON
+    /// `{"left": <min>, "blocker": "<text>"}`.
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +137,9 @@ pub struct MessageRow {
     pub result: Option<String>,
     pub created: Ts,
     pub resolved: Option<Ts>,
+    /// v6 (§5.2): the structured fields of a progress answer, JSON
+    /// `{"left": <min>, "blocker": "<text>"}`.
+    pub meta: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +204,17 @@ pub struct TaskRow {
     pub estimate_min: Option<i64>,
     /// The GitHub issue the task came from (T-79): the plan's `issue: #<n>`.
     pub issue: Option<i64>,
+    /// v6 (§1.1): the repo the task works in, copied from the lane's config
+    /// when it was created. None for a task of before v6; its reader falls
+    /// back to the lane's current config.
+    pub repo: Option<String>,
+    /// v6 (§1.1): the integration branch the task is merged into.
+    pub base: Option<String>,
+    /// v6 (§1.1): the gate the task's merge runs.
+    pub gate: Option<String>,
+    /// v6 (§5.1): the estimate the fail verdict asked for with
+    /// `estimate=<min>`; the budget of the rework round.
+    pub rework_estimate_min: Option<i64>,
     pub updated: Ts,
 }
 
@@ -224,6 +251,17 @@ pub struct AttemptRow {
     pub safe_point: Option<String>,
     pub started: Ts,
     pub updated: Ts,
+    /// v6 (§3): the session the attempt ran in (Herdr session at check-in,
+    /// refreshed at hand-in).
+    pub session_ref: Option<String>,
+    /// v6 (§3): the agent kind that ran the attempt (pi, codex, ...).
+    pub session_cli: Option<String>,
+    /// v6 (§3.2): what the engine did before the packet: keep | new |
+    /// compact | resume | fresh | new-unconfirmed | compact-fallback |
+    /// resume-fallback.
+    pub session_action: Option<String>,
+    /// v6 (§3.2): when the packet was actually sent through Herdr.
+    pub sent_at: Option<Ts>,
 }
 
 /// One step of an attempt (T-38). Each step has its own time; a step writes
@@ -333,6 +371,172 @@ pub struct ReviewVerdictRow {
     /// The temp seat that handed the verdict in.
     pub by_seat: String,
     pub created: Ts,
+}
+
+/// The key of a round (v6, §1): the project, the task, the attempt and the
+/// role of the round. One round per key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoundKey {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    /// `dev` | `rework` | `review`
+    pub role: String,
+}
+
+/// A round to insert (v6, §1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewRound {
+    pub key: RoundKey,
+    pub seat: String,
+    pub generation: i64,
+    pub cli: String,
+    pub model: Option<String>,
+    /// The engine's first input of this round (§4.1).
+    pub start_at: Ts,
+}
+
+/// The tokens and the cost of a round (v6, §4.3-4.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundTokens {
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
+    pub cost_usd: Option<f64>,
+    /// `agent` | `prices` | `none`
+    pub cost_source: String,
+}
+
+/// One round of work by one seat (v6, §1): one field per column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundRow {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    /// `dev` | `rework` | `review`
+    pub role: String,
+    pub seat: String,
+    pub generation: i64,
+    pub cli: String,
+    pub model: Option<String>,
+    pub start_at: Ts,
+    /// The next round's start on this seat, or the seat's release (§4.1).
+    pub end_at: Option<Ts>,
+    /// Every `session_ref` the seat's binding had during the window.
+    pub sessions: Vec<String>,
+    /// Time on the clock, pauses excluded (§5.1).
+    pub active_s: i64,
+    /// Time the seat could not work (§5.1).
+    pub paused_s: i64,
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    /// When the tokens were last read.
+    pub counted_at: Option<Ts>,
+}
+
+/// A friction report to insert (v6, §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewFriction {
+    pub project: String,
+    pub task: String,
+    pub attempt: i64,
+    /// `dev` | `rework` | `review`
+    pub role: String,
+    pub seat: String,
+    pub body: String,
+    /// True when the round passed its budget, so the report was required (§6.2).
+    pub required: bool,
+    pub created: Ts,
+}
+
+/// One friction report (v6, §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrictionRow {
+    pub project: String,
+    /// `F-<n>`
+    pub id: String,
+    pub task: String,
+    pub attempt: i64,
+    pub role: String,
+    pub seat: String,
+    pub body: String,
+    pub required: bool,
+    pub created: Ts,
+    /// When the captain closed it (§6.4).
+    pub closed_at: Option<Ts>,
+    /// What the captain did about it: fixed (what), lesson (which), not worth
+    /// it (why).
+    pub outcome: Option<String>,
+}
+
+/// A decision to log (v6, §7). `key` is the hash of the normalized line, so
+/// an apply is idempotent (§7.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewDecision {
+    pub project: String,
+    pub key: String,
+    pub voyage: String,
+    /// The date written on the line, or the apply time.
+    pub at: String,
+    /// The kind of the decision (§7.2).
+    pub kind: String,
+    pub what: String,
+    pub why: Option<String>,
+    /// The alternative not taken.
+    pub alt: Option<String>,
+    /// What it changed: scope, time, quality, risk.
+    pub changes: Option<String>,
+    /// True when the decision is worth a look at landing (§7.2).
+    pub star: bool,
+    /// `plan` | `gear`
+    pub source: String,
+    /// The plan line, verbatim (source = plan).
+    pub line: Option<String>,
+    pub plan_version: Option<i64>,
+    pub created: Ts,
+}
+
+/// One decision of the log (v6, §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionRow {
+    pub project: String,
+    pub key: String,
+    /// The order of first appearance.
+    pub seq: i64,
+    pub voyage: String,
+    pub at: String,
+    pub kind: String,
+    pub what: String,
+    pub why: Option<String>,
+    pub alt: Option<String>,
+    pub changes: Option<String>,
+    pub star: bool,
+    pub source: String,
+    pub line: Option<String>,
+    pub plan_version: Option<i64>,
+    pub created: Ts,
+}
+
+/// One stretch a seat could not work (v6, §5.4): a quota park or a declared
+/// wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PauseRow {
+    pub project: String,
+    pub seat: String,
+    /// `quota` | `wait`
+    pub kind: String,
+    /// The provider and window, or the task waited for.
+    pub reason: Option<String>,
+    pub start_at: Ts,
+    /// None while the pause lasts.
+    pub end_at: Option<Ts>,
 }
 
 /// A milestone as a voyage (T-22): its one-sentence `done`, the quality `bar`
@@ -1026,8 +1230,9 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO messages
                    (project, id, thread, task, attempt, sender, sender_gen, recipient, kind, urgent,
-                    body, reply_to, needs_ack, state, wait_on, wait_until, result, created, resolved)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, NULL, NULL, ?15, NULL)",
+                    body, reply_to, needs_ack, state, wait_on, wait_until, result, created, resolved,
+                    meta)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, NULL, NULL, ?15, NULL, ?16)",
                 params![
                     msg.project,
                     id,
@@ -1044,6 +1249,7 @@ impl<'s> Tx<'s> {
                     msg.needs_ack as i64,
                     msg.state.as_str(),
                     msg.created,
+                    msg.meta,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -1067,6 +1273,7 @@ impl<'s> Tx<'s> {
             result: None,
             created: msg.created,
             resolved: None,
+            meta: msg.meta.clone(),
         })
     }
 
@@ -1522,8 +1729,10 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO tasks
                    (project, id, rank, state, priority, lane, milestone, required, contract_version,
-                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue,
+                    repo, base, gate, rework_estimate_min, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18, ?19, ?20, ?21)",
                 params![
                     row.project,
                     row.id,
@@ -1541,6 +1750,10 @@ impl<'s> Tx<'s> {
                     row.rework_note,
                     row.estimate_min,
                     row.issue,
+                    row.repo,
+                    row.base,
+                    row.gate,
+                    row.rework_estimate_min,
                     row.updated,
                 ],
             )
@@ -1586,7 +1799,8 @@ impl<'s> Tx<'s> {
                 "UPDATE tasks
                  SET rank=?3, state=?4, priority=?5, lane=?6, milestone=?7, required=?8,
                      contract_version=?9, deps=?10, followup_of=?11, wait_on=?12, wait_cond=?13,
-                     rework_note=?14, estimate_min=?15, issue=?16, updated=?17
+                     rework_note=?14, estimate_min=?15, issue=?16, repo=?17, base=?18, gate=?19,
+                     rework_estimate_min=?20, updated=?21
                  WHERE project=?1 AND id=?2",
                 params![
                     row.project,
@@ -1605,6 +1819,10 @@ impl<'s> Tx<'s> {
                     row.rework_note,
                     row.estimate_min,
                     row.issue,
+                    row.repo,
+                    row.base,
+                    row.gate,
+                    row.rework_estimate_min,
                     row.updated,
                 ],
             )
@@ -1661,8 +1879,9 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO attempts
                    (project, task, n, seat, generation, contract_version, adopted_version,
-                    pending_update, state, candidate, report, safe_point, started, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                    pending_update, state, candidate, report, safe_point, started, updated,
+                    session_ref, session_cli, session_action, sent_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     row.project,
                     row.task,
@@ -1678,6 +1897,10 @@ impl<'s> Tx<'s> {
                     row.safe_point,
                     row.started,
                     row.updated,
+                    row.session_ref,
+                    row.session_cli,
+                    row.session_action,
+                    row.sent_at,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -2177,6 +2400,618 @@ impl<'s> Tx<'s> {
         }
         Ok(verdicts)
     }
+
+    // ---- v6: the M4 store API (§1 and §13.1 of ops/plan/m4-design.md)
+
+    /// The session the attempt ran in (§3): written at check-in and again at
+    /// hand-in, when the agent may have compacted or been restarted.
+    pub fn set_attempt_session(
+        &self,
+        project: &str,
+        task: &str,
+        n: i64,
+        session_ref: &str,
+        cli: &str,
+    ) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE attempts SET session_ref=?4, session_cli=?5
+                 WHERE project=?1 AND task=?2 AND n=?3",
+                params![project, task, n, session_ref, cli],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "attempt",
+            &format!("{task} attempt {n} in project {project}"),
+        )
+    }
+
+    /// What the engine did before the packet (§3.2): keep | new | compact |
+    /// resume | fresh | new-unconfirmed | compact-fallback | resume-fallback.
+    pub fn set_attempt_action(
+        &self,
+        project: &str,
+        task: &str,
+        n: i64,
+        action: &str,
+    ) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE attempts SET session_action=?4
+                 WHERE project=?1 AND task=?2 AND n=?3",
+                params![project, task, n, action],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "attempt",
+            &format!("{task} attempt {n} in project {project}"),
+        )
+    }
+
+    /// When the packet was actually sent through Herdr (§3.2).
+    pub fn set_attempt_sent(&self, project: &str, task: &str, n: i64, at: Ts) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE attempts SET sent_at=?4 WHERE project=?1 AND task=?2 AND n=?3",
+                params![project, task, n, at],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "attempt",
+            &format!("{task} attempt {n} in project {project}"),
+        )
+    }
+
+    /// Insert a round (§4). A key that exists → BadFormat: one round per
+    /// (project, task, attempt, role).
+    pub fn insert_round(&self, r: &NewRound) -> GearResult<()> {
+        self.tx
+            .execute(
+                "INSERT INTO rounds
+                   (project, task, attempt, role, seat, generation, cli, model, start_at, end_at,
+                    sessions, active_s, paused_s, input, output, cache_read, cache_write, reasoning,
+                    cost_usd, cost_source, counted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, '[]', 0, 0,
+                         NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
+                params![
+                    r.key.project,
+                    r.key.task,
+                    r.key.attempt,
+                    r.key.role,
+                    r.seat,
+                    r.generation,
+                    r.cli,
+                    r.model,
+                    r.start_at,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// The open round of a seat (`end_at IS NULL`): the one it is working on.
+    pub fn open_round_of_seat(&self, seat: &str) -> GearResult<Option<RoundRow>> {
+        let row: Option<RoundRow> = self
+            .tx
+            .query_row(
+                &round_select(" WHERE seat=?1 AND end_at IS NULL ORDER BY start_at DESC LIMIT 1"),
+                params![seat],
+                round_from_row,
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        Ok(row)
+    }
+
+    /// Close a round: the next round's start on the seat, or the seat's
+    /// release (§4.1).
+    pub fn close_round(&self, key: &RoundKey, end_at: Ts) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE rounds SET end_at=?5
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role, end_at],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "round",
+            &format!(
+                "{} attempt {} {} in project {}",
+                key.task, key.attempt, key.role, key.project
+            ),
+        )
+    }
+
+    /// Add a session the seat ran in during the round's window (§4.3). A
+    /// session that is already listed is not added twice.
+    pub fn add_round_session(&self, key: &RoundKey, session_ref: &str) -> GearResult<()> {
+        let stored: Option<String> = self
+            .tx
+            .query_row(
+                "SELECT sessions FROM rounds
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        let mut sessions = match stored {
+            Some(text) => serde_json::from_str::<Vec<String>>(&text).map_err(|error| {
+                GearError::new(ErrorCode::BadFormat, format!("round sessions: {error}"))
+            })?,
+            None => {
+                return Err(GearError::new(
+                    ErrorCode::NoTarget,
+                    format!(
+                        "no round {} attempt {} {} in project {}",
+                        key.task, key.attempt, key.role, key.project
+                    ),
+                ))
+            }
+        };
+        if sessions.iter().any(|session| session == session_ref) {
+            return Ok(());
+        }
+        sessions.push(session_ref.to_string());
+        let text = serde_json::to_string(&sessions)
+            .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?;
+        self.tx
+            .execute(
+                "UPDATE rounds SET sessions=?5
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role, text],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Add to the round's paused time (§5.1): the clock pauses while the seat
+    /// is quota-parked or the task is in a declared wait.
+    pub fn add_round_pause(&self, key: &RoundKey, secs: i64) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE rounds SET paused_s = paused_s + ?5
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role, secs],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "round",
+            &format!(
+                "{} attempt {} {} in project {}",
+                key.task, key.attempt, key.role, key.project
+            ),
+        )
+    }
+
+    /// Write the round's active time (the clock without its pauses).
+    pub fn set_round_active(&self, key: &RoundKey, active_s: i64) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE rounds SET active_s=?5
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![key.project, key.task, key.attempt, key.role, active_s],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "round",
+            &format!(
+                "{} attempt {} {} in project {}",
+                key.task, key.attempt, key.role, key.project
+            ),
+        )
+    }
+
+    /// Write the round's tokens and cost, and the time they were read (§4.3).
+    pub fn set_round_tokens(&self, key: &RoundKey, t: &RoundTokens, at: Ts) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE rounds
+                 SET input=?5, output=?6, cache_read=?7, cache_write=?8, reasoning=?9,
+                     cost_usd=?10, cost_source=?11, counted_at=?12
+                 WHERE project=?1 AND task=?2 AND attempt=?3 AND role=?4",
+                params![
+                    key.project,
+                    key.task,
+                    key.attempt,
+                    key.role,
+                    t.input,
+                    t.output,
+                    t.cache_read,
+                    t.cache_write,
+                    t.reasoning,
+                    t.cost_usd,
+                    t.cost_source,
+                    at,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "round",
+            &format!(
+                "{} attempt {} {} in project {}",
+                key.task, key.attempt, key.role, key.project
+            ),
+        )
+    }
+
+    /// The rounds of a task, oldest first.
+    pub fn rounds_of_task(&self, project: &str, task: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&round_select(" WHERE project=?1 AND task=?2 ORDER BY start_at, role"))
+            .map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project, task], round_from_row).map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// The rounds of a project, oldest first.
+    pub fn rounds_of_project(&self, project: &str) -> GearResult<Vec<RoundRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&round_select(" WHERE project=?1 ORDER BY start_at, task, role"))
+            .map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project], round_from_row).map_err(map_sqlite)?;
+        let mut rounds = Vec::new();
+        for row in rows {
+            rounds.push(row.map_err(map_sqlite)?);
+        }
+        Ok(rounds)
+    }
+
+    /// Store a friction report (§6). Returns its id, `F-<n>`.
+    pub fn insert_friction(&self, f: &NewFriction) -> GearResult<String> {
+        let id = self.next_id(&f.project, 'F')?;
+        self.tx
+            .execute(
+                "INSERT INTO frictions
+                   (project, id, task, attempt, role, seat, body, required, created,
+                    closed_at, outcome)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+                params![
+                    f.project,
+                    id,
+                    f.task,
+                    f.attempt,
+                    f.role,
+                    f.seat,
+                    f.body,
+                    f.required as i64,
+                    f.created,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(id)
+    }
+
+    /// The friction reports that are not closed yet (§6.4).
+    pub fn open_frictions(&self, project: &str) -> GearResult<Vec<FrictionRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&friction_select(" WHERE project=?1 AND closed_at IS NULL ORDER BY created, id"))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], friction_from_row)
+            .map_err(map_sqlite)?;
+        let mut frictions = Vec::new();
+        for row in rows {
+            frictions.push(row.map_err(map_sqlite)?);
+        }
+        Ok(frictions)
+    }
+
+    /// Every friction report of the project, closed ones too.
+    pub fn frictions_of_project(&self, project: &str) -> GearResult<Vec<FrictionRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&friction_select(" WHERE project=?1 ORDER BY created, id"))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project], friction_from_row)
+            .map_err(map_sqlite)?;
+        let mut frictions = Vec::new();
+        for row in rows {
+            frictions.push(row.map_err(map_sqlite)?);
+        }
+        Ok(frictions)
+    }
+
+    /// Close a friction report with what the captain did about it (§6.4).
+    pub fn close_friction(
+        &self,
+        project: &str,
+        id: &str,
+        outcome: &str,
+        at: Ts,
+    ) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE frictions SET closed_at=?3, outcome=?4 WHERE project=?1 AND id=?2",
+                params![project, id, at, outcome],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "friction", &format!("{id} in project {project}"))
+    }
+
+    /// Log a decision (§7). A key that is already there is skipped: false says
+    /// the decision was already logged, true says it was written now. The
+    /// table is append-only (§7.3).
+    pub fn insert_decision_if_new(&self, d: &NewDecision) -> GearResult<bool> {
+        let changed = self
+            .tx
+            .execute(
+                "INSERT INTO decisions
+                   (project, key, seq, voyage, at, kind, what, why, alt, changes, star, source,
+                    line, plan_version, created)
+                 VALUES (?1, ?2,
+                         (SELECT COALESCE(MAX(seq), 0) + 1 FROM decisions WHERE project=?1),
+                         ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ON CONFLICT(project, key) DO NOTHING",
+                params![
+                    d.project,
+                    d.key,
+                    d.voyage,
+                    d.at,
+                    d.kind,
+                    d.what,
+                    d.why,
+                    d.alt,
+                    d.changes,
+                    d.star as i64,
+                    d.source,
+                    d.line,
+                    d.plan_version,
+                    d.created,
+                ],
+            )
+            .map_err(map_sqlite)?;
+        Ok(changed > 0)
+    }
+
+    /// The decisions of a voyage, in the order they appeared (§7).
+    pub fn decisions_of(&self, project: &str, voyage: &str) -> GearResult<Vec<DecisionRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&decision_select(" WHERE project=?1 AND voyage=?2 ORDER BY seq"))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, voyage], decision_from_row)
+            .map_err(map_sqlite)?;
+        let mut decisions = Vec::new();
+        for row in rows {
+            decisions.push(row.map_err(map_sqlite)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Open a pause: the seat cannot work from `at` on (§5.4). A seat that
+    /// already has an open pause keeps it: the stretches do not overlap, and
+    /// the row key (project, seat, start_at) stays unique.
+    pub fn open_pause(
+        &self,
+        project: &str,
+        seat: &str,
+        kind: &str,
+        reason: &str,
+        at: Ts,
+    ) -> GearResult<()> {
+        let open: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT count(*) FROM seat_pauses
+                 WHERE project=?1 AND seat=?2 AND end_at IS NULL",
+                params![project, seat],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if open.unwrap_or(0) > 0 {
+            return Ok(());
+        }
+        // The row key carries the start second: a pause that starts in a
+        // second another pause of the seat already starts in moves to the
+        // next free one, so no pause is lost.
+        let mut start_at = at;
+        for _ in 0..60 {
+            let taken: i64 = self
+                .tx
+                .query_row(
+                    "SELECT count(*) FROM seat_pauses
+                     WHERE project=?1 AND seat=?2 AND start_at=?3",
+                    params![project, seat, start_at],
+                    |row| row.get(0),
+                )
+                .map_err(map_sqlite)?;
+            if taken == 0 {
+                break;
+            }
+            start_at += 1;
+        }
+        self.tx
+            .execute(
+                "INSERT INTO seat_pauses (project, seat, kind, reason, start_at, end_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
+                params![project, seat, kind, reason, start_at],
+            )
+            .map_err(map_sqlite)?;
+        Ok(())
+    }
+
+    /// Close the open pause of that kind: the seat can work again (§5.4).
+    pub fn close_pause(&self, project: &str, seat: &str, kind: &str, at: Ts) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE seat_pauses SET end_at=?4
+                 WHERE project=?1 AND seat=?2 AND kind=?3 AND end_at IS NULL",
+                params![project, seat, kind, at],
+            )
+            .map_err(map_sqlite)?;
+        require_written(
+            changed,
+            "pause",
+            &format!("{kind} of seat {seat} in project {project}"),
+        )
+    }
+
+    /// The pauses of a project, oldest first.
+    pub fn pauses_of_project(&self, project: &str) -> GearResult<Vec<PauseRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT project, seat, kind, reason, start_at, end_at
+                 FROM seat_pauses WHERE project=?1 ORDER BY start_at, seat",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project], pause_from_row).map_err(map_sqlite)?;
+        let mut pauses = Vec::new();
+        for row in rows {
+            pauses.push(row.map_err(map_sqlite)?);
+        }
+        Ok(pauses)
+    }
+
+    /// The estimate the fail verdict asked for (§5.1): the budget of the
+    /// rework round.
+    pub fn set_task_rework_estimate(
+        &self,
+        project: &str,
+        task: &str,
+        min: Option<i64>,
+    ) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE tasks SET rework_estimate_min=?3 WHERE project=?1 AND id=?2",
+                params![project, task, min],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "task", &format!("{task} in project {project}"))
+    }
+
+    /// A declared wait (§5.3): the task cannot finish until `on` is merged.
+    pub fn set_task_wait(&self, project: &str, task: &str, on: &str, cond: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE tasks SET wait_on=?3, wait_cond=?4 WHERE project=?1 AND id=?2",
+                params![project, task, on, cond],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "task", &format!("{task} in project {project}"))
+    }
+
+    /// End a declared wait (§5.3).
+    pub fn clear_task_wait(&self, project: &str, task: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE tasks SET wait_on=NULL, wait_cond=NULL WHERE project=?1 AND id=?2",
+                params![project, task],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "task", &format!("{task} in project {project}"))
+    }
+
+    /// The budget of a round in minutes (§5.1), in one place: the overrun
+    /// question, the friction check and the packet's budget line all read it.
+    ///
+    /// - a dev round (attempt 1): the task's `estimate_min`;
+    /// - a rework round (attempt n >= 2): the estimate the fail verdict
+    ///   asked for, or `max(10, ceil(estimate_min / 2))`;
+    /// - a review round: 1.5 × the median active time of the last 10
+    ///   finished review rounds of the same model, at least 10 min; with
+    ///   fewer than 3 such rounds, 30 min.
+    pub fn round_budget_min(
+        &self,
+        project: &str,
+        task: &str,
+        attempt: i64,
+        role: &str,
+        model: Option<&str>,
+    ) -> GearResult<i64> {
+        if role == "review" {
+            return self.review_budget_min(project, model);
+        }
+        let estimate: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT estimate_min FROM tasks WHERE project=?1 AND id=?2",
+                params![project, task],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?
+            .flatten();
+        if attempt >= 2 {
+            let rework: Option<i64> = self
+                .tx
+                .query_row(
+                    "SELECT rework_estimate_min FROM tasks WHERE project=?1 AND id=?2",
+                    params![project, task],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(map_sqlite)?
+                .flatten();
+            if let Some(minutes) = rework {
+                return Ok(minutes.max(1));
+            }
+            let half = estimate.map(|minutes| (minutes + 1) / 2).unwrap_or(0);
+            return Ok(half.max(10));
+        }
+        Ok(estimate.unwrap_or(DEFAULT_ROUND_BUDGET_MIN))
+    }
+
+    /// The measured budget of a review round (§5.1).
+    fn review_budget_min(&self, project: &str, model: Option<&str>) -> GearResult<i64> {
+        let mut stmt = self
+            .tx
+            .prepare(
+                "SELECT active_s FROM rounds
+                 WHERE project=?1 AND role='review' AND end_at IS NOT NULL AND model IS ?2
+                 ORDER BY end_at DESC LIMIT 10",
+            )
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, model], |row| row.get::<_, i64>(0))
+            .map_err(map_sqlite)?;
+        let mut minutes = Vec::new();
+        for row in rows {
+            minutes.push(row.map_err(map_sqlite)? as f64 / 60.0);
+        }
+        if minutes.len() < 3 {
+            return Ok(DEFAULT_REVIEW_BUDGET_MIN);
+        }
+        minutes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = if minutes.len() % 2 == 1 {
+            minutes[minutes.len() / 2]
+        } else {
+            let upper = minutes.len() / 2;
+            (minutes[upper - 1] + minutes[upper]) / 2.0
+        };
+        let budget = (median * 1.5).ceil() as i64;
+        Ok(budget.max(10))
+    }
 }
 
 /// Test helpers (enable with feature-less `cfg(test)` in this crate or via
@@ -2379,7 +3214,7 @@ fn seat_select(tail: &str) -> String {
 fn message_select(tail: &str) -> String {
     format!(
         "SELECT project, id, thread, task, attempt, sender, sender_gen, recipient, kind, urgent, body,
-                reply_to, needs_ack, state, wait_on, wait_until, result, created, resolved
+                reply_to, needs_ack, state, wait_on, wait_until, result, created, resolved, meta
          FROM messages{tail}"
     )
 }
@@ -2395,7 +3230,8 @@ fn op_select(tail: &str) -> String {
 fn task_select(tail: &str) -> String {
     format!(
         "SELECT project, id, rank, state, priority, lane, milestone, required, contract_version,
-                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated
+                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue,
+                repo, base, gate, rework_estimate_min, updated
          FROM tasks{tail}"
     )
 }
@@ -2403,8 +3239,33 @@ fn task_select(tail: &str) -> String {
 fn attempt_select(tail: &str) -> String {
     format!(
         "SELECT project, task, n, seat, generation, contract_version, adopted_version,
-                pending_update, state, candidate, report, safe_point, started, updated
+                pending_update, state, candidate, report, safe_point, started, updated,
+                session_ref, session_cli, session_action, sent_at
          FROM attempts{tail}"
+    )
+}
+
+fn round_select(tail: &str) -> String {
+    format!(
+        "SELECT project, task, attempt, role, seat, generation, cli, model, start_at, end_at,
+                sessions, active_s, paused_s, input, output, cache_read, cache_write, reasoning,
+                cost_usd, cost_source, counted_at
+         FROM rounds{tail}"
+    )
+}
+
+fn friction_select(tail: &str) -> String {
+    format!(
+        "SELECT project, id, task, attempt, role, seat, body, required, created, closed_at, outcome
+         FROM frictions{tail}"
+    )
+}
+
+fn decision_select(tail: &str) -> String {
+    format!(
+        "SELECT project, key, seq, voyage, at, kind, what, why, alt, changes, star, source, line,
+                plan_version, created
+         FROM decisions{tail}"
     )
 }
 
@@ -2439,7 +3300,11 @@ fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
         rework_note: row.get(13)?,
         estimate_min: row.get(14)?,
         issue: row.get(15)?,
-        updated: row.get(16)?,
+        repo: row.get(16)?,
+        base: row.get(17)?,
+        gate: row.get(18)?,
+        rework_estimate_min: row.get(19)?,
+        updated: row.get(20)?,
     })
 }
 
@@ -2475,6 +3340,84 @@ fn attempt_from_row(row: &rusqlite::Row) -> rusqlite::Result<AttemptRow> {
         safe_point: row.get(11)?,
         started: row.get(12)?,
         updated: row.get(13)?,
+        session_ref: row.get(14)?,
+        session_cli: row.get(15)?,
+        session_action: row.get(16)?,
+        sent_at: row.get(17)?,
+    })
+}
+
+fn round_from_row(row: &rusqlite::Row) -> rusqlite::Result<RoundRow> {
+    let sessions: String = row.get(10)?;
+    Ok(RoundRow {
+        project: row.get(0)?,
+        task: row.get(1)?,
+        attempt: row.get(2)?,
+        role: row.get(3)?,
+        seat: row.get(4)?,
+        generation: row.get(5)?,
+        cli: row.get(6)?,
+        model: row.get(7)?,
+        start_at: row.get(8)?,
+        end_at: row.get(9)?,
+        sessions: json_strings_from_text(&sessions)?,
+        active_s: row.get(11)?,
+        paused_s: row.get(12)?,
+        input: row.get(13)?,
+        output: row.get(14)?,
+        cache_read: row.get(15)?,
+        cache_write: row.get(16)?,
+        reasoning: row.get(17)?,
+        cost_usd: row.get(18)?,
+        cost_source: row.get(19)?,
+        counted_at: row.get(20)?,
+    })
+}
+
+fn friction_from_row(row: &rusqlite::Row) -> rusqlite::Result<FrictionRow> {
+    Ok(FrictionRow {
+        project: row.get(0)?,
+        id: row.get(1)?,
+        task: row.get(2)?,
+        attempt: row.get(3)?,
+        role: row.get(4)?,
+        seat: row.get(5)?,
+        body: row.get(6)?,
+        required: row.get::<_, i64>(7)? != 0,
+        created: row.get(8)?,
+        closed_at: row.get(9)?,
+        outcome: row.get(10)?,
+    })
+}
+
+fn decision_from_row(row: &rusqlite::Row) -> rusqlite::Result<DecisionRow> {
+    Ok(DecisionRow {
+        project: row.get(0)?,
+        key: row.get(1)?,
+        seq: row.get(2)?,
+        voyage: row.get(3)?,
+        at: row.get(4)?,
+        kind: row.get(5)?,
+        what: row.get(6)?,
+        why: row.get(7)?,
+        alt: row.get(8)?,
+        changes: row.get(9)?,
+        star: row.get::<_, i64>(10)? != 0,
+        source: row.get(11)?,
+        line: row.get(12)?,
+        plan_version: row.get(13)?,
+        created: row.get(14)?,
+    })
+}
+
+fn pause_from_row(row: &rusqlite::Row) -> rusqlite::Result<PauseRow> {
+    Ok(PauseRow {
+        project: row.get(0)?,
+        seat: row.get(1)?,
+        kind: row.get(2)?,
+        reason: row.get(3)?,
+        start_at: row.get(4)?,
+        end_at: row.get(5)?,
     })
 }
 
@@ -2588,6 +3531,7 @@ fn message_from_row(row: &rusqlite::Row) -> rusqlite::Result<MessageRow> {
         result: row.get(16)?,
         created: row.get(17)?,
         resolved: row.get(18)?,
+        meta: row.get(19)?,
     })
 }
 
