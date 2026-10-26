@@ -65,7 +65,15 @@ fn world() -> World {
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP, "opencode", AgentStatus::Idle);
     herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
-    let mut cfg = EngineCfg { doorbell_check_budget: 2, cooldown_s: 5, ..Default::default() };
+    // T-150 (design §10.3): the delivery waits for its confirmation window —
+    // wall clock, not a number of checks. Eight seconds here keeps the test
+    // quick; the default is 180 s.
+    let mut cfg = EngineCfg {
+        doorbell_check_budget: 2,
+        cooldown_s: 5,
+        delivery_grace_s: 8,
+        ..Default::default()
+    };
     cfg.profiles
         .insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
     World { store, herdr, cfg }
@@ -123,15 +131,16 @@ fn an_unconfirmed_delivery_fails_once_and_goes_again_in_a_new_session() {
     assert_eq!(ops[0].state, OpState::Submitted);
     assert_eq!(w.herdr.prompts_to(LANE).len(), 1);
 
-    // Ticks 2–3: the budget (2) is spent. The op fails with the reason — the
-    // seat's slot is free — and the captain gets exactly one item.
+    // Ticks 2–3: the confirmation window (8 s) is over. The op fails with the
+    // reason — the seat's slot is free — and the captain gets exactly one
+    // item.
     w.tick(5);
     w.tick(9);
     let ops = w.deliveries();
     assert_eq!(ops.len(), 1, "no new delivery while the record blocks: {ops:?}");
     assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
     let reason = ops[0].result.clone().unwrap_or_default();
-    assert!(reason.contains("not confirmed after 2 checks"), "{reason}");
+    assert!(reason.contains("not confirmed within 8s"), "{reason}");
     assert!(reason.contains("T-1 attempt 1"), "{reason}");
     let items = w.stall_items();
     assert_eq!(items.len(), 1, "one captain item: {items:?}");
@@ -257,19 +266,31 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     assert_eq!(attempt.state, AttemptState::Started);
 }
 
-/// F2 of the review: a failed **continue** is not delivered again in the same
-/// session either — the guard covers Started/Stopped attempts, not only a
-/// Delivered one.
+/// F2 of the review: a failed **second** delivery of the same attempt (the
+/// nudge for an attempt that stopped) is not delivered again in the same
+/// session either — the guard covers every delivery of the attempt, not only
+/// the first.
+///
+/// T-150 (design §10.3): an attempt that already started gets no second
+/// packet, so the nudge is the one of a `Stopped` attempt.
 #[test]
-fn a_failed_continue_is_not_repeated_in_the_same_session() {
+fn a_failed_nudge_is_not_delivered_again_in_the_same_session() {
     let mut w = world();
     w.herdr.set_agent_session(LANE, "ses_A");
-    w.tick(1); // the assignment goes into A
-    view(&mut w, 2);
-    w.tick(5); // confirmed: the attempt starts
+    w.tick(1); // the packet goes into A
+    view(&mut w, 2); // the lane checks in
+    w.tick(5); // the delivery is confirmed: the attempt starts
     assert_eq!(w.deliveries()[0].state, OpState::Confirmed);
+    // The attempt stops (the lane's turn is over).
+    w.store
+        .write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Stopped;
+            tx.update_attempt(&attempt)
+        })
+        .unwrap();
 
-    w.tick(9); // a Continue goes (cooldown elapsed)
+    w.tick(9); // a Continue goes (the cooldown elapsed)
     let ops = w.deliveries();
     assert_eq!(ops.len(), 2, "{ops:?}");
     assert!(
@@ -278,8 +299,7 @@ fn a_failed_continue_is_not_repeated_in_the_same_session() {
         w.herdr.prompts_to(LANE)
     );
 
-    w.tick(13); // one check
-    w.tick(17); // the budget is spent: the Continue fails
+    w.tick(17); // the window (8 s) is over: the nudge fails
     let ops = w.deliveries();
     assert_eq!(ops.len(), 2, "no replacement in the same session: {ops:?}");
     assert_eq!(ops[1].state, OpState::Failed, "{ops:?}");

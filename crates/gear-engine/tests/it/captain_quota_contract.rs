@@ -162,7 +162,13 @@ fn current_work_can_continue_and_hand_in_but_the_next_task_waits() {
         .unwrap();
     herdr.set_screen(CAP, &screen(100));
     tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
-    assert!(herdr.prompts_to(LANE)[0].starts_with("Continue T-1"));
+    // T-150 (design §10.3): the attempt already started — the lane got its
+    // packet and checked in — so the engine sends no second one.
+    assert!(
+        herdr.prompts_to(LANE).is_empty(),
+        "no second packet: {:?}",
+        herdr.prompts_to(LANE)
+    );
     store
         .write(|tx| {
             tx.insert_view(&ViewRecord {
@@ -180,7 +186,7 @@ fn current_work_can_continue_and_hand_in_but_the_next_task_waits() {
         })
         .unwrap();
     tick(&mut store, &mut herdr, &cfg, T0 + 30).unwrap();
-    assert_eq!(herdr.prompts_to(LANE).len(), 1);
+    assert_eq!(herdr.prompts_to(LANE).len(), 0, "the captain is on quota: the next task waits");
     assert_eq!(
         store
             .read(|tx| tx.get_task("p", "T-2"))

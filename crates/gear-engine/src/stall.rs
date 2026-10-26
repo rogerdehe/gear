@@ -42,6 +42,30 @@ pub fn waiting_for_provider(
         .collect()
 }
 
+/// Close the captain's item for a seat that is not stuck any more (design
+/// §10.3: a late check-in confirms the delivery and closes the stall item).
+///
+/// Returns true when an open item was closed.
+pub fn resolve(tx: &Tx<'_>, project: &str, seat_id: &str, now: Ts) -> GearResult<bool> {
+    let open = tx
+        .thread_messages(project, &thread(seat_id))?
+        .into_iter()
+        .find(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
+    let Some(item) = open else {
+        return Ok(false);
+    };
+    tx.update_message_state(
+        project,
+        &item.id,
+        MsgState::Resolved,
+        Some("the lane checked in: the delivery was confirmed after all"),
+        None,
+        None,
+        now,
+    )?;
+    Ok(true)
+}
+
 /// Open the captain's item for a flagged seat unless one is open already.
 /// Returns true when an item was opened.
 ///

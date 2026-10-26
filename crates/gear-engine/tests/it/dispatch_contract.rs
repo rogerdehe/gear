@@ -81,15 +81,23 @@ fn gates_before_any_action() {
     assert_eq!(decide(&v, &cfg, NOW), Action::Assign { task: "T-2".into() }, "cooldown boundary");
 }
 
+/// T-150 (design §10.3): an attempt that already started got its packet and
+/// the lane checked in — the engine never delivers it a second one. A stopped
+/// attempt is still continued (and escalated when nothing moves).
 #[test]
-fn started_attempt_is_continued_then_escalated() {
+fn a_started_attempt_gets_no_second_packet_and_a_stopped_one_is_continued() {
     let cfg = DispatchCfg::default();
-    for st in [AttemptState::Started, AttemptState::Stopped] {
-        let mut v = view(); v.attempt = Some(attempt("T-1", st));
-        assert_eq!(decide(&v, &cfg, NOW), Action::Continue { task: "T-1".into() });
-        v.nudges_since_progress = 5;
-        assert!(matches!(decide(&v, &cfg, NOW), Action::Escalate { task, reason } if task == "T-1" && !reason.is_empty()));
-    }
+    let mut v = view();
+    v.attempt = Some(attempt("T-1", AttemptState::Started));
+    assert!(
+        is_none(&decide(&v, &cfg, NOW)),
+        "no second packet for a started attempt: {:?}",
+        decide(&v, &cfg, NOW)
+    );
+    v.attempt = Some(attempt("T-1", AttemptState::Stopped));
+    assert_eq!(decide(&v, &cfg, NOW), Action::Continue { task: "T-1".into() });
+    v.nudges_since_progress = 5;
+    assert!(matches!(decide(&v, &cfg, NOW), Action::Escalate { task, reason } if task == "T-1" && !reason.is_empty()));
 }
 
 #[test]
@@ -106,7 +114,7 @@ fn retiring_and_temp_seats_never_assign() {
     let cfg = DispatchCfg::default();
     let mut v = view(); v.obs = Some(obs(SeatState::Retiring, true, &[]));
     assert!(is_none(&decide(&v, &cfg, NOW)));
-    v.attempt = Some(attempt("T-1", AttemptState::Started));
+    v.attempt = Some(attempt("T-1", AttemptState::Stopped));
     assert_eq!(decide(&v, &cfg, NOW), Action::Continue { task: "T-1".into() });
     let mut v = view();
     let mut o = obs(SeatState::Active, true, &[]); o.seat.role = SeatRole::Temp; v.obs = Some(o);

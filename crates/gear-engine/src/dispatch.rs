@@ -70,6 +70,8 @@ pub enum Action {
 ///    `nudges_since_progress >= nudge_budget` (a Delivered attempt was
 ///    confirmed but the agent never started, so it is nudged like a stopped
 ///    one);
+///    a Started attempt gets no delivery at all (design §10.3: one packet per
+///    round);
 ///    attempt Submitted → Assign the first ready task if `safe_for_next`, else None;
 ///    attempt Unknown → None (an unknown outcome is never retried);
 ///    no attempt (or a terminal one, which the view contract excludes) →
@@ -149,6 +151,13 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                             version,
                         };
                     }
+                }
+                // Design §10.3: an attempt that already Started got its packet
+                // and the lane checked in — the engine never delivers it a
+                // second one. The lane that stops working is reached by the
+                // overrun question of design §5.2, not by a second packet.
+                if attempt.state == AttemptState::Started {
+                    return none("the attempt already started; no second packet");
                 }
                 if v.nudges_since_progress >= cfg.nudge_budget {
                     Action::Escalate {

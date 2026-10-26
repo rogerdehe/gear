@@ -85,7 +85,13 @@ pub fn deliver_doorbell_now(
         urgent,
         at_once: true,
     }];
-    let text = crate::doorbell::text(&items);
+    // Design §10.4: a lane with no open attempt gets the text that tells it
+    // to stop working on earlier things.
+    let no_task = store.read(|tx| {
+        let Some(row) = tx.get_seat(seat)? else { return Ok(false) };
+        crate::no_task_of(tx, &row)
+    })?;
+    let text = crate::doorbell::text(&items, no_task);
     // One write transaction: check the seat, the binding and the coverage, and
     // claim the message with this path's own doorbell op before Herdr runs.
     let claimed = store.write(|tx| {
@@ -443,6 +449,20 @@ fn is_reviewer(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
         .unwrap_or(false))
 }
 
+/// The confirmation window of a delivery when nothing else says (design
+/// §10.3: `timing.delivery_grace_s`, default 180 s).
+pub const DEFAULT_DELIVERY_GRACE_S: i64 = 180;
+
+/// [`confirm_pending_with`] with the default confirmation window.
+pub fn confirm_pending(
+    store: &mut Store,
+    project: &str,
+    budget: i64,
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    confirm_pending_with(store, project, budget, DEFAULT_DELIVERY_GRACE_S, now)
+}
+
 /// Settle Submitted/Unknown doorbell ops using ViewRecords: an op is Confirmed
 /// only when a view of the same seat+generation, at or after the op's
 /// `created` (intent) time, lists every message id in the op's `covers`.
@@ -457,10 +477,11 @@ fn is_reviewer(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
 /// `gear_app::tasks::on_delivery_confirmed` in the same transaction. Budget and
 /// flagging as for doorbells.
 /// Returns (confirmed op ids, flagged seat ids).
-pub fn confirm_pending(
+pub fn confirm_pending_with(
     store: &mut Store,
     project: &str,
     budget: i64,
+    grace_s: i64,
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
     // The seats whose screen shows a provider limit right now (T-15): their
@@ -548,17 +569,19 @@ pub fn confirm_pending(
                 if on_quota.contains(&op.seat) {
                     continue;
                 }
-                // No evidence yet: the op waits for the next round. Its budget
-                // counts the checks. A delivery whose budget is spent must not
-                // hold the seat's slot forever (T-97): it fails with the
-                // reason, the captain is rung once, and the open attempt is
-                // delivered again in a new agent session (dispatch).
-                let used = tx.bump_op_check_budget(project, &op.id, now)?;
-                if op.kind == OpKind::Deliver && used >= budget {
-                    // The session the prompt was sent into, fixed when the op
-                    // was prepared (T-97): a hand restart may have refreshed
-                    // the binding since, and the retry belongs to the new
-                    // session, not to this record.
+                // No evidence yet: the op waits for the next round.
+                if op.kind == OpKind::Deliver {
+                    // Design §10.3: the confirmation window is wall clock
+                    // (`timing.delivery_grace_s`), not a number of checks: a
+                    // lane that reads its packet after a minute still
+                    // confirms it.
+                    if now - op.created < grace_s {
+                        continue;
+                    }
+                    // The window is over: the delivery is not confirmed. It
+                    // fails with the reason, the captain is rung once, and the
+                    // open attempt is delivered again in a new agent session
+                    // (dispatch).
                     let session = match crate::delivery::sent(tx, &op.id)? {
                         Some(session) => session,
                         None => tx
@@ -570,7 +593,7 @@ pub fn confirm_pending(
                         &op.id,
                         OpState::Failed,
                         Some(&format!(
-                            "delivery not confirmed after {used} checks (the lane never showed task {} attempt {}): it is delivered again in a new agent session",
+                            "delivery not confirmed within {grace_s}s (the lane never showed task {} attempt {}): it is delivered again in a new agent session",
                             op.task.as_deref().unwrap_or("-"),
                             op.attempt.unwrap_or(0)
                         )),
@@ -593,6 +616,10 @@ pub fn confirm_pending(
                     }
                     continue;
                 }
+                // A doorbell's budget counts the checks: without evidence the
+                // op waits for the next round, and the seat is flagged when
+                // the budget is spent (no resend either way).
+                let used = tx.bump_op_check_budget(project, &op.id, now)?;
                 if used == budget && !flagged.contains(&op.seat) {
                     flagged.push(op.seat.clone());
                 }
@@ -605,6 +632,46 @@ pub fn confirm_pending(
 /// The longest a doorbell may wait for its answer before it expires and the
 /// seat can be rung again (L-69).
 pub const DOORBELL_EXPIRY_S: i64 = 300;
+
+/// A late check-in confirms a delivery that failed (design §10.3).
+///
+/// The delivery op of an attempt fails when the lane never showed the
+/// attempt within the confirmation window. A view that shows the attempt
+/// **after** that is proof that the lane did read it: the attempt goes
+/// Delivered → Started (design/06) and the stall item of the seat closes —
+/// the lane is not stuck any more.
+///
+/// Returns the confirmed attempts ("T-n/attempt @ the view").
+pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<String>> {
+    store.write(|tx| {
+        let mut confirmed = Vec::new();
+        for op in tx.ops_in_state(project, OpState::Failed)? {
+            if op.kind != OpKind::Deliver {
+                continue;
+            }
+            // A review delivery is settled by the reviewer's verdict, not by
+            // a view of the reviewer's home page.
+            if is_reviewer(tx, &op.seat)? {
+                continue;
+            }
+            let Some(view_ts) = shown_delivery(tx, &op)? else {
+                continue;
+            };
+            let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+                continue;
+            };
+            // The attempt is confirmed only while it waits for its first
+            // check-in (Delivered); a later state is not this op's business.
+            if !start_confirmed_attempt(tx, project, &op, now)? {
+                continue;
+            }
+            // The lane is not stuck: its stall item closes.
+            crate::stall::resolve(tx, project, &op.seat, now)?;
+            confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
+        }
+        Ok(confirmed)
+    })
+}
 
 /// The time of the first view of the seat (current generation) at or after the
 /// doorbell, if any. A doorbell asks the seat to run `gear`; any view after it
@@ -669,19 +736,26 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
 }
 
 /// A confirmed delivery starts its attempt: `Delivered` → `Started` and the
-/// task `Ready` → `Running`, in the same transaction (design/06).
-fn start_confirmed_attempt(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResult<()> {
+/// task `Ready` → `Running`, in the same transaction (design/06). Returns
+/// false when the attempt is not waiting for its first check-in any more.
+fn start_confirmed_attempt(
+    tx: &Tx<'_>,
+    project: &str,
+    op: &OpRow,
+    now: Ts,
+) -> GearResult<bool> {
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
-        return Ok(());
+        return Ok(false);
     };
     let still_delivered = tx
         .get_attempt(project, task, attempt)?
         .map(|row| row.state == AttemptState::Delivered)
         .unwrap_or(false);
-    if still_delivered {
-        gear_app::tasks::on_delivery_confirmed(tx, project, task, attempt, now)?;
+    if !still_delivered {
+        return Ok(false);
     }
-    Ok(())
+    gear_app::tasks::on_delivery_confirmed(tx, project, task, attempt, now)?;
+    Ok(true)
 }
 
 /// On engine start: every Executing op becomes Unknown (the previous process

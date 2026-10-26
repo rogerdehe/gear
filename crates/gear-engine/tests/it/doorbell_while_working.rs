@@ -96,7 +96,9 @@ fn a_working_pi_lane_gets_the_captains_instruction_in_the_same_tick() {
     let said = w.herdr.prompts_to(PI_PANE);
     assert_eq!(said.len(), 1, "typed while the agent works: {said:?}");
     assert!(said[0].contains(&id), "the doorbell names the message: {said:?}");
-    assert!(said[0].contains("Run `gear` now."), "{said:?}");
+    // T-150 (design §10.4): the lane has no open attempt, so the text says so
+    // and tells it to stop working on earlier things.
+    assert!(said[0].contains("You have no task now"), "{said:?}");
     let ops = w.doorbell_ops();
     assert_eq!(ops.len(), 1, "{ops:?}");
     assert_eq!(ops[0].state, OpState::Submitted);
