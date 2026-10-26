@@ -1184,11 +1184,13 @@ fn merge_one_locked(
     //    rework's (`engine/t53-v2`), or another one. One process answers both
     //    (T-127): `for-each-ref --contains` fails when the commit is not here
     //    at all — the "not fetchable yet" of step 2, for a sha.
+    //    The listing names each ref and its tip, so step 9 closes the branches
+    //    it needs from the same answer instead of asking again (T-127).
     let pushed = match git(
         dir,
         &[
             "for-each-ref",
-            "--format=%(refname:short)",
+            "--format=%(refname:short) %(objectname)",
             &format!("--contains={sha}"),
             "refs/remotes/origin/",
         ],
@@ -1201,7 +1203,20 @@ fn merge_one_locked(
             )))
         }
     };
-    if pushed.trim().is_empty() {
+    // The refs that contain the candidate, and those whose tip it is.
+    let mut refs = Vec::new();
+    let mut tips = Vec::new();
+    for line in pushed.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(name), tip) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        refs.push(name.to_string());
+        if tip == Some(sha.as_str()) {
+            tips.push(name.to_string());
+        }
+    }
+    if refs.is_empty() {
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
@@ -1347,7 +1362,7 @@ fn merge_one_locked(
         // hook that rejects the push once (F1 of the T-61 review).
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
-    let (closed, left) = close_branches(dir, repo, &branch, &review, &sha, &task, remote);
+    let (closed, left) = close_branches(dir, repo, &branch, &review, &task, remote, &refs, &tips);
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
@@ -1435,29 +1450,21 @@ fn close_branches(
     repo: &Repo,
     task_branch: &str,
     review: &str,
-    candidate: &str,
     task: &str,
     remote: &dyn Remote,
+    refs: &[String],
+    tips: &[String],
 ) -> (Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
-    if remote_branch_exists(dir, review) && delete_remote(dir, review, remote) {
+    let review_ref = format!("origin/{review}");
+    if refs.iter().any(|name| name == &review_ref) && delete_remote(dir, review, remote) {
         closed.push(review.to_string());
     }
     // The branches whose tip is the candidate: the work the review approved.
-    let points = git(
-        dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)",
-            &format!("--points-at={candidate}"),
-            "refs/remotes/origin/",
-        ],
-    )
-    .unwrap_or_default();
-    for line in points.lines() {
-        let name = line.trim().trim_start_matches("origin/").to_string();
+    for name in tips {
+        let name = name.trim().trim_start_matches("origin/").to_string();
         if name.is_empty() || name == "HEAD" {
             continue;
         }
@@ -2082,8 +2089,10 @@ mod tests {
             let shape = if built_on { Shape::PairOn } else { Shape::PairFlat };
             let root = scratch_root(name, shape);
             let work = root.join("work");
-            let a = sh(&root, "git -C origin.git rev-parse heat/t1");
-            let b = sh(&root, "git -C origin.git rev-parse heat/t2");
+            // One listing for both heads, not one git process each (T-127).
+            let heads = branch_heads(&root);
+            let a = heads["heat/t1"].clone();
+            let b = heads["heat/t2"].clone();
             Pair { root, work, a, b }
         }
 
@@ -2111,13 +2120,6 @@ mod tests {
             sh(&self.root, "git -C origin.git log --format=%s dev")
         }
 
-        /// `true` when origin's dev holds a commit with this subject.
-        fn dev_has(&self, subject: &str) -> bool {
-            sh_ok(
-                &self.root,
-                &format!("git -C origin.git log --format=%s dev | grep -qx {subject}"),
-            )
-        }
     }
 
     impl Drop for Pair {
@@ -2296,10 +2298,10 @@ mod tests {
         });
 
         let log = pair.dev_log();
-        assert!(pair.dev_has("a"), "T-1 landed: {log}");
-        assert!(pair.dev_has("b"), "T-2 landed: {log}");
-        assert!(pair.dev_has("r1"), "T-1's review landed: {log}");
-        assert!(pair.dev_has("r2"), "T-2's review landed: {log}");
+        assert!(log_has(&log, "a"), "T-1 landed: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(log_has(&log, "r1"), "T-1's review landed: {log}");
+        assert!(log_has(&log, "r2"), "T-2's review landed: {log}");
         // In order: T-1's merge is below T-2's (the log is newest first).
         let first = log.find("merge(T-1)").expect("T-1's merge commit");
         let second = log.find("merge(T-2)").expect("T-2's merge commit");
@@ -2446,8 +2448,8 @@ mod tests {
         });
 
         let log = pair.dev_log();
-        assert!(pair.dev_has("b"), "T-2 landed: {log}");
-        assert!(!pair.dev_has("a"), "T-1 did not land: {log}");
+        assert!(log_has(&log, "b"), "T-2 landed: {log}");
+        assert!(!log_has(&log, "a"), "T-1 did not land: {log}");
         // The captain is not told about a wait that did not happen.
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
         assert!(inbox.is_empty(), "{inbox:?}");
@@ -2472,8 +2474,10 @@ mod tests {
             };
             let root = scratch_root(name, shape);
             let work = root.join("work");
+            // One listing for every head, not one git process each (T-127).
+            let heads = branch_heads(&root);
             let candidates = (1..=tasks)
-                .map(|n| sh(&root, &format!("git -C origin.git rev-parse heat/t{n}")))
+                .map(|n| heads[&format!("heat/t{n}")].clone())
                 .collect();
             Chain { root, work, candidates }
         }
@@ -2643,8 +2647,10 @@ mod tests {
         let b_merge = log.find("merge(T-2)").expect("T-2's merge");
         let a_merge = log.find("merge(T-1)").expect("T-1's merge");
         assert!(b_merge < a_merge, "T-1 lands before T-2 (newest first): {log}");
-        assert!(sh_ok(&chain.root, "git -C origin.git log --format=%s dev | grep -qx a2"));
-        assert!(sh_ok(&chain.root, "git -C origin.git log --format=%s dev | grep -qx t2"));
+        // The same log the order was read from: the rework's commit and T-2's
+        // work are both on the integration branch (one git process, not two).
+        assert!(log_has(&log, "a2"), "T-1's rework landed: {log}");
+        assert!(log_has(&log, "t2"), "T-2's work landed: {log}");
     }
 
     /// T-62, F2 of the review: waiting merges take turns, so a chain lands in
@@ -3057,6 +3063,30 @@ gate = "{gate}"
                 tick_step(store, herdr, cfg, 31);
             }
         }
+    }
+
+    /// The tip of every branch of the fixture repo's origin, by name: one git
+    /// process for all of them (T-127).
+    fn branch_heads(root: &Path) -> std::collections::BTreeMap<String, String> {
+        let listing = sh(
+            root,
+            "git -C origin.git for-each-ref --format='%(refname:short) %(objectname)' refs/heads/",
+        );
+        listing
+            .lines()
+            .filter_map(|line| {
+                let (name, sha) = line.split_once(' ')?;
+                Some((name.trim().to_string(), sha.trim().to_string()))
+            })
+            .collect()
+    }
+
+    /// Whether `log` — what [`Pair::dev_log`] and [`Chain::dev_log`] read, one
+    /// line per commit — holds `subject` exactly. A test reads the log once
+    /// and its assertions read that string, never one git process per subject
+    /// (T-127).
+    fn log_has(log: &str, subject: &str) -> bool {
+        log.lines().any(|line| line == subject)
     }
 
     /// The state of a merge op.
