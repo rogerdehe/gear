@@ -315,6 +315,53 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
     Ok(())
 }
 
+/// Refuse a **first** registration that is not the user's own (T-100).
+///
+/// An agent must not act as the user: a project that is not registered yet is
+/// created only from the user's own shell — no `GEAR_CTX` of any project, and no
+/// Herdr agent in the pane — whatever `GEAR_ADMIN=1` says. Re-applying the
+/// config of an already-registered project from its captain's pane stays allowed
+/// (T-86), and that is the only `init` an agent may run.
+fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> {
+    if let Some(ctx) = &env.ctx {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            format!(
+                "a project is registered from the user's own shell, never from an agent: this is seat {} of project {} (a config change for a registered project may be re-applied from its captain's pane)",
+                ctx.seat_id(),
+                ctx.project
+            ),
+        ));
+    }
+    // A shell left in a Herdr pane is still the user; a pane hosting an agent is
+    // not. When the pane cannot be read, the answer is no.
+    if let Some(pane) = env.pane_id.as_deref() {
+        let mut herdr = open_herdr().map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("a project is registered from the user's own shell: cannot reach Herdr to read pane {pane} ({})", e.detail),
+            )
+        })?;
+        use gear_herdr::HerdrRead as _;
+        let occupant = herdr.agent_get(pane).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("a project is registered from the user's own shell: cannot read pane {pane} ({})", e.0),
+            )
+        })?;
+        if let Some(agent) = occupant {
+            return Err(GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!(
+                    "a project is registered from the user's own shell, never from an agent: pane {pane} hosts {} — run `gear admin init` from a plain terminal",
+                    agent.agent.as_deref().unwrap_or("an agent")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `gear admin init <config>`: register a project — from the user's own shell
 /// or from the captain's pane (T-86). `GEAR_ADMIN=1` is the user's consent and
 /// is checked before anything is read; which seat may act on it is decided by
@@ -332,6 +379,16 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
     })?;
     let mut store = open_store()?;
+    // A project that is not registered yet is the user's own act (T-100): an
+    // agent may re-apply the config of its own project (T-86), never create
+    // one. Refused before anything is written, and it rings nobody.
+    if let Ok(parsed) = gear_app::config::parse(&text) {
+        let registered =
+            store.read(|tx| Ok(tx.get_project(&parsed.project.id)?.is_some()))?;
+        if !registered {
+            refuse_first_registration_by_an_agent(&env)?;
+        }
+    }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let r = gear_app::admin::init_with_home(&mut store, &env, &text, home.as_deref(), now_ts())?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
