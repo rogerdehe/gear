@@ -66,6 +66,8 @@ pub enum StaffItem {
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
 /// `- T-33 attempt=1 contract=1 candidate=def5678 fail rework="<text>"`
+/// `- T-34 attempt=1 contract=1 candidate=abc1234 fail rework="<text>" estimate=25`
+/// `- T-35 attempt=1 contract=1 candidate=abc1234 pass evidence=<path> why="<text>"`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictLine {
     pub line: usize,
@@ -78,6 +80,15 @@ pub struct VerdictLine {
     pub evidence: Option<String>,
     /// required for fail, absent for pass
     pub rework: Option<String>,
+    /// The minutes the fail verdict asks for (design §5.1): the budget of the
+    /// rework round. `estimate=25`.
+    pub estimate: Option<i64>,
+    /// Why the captain passes over a failed review (design §7.4): `why="…"`.
+    /// Required for that case.
+    pub why: Option<String>,
+    /// The task whose merge landed this work (design §10.7, row B03-01):
+    /// `integrated-by=T-m`.
+    pub integrated_by: Option<String>,
 }
 
 /// `V-9 keep plan=12: <text>; next=<RFC3339>`
@@ -754,7 +765,8 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         }
     };
 
-    // The tail runs to the end of the line: `evidence=<path>` or `rework="<text>"`.
+    // The tail runs to the end of the line: `evidence=<path>`, `rework="<text>"`,
+    // `estimate=<min>`, `why="<text>"` or `integrated-by=T-m`.
     let tail = rest
         .splitn(6, char::is_whitespace)
         .nth(5)
@@ -762,32 +774,59 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         .trim();
     let mut evidence = None;
     let mut rework = None;
-    if let Some(value) = tail.strip_prefix("evidence=") {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
+    let mut estimate = None;
+    let mut why = None;
+    let mut integrated_by = None;
+    for (key, value) in tail_fields(tail) {
+        match key.as_str() {
+            "evidence" => {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
+                }
+                // A pass verdict carries exactly one `evidence=<path>`: a second
+                // field after it (or a path with a space) is a different tail.
+                if pass && value.chars().any(char::is_whitespace) {
+                    return Err(bad(
+                        line,
+                        "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
+                    ));
+                }
+                evidence = Some(value.to_string());
+            }
+            "rework" => {
+                let inner = quoted_text(&value)
+                    .ok_or_else(|| bad(line, "a `fail` verdict needs `rework=\"<text>\"`"))?;
+                if inner.trim().is_empty() {
+                    return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
+                }
+                rework = Some(inner.trim().to_string());
+            }
+            "estimate" => {
+                let minutes = value.trim().parse::<i64>().map_err(|_| {
+                    bad(line, format!("`estimate=` takes a number of minutes, got {value:?}"))
+                })?;
+                estimate = Some(minutes);
+            }
+            "why" => {
+                let inner = quoted_text(&value)
+                    .ok_or_else(|| bad(line, "`why=\"<text>\"` takes a quoted text"))?;
+                if inner.trim().is_empty() {
+                    return Err(bad(line, "`why=\"<text>\"` takes a non-empty text"));
+                }
+                why = Some(inner.trim().to_string());
+            }
+            "integrated-by" => {
+                let task = value.trim();
+                if !is_task_id(task) {
+                    return Err(bad(line, format!("`integrated-by=` takes a task id, got {task:?}")));
+                }
+                integrated_by = Some(task.to_string());
+            }
+            other => {
+                return Err(bad(line, format!("unexpected verdict field {other:?}")));
+            }
         }
-        // A pass verdict carries exactly one `evidence=<path>`: a second field
-        // after it (or a path with a space) is a different tail.
-        if pass && value.chars().any(char::is_whitespace) {
-            return Err(bad(
-                line,
-                "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
-            ));
-        }
-        evidence = Some(value.to_string());
-    } else if let Some(value) = tail.strip_prefix("rework=") {
-        let quoted = value.trim();
-        let inner = quoted
-            .strip_prefix('"')
-            .and_then(|text| text.strip_suffix('"'))
-            .ok_or_else(|| bad(line, "a `fail` verdict needs `rework=\"<text>\"`"))?;
-        if inner.trim().is_empty() {
-            return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
-        }
-        rework = Some(inner.to_string());
-    } else if !tail.is_empty() {
-        return Err(bad(line, format!("unexpected verdict text {tail:?}")));
     }
 
     if pass && evidence.is_none() {
@@ -802,6 +841,27 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
     if !pass && evidence.is_some() {
         return Err(bad(line, "a `fail` verdict must not carry `evidence=`"));
     }
+    if pass && estimate.is_some() {
+        return Err(bad(
+            line,
+            "a `pass` verdict must not carry `estimate=`: the minutes a rework asks for belong to a fail",
+        ));
+    }
+    if !pass && estimate.is_some() && estimate.map(|min| min <= 0).unwrap_or(false) {
+        return Err(bad(line, "`estimate=` takes a positive number of minutes"));
+    }
+    if !pass && why.is_some() {
+        return Err(bad(
+            line,
+            "`why=` belongs to a pass over a failed review: a fail carries its rework text",
+        ));
+    }
+    if !pass && integrated_by.is_some() {
+        return Err(bad(
+            line,
+            "`integrated-by=` belongs to a pass: only a pass can be landed by another task's merge",
+        ));
+    }
 
     Ok(VerdictLine {
         line,
@@ -812,7 +872,46 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         pass,
         evidence,
         rework,
+        estimate,
+        why,
+        integrated_by,
     })
+}
+
+/// The fields of a verdict line's tail: `key=value` pairs, where a quoted
+/// value may hold spaces (`rework="…"`, `why="…"`).
+fn tail_fields(tail: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let mut rest = tail.trim();
+    while !rest.is_empty() {
+        let Some((key, value)) = rest.split_once('=') else {
+            fields.push((rest.trim().to_string(), String::new()));
+            break;
+        };
+        let value = value.trim_start();
+        let (value, tail) = if let Some(quoted) = value.strip_prefix('"') {
+            match quoted.split_once('"') {
+                Some((inner, after)) => (format!("\"{inner}\""), after.trim_start()),
+                None => (format!("\"{quoted}\""), ""),
+            }
+        } else {
+            match value.find(char::is_whitespace) {
+                Some(at) => (value[..at].to_string(), value[at..].trim_start()),
+                None => (value.to_string(), ""),
+            }
+        };
+        fields.push((key.trim().to_string(), value));
+        rest = tail;
+    }
+    fields
+}
+
+/// The text inside a quoted value (`"…"`), `None` when it is not quoted.
+fn quoted_text(value: &str) -> Option<&str> {
+    value
+        .trim()
+        .strip_prefix('"')
+        .and_then(|text| text.strip_suffix('"'))
 }
 
 fn number_field(token: Option<&str>, name: &str, line: usize) -> GearResult<i64> {
