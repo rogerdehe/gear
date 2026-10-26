@@ -309,3 +309,69 @@ fn classify_bad_ctx_is_anonymous() {
     let caller = s.read(|tx| classify(tx, &env(None, 1, None, false), None)).unwrap();
     assert_eq!(caller, Caller::Anonymous);
 }
+
+/// A pid that is certainly not an ancestor of this test process.
+const ELSEWHERE: u32 = 4_000_000_000;
+
+/// T-104: GEAR_CTX and HERDR_PANE_ID are environment variables any agent can
+/// set. The seat is the pane the caller really runs in: a lane that claims the
+/// captain's pane is refused, and the captain hears which pane the caller is in.
+#[test]
+fn a_caller_outside_the_bound_pane_is_refused_and_the_captain_hears_it() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    // The captain's pane runs someone else's process; the lane's pane runs this
+    // caller (the fixture's default is "this process is in the pane").
+    herdr.set_pane_processes(CAP_PANE, Some(ELSEWHERE), &[]);
+
+    let claimed = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let error = observe(&claimed, &mut herdr).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(error.detail.contains(CAP_PANE), "names the claim: {}", error.detail);
+    assert!(error.detail.contains("runs in pane w1:p2"), "names the truth: {}", error.detail);
+    assert!(error.detail.contains("GEAR_CTX"), "says why pids beat env: {}", error.detail);
+
+    // One urgent item for the captain, naming the real pane; a repeat is quiet.
+    assert!(gear_app::identity::report_claim(&mut s, &claimed, &mut herdr, &error, NOW).unwrap());
+    let items = s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(items[0].urgent, "urgent: {items:?}");
+    assert_eq!(items[0].state, gear_model::MsgState::Open);
+    assert!(items[0].body.contains("runs in w1:p2"), "{}", items[0].body);
+    assert!(items[0].body.contains("captain"), "{}", items[0].body);
+    assert!(!gear_app::identity::report_claim(&mut s, &claimed, &mut herdr, &error, NOW + 1).unwrap());
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
+}
+
+/// The same caller in its own pane is the seat it says it is.
+#[test]
+fn a_caller_in_the_bound_pane_is_accepted() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    let own = env(Some("heat"), 1, Some(LANE_PANE), false);
+
+    let got = observe(&own, &mut herdr).unwrap().expect("the lane's agent");
+    assert_eq!(got.pane_id, LANE_PANE);
+    let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
+}
+
+/// The captain's own commands run in the captain's pane: they still pass.
+#[test]
+fn the_captains_own_commands_pass() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    let own = env(Some("captain"), 1, Some(CAP_PANE), false);
+
+    let got = observe(&own, &mut herdr).unwrap().expect("the captain's agent");
+    let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
+    match caller {
+        Caller::Seat { seat, .. } => assert_eq!((seat.id.as_str(), seat.role), ("p:captain", SeatRole::Captain)),
+        other => panic!("expected the captain, got {other:?}"),
+    }
+}

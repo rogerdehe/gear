@@ -364,6 +364,28 @@ fn open_store() -> GearResult<gear_store::Store> {
 }
 
 /// [`open_store`] over an injected variable lookup (testable).
+/// The caller's identity (T-104): a process that claims a seat from a pane it
+/// does not run in is refused here, and the captain gets one urgent item saying
+/// which pane the caller really runs in. `GEAR_CTX` and `HERDR_PANE_ID` alone
+/// prove nothing — any agent can set them in its own shell.
+fn observe_identity(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+) -> GearResult<Option<gear_app::identity::Fingerprint>> {
+    match gear_app::identity::observe(env, herdr) {
+        Ok(fp) => Ok(fp),
+        Err(error) => {
+            if error.code == gear_model::ErrorCode::NotRegistered {
+                // Best effort: the refusal is the answer even if the item
+                // cannot be written (the store may be the thing that is wrong).
+                let _ = gear_app::identity::report_claim(store, env, herdr, &error, now_ts());
+            }
+            Err(error)
+        }
+    }
+}
+
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
     let Some(path) = vars(gear_model::ctx::ENV_DB) else {
         // The admin target file (design/14) comes with slice 3.
@@ -440,7 +462,7 @@ fn run_show(
             format!("--show {target} is not supported: only a task id (T-n) can be shown"),
         ));
     }
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let (text, project) = store.read(|tx| {
         // The identity of the home page: a registered seat of the project.
         let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
@@ -496,7 +518,7 @@ fn run_home(
     json: bool,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
         herdr.agents().ok()
     } else { None };
@@ -585,7 +607,7 @@ fn run_report_time(
     filter: &gear_app::time::Filter,
     json: bool,
 ) -> GearResult<String> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let report = gear_app::time::build(store, env, fp.as_ref(), filter)?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
@@ -1095,7 +1117,7 @@ fn run_plan(
         )
     })?;
     let draft = gear_app::draft::parse(&text)?;
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
@@ -1212,7 +1234,7 @@ fn run_send(
         urgent: c.urgent,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
@@ -1248,7 +1270,7 @@ fn run_reply(
         downgrade: c.downgrade,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::reply(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);

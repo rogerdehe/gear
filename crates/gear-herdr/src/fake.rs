@@ -3,7 +3,10 @@
 //! Tests set panes/agents/screens and failure modes, run the engine or CLI
 //! logic, then assert on [`FakeHerdr::calls`].
 
-use crate::{AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome, Worktree};
+use crate::{
+    AgentInfo, AgentSession, AgentStatus, HerdrAct, HerdrRead, ObserveError, Outcome,
+    PaneProcess, PaneProcessInfo, Worktree,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +71,11 @@ pub struct FakeHerdr {
     /// The screen a freshly started agent shows (a real agent renders its UI,
     /// status bar included). Empty by default.
     pub start_screen: Option<String>,
+    /// The processes each pane reports (T-104). A pane without an entry claims
+    /// the process that asks (the test process), which is what a fixture that
+    /// runs `gear` as itself needs; `set_pane_processes` makes a pane claim
+    /// someone else.
+    processes: BTreeMap<String, PaneProcessInfo>,
 }
 
 impl FakeHerdr {
@@ -93,6 +101,24 @@ impl FakeHerdr {
         let a = p.agent.as_mut().expect("pane has no agent");
         a.1 = status;
         p.revision += 1;
+    }
+
+    /// Set the shell and foreground processes of a pane (T-104). A pid that is
+    /// not an ancestor of the caller is a pane the caller does not run in.
+    pub fn set_pane_processes(&mut self, pane: &str, shell: Option<u32>, foreground: &[u32]) {
+        self.processes.insert(
+            pane.into(),
+            PaneProcessInfo {
+                pane_id: pane.into(),
+                shell_pid: shell,
+                tty: None,
+                foreground_process_group_id: foreground.first().copied(),
+                foreground_processes: foreground
+                    .iter()
+                    .map(|pid| PaneProcess { pid: *pid, name: String::new(), cmdline: None })
+                    .collect(),
+            },
+        );
     }
 
     pub fn set_screen(&mut self, pane: &str, screen: &str) {
@@ -203,6 +229,19 @@ impl HerdrRead for FakeHerdr {
             return Err(ObserveError("injected".into()));
         }
         Ok(self.panes.get(pane_id).and_then(|p| Self::info(pane_id, p)))
+    }
+
+    fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
+        if !self.panes.contains_key(pane_id) && !self.processes.contains_key(pane_id) {
+            return Err(ObserveError(format!("no pane {pane_id}")));
+        }
+        Ok(self.processes.get(pane_id).cloned().unwrap_or_else(|| PaneProcessInfo {
+            pane_id: pane_id.to_string(),
+            shell_pid: Some(std::process::id()),
+            tty: None,
+            foreground_process_group_id: None,
+            foreground_processes: Vec::new(),
+        }))
     }
 
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError> {
