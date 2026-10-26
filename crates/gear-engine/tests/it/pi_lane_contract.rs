@@ -135,6 +135,10 @@ fn active_world(config_text: &str) -> Store {
             testing::seed_active_seat(tx, "toy", "heat", SeatRole::Lane, PANE, "pi", T0)?;
             testing::seed_active_seat(tx, "toy", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "toy".into(),
                 id: "T-1".into(),
                 rank: 1,
@@ -192,7 +196,7 @@ fn closing_calls(herdr: &FakeHerdr) -> Vec<String> {
     herdr.calls
         .iter()
         .filter_map(|call| match call {
-            Call::Prompt { pane, text } if pane == PANE => Some(format!("command:{text}")),
+            Call::Prompt { pane, text, .. } if pane == PANE => Some(format!("command:{text}")),
             Call::SendKeys { pane, keys } if pane == PANE => {
                 Some(format!("keys:{}", keys.join("+")))
             }

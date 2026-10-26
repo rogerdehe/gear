@@ -368,7 +368,11 @@ fn retire_one(
         crate::names::ensure(herdr, pane, &crate::names::desired(seat));
         if let Some(profile) = profiles.get(&seat.profile) {
             if let Some(command) = profile.exit_command.as_deref() {
-                let _ = herdr.prompt(pane, command);
+                // Design §10.1: the command goes to the agent's name, never to
+                // the pane id — a pane whose agent is gone is a shell.
+                if let Some(name) = crate::names::live_name(herdr, pane) {
+                    let _ = herdr.prompt(&name, command);
+                }
             } else if !profile.exit_keys.is_empty() {
                 let _ = herdr.send_keys(pane, &profile.exit_keys);
             }
@@ -465,6 +469,10 @@ profile = "codex"
                     created: T0,
                 })?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -508,6 +516,10 @@ profile = "codex"
                     created: T0,
                 })?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -773,6 +785,10 @@ profile = "codex"
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-2".into(),
                     rank: 2,
@@ -879,6 +895,10 @@ profile = "codex"
         store
             .write(|tx| {
                 let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap_or(gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: "T-1".into(),
                     n: 1,

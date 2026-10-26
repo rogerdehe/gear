@@ -8,6 +8,7 @@ description = "The GEAR plan board: a read-only full-screen view of the plan (PR
 gear-model = { workspace = true }
 gear-store = { workspace = true }
 gear-herdr = { workspace = true }
+gear-usage = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 

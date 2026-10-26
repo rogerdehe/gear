@@ -63,6 +63,10 @@ impl World {
             .write(|tx| {
                 let seat = testing::seed_temp_seat(tx, "p", "review-1", "T-7", REV_PANE, "codex", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -119,6 +123,10 @@ impl World {
         self.store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -228,8 +236,25 @@ fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
         "the seat's agent is named after the task it reviews"
     );
 
-    // The delivery path makes sure of the name before it types.
+    // The delivery path makes sure of the name before it types. T-149: the
+    // agent lost its name, so it is renamed now and the packet waits for the
+    // next tick — the name is in place before any text is typed.
     execute_intended(&mut w.store, &mut w.herdr, "p", T0 + 10).unwrap();
+
+    assert_eq!(w.name(REV_PANE), Some("p-review-t7"), "the agent carries its task name");
+    assert!(
+        w.herdr.prompts_to(REV_PANE).is_empty(),
+        "nothing is typed while the agent has no name: {:?}",
+        w.herdr.prompts_to(REV_PANE)
+    );
+    assert!(
+        w.herdr.renames_to("p-review-1").is_empty(),
+        "the warm seat's name is never the agent's name: {:?}",
+        w.herdr.calls
+    );
+
+    // The next tick: the packet goes out.
+    execute_intended(&mut w.store, &mut w.herdr, "p", T0 + 20).unwrap();
 
     let renamed_at = w
         .herdr

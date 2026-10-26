@@ -226,6 +226,10 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -287,6 +291,9 @@ fn result(candidate: &str, gate: Option<BaseGate>) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
         request_id: "r-1".into(),
     }
 }

@@ -265,6 +265,7 @@ pub fn take(
     );
     store.write(|tx| {
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.clone(),
             thread: "captain:take".to_string(),
             task: None,
@@ -385,6 +386,7 @@ fn refused_item(
             return Ok(false);
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread,
             task: None,

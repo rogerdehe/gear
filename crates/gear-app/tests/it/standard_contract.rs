@@ -53,6 +53,10 @@ fn world() -> (tempfile::TempDir, Store) {
     .unwrap();
     s.write(|tx| {
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "toy".into(),
             id: "T-1".into(),
             rank: 1,

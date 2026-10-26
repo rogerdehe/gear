@@ -87,6 +87,10 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAPTAIN_PANE, "claude", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-7".into(),
                 rank: 1,

@@ -21,6 +21,10 @@ const FINDINGS_WITH_IDS: &str = "F1: the store forgets the verdict\nF2: the word
 
 fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
     TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank,
@@ -94,6 +98,7 @@ fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
             tx.set_review_blocking("p", "T-1", 1, blocking, T0 + 2)?;
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "T-1:1".into(),
             task: Some("T-1".into()),
@@ -274,6 +279,9 @@ fn send_review(outcome: Outcome, rid: &str) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
         request_id: rid.into(),
     }
 }
@@ -455,6 +463,10 @@ fn the_rework_rounds_are_capped() {
     s.write(|tx| {
         for n in 2..=4 {
             tx.insert_attempt(&gear_store::AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(),
                 task: "T-1".into(),
                 n,

@@ -46,6 +46,10 @@ impl Repo {
             }
             for (n, lane) in [(1, "heat"), (2, second_lane)] {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                     priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                     contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
@@ -111,6 +115,10 @@ fn pair_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
 }
 fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
     store.write(|tx| tx.insert_attempt(&AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: "p".into(), task: task.into(), n, seat: seat.into(), generation: 1,
         contract_version: 1, adopted_version: 1, pending_update: None,
         state: AttemptState::Submitted, candidate: Some(candidate.into()), report: None,
@@ -156,6 +164,7 @@ fn legacy_root_overlap_keeps_its_item_and_resolves_it() {
     // Seed the pre-multi-repo namespace, including its original open item.
     let item = store.write(|tx| {
         let item = tx.insert_message(&gear_store::NewMessage {
+            meta: None,
             project: "p".into(), thread: "parallel:tasks:T-1:T-2".into(),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: "p:captain".into(), kind: gear_model::MsgKind::System,
@@ -324,6 +333,10 @@ fn multi_repo_store(root: &Repo) -> Store {
         }
         for (n, lane) in [(1, "heat"), (2, "steady"), (3, "web2")] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                 priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                 contract_version: 1, deps: vec![], followup_of: None, wait_on: None,

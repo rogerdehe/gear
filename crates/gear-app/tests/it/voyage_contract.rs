@@ -243,6 +243,10 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
             (2, AttemptState::Accepted, 60, 120),
         ] {
             tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(), task: "T-1".into(), n, seat: "p:heat".into(),
                 generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
                 state, candidate: Some("abc".into()), report: None, safe_point: None,
@@ -255,6 +259,7 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     }).unwrap();
     s.write(|tx| {
         tx.insert_message(&gear_store::NewMessage {
+            meta: None,
             project: "p".into(), thread: "question".into(), task: None, attempt: None,
             sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
             kind: gear_model::MsgKind::Question, urgent: false, body: "Review scope".into(),
@@ -315,6 +320,10 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
         task.state = TaskState::Running;
         tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-2".into(), n: 1, seat: "p:heat".into(),
             generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Started, candidate: None, report: None, safe_point: None,

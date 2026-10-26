@@ -7,7 +7,7 @@ use gear_store::{testing, ContractRow, Store, TaskRow};
 const T0: i64 = 1_800_000_000;
 
 fn task(id: &str, state: TaskState, deps: &[&str]) -> TaskRow {
-    TaskRow { project: "p".into(), id: id.into(), rank: 1, state, priority: "must".into(), lane: Some("heat".into()),
+    TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: id.into(), rank: 1, state, priority: "must".into(), lane: Some("heat".into()),
         milestone: None, required: false, contract_version: 1, deps: deps.iter().map(|d| d.to_string()).collect(),
         followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 }
 }
@@ -43,7 +43,8 @@ fn submitted() -> Store {
 
 fn verdict(pass: bool) -> Verdict {
     Verdict { project: "p".into(), task: "T-1".into(), attempt: 1, contract_version: 1, candidate: "c1".into(), pass,
-        evidence: pass.then(|| "logs/v.md".to_string()), rework: (!pass).then(|| "edge cases".to_string()), by_seat: "p:captain".into() }
+        evidence: pass.then(|| "logs/v.md".to_string()), rework: (!pass).then(|| "edge cases".to_string()),
+        integrated_by: None, by_seat: "p:captain".into() }
 }
 
 #[test]

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Call {
     OpenCodeApi { args: Vec<String> },
-    Prompt { pane: String, text: String },
+    Prompt { pane: String, target: String, text: String },
     Rename { pane: String, name: String },
     PaneRun { pane: String, command: String },
     AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
@@ -135,6 +135,19 @@ impl FakeHerdr {
         self.panes.get(pane).and_then(|p| p.name.as_deref())
     }
 
+    /// The pane a prompt target names: a pane id, or the pane of the agent
+    /// that carries the name (design §10.1: a delivery aims at the live
+    /// agent name, never at the pane id).
+    pub fn pane_of_target(&self, target: &str) -> Option<String> {
+        if self.panes.contains_key(target) {
+            return Some(target.to_string());
+        }
+        self.panes
+            .iter()
+            .find(|(_, pane)| pane.name.as_deref() == Some(target))
+            .map(|(id, _)| id.clone())
+    }
+
     /// The panes renamed to `name`, in call order.
     pub fn renames_to(&self, name: &str) -> Vec<&str> {
         self.calls
@@ -205,7 +218,19 @@ impl FakeHerdr {
         self.calls
             .iter()
             .filter_map(|c| match c {
-                Call::Prompt { pane: p, text } if p == pane => Some(text.as_str()),
+                Call::Prompt { pane: p, text, .. } if p == pane => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the engine aimed its prompts at: an agent name (design §10.1) or
+    /// a pane id.
+    pub fn prompt_targets(&self) -> Vec<&str> {
+        self.calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::Prompt { target, .. } => Some(target.as_str()),
                 _ => None,
             })
             .collect()
@@ -345,10 +370,29 @@ impl HerdrAct for FakeHerdr {
         self.calls.push(Call::OpenCodeApi { args: args.to_vec() });
         self.api_replies.pop_front().unwrap_or_else(|| Err("fake API unavailable".into()))
     }
-    fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
-        let call = Call::Prompt { pane: pane_id.into(), text: text.into() };
-        let pane = pane_id.to_string();
+    fn prompt(&mut self, target: &str, text: &str) -> Outcome<()> {
+        // The target is an agent name (design §10.1) or a pane id. The call
+        // log names the pane the text went to, so a test can ask "what did
+        // this pane receive?".
+        let pane = self.pane_of_target(target);
+        let call = Call::Prompt {
+            pane: pane.clone().unwrap_or_else(|| target.to_string()),
+            // What the engine aimed at: an agent name (design §10.1) or a
+            // pane id. The pane is where the text went.
+            target: target.to_string(),
+            text: text.into(),
+        };
+        let target = target.to_string();
         self.act(call, move |s| {
+            // Herdr refuses a prompt when no agent of that name runs
+            // (design §10.1): a pane that lost its agent, or a name no agent
+            // carries.
+            let Some(pane) = s.pane_of_target(&target) else {
+                return Outcome::Refused {
+                    code: "agent_not_ready".into(),
+                    message: format!("no agent named {target}"),
+                };
+            };
             let starts = s.prompt_starts_turn;
             // Herdr refuses a prompt to an agent with no name (T-134):
             // "agent <pane> is not an active named agent".
@@ -360,7 +404,7 @@ impl HerdrAct for FakeHerdr {
                 };
             }
             match s.panes.get_mut(&pane).and_then(|p| p.agent.as_mut()) {
-                None => Outcome::Refused { code: "not_found".into(), message: "no agent".into() },
+                None => Outcome::Refused { code: "agent_not_ready".into(), message: "no agent".into() },
                 Some(a) if a.1 == AgentStatus::Blocked => {
                     Outcome::Refused { code: "agent_blocked".into(), message: "blocked".into() }
                 }
@@ -406,6 +450,14 @@ impl HerdrAct for FakeHerdr {
         let pane = pane_id.to_string();
         let command_owned = command.to_string();
         self.act(Call::PaneRun { pane: pane_id.into(), command: command.into() }, move |s| {
+            // Design §10.1: a shell command runs only in a pane that hosts no
+            // agent — otherwise it is typed into the agent's input.
+            if s.panes.get(&pane).is_some_and(|p| p.agent.is_some()) {
+                return Outcome::Refused {
+                    code: crate::AGENT_PRESENT.into(),
+                    message: format!("pane {pane} hosts an agent"),
+                };
+            }
             if s.panes.contains_key(&pane) {
                 // Text + Enter is one submission (the socket path sends the
                 // Enter itself); the screen it produces comes next.

@@ -438,7 +438,12 @@ fn onboard_seat(
             .map(|(_, profile)| profile)
             .unwrap_or(profile);
         if let Some(command) = exit_profile.exit_command.as_deref() {
-            let _ = herdr.prompt(&pane, command);
+            // Design §10.1: the command goes to the agent's name, never to the
+            // pane id — an agent that exited leaves a shell behind, and the
+            // command would be typed into it.
+            if let Some(name) = crate::names::live_name(herdr, &pane) {
+                let _ = herdr.prompt(&name, command);
+            }
         } else if !exit_profile.exit_keys.is_empty() {
             let _ = herdr.send_keys(&pane, &exit_profile.exit_keys);
         }
@@ -1209,7 +1214,10 @@ repo = "web"
         ]);
         let mut cfg = cfg();
         cfg.model_list_wait_s = 5;
-        cfg.model_list_poll_ms = 10;
+        // T-127 F5: no test sleeps on the wall clock. The poll is 0, so the
+        // wait between two asks is no wait at all — the fake's next queued
+        // answer is what moves the wait forward.
+        cfg.model_list_poll_ms = 0;
 
         assert_eq!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap(), ["toy:heat"]);
 

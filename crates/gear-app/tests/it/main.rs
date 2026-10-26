@@ -19,6 +19,7 @@ mod home_task_contract;
 mod kickoff_contract;
 mod packet_contract;
 mod plan_apply_contract;
+mod plan_fields_contract;
 mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;

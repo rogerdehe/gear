@@ -138,7 +138,7 @@ deps: -
   - T-<n> attempt=<a> contract=<c> candidate=<commit> fail rework="<the exact fix>"
   ```
 
-  A `fail` puts the task at the head of its lane's queue with your rework text.
+  A `fail` puts the task at the head of its lane's queue with your rework text. A `fail` may carry `estimate=<min>` — the minutes its rework round gets. A `pass` over a failed review needs `why="<why you overrule the reviewer>"`; a `pass` may carry `integrated-by=T-<m>` when the work landed with another task's merge. The quoted value (`rework="…"`, `why="…"`) is the **last** field of the line — the `estimate=`, `integrated-by=` and `evidence=` fields come before it — and it may contain quotes of its own.
 - `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- release <lane>` (a held lane whose agent runs continues, one whose agent is gone is onboarded again), `- release <reviewer>` (a reviewer seat in Standby is released; one that is reviewing is refused — when you are idle and judge that no hand-in comes within 10 min, release the idle reviewers), `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted). A staff line is an instruction: the apply carries it out and the line is gone from the file, so it is never carried out twice.
 
 ## 3. The daily loop

@@ -22,6 +22,10 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,

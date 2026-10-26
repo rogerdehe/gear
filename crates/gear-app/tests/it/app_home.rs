@@ -53,6 +53,7 @@ fn insert(
 ) -> String {
     s.write(|tx| {
         let row = NewMessage {
+            meta: None,
             project: "p".into(),
             thread: thread.into(),
             task: None,
@@ -310,6 +311,10 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
             ("T-4", 4, "runtime", TaskState::Ready),
         ] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: id.into(),
                 rank,

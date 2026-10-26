@@ -18,6 +18,10 @@ fn world_in(mut store: Store) -> World {
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
         for n in 1..=3 {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(), id: format!("T-{n}"), rank: n,
                 state: if n == 1 { TaskState::Verifying } else { TaskState::Ready },
                 priority: "must".into(), lane: Some("heat".into()), milestone: None,
@@ -26,6 +30,10 @@ fn world_in(mut store: Store) -> World {
             })?;
         }
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-1".into(), n: 1, seat: "p:heat".into(), generation: 1,
             contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Submitted, candidate: Some("abc".into()), report: None,

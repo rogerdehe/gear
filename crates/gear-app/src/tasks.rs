@@ -75,6 +75,10 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
         .unwrap_or(0)
         + 1;
     let row = AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: project.to_string(),
         task: task.to_string(),
         n,
@@ -392,6 +396,9 @@ pub struct Verdict {
     pub evidence: Option<String>,
     /// required for fail
     pub rework: Option<String>,
+    /// The task whose merge landed this work (design §10.7, row B03-01):
+    /// `integrated-by=T-m`. The settle decides what it means.
+    pub integrated_by: Option<String>,
     pub by_seat: String,
 }
 
@@ -889,6 +896,7 @@ fn tell_captain_cap(
         return Ok(());
     }
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread: format!("{task}:cap"),
         task: Some(task.to_string()),
@@ -966,6 +974,7 @@ fn resolve_review_items(
         None => (format!("{task}:review"), None),
     };
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread,
         task: Some(task.to_string()),

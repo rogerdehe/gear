@@ -17,7 +17,7 @@ fn world() -> Store {
         testing::seed_project(tx, "p", "sess", T0)?;
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
-        tx.insert_task(&TaskRow { project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
+        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
@@ -36,7 +36,10 @@ fn lane() -> (Env, Fingerprint) {
 fn result(contract: i64, candidate: Option<&str>, rid: &str) -> SendArgs {
     SendArgs { kind: MsgKind::Result, body: "Report: ops/tasks/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(contract), candidate: candidate.map(String::from), about: None, to: None, reply_to: None,
-        verdict: None, blocking: None, base: None, urgent: false, request_id: rid.into() }
+        verdict: None, blocking: None, base: None, urgent: false,
+        left: None,
+        blocker: None,
+        on: None, request_id: rid.into() }
 }
 
 #[test]

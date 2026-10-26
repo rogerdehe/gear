@@ -1493,6 +1493,7 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             .map(|seat| seat.generation)
             .unwrap_or(0);
         let message = NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("{}:{seq}", task.task),
             task: Some(task.task.clone()),
@@ -1711,6 +1712,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
                 testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -1805,6 +1810,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
                 testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -3073,6 +3082,10 @@ review = [
                 first.state = TaskState::Done;
                 tx.update_task(&first)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-2".into(),
                     rank: 2,
@@ -3193,8 +3206,15 @@ review = [
             .unwrap();
         herdr.exit_agent("wt1:p1");
 
-        // Attempt 2 of the same task is handed in — with a new candidate
-        // (T-118: the candidate that already failed is refused).
+        // Attempt 2 of the same task is handed in — with a **new** candidate.
+        // Not a style choice: `submit_result` refuses a candidate that already
+        // failed on an earlier attempt of the task (T-118), so reusing
+        // "abc1234" fails here with `candidate abc1234 already failed on
+        // attempt 1` (T-124: that rule, not a race, was the one failure seen
+        // — it reproduces 3 of 3 runs, alone or under load).
+        // Nothing else in this test can vary: its store is in memory, its
+        // Herdr is the fake, and every timestamp is given (T0 + n) — no clock,
+        // no sleep, no temp path, no global.
         store
             .write(|tx| {
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 25)?;

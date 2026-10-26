@@ -314,8 +314,18 @@ fn stop(
         .or_else(|| profile_for_kind(profiles, &cli).map(|(_, profile)| profile));
     let sent = match profile {
         Some(profile) if !profile.exit_command.is_none() => {
-            // The CLI takes a command, not a key (grok: `/exit`).
-            herdr.prompt(&pane, profile.exit_command.as_deref().unwrap_or_default())
+            // The CLI takes a command, not a key (grok: `/exit`). Design
+            // §10.1: the command goes to the agent's name, never to the pane
+            // id — a pane whose agent is gone is a shell.
+            match crate::names::live_name(herdr, &pane) {
+                Some(name) => herdr.prompt(&name, profile.exit_command.as_deref().unwrap_or_default()),
+                // Without a name there is no agent to address: the command is
+                // withheld rather than typed into a shell.
+                None => Outcome::Refused {
+                    code: "agent_not_ready".into(),
+                    message: format!("the agent of pane {pane} has no name"),
+                },
+            }
         }
         Some(profile) if !profile.exit_keys.is_empty() => {
             herdr.send_keys(&pane, &profile.exit_keys)

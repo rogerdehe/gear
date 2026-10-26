@@ -103,6 +103,7 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                 if tx.get_meta(&format!("{key}:files"))?.as_deref() == Some(&files) { continue; }
                 close(tx, project, &key, "the shared file set changed", now)?;
                 let message = tx.insert_message(&NewMessage {
+                    meta: None,
                     project: project.into(), thread: format!("parallel:{pair}"), task: None, attempt: None,
                     sender: "engine".into(), sender_gen: 0, recipient: captain.id.clone(),
                     kind: MsgKind::System, urgent: false,

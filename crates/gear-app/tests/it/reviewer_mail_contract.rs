@@ -33,6 +33,10 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, REVIEW_PANE, "codex", NOW)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -108,6 +112,9 @@ fn send_args(kind: MsgKind) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
         request_id: "r1".into(),
     }
 }

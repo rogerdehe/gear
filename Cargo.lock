@@ -193,6 +193,7 @@ dependencies = [
  "gear-herdr",
  "gear-model",
  "gear-store",
+ "gear-usage",
  "libc",
  "serde",
  "serde_json",
@@ -207,6 +208,7 @@ dependencies = [
  "gear-herdr",
  "gear-model",
  "gear-store",
+ "gear-usage",
  "libc",
  "serde_json",
  "tempfile",
@@ -233,10 +235,12 @@ name = "gear-engine"
 version = "0.3.4"
 dependencies = [
  "gear-app",
+ "gear-board",
  "gear-forge",
  "gear-herdr",
  "gear-model",
  "gear-store",
+ "gear-usage",
  "libc",
  "serde_json",
  "tempfile",
@@ -279,6 +283,16 @@ dependencies = [
  "gear-model",
  "rusqlite",
  "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "gear-usage"
+version = "0.3.4"
+dependencies = [
+ "gear-model",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]
