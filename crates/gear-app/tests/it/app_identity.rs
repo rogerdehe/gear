@@ -476,12 +476,13 @@ fn a_partial_claim_is_refused_with_one_item() {
 
 /// OpenCode runs a lane's tools in its shared service, outside every pane: such
 /// a caller keeps its claim on an OpenCode pane (still checked against the
-/// binding), but it can never claim the captain, whose agent runs in its pane.
+/// binding), but it can never claim a captain whose agent runs its tools in its
+/// pane (Claude Code).
 #[test]
 fn an_opencode_service_caller_keeps_its_lane_but_never_becomes_the_captain() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
@@ -495,5 +496,29 @@ fn an_opencode_service_caller_keeps_its_lane_but_never_becomes_the_captain() {
 
     let forged = env(Some("captain"), 1, Some(CAP_PANE), false);
     let error = observe(&forged, &mut herdr, &service).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+}
+
+/// Codex in daemon mode runs its tools in the shared `codex app-server`, outside
+/// every pane (trial, 2026-10-26): a Codex captain's tool call keeps its claim,
+/// still checked against the binding; a caller that really runs in another pane
+/// is still refused.
+#[test]
+fn a_codex_daemon_caller_keeps_its_captain_seat() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    let daemon: Vec<u32> = vec![5_000_001, 5_000_000, 1];
+
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let got = observe(&captain, &mut herdr, &daemon).unwrap().expect("the captain's agent");
+    let caller = s.read(|tx| classify(tx, &captain, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+
+    // A lane's shell (really in the lane's pane) claiming the captain is refused.
+    let error = observe(&captain, &mut herdr, &LANE_CALLER).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
 }
