@@ -18,6 +18,7 @@ fn input(seat: &str) -> DoorbellInput {
         idle: true,
         slot_busy: false,
         last_settled_at: None,
+        no_task: false,
         waiting: vec![item("M-1")],
     }
 }
@@ -143,7 +144,7 @@ fn the_text_names_every_id_and_says_run_gear_now() {
         DoorbellItem { id: "M-12".into(), urgent: false, at_once: false },
         DoorbellItem { id: "M-13".into(), urgent: false, at_once: false },
     ];
-    let said = text(&items);
+    let said = text(&items, false);
     assert!(said.contains("M-12") && said.contains("M-13"), "{said}");
     assert!(said.contains("Run `gear` now."), "{said}");
     assert!(!said.contains('\n'), "one line: {said}");
