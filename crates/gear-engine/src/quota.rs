@@ -301,13 +301,8 @@ fn resume_switch(
     };
     // The plan keeps the bar text; the config gives back the model id and its
     // picker filter.
-    let model = config
-        .models
-        .switch
-        .iter()
-        .find(|(_, labels)| labels.bar == plan.to)
-        .map(|(model, _)| model.clone());
-    let Some(model) = model else {
+    let target = crate::switch::plan_target(store, herdr, config, &seat.id, &plan.to)?;
+    let Some((model, labels)) = target else {
         crate::switch::clear_pending(store, &seat.id)?;
         let line = format!(
             "{}: the switch target {:?} has no [models.switch] labels any more — needs check",
@@ -316,7 +311,6 @@ fn resume_switch(
         flag_and_alert(store, project, seat, &line, now)?;
         return Ok(Some(line));
     };
-    let labels = config.models.switch.get(&model).cloned().expect("just found");
     let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
     settle_switch(store, project, seat, &model, outcome, now)
 }
@@ -1617,6 +1611,36 @@ quota_reset_h = 5
         }
         let open = store.read(|tx| tx.actionable_for("p", "p:captain", reset + 60)).unwrap();
         assert_eq!(open.len(), told, "the failure was told once: {open:?}");
+    }
+
+    /// M3 acceptance: a switch planned on labels derived from OpenCode's
+    /// catalogue (T-94) is continued on them — the config has no
+    /// `[models.switch]` entry, and the lane must not be flagged for it.
+    #[test]
+    fn a_switch_planned_on_derived_labels_is_continued_on_them() {
+        let text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        let cfg = gear_app::config::parse(&text).unwrap();
+        let mut store = world(&text);
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(serde_json::json!({"data": [{
+            "providerID": "minimax-cn", "id": "MiniMax-M3.1-Flash", "name": "MiniMax-M3.1-Flash"
+        }]})));
+        herdr.api_replies.push_back(Ok(serde_json::json!({"data": [
+            {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}
+        ]})));
+        let target = crate::switch::plan_target(
+            &mut store, &mut herdr, &cfg, "p:heat", "MiniMax-M3.1-Flash MiniMax (minimax.cn)",
+        )
+        .unwrap();
+        let (model, labels) = target.expect("the catalogue gives the plan's target");
+        assert_eq!(model, "minimax-cn/MiniMax-M3.1-Flash");
+        assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
+
+        // A target no chain model renders as is still unknown.
+        herdr.api_replies.push_back(Ok(serde_json::json!({"data": []})));
+        assert!(crate::switch::plan_target(&mut store, &mut herdr, &cfg, "p:heat", "Other Model X")
+            .unwrap()
+            .is_none());
     }
 
     /// Every message the engine sent the captain about the lane, in thread

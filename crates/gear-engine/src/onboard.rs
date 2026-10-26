@@ -611,12 +611,8 @@ fn resume_start(
     let Some(plan) = crate::switch::pending(store, &seat.id).map_err(|e| e.detail)? else {
         return Ok(false);
     };
-    let Some((model, labels)) = config
-        .models
-        .switch
-        .iter()
-        .find(|(_, labels)| labels.bar == plan.to)
-        .map(|(model, labels)| (model.clone(), labels.clone()))
+    let Some((model, labels)) = crate::switch::plan_target(store, herdr, config, &seat.id, &plan.to)
+        .map_err(|e| e.detail)?
     else {
         crate::switch::clear_pending(store, &seat.id).map_err(|e| e.detail)?;
         let reason = format!(
