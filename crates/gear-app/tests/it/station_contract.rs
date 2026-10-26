@@ -18,7 +18,7 @@ fn apply(store: &mut Store, decisions: &str, rid: &str, now: i64) -> gear_model:
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n{decisions}\n");
     let parsed = draft::parse(&text).unwrap();
     let (env, fp) = captain();
-    plan::apply(store, &env, Some(&fp), &parsed, &text, rid, now)
+    plan::apply(store, &env, Some(&fp), None, &parsed, &text, rid, now)
 }
 
 fn seed(store: &mut Store, eta: &str, count: usize) {
@@ -34,7 +34,7 @@ fn seed(store: &mut Store, eta: &str, count: usize) {
         text.push_str(&format!("## NEW [must] lane=heat milestone=M2\ngoal: task {n}\naccept: works\nestimate: {estimate}\ndeps: -\n"));
     }
     let (env, fp) = captain();
-    plan::apply(store, &env, Some(&fp), &draft::parse(&text).unwrap(), &text, "seed", T0).unwrap();
+    plan::apply(store, &env, Some(&fp), None, &draft::parse(&text).unwrap(), &text, "seed", T0).unwrap();
 }
 
 fn world(eta: &str, count: usize) -> Store {

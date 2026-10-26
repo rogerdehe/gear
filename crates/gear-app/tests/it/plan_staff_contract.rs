@@ -27,7 +27,7 @@ fn run(s: &mut Store, staff: &str, rid: &str) -> gear_model::GearResult<gear_app
     let text = format!("<!-- gear-plan project=p base=0 -->\n# Staff\n{staff}");
     let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
     let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
-    apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, T0 + 10)
+    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
 }
 
 fn seat(s: &mut Store, name: &str) -> (SeatState, Option<String>) {
@@ -70,7 +70,7 @@ fn retry_puts_a_parked_lane_back_in_the_queue() {
         let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
         let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
         let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
-        apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, T0 + 10)
+        apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
     }
 
     let mut s = world();
@@ -106,4 +106,92 @@ fn retry_puts_a_parked_lane_back_in_the_queue() {
     // A lane that does not exist, and a seat that is not a lane, are refused.
     assert_eq!(run_at(&mut s, "- retry nobody\n", "retry-5").unwrap_err().code, ErrorCode::BadFormat);
     assert_eq!(run_at(&mut s, "- retry captain\n", "retry-6").unwrap_err().code, ErrorCode::BadFormat);
+}
+
+/// T-133: a held lane comes back from the plan — `Active` while its agent is
+/// still there, `Queued` (the engine onboards it again) once it is gone — and a
+/// lane that is not held is refused with the reason.
+///
+/// Review F1: the store keeps an exited agent's binding Active, so the session's
+/// agents decide; without them the release is refused, never guessed.
+#[test]
+fn release_brings_a_held_lane_back() {
+    use gear_herdr::fake::FakeHerdr;
+    use gear_herdr::{AgentStatus, HerdrRead as _};
+
+    // `run_at` applies against the plan version the store holds, with the
+    // session's agents as the caller read them.
+    fn run_at(
+        s: &mut Store,
+        herdr: &mut FakeHerdr,
+        staff: &str,
+        rid: &str,
+    ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+        let agents = herdr.agents().unwrap();
+        run_with(s, Some(&agents), staff, rid)
+    }
+
+    fn run_with(
+        s: &mut Store,
+        agents: Option<&[gear_herdr::AgentInfo]>,
+        staff: &str,
+        rid: &str,
+    ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+        let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
+        let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
+        apply(s, &env, Some(&fp), agents, &parse(&text).unwrap(), &text, rid, T0 + 10)
+    }
+
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle); // heat
+    herdr.add_agent("w1:p3", "opencode", AgentStatus::Idle); // wire
+
+    // The captain holds a lane whose agent keeps running.
+    run_at(&mut s, &mut herdr, "- hold heat reason=waiting for the user\n", "hold-1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Held);
+
+    // Release it: an agent of its binding's kind is in the binding's pane, so
+    // the engine continues with it.
+    let r = run_at(&mut s, &mut herdr, "- release heat\n", "release-1").unwrap();
+    assert_eq!(r.staffed, vec!["release heat".to_string()]);
+    assert_eq!(
+        seat(&mut s, "heat"),
+        (SeatState::Active, Some("released by the captain: its agent continues".into())),
+        "the agent continues"
+    );
+
+    // Review F1: the agent exits and its binding stays Active. The lane is
+    // released to the queue, so the engine onboards it again.
+    run_at(&mut s, &mut herdr, "- hold wire reason=the machine is recovering\n", "hold-2").unwrap();
+    herdr.exit_agent("w1:p3");
+    let binding = s.read(|tx| tx.get_binding("p:wire", 1)).unwrap().unwrap();
+    assert_eq!(binding.status, gear_store::BindingStatus::Active, "the exited agent keeps its binding");
+    run_at(&mut s, &mut herdr, "- release wire\n", "release-2").unwrap();
+    assert_eq!(
+        seat(&mut s, "wire"),
+        (SeatState::Queued, Some("released by the captain: its agent is gone".into())),
+        "the engine onboards it again"
+    );
+
+    // An unread session is not "gone": the release is refused and the lane stays
+    // held (prompts has no agent in its pane either).
+    run_at(&mut s, &mut herdr, "- hold prompts reason=the machine is recovering\n", "hold-3").unwrap();
+    let error = run_with(&mut s, None, "- release prompts\n", "release-3").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("the session's agents were not read"), "{}", error.detail);
+    assert_eq!(seat(&mut s, "prompts").0, SeatState::Held, "nothing written, still held");
+
+    // Only a held lane is released: a running one is refused with the reason.
+    let error = run_at(&mut s, &mut herdr, "- release heat\n", "release-4").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(error.detail.contains("p:heat"), "{}", error.detail);
+    assert!(error.detail.contains("only a lane in Held is released"), "{}", error.detail);
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active, "nothing written");
+
+    // A lane that does not exist, and a seat that is not a lane, are refused.
+    assert_eq!(run_at(&mut s, &mut herdr, "- release nobody\n", "release-5").unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(run_at(&mut s, &mut herdr, "- release captain\n", "release-6").unwrap_err().code, ErrorCode::BadFormat);
 }

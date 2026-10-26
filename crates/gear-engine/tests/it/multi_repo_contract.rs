@@ -189,6 +189,8 @@ fn cfg() -> EngineCfg {
         // T-107: the merge's remote runner moves refs from origin's side; no
         // engine test runs `git push`.
         remote: std::sync::Arc::new(gear_engine::merge::FetchRemote),
+        // A merge that retries does not wait on the clock in a test (T-127).
+        merge_retry_wait: gear_engine::merge::RetryWait::immediate(),
         ..Default::default()
     };
     for kind in ["opencode", "claude"] {
@@ -239,9 +241,13 @@ fn checkout_token(herdr: &FakeHerdr) -> String {
 }
 
 /// Wait for the merge to finish; it must be confirmed.
+///
+/// The wait is on the merge worker's own report — a condition, never the clock
+/// (T-127); only a worker that hung fails the test.
 fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
     loop {
+        let seen = cfg.merges.progress();
         merge_passed(store, herdr, cfg, "p", T0 + 40).unwrap();
         let op = store
             .read(|tx| {
@@ -263,11 +269,17 @@ fn wait_merge(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg) {
             })
             .unwrap();
         assert!(states.is_none(), "the merge failed: {states:?}");
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the merge did not finish"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        if cfg.merges.running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report within {WAIT:?}"
+            );
+        } else {
+            assert!(
+                cfg.merges.progress() != seen,
+                "the merge step had nothing to run"
+            );
+        }
     }
 }
 

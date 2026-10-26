@@ -26,6 +26,7 @@ pub mod feed;
 pub mod guardrails;
 pub mod merge;
 pub mod model;
+pub mod names;
 pub mod observe;
 pub mod onboard;
 mod opencode;
@@ -81,11 +82,15 @@ pub struct EngineCfg {
     /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
     /// moves the refs from the remote's own side, so no test runs `git push`.
     pub remote: std::sync::Arc<dyn merge::Remote>,
+    /// The wait between two attempts of a merge that failed for a reason that
+    /// can clear: the engine sleeps, doubling from 2 s up to 30 s (T-61). A
+    /// field so a test injects a hook that never touches the clock (T-127).
+    pub merge_retry_wait: merge::RetryWait,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote) }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
     }
 }
 
@@ -134,6 +139,13 @@ pub struct TickReport {
     pub blocked: Vec<String>,
     /// Seats whose own guardrails refused one of their actions (T-113).
     pub guardrails: Vec<String>,
+    /// Seats whose agent was renamed back to its seat name this tick (T-134).
+    pub renamed: Vec<String>,
+    /// Seats whose name another pane holds (reported, never stolen; T-134).
+    pub name_taken: Vec<String>,
+    /// `seat: reason` of a name the engine could neither read nor give back
+    /// (T-134).
+    pub name_failed: Vec<String>,
     /// Seats that wait for their provider (T-75): a provider back-off is not
     /// a stall, and the home page shows it.
     pub backoff: Vec<String>,
@@ -191,7 +203,30 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         return Ok(report);
     };
 
+    // 0c. names (T-134): Herdr clears an agent's name when it re-detects the
+    //     occupant, and a prompt to an unnamed agent is refused. Read every
+    //     agent's name once, then give each seat its name back before anything
+    //     is delivered this tick. A failed read is not an observation failure:
+    //     the deliveries below still make sure of the name they prompt.
+    let names = match names::read(herdr) {
+        Ok(names) => names,
+        Err(error) => {
+            report.name_failed.push(format!("agent.list: {}", error.0));
+            std::collections::BTreeMap::new()
+        }
+    };
+
     for project in projects {
+        // 0d. every seat with an active binding carries its name (`<project>-
+        //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
+        //     captain once, never stolen.
+        if !names.is_empty() {
+            let restored = names::restore(store, herdr, &project, &names, now)?;
+            report.renamed.extend(restored.renamed);
+            report.name_taken.extend(restored.taken);
+            report.name_failed.extend(restored.failed);
+        }
+
         // Seat observations (reads screen tails; no write transaction is held).
         // The profile table of this project: the built-ins with the project's
         // own `[profiles.<name>]` on top (T-31). A config that does not parse
@@ -397,6 +432,9 @@ fn doorbell_inputs(
     use gear_store::BindingStatus;
     use std::collections::BTreeSet;
 
+    // The sender whose instruction reaches a lane that queues input while it
+    // works (T-130).
+    let captain = tx.captain_of(project)?.map(|seat| seat.id);
     let mut inputs = Vec::new();
     for seat_obs in observed {
         let seat = &seat_obs.seat;
@@ -409,6 +447,22 @@ fn doorbell_inputs(
             .filter(|b| b.status == BindingStatus::Active)
         else {
             continue;
+        };
+
+        // One doorbell per message, never repeated (T-130): an id an earlier
+        // doorbell of this seat named is not named again — not after the
+        // cooldown, and not when that doorbell was never confirmed. A doorbell
+        // that never reached the pane covers nothing: a voided one, and a
+        // definitely failed one (Herdr refused it, review F2), so a refused
+        // message is rung again on a later tick.
+        //
+        // The captain is the exception: its unanswered items are reminded on
+        // purpose, once per configured period (T-40), and that reminder is the
+        // one thing that brings an ignored item back.
+        let doorbelled: BTreeSet<String> = if seat.role == gear_model::SeatRole::Captain {
+            BTreeSet::new()
+        } else {
+            crate::ops::covered_messages(tx, &seat.id)?
         };
 
         // What this generation has already been shown: an open item it has
@@ -426,7 +480,21 @@ fn doorbell_inputs(
         // about the task it reviews now (F1 of the T-71 review).
         let since = gear_app::seats::generation_since(tx, &seat.id, seat.generation)?;
         let period = attention::period(tx, project)?;
-        let mut actionable = Vec::new();
+        // A captain instruction reaches a lane that queues input even while
+        // it works; everything else waits for idle unless it is urgent
+        // (T-130). `binding.kind` is the CLI that runs in the seat's pane; a
+        // reviewer (Temp) is not a lane and is not interrupted mid-review.
+        let item = |message: &gear_store::MessageRow| doorbell::DoorbellItem {
+            id: message.id.clone(),
+            urgent: message.urgent,
+            at_once: doorbell::reaches_while_working(
+                message,
+                seat,
+                &binding.kind,
+                captain.as_deref(),
+            ),
+        };
+        let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -437,18 +505,22 @@ fn doorbell_inputs(
                 gear_app::seats::message_belongs(seat, &message, since)
                     && !shown.contains(&message.id)
             };
-            if include { actionable.push(message); }
+            if include && !doorbelled.contains(&message.id) {
+                waiting.push(item(&message));
+            }
         }
-        let urgent = actionable.iter().filter(|m| m.urgent).count();
-        let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
 
         // Reply/Instruction messages this generation has not shown yet.
-        let unshown: Vec<String> = tx
-            .messages_to_since(project, &seat.id, since)?
-            .into_iter()
-            .filter(|m| !shown.contains(&m.id) && gear_app::seats::message_belongs(seat, m, since))
-            .map(|m| m.id)
-            .collect();
+        for message in tx.messages_to_since(project, &seat.id, since)? {
+            if shown.contains(&message.id)
+                || doorbelled.contains(&message.id)
+                || !gear_app::seats::message_belongs(seat, &message, since)
+                || waiting.iter().any(|item| item.id == message.id)
+            {
+                continue;
+            }
+            waiting.push(item(&message));
+        }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
@@ -468,9 +540,7 @@ fn doorbell_inputs(
             idle: seat_obs.idle && observe::reachable(seat.state),
             slot_busy,
             last_settled_at,
-            actionable: actionable_ids,
-            unshown,
-            urgent,
+            waiting,
         });
     }
     Ok(inputs)

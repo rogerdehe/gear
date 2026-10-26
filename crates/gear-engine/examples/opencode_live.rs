@@ -218,6 +218,11 @@ impl HerdrRead for NoKeys {
     fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
         self.0.panes()
     }
+    fn agent_names(
+        &mut self,
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>, ObserveError> {
+        self.0.agent_names()
+    }
 }
 impl HerdrAct for NoKeys {
     fn opencode_api(&mut self, args: &[String]) -> Result<serde_json::Value, String> {
@@ -231,9 +236,14 @@ impl HerdrAct for NoKeys {
     fn prompt(&mut self, _: &str, _: &str) -> Outcome<()> {
         panic!("unexpected prompt")
     }
+    fn agent_rename(&mut self, pane: &str, name: &str) -> Outcome<()> {
+        self.0.agent_rename(pane, name)
+    }
     fn pane_type(&mut self, _: &str, _: &str) -> Outcome<()> {
         panic!("unexpected typed keys")
     }
+    /// This driver refuses typed keys, so it never settles after them.
+    fn type_settle(&mut self) {}
     fn send_keys(&mut self, _: &str, _: &[String]) -> Outcome<()> {
         panic!("unexpected keys")
     }

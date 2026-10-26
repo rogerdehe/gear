@@ -832,6 +832,7 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
                 "to": result.to,
                 "generation": result.generation,
                 "kind": result.kind,
+                "named": named_line(&result.named),
             })
         );
         return Ok(());
@@ -844,8 +845,22 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
         result.kind,
         result.from.as_deref().unwrap_or("no pane recorded")
     );
+    println!("agent name: {}", named_line(&result.named));
     println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
+}
+
+/// What naming the new captain's agent did, in one line (T-134).
+fn named_line(named: &gear_herdr::Ensured) -> &'static str {
+    match named {
+        gear_herdr::Ensured::Named => "already the captain's name",
+        gear_herdr::Ensured::Renamed => "given to the agent now",
+        gear_herdr::Ensured::NoAgent => "the pane hosts no agent yet",
+        gear_herdr::Ensured::Taken { .. } => {
+            "held by another pane: GEAR reports it and never steals it"
+        }
+        gear_herdr::Ensured::Failed(_) => "could not be given: the engine tries again next tick",
+    }
 }
 
 fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
@@ -1068,7 +1083,37 @@ fn run_plan(
     })?;
     let draft = gear_app::draft::parse(&text)?;
     let fp = observe_identity(store, env, herdr)?;
-    let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
+    // T-133 (review F1): a `- release` line must know whether the lane's agent
+    // is really in its pane, and only the session can say so. The agents are
+    // read here, before the write transaction (Herdr is never touched inside
+    // one); a read that fails refuses the apply rather than guessing.
+    let releasing = draft
+        .staff
+        .iter()
+        .any(|item| matches!(item, gear_app::draft::StaffItem::Release { .. }));
+    let agents = if releasing {
+        Some(herdr.agents().map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
+                    e.0
+                ),
+            )
+        })?)
+    } else {
+        None
+    };
+    let result = gear_app::plan::apply(
+        store,
+        env,
+        fp.as_ref(),
+        agents.as_deref(),
+        &draft,
+        &text,
+        request_id,
+        now,
+    )?;
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
     // (T-34): base= the applied version, each NEW block gets its id, the
@@ -1153,7 +1198,7 @@ fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
 fn run_send(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
-    herdr: &mut dyn gear_herdr::HerdrRead,
+    herdr: &mut dyn gear_herdr::HerdrAct,
     c: &SendCmd,
     body: String,
     base: Option<gear_app::base::BaseGate>,
@@ -1192,6 +1237,14 @@ fn run_send(
     };
     let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
+    // T-130: an urgent message, and every captain instruction to a lane whose
+    // agent queues input (pi, claude), is typed into the pane before this call
+    // returns. A replay already typed it once.
+    let typed = if result.replayed {
+        None
+    } else {
+        ring_recipient_now(store, herdr, &result, now)?
+    };
     if json {
         return serde_json::to_string(&result).map_err(json_error);
     }
@@ -1200,11 +1253,53 @@ fn run_send(
             "Delivered to {} inbox {} (thread {})",
             result.recipient, result.msg_id, result.thread
         );
+        if let Some(pane) = typed {
+            line.push_str(&format!("; doorbell typed into {pane}"));
+        }
         if result.replayed {
             line.push_str(" [replayed]");
         }
         Ok(line)
     }
+}
+
+/// Type the doorbell of a message that must reach the recipient while it works
+/// (T-130): an `--urgent` message, and every captain instruction to a lane
+/// whose agent queues input (pi, claude).
+///
+/// The engine would ring the same seat on its next tick; doing it here puts the
+/// text in the pane before `gear send` returns. The doorbell is recorded only
+/// when Herdr took it, so a Herdr failure leaves the message stored and the
+/// engine rings it on the next tick. Returns the pane the text went to.
+fn ring_recipient_now(
+    store: &mut gear_store::Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    result: &gear_app::mail::SendResult,
+    now: i64,
+) -> GearResult<Option<String>> {
+    let target = store.read(|tx| {
+        let Some(message) = tx.get_message(&result.project, &result.msg_id)? else {
+            return Ok(None);
+        };
+        let Some(seat) = tx.get_seat(&message.recipient)? else { return Ok(None) };
+        let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { return Ok(None) };
+        let captain = tx.captain_of(&result.project)?.map(|row| row.id);
+        if !gear_engine::doorbell::reaches_while_working(&message, &seat, &binding.kind, captain.as_deref()) {
+            return Ok(None);
+        }
+        Ok(Some((seat.id, seat.generation, message.id, message.urgent)))
+    })?;
+    let Some((seat, generation, id, urgent)) = target else { return Ok(None) };
+    gear_engine::ops::deliver_doorbell_now(
+        store,
+        herdr,
+        &result.project,
+        &seat,
+        generation,
+        &id,
+        urgent,
+        now,
+    )
 }
 
 /// `gear reply` body, over injected state.
@@ -2518,6 +2613,156 @@ mod tests {
         assert!(!parsed.replayed);
     }
 
+    // ------------------------------------------------------------ T-130
+
+    /// A project whose lane `heat` runs pi and works, and whose lane `wire`
+    /// runs codex: the two agent kinds the doorbell treats differently.
+    fn working_world(lane_kind: &str, status: AgentStatus) -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, lane_kind, T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, lane_kind, status);
+        (store, herdr)
+    }
+
+    fn captain_instruction(to: &str, urgent: bool) -> SendCmd {
+        SendCmd {
+            to: Some(to.into()),
+            urgent,
+            ..send_cmd("instruction")
+        }
+    }
+
+    fn tick_cfg() -> gear_engine::EngineCfg {
+        gear_engine::EngineCfg {
+            tick_s: 4,
+            cooldown_s: 30,
+            doorbell_check_budget: 3,
+            profiles: gear_herdr::builtins(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_urgent_send_types_the_doorbell_before_it_returns_and_the_engine_does_not_ring_again() {
+        let (mut store, mut herdr) = working_world("codex", AgentStatus::Working);
+        let out = run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &captain_instruction("heat", true),
+            "stop and read this".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let said = herdr.prompts_to(LANE_PANE);
+        assert_eq!(said.len(), 1, "typed inside gear send: {said:?}");
+        assert!(said[0].contains("M-1"), "the doorbell names the message: {said:?}");
+        assert!(said[0].contains("Run `gear` now."), "{said:?}");
+        assert!(out.contains("doorbell typed into"), "{out}");
+
+        // The next tick sees the message covered: no second doorbell.
+        gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
+        assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1, "one doorbell per message");
+    }
+
+    #[test]
+    fn a_captain_instruction_to_a_working_pi_lane_is_typed_by_the_send() {
+        let (mut store, mut herdr) = working_world("pi", AgentStatus::Working);
+        run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &captain_instruction("heat", false),
+            "use v2".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let said = herdr.prompts_to(LANE_PANE);
+        assert_eq!(said.len(), 1, "pi queues input while it works: {said:?}");
+        assert!(said[0].contains("M-1"), "{said:?}");
+    }
+
+    #[test]
+    fn a_normal_instruction_to_a_working_codex_lane_waits_for_the_engine_and_idle() {
+        let (mut store, mut herdr) = working_world("codex", AgentStatus::Working);
+        run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &captain_instruction("heat", false),
+            "use v2".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "codex does not queue input");
+
+        // Still working: the engine keeps it for idle.
+        gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "waits for idle");
+
+        // Idle: the engine rings it once.
+        herdr.set_status(LANE_PANE, AgentStatus::Idle);
+        gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 80).unwrap();
+        let said = herdr.prompts_to(LANE_PANE);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].contains("M-1"), "{said:?}");
+    }
+
+    #[test]
+    fn a_failed_herdr_leaves_the_message_stored_and_the_engine_rings_it() {
+        let (mut store, mut herdr) = working_world("codex", AgentStatus::Working);
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "agent_blocked".into() });
+        run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &captain_instruction("heat", true),
+            "stop and read this".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            herdr.prompts_to(LANE_PANE).len(),
+            1,
+            "the send tried and Herdr refused: {:?}",
+            herdr.prompts_to(LANE_PANE)
+        );
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(stored.body, "stop and read this", "the message is stored all the same");
+        // The claim is recorded, and recorded as failed: a definitely refused
+        // doorbell covers nothing, so the engine rings the message (T-130 F2).
+        let ops = store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
+            .unwrap();
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
+
+        gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
+        let said = herdr.prompts_to(LANE_PANE);
+        assert_eq!(said.len(), 2, "the engine rings it on its next tick: {said:?}");
+        assert!(said[1].contains("M-1"), "{said:?}");
+    }
+
     #[test]
     fn reply_resolves_by_default() {
         let (mut store, mut herdr) = world();
@@ -3021,6 +3266,76 @@ mod tests {
         assert_ne!(a, b, "{a} / {b}");
         assert!(a.starts_with("r-"), "{a}");
         assert!(b.starts_with("r-"), "{b}");
+    }
+
+    /// T-133 (review F1): a release line asks the session which agents are
+    /// really running — the store keeps an exited agent's binding `Active` — and
+    /// a session that cannot be read refuses the apply instead of guessing.
+    #[test]
+    fn a_release_asks_the_session_and_refuses_an_unreadable_one() {
+        fn lane_state(store: &mut Store) -> gear_model::SeatState {
+            store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().state
+        }
+
+        let (mut store, mut herdr) = world();
+        let path = write_draft(
+            "<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=the machine is recovering\n",
+        );
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "hold-1",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Held);
+
+        // The agent exits; its binding stays Active. The session cannot be read.
+        herdr.exit_agent(LANE_PANE);
+        std::fs::write(
+            &path,
+            "<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n",
+        )
+        .unwrap();
+        herdr.agents_fail = true;
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "release-1",
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("cannot read the session's agents"), "{}", err.detail);
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Held, "nothing applied, still held");
+
+        // Read again: no agent in the binding's pane, so the lane goes back to
+        // the queue and the engine onboards it again.
+        herdr.agents_fail = false;
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "release-2",
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Queued);
+        std::fs::remove_file(&path).ok();
     }
 
 }

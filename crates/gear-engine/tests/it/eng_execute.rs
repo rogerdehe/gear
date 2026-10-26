@@ -1,6 +1,6 @@
 //! Tests for `gear_engine::ops::execute_intended` (T-19).
 
-use gear_engine::ops::execute_intended;
+use gear_engine::ops::{deliver_doorbell_now, execute_intended, intend_doorbells};
 use gear_herdr::fake::{FakeHerdr, Inject};
 use gear_herdr::AgentStatus;
 use gear_model::{AttemptState, OpKind, OpState, SeatRole, SeatState, TaskState};
@@ -47,7 +47,14 @@ fn insert_doorbell(tx: &Tx<'_>, project: &str, seat: &str, generation: i64, now:
 
 fn herdr_with_agent(pane: &str) -> FakeHerdr {
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(pane, "codex", AgentStatus::Idle);
+    // A real agent carries its seat name (T-134): an unnamed one refuses a
+    // prompt, and the engine would name it before prompting.
+    let name = match pane {
+        CAP_PANE => "p-captain",
+        "w1:p2" => "p-heat",
+        other => other,
+    };
+    herdr.add_agent_named(pane, "codex", AgentStatus::Idle, name);
     herdr
 }
 
@@ -125,6 +132,68 @@ fn insert_delivery(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64, now: i64) 
     })
     .unwrap()
     .id
+}
+
+/// T-130 review F1: the engine has already intended its doorbell for M-1, so
+/// the sender's own doorbell must skip — one prompt, one op, whoever gets there
+/// first.
+#[test]
+fn a_sender_does_not_type_a_message_the_engine_already_intends() {
+    let mut store = store_with_projects();
+    let action = gear_engine::doorbell::DoorbellAction {
+        project: "p".into(),
+        seat: "p:captain".into(),
+        generation: 1,
+        pane_id: CAP_PANE.into(),
+        text: "GEAR: 1 item(s) waiting for you (1 urgent): M-1. Run `gear` now.".into(),
+        covers: vec!["M-1".into()],
+    };
+    let intended: Vec<gear_store::OpRow> = store
+        .write(|tx| intend_doorbells(tx, &[action], T0 + 1))
+        .unwrap();
+    let mut herdr = herdr_with_agent(CAP_PANE);
+
+    // The sender's path finds the engine's Intended doorbell covering M-1.
+    let typed = deliver_doorbell_now(
+        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 2,
+    )
+    .unwrap();
+    assert!(typed.is_none(), "the sender skipped");
+    assert!(herdr.prompts_to(CAP_PANE).is_empty(), "nothing typed yet");
+
+    // The engine's own execute types it: exactly one prompt.
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 3).unwrap();
+    assert_eq!(done, vec![(intended[0].id.clone(), "submitted".to_string())]);
+    assert_eq!(herdr.prompts_to(CAP_PANE).len(), 1, "{:?}", herdr.calls);
+    let ops = store
+        .read(|tx| tx.ops_of_seat_kind("p:captain", OpKind::Doorbell))
+        .unwrap();
+    assert_eq!(ops.len(), 1, "no second doorbell op: {ops:?}");
+}
+
+/// T-130 review F1, the other order: the sender claims first (its op covers the
+/// message and holds the slot), so the engine's execute and next tick leave it
+/// alone.
+#[test]
+fn a_sender_claim_keeps_the_engine_from_ringing_the_same_message() {
+    let mut store = store_with_projects();
+    let mut herdr = herdr_with_agent(CAP_PANE);
+
+    let typed = deliver_doorbell_now(
+        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 1,
+    )
+    .unwrap();
+    assert_eq!(typed.as_deref(), Some(CAP_PANE));
+    assert_eq!(herdr.prompts_to(CAP_PANE).len(), 1);
+
+    // A second send for the same message skips: the claim covers it.
+    let again = deliver_doorbell_now(
+        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 2,
+    )
+    .unwrap();
+    assert!(again.is_none(), "the same message is never typed twice");
+    execute_intended(&mut store, &mut herdr, "p", T0 + 3).unwrap();
+    assert_eq!(herdr.prompts_to(CAP_PANE).len(), 1, "{:?}", herdr.calls);
 }
 
 #[test]

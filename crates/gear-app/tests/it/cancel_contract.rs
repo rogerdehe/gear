@@ -40,7 +40,7 @@ fn world() -> Store {
 fn run(s: &mut Store, queue: &str, base: i64, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, T0 + 10)
+    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
 }
 
 fn attempt(s: &mut Store, task: &str, n: i64) -> AttemptState {
@@ -157,7 +157,7 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     let mut s = world();
     let text = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\nstate: cancelled\n";
     let (env, fp) = cap();
-    apply(&mut s, &env, Some(&fp), &parse(text).unwrap(), text, "v2", T0 + 10).unwrap();
+    apply(&mut s, &env, Some(&fp), None, &parse(text).unwrap(), text, "v2", T0 + 10).unwrap();
     assert_eq!(state(&mut s, "T-2"), TaskState::Cancelled);
     assert!(lane_messages(&mut s, "T-2").is_empty(), "nothing was running");
 
@@ -169,7 +169,7 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     })
     .unwrap();
     let bad = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
-    let error = apply(&mut s, &env, Some(&fp), &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
+    let error = apply(&mut s, &env, Some(&fp), None, &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
 }
@@ -202,32 +202,59 @@ fn sh_out(dir: &Path, command: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// The fixture of this file, built **once**: the repository before the merge
+/// or after it. A test copies it (T-128) — twenty git processes per test cost
+/// more than the cancel under test, and a copy of the tree costs none.
+struct Fixture {
+    origin: PathBuf,
+    work: PathBuf,
+    candidate: String,
+    /// The trees above live here, for as long as the process does.
+    _root: tempfile::TempDir,
+}
+
+fn template(merged: bool) -> &'static Fixture {
+    static UNMERGED: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    static MERGED: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    let cell = if merged { &MERGED } else { &UNMERGED };
+    cell.get_or_init(|| {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        std::fs::write(work.join("README.md"), "dev\n").unwrap();
+        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        publish(&origin, &work, "dev");
+        sh(
+            &work,
+            "git switch -qc heat/t1 && echo work >> README.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm work",
+        );
+        publish(&origin, &work, "heat/t1");
+        let candidate = sh_out(&work, "git rev-parse HEAD");
+        if merged {
+            sh(
+                &work,
+                "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 -m merge",
+            );
+            publish(&origin, &work, "dev");
+        }
+        Fixture { origin, work, candidate, _root: root }
+    })
+}
+
 /// A repo whose `dev` is on a bare origin and whose lane branch carries one
 /// commit — merged into `dev` when `merged`, pushed only on its own otherwise.
 fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
+    let fixture = template(merged);
     let origin = scratch.join("origin.git");
+    crate::copy_tree(&fixture.origin, &origin);
     let work = scratch.join("work");
-    sh(scratch, &format!("git init -q --bare {}", origin.display()));
-    sh(scratch, &format!("git init -q -b dev {}", work.display()));
-    std::fs::write(work.join("README.md"), "dev\n").unwrap();
-    sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-    sh(&work, &format!("git remote add origin {}", origin.display()));
-    publish(&origin, &work, "dev");
-    sh(
-        &work,
-        "git switch -qc heat/t1 && echo work >> README.md && git add -A \
-         && git -c user.email=a@b -c user.name=a commit -qm work",
-    );
-    publish(&origin, &work, "heat/t1");
-    let candidate = sh_out(&work, "git rev-parse HEAD");
-    if merged {
-        sh(
-            &work,
-            "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 -m merge",
-        );
-        publish(&origin, &work, "dev");
-    }
-    (work, candidate)
+    crate::copy_tree(&fixture.work, &work);
+    crate::point_at(&work, &origin);
+    (work, fixture.candidate.clone())
 }
 
 /// Publish `branch` of `source` in the bare origin's refs: the origin fetches

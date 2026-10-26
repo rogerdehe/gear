@@ -37,7 +37,7 @@ fn draft(base: i64, queue: &str) -> (Draft, String) {
 
 fn run(s: &mut Store, d: &(Draft, String), rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &d.0, &d.1, rid, NOW)
+    apply(s, &env, Some(&fp), None, &d.0, &d.1, rid, NOW)
 }
 
 const TWO_NEW: &str = "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n";
@@ -94,7 +94,7 @@ fn invalid_drafts_write_nothing() {
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
     let staff = "<!-- gear-plan project=p base=1 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n"; // temp workers are not in slice 2 (T-55)
     let (env, fp) = cap();
-    assert_eq!(apply(&mut s, &env, Some(&fp), &parse(staff).unwrap(), staff, "f", NOW).unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(apply(&mut s, &env, Some(&fp), None, &parse(staff).unwrap(), staff, "f", NOW).unwrap_err().code, ErrorCode::BadFormat);
 }
 
 #[test]
@@ -106,7 +106,7 @@ fn cancel_and_lane_cannot_apply() {
     let lane = Env { ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }), pane_id: Some("w1:p2".into()), admin: false };
     let lfp = Fingerprint { pane_id: "w1:p2".into(), kind: Some("opencode".into()), session_ref: None };
     let d = draft(2, "");
-    assert_eq!(apply(&mut s, &lane, Some(&lfp), &d.0, &d.1, "r3", NOW).unwrap_err().code, ErrorCode::Forbidden);
+    assert_eq!(apply(&mut s, &lane, Some(&lfp), None, &d.0, &d.1, "r3", NOW).unwrap_err().code, ErrorCode::Forbidden);
 }
 
 // ---- the lanes that are about to stand idle (T-58, ops/lessons.md 7a)

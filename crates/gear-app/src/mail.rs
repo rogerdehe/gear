@@ -42,6 +42,9 @@ pub struct SendArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SendResult {
+    /// The message's project (T-130: the caller types the doorbell itself).
+    #[serde(default)]
+    pub project: String,
     pub msg_id: String,
     pub thread: String,
     /// Seat id, e.g. `p:captain`.
@@ -330,6 +333,7 @@ pub fn send(
             };
             let stored = tx.insert_message(&message)?;
             Ok(serde_json::json!({
+                "project": stored.project,
                 "msg_id": stored.id,
                 "thread": stored.thread,
                 "recipient": stored.recipient,
@@ -340,10 +344,11 @@ pub fn send(
             RequestOutcome::Executed(value) => (value, false),
             RequestOutcome::Replayed(value) => (value, true),
         };
+        let project = value["project"].as_str().unwrap_or_default().to_string();
         let msg_id = value["msg_id"].as_str().unwrap_or_default().to_string();
         let thread = value["thread"].as_str().unwrap_or_default().to_string();
         let recipient = value["recipient"].as_str().unwrap_or_default().to_string();
-        Ok(SendResult { msg_id, thread, recipient, replayed })
+        Ok(SendResult { project, msg_id, thread, recipient, replayed })
     })
 }
 
@@ -384,6 +389,7 @@ fn stored_receipt(
             )
         })?;
         Ok(Some(SendResult {
+            project: env.ctx.as_ref().map(|ctx| ctx.project.clone()).unwrap_or_default(),
             msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
             thread: value["thread"].as_str().unwrap_or_default().to_string(),
             recipient: value["recipient"].as_str().unwrap_or_default().to_string(),

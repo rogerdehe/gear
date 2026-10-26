@@ -8,6 +8,157 @@ use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 /// Reason stored with an op that the engine found Executing after a restart.
 const RECOVERED_REASON: &str = "engine restarted before the call finished";
 
+/// Result stored on a doorbell typed by the sender itself (T-130).
+const SENT_BY_SENDER: &str = "typed by the sender";
+
+/// Whether a doorbell op still covers the messages it named (T-130 review F2).
+///
+/// `Void` never reached the pane, and a definitely `Failed` one was refused by
+/// Herdr before it typed anything — so both leave their messages free to be
+/// rung again. Everything else (on its way, typed, or possibly typed) covers
+/// them: a message is never rung twice, and an uncertain doorbell is never
+/// resent.
+pub fn doorbell_covers(op: &OpRow) -> bool {
+    !matches!(op.state, OpState::Void | OpState::Failed)
+}
+
+/// The message ids a seat's doorbell ops still cover, one doorbell per message.
+pub(crate) fn covered_messages(
+    tx: &Tx<'_>,
+    seat: &str,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    let mut ids = std::collections::BTreeSet::new();
+    for op in tx.ops_of_seat_kind(seat, OpKind::Doorbell)? {
+        if !doorbell_covers(&op) {
+            continue;
+        }
+        for id in op
+            .payload
+            .get("covers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            ids.insert(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+/// Type one doorbell into its pane now, from a caller outside the tick
+/// (`gear send`, T-130), and record it so the engine never rings the message
+/// again.
+///
+/// The seat and its active binding are re-read here, as the tick does: a stale
+/// generation, an unreachable seat or a closed pane is never typed into.
+///
+/// **The message is claimed before Herdr is called** (T-130 review F1): the
+/// doorbell op is written — covering the message, holding the seat's slot — in
+/// one write transaction that first checks whether any doorbell of this seat
+/// that still covers its message (`covered_messages`) already names it. An
+/// engine tick that has already intended its doorbell for the message wins:
+/// the sender skips, and the engine types it. When the sender claims first, the
+/// tick's own coverage read (and the slot this claim holds) keeps it from ringing
+/// the same message again. Only a tick that read its coverage before this claim
+/// was written and writes its intent after it can still double-ring, a window of
+/// pure computation inside one tick — closing that is the claim protocol the
+/// review deferred, and the report names it.
+///
+/// A prompt Herdr refuses records the op as **Failed**, which covers nothing
+/// (F2), so the engine rings the message on its next tick; an uncertain prompt
+/// records it as Unknown and is never resent (design/07). Returns the pane the
+/// text went to; `None` = skipped (another doorbell covers the message, or the
+/// seat cannot be reached) or refused.
+pub fn deliver_doorbell_now(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &str,
+    generation: i64,
+    message: &str,
+    urgent: bool,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let items = [crate::doorbell::DoorbellItem {
+        id: message.to_string(),
+        urgent,
+        at_once: true,
+    }];
+    let text = crate::doorbell::text(&items);
+    // One write transaction: check the seat, the binding and the coverage, and
+    // claim the message with this path's own doorbell op before Herdr runs.
+    let claimed = store.write(|tx| {
+        let Some(row) = tx.get_seat(seat)? else { return Ok(None) };
+        if row.generation != generation || !crate::observe::reachable(row.state) {
+            return Ok(None);
+        }
+        let Some(binding) = tx.get_binding(seat, generation)? else { return Ok(None) };
+        if binding.status != BindingStatus::Active {
+            return Ok(None);
+        }
+        // F1: another path (the engine's tick, or an earlier send) already
+        // covers this message — it types it, this call does not.
+        if covered_messages(tx, seat)?.contains(message) {
+            return Ok(None);
+        }
+        // T-134: the name this seat's agent must carry before the prompt —
+        // a reviewer keeps the task-based name its review started with.
+        let agent_name = crate::names::desired(&row);
+        let op = tx.insert_op(&NewOp {
+            project: project.to_string(),
+            seat: seat.to_string(),
+            generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": text, "covers": [message] }),
+            created: now,
+        })?;
+        // Executing is the claim: the tick's `execute_intended` only drains
+        // Intended ops, so nobody else types this one, and the seat's slot is
+        // held from here on.
+        tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
+        Ok(Some((op.id, binding.pane_id, agent_name)))
+    })?;
+    let Some((op_id, pane_id, agent_name)) = claimed else { return Ok(None) };
+    // Outside any transaction: call Herdr. T-134: Herdr refuses a prompt to an
+    // agent whose name it cleared, so make sure of the name first.
+    crate::names::ensure(herdr, &pane_id, &agent_name);
+    let outcome = herdr.prompt(&pane_id, &text);
+    let state = match &outcome {
+        Outcome::Ok(()) => OpState::Submitted,
+        // A refusal proves nothing was typed: the engine rings it again (F2).
+        Outcome::Refused { .. } => OpState::Failed,
+        // The text may be in the pane: never resent (design/07).
+        Outcome::Uncertain { .. } => OpState::Unknown,
+    };
+    let result = match &outcome {
+        Outcome::Ok(()) => SENT_BY_SENDER.to_string(),
+        Outcome::Refused { code, message } => format!("{code}: {message}"),
+        Outcome::Uncertain { reason } => reason.clone(),
+    };
+    store.write(|tx| {
+        if state == OpState::Submitted {
+            // The doorbell reached the pane: count it for the captain's
+            // reminder clock, exactly as the tick's own path does.
+            let action = crate::doorbell::DoorbellAction {
+                project: project.to_string(),
+                seat: seat.to_string(),
+                generation,
+                pane_id: pane_id.clone(),
+                text: text.clone(),
+                covers: vec![message.to_string()],
+            };
+            crate::attention::record(tx, &action, now)?;
+        }
+        tx.set_op_state(project, &op_id, state, Some(&result), now)
+    })?;
+    Ok((state == OpState::Submitted).then_some(pane_id))
+}
+
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
@@ -146,7 +297,15 @@ pub fn execute_intended(
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, .. } => Some(herdr.prompt(pane_id, text)),
+            Prepared::Run { pane_id, text, agent_name, .. } => {
+                // T-134: Herdr refuses a prompt to an agent whose name it
+                // cleared; name the agent first, then deliver in this same
+                // tick. A rename that fails (the name is held elsewhere) is
+                // reported by the tick's own name step; the prompt is tried
+                // all the same.
+                crate::names::ensure(herdr, pane_id, agent_name);
+                Some(herdr.prompt(pane_id, text))
+            }
             // Waiting ops never reach here (they are not prepared).
             Prepared::Wait { .. } => None,
             Prepared::Void { .. } => None,
@@ -200,8 +359,9 @@ pub fn execute_intended(
 
 /// What to do with one Intended op after the guard checks.
 enum Prepared {
-    /// The op may run: send `text` to `pane_id`.
-    Run { id: String, pane_id: String, text: String },
+    /// The op may run: send `text` to `pane_id`, whose agent must carry
+    /// `agent_name` first (T-134).
+    Run { id: String, pane_id: String, text: String, agent_name: String },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
     Wait { id: String },
@@ -270,6 +430,8 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
         text: text.to_string(),
+        // T-134: the name the agent in that pane must carry before the prompt.
+        agent_name: crate::names::desired(&seat),
     })
 }
 

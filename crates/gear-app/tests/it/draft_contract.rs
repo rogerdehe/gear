@@ -112,3 +112,15 @@ fn staff_lines_are_strict() {
     let unknown_verb = FULL.replace("- retire prompts", "- fire prompts");
     assert!(bad_line(&unknown_verb).starts_with("line 30: "));
 }
+
+/// T-133: `- release <lane>` takes one lane and nothing else.
+#[test]
+fn release_is_a_staff_line() {
+    let d = parse("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n").unwrap();
+    assert!(matches!(&d.staff[0], StaffItem::Release { lane, .. } if lane == "heat"));
+    assert!(bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release\n").contains("`release` needs a lane"));
+    assert!(
+        bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat now\n")
+            .contains("`release` takes only a lane")
+    );
+}

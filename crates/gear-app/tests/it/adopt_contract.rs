@@ -101,7 +101,7 @@ fn bump_at(
     );
     let draft: Draft = parse(&text).unwrap();
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &draft, &text, rid, NOW + 10)
+    apply(s, &env, Some(&fp), None, &draft, &text, rid, NOW + 10)
 }
 
 /// Apply a draft that changes T-1's goal and acceptance (contract v2).

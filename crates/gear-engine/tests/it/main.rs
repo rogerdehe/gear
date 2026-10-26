@@ -15,6 +15,7 @@ mod dispatch_contract;
 mod dispatch_tick_contract;
 mod doorbell_contract;
 mod doorbell_isolation;
+mod doorbell_while_working;
 mod eng_confirm;
 mod eng_execute;
 mod eng_intend_recover;
@@ -41,6 +42,7 @@ mod parallel_contract;
 mod multi_repo_contract;
 mod reviewer_quota_contract;
 mod pi_lane_contract;
+mod agent_names_contract;
 mod all_tail_contract;
 mod dead_temp_slot_contract;
 
