@@ -78,6 +78,7 @@ pub fn apply(
     store: &mut Store,
     env: &Env,
     fp: Option<&Fingerprint>,
+    agents: Option<&[gear_herdr::AgentInfo]>,
     draft: &Draft,
     text: &str,
     request_id: &str,
@@ -125,6 +126,7 @@ pub fn apply(
                 draft,
                 text,
                 &cancellable,
+                agents,
                 now,
             )?;
             // The milestone blocks of the draft become voyages (T-22), after the
@@ -163,6 +165,7 @@ fn apply_queue(
     draft: &Draft,
     text: &str,
     cancellable: &BTreeSet<String>,
+    agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<ApplyResult> {
     // 3. the draft must be based on the current plan version.
@@ -490,7 +493,7 @@ fn apply_queue(
             continue;
         }
         if let StaffItem::Release { lane, .. } = item {
-            release_lane(tx, project, lane, staff_line(item), now)?;
+            release_lane(tx, project, lane, staff_line(item), agents, now)?;
             staffed.push(format!("release {lane}"));
             continue;
         }
@@ -854,19 +857,27 @@ fn retry_lane(
 }
 
 /// `- release <lane>` (T-133): a lane the captain held goes back to the state
-/// the engine continues or onboards from. A held lane whose agent GEAR still
-/// holds (an active binding for the seat's generation) continues where it was —
-/// `Active`; one whose agent is gone goes back to `Queued`, so the engine
-/// onboards it again (`- retry` refuses Held, and editing the store was the
-/// captain's only way out, M3.1 machine recovery).
+/// the engine continues or onboards from. A held lane whose agent is still in
+/// its pane continues where it was — `Active`; one whose agent is gone goes back
+/// to `Queued`, so the engine onboards it again (`- retry` refuses Held, and
+/// editing the store was the captain's only way out, M3.1 machine recovery).
 ///
 /// Only a held lane is released: any other state is a transition this line
 /// cannot mean, and it is refused with the reason.
+///
+/// Whether the agent is still there is the session's fact, not the store's
+/// (review F1): the store keeps the pane GEAR started an agent in, and an agent
+/// that exits leaves that binding Active. So the target is `Active` only when
+/// the caller brought the session's agents in and one of the binding's kind sits
+/// in the binding's pane; a binding with no such agent, and no binding at all,
+/// go back to `Queued`. An unread observation is not "gone": the release is
+/// refused instead of guessed.
 fn release_lane(
     tx: &Tx<'_>,
     project: &str,
     lane: &str,
     line: usize,
+    agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<()> {
     let seat_id = format!("{project}:{lane}");
@@ -891,13 +902,31 @@ fn release_lane(
             ),
         ));
     }
-    // The seat's binding is GEAR's record of the agent it started: an active
-    // binding for this generation means the agent is there to continue; none
-    // means it is gone, and the engine onboards the lane again.
-    let bound = tx
+    // The seat's binding is GEAR's record of the pane it started an agent in;
+    // the session's agents say whether one is in that pane now.
+    let binding = tx
         .get_binding(&seat_id, seat.generation)?
-        .is_some_and(|binding| binding.status == BindingStatus::Active);
-    let (target, reason) = if bound {
+        .filter(|binding| binding.status == BindingStatus::Active);
+    let running = match &binding {
+        // No live binding: the agent was ended (a restart, a release) or never
+        // bound. Either way there is none to continue with.
+        None => false,
+        Some(binding) => {
+            let Some(agents) = agents else {
+                return Err(bad(
+                    line,
+                    format!(
+                        "cannot tell whether seat {seat_id}'s agent is still running: the session's agents were not read, so the release is refused and the lane stays held"
+                    ),
+                ));
+            };
+            agents.iter().any(|agent| {
+                agent.pane_id == binding.pane_id
+                    && agent.agent.as_deref() == Some(binding.kind.as_str())
+            })
+        }
+    };
+    let (target, reason) = if running {
         (
             SeatState::Active,
             "released by the captain: its agent continues",
@@ -1123,7 +1152,7 @@ mod tests {
     fn run(s: &mut Store, text: &str, rid: &str) -> GearResult<ApplyResult> {
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
-        apply(s, &env, Some(&fp), &draft, text, rid, NOW)
+        apply(s, &env, Some(&fp), None, &draft, text, rid, NOW)
     }
 
     #[test]
@@ -1179,7 +1208,7 @@ mod tests {
         let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n";
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
-        let err = apply(&mut s, &env, Some(&fp), &draft, text, "r2", NOW).unwrap_err();
+        let err = apply(&mut s, &env, Some(&fp), None, &draft, text, "r2", NOW).unwrap_err();
         assert_eq!(err.code, ErrorCode::StaleVersion, "step 3 is checked before step 4");
     }
 }

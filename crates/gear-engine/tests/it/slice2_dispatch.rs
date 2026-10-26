@@ -11,7 +11,7 @@
 use gear_app::identity::Fingerprint;
 use gear_app::{draft, home, mail, plan, Env};
 use gear_engine::{tick, EngineCfg};
-use gear_herdr::{fake::FakeHerdr, AgentStatus};
+use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead as _};
 use gear_model::{AttemptState, GearCtx, MsgKind, SeatRole, TaskState};
 use gear_store::{testing, Store};
 
@@ -76,7 +76,10 @@ fn fp(pane: &str, kind: &str) -> Fingerprint {
 
 fn apply(w: &mut World, text: &str, rid: &str, now: i64) -> plan::ApplyResult {
     let d = draft::parse(text).unwrap();
-    plan::apply(&mut w.store, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), &d, text, rid, now).unwrap()
+    // The session's agents, as the captain's `gear plan apply` reads them
+    // before its write transaction (T-133).
+    let agents = w.herdr.agents().unwrap();
+    plan::apply(&mut w.store, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), Some(&agents), &d, text, rid, now).unwrap()
 }
 
 fn lane_home(w: &mut World, now: i64) -> String {

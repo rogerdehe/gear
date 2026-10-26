@@ -1068,7 +1068,37 @@ fn run_plan(
     })?;
     let draft = gear_app::draft::parse(&text)?;
     let fp = observe_identity(store, env, herdr)?;
-    let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
+    // T-133 (review F1): a `- release` line must know whether the lane's agent
+    // is really in its pane, and only the session can say so. The agents are
+    // read here, before the write transaction (Herdr is never touched inside
+    // one); a read that fails refuses the apply rather than guessing.
+    let releasing = draft
+        .staff
+        .iter()
+        .any(|item| matches!(item, gear_app::draft::StaffItem::Release { .. }));
+    let agents = if releasing {
+        Some(herdr.agents().map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
+                    e.0
+                ),
+            )
+        })?)
+    } else {
+        None
+    };
+    let result = gear_app::plan::apply(
+        store,
+        env,
+        fp.as_ref(),
+        agents.as_deref(),
+        &draft,
+        &text,
+        request_id,
+        now,
+    )?;
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
     // (T-34): base= the applied version, each NEW block gets its id, the
@@ -3021,6 +3051,76 @@ mod tests {
         assert_ne!(a, b, "{a} / {b}");
         assert!(a.starts_with("r-"), "{a}");
         assert!(b.starts_with("r-"), "{b}");
+    }
+
+    /// T-133 (review F1): a release line asks the session which agents are
+    /// really running — the store keeps an exited agent's binding `Active` — and
+    /// a session that cannot be read refuses the apply instead of guessing.
+    #[test]
+    fn a_release_asks_the_session_and_refuses_an_unreadable_one() {
+        fn lane_state(store: &mut Store) -> gear_model::SeatState {
+            store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().state
+        }
+
+        let (mut store, mut herdr) = world();
+        let path = write_draft(
+            "<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=the machine is recovering\n",
+        );
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "hold-1",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Held);
+
+        // The agent exits; its binding stays Active. The session cannot be read.
+        herdr.exit_agent(LANE_PANE);
+        std::fs::write(
+            &path,
+            "<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n",
+        )
+        .unwrap();
+        herdr.agents_fail = true;
+        let err = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "release-1",
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+        assert!(err.detail.contains("cannot read the session's agents"), "{}", err.detail);
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Held, "nothing applied, still held");
+
+        // Read again: no agent in the binding's pane, so the lane goes back to
+        // the queue and the engine onboards it again.
+        herdr.agents_fail = false;
+        run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "release-2",
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Queued);
+        std::fs::remove_file(&path).ok();
     }
 
 }
