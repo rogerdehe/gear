@@ -473,3 +473,27 @@ fn a_partial_claim_is_refused_with_one_item() {
     let _ = gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, NOW + 1);
     assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
 }
+
+/// OpenCode runs a lane's tools in its shared service, outside every pane: such
+/// a caller keeps its claim on an OpenCode pane (still checked against the
+/// binding), but it can never claim the captain, whose agent runs in its pane.
+#[test]
+fn an_opencode_service_caller_keeps_its_lane_but_never_becomes_the_captain() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // The service's tool shell: its ancestry reaches no pane of the session.
+    let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
+
+    let lane = env(Some("heat"), 1, Some(LANE_PANE), false);
+    let got = observe(&lane, &mut herdr, &service).unwrap().expect("the lane's agent");
+    let caller = s.read(|tx| classify(tx, &lane, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
+
+    let forged = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let error = observe(&forged, &mut herdr, &service).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+}

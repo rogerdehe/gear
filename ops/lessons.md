@@ -39,8 +39,10 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 ## Engineering the project
 
 17. **A gate over 300 s is cut.** One test binary per crate (macOS scans each new binary on first run).
-18. **Development never touches the production store, nor acts as a seat.** Tests run with a scratch store and HOME, and with GEAR_CTX blanked (`.cargo/config.toml`): a lane's GEAR_CTX reached the tests' pre-push hook in M3 and sent the captain 300+ urgent items.
-19. **Two writers push the integration branch** (the engine's merges, the captain's plan commits): a rejected push is a race, retried.
+18. **Development never touches the production store, nor acts as a seat.** Tests run with a scratch store and HOME, GEAR_CTX blanked, no real `gh` and git limited to local paths (`.cargo/config.toml`), and push nothing: a lane's GEAR_CTX reached a test hook in M3 and sent the captain 300+ urgent items, and a trial team's test run full of `git push` crossed a company red line.
+19. **Two writers push the integration branch** (the engine's merges, the captain's plan commits): the captain holds its pushes while a merge is in flight (M3: two merges lost to the captain's own pushes).
 20. **A hand merge cleans up like the engine's merge** (task and review branches, local and remote).
 21. **The plan's allowance is the ceiling.** The captain never sets GEAR_ADMIN, never registers a project, never starts an agent outside the plan's lanes and reviewers; live acceptance runs on its own lanes. (M3: 11 agents, three self-made captains, one froze on a dialog.)
 22. **When every lane waits, the captain checks on its own.** A silent stall is found by the captain, not by the user. (M3: two reviews never started for an hour.)
+23. **Fix what happened, and build only what the user agreed.** A trial's red line was the gate's own `git push`; the captain built a push allow-list instead, never agreed, which then blocked the fleet's own pushes and was removed (M3).
+24. **A removal lands whole.** Deleting a command while its caller still ships breaks the integration branch: T-106 removed `push-check` while the engine still installed the hook that called it, and every push failed until the hook went too (M3).
