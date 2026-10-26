@@ -374,10 +374,16 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         // `Your included usage is exhausted. Choose an option below to
         // continue.`, the error line `Usage limit reached. You've reached
         // your usage limit. Increase your limits to continue using codex.`,
-        // and the workspace forms `You've reached your workspace credit
-        // limit` / `Your workspace is out of credits` / `You hit your spend
-        // cap`. All of them are stops: the agent cannot work until the
-        // limit resets.
+        // the workspace forms `You've reached your workspace credit limit` /
+        // `Your workspace is out of credits` / `You hit your spend cap`, and
+        // the sentence the TUI prints when the plan is spent: `You’ve hit
+        // your usage limit.` — followed by an upgrade line (Plus, Pro), a
+        // credit link, a request to the workspace admin, or nothing. All of
+        // them are stops: the agent cannot work until the limit resets.
+        //
+        // The spent-limit sentence has a **curly** apostrophe in the binary
+        // (`You’ve`), so the marker starts after it (`hit your usage limit`):
+        // one marker for every form, straight or curly (T-115 review F1).
         //
         // The **warning** is not a stop and is not a marker: `Heads up, you
         // have less than 5% of your weekly limit left. Run /status for a
@@ -391,6 +397,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             quota_markers: vec![
                 "Usage limit reached".into(),
                 "You've reached your usage limit".into(),
+                "hit your usage limit".into(),
                 "Your included usage is exhausted".into(),
                 "You've reached your workspace credit limit".into(),
                 "Your workspace is out of credits".into(),

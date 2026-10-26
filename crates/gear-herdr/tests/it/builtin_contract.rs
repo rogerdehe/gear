@@ -56,11 +56,13 @@ fn codex_is_built_in_and_never_shows_its_update_dialog() {
 
 /// T-115: a reviewer whose Codex quota is spent is seen as on quota.
 ///
-/// The texts are Codex's own (the installed binary, codex-cli 0.164.0): the
-/// modal `Usage limit reached` over `Your included usage is exhausted. Choose
-/// an option below to continue.`, and the error line `Usage limit reached.
+/// The texts are Codex's own (the installed native binary, codex-cli 0.164.0):
+/// the modal `Usage limit reached` over `Your included usage is exhausted.
+/// Choose an option below to continue.`, the error line `Usage limit reached.
 /// You've reached your usage limit. Increase your limits to continue using
-/// codex.`. Both are stops.
+/// codex.`, and the sentence the TUI prints when the plan is spent —
+/// `You’ve hit your usage limit.`, with a **curly** apostrophe, followed by an
+/// upgrade line, a credit link, an admin request or nothing. All are stops.
 #[test]
 fn a_spent_codex_limit_is_a_quota_stop() {
     let p = builtin("codex").expect("codex is built in");
@@ -74,6 +76,22 @@ fn a_spent_codex_limit_is_a_quota_stop() {
         " Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.",
     );
     assert!(error.contains(&ScreenFlag::Quota), "{error:?}");
+    // The spent-limit sentence, exactly as the binary carries it (curly
+    // apostrophe) and its forms with an upgrade line, a credit link and an
+    // admin request behind it (F1 of the T-115 review).
+    for text in [
+        "You’ve hit your usage limit.",
+        "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits",
+        "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits",
+        "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus)",
+        "You’ve hit your usage limit. To get more access now, send a request to your admin",
+        "You’ve hit your usage limit for gpt-6.1-sol",
+        // The same sentence with a straight apostrophe: one marker for both.
+        "You've hit your usage limit.",
+    ] {
+        let flags = classify_screen(&p, text);
+        assert!(flags.contains(&ScreenFlag::Quota), "{text}: {flags:?}");
+    }
     // The workspace forms of the same stop.
     for text in [
         "You've reached your workspace credit limit",
@@ -101,6 +119,11 @@ fn a_low_codex_limit_is_not_a_quota_stop() {
         "Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown.",
         "⚠ weekly limit: only 3% left · resets at 3:30 AM on 1 Nov · /status",
         "GPT-6.1-Sol medium · Context 0% used · weekly 3% left",
+        // The status-line items and the goal line of the same warning family:
+        // neither is a stop (T-115 review F1).
+        "Remaining usage on the weekly usage limit (omitted when unavailable)",
+        "Approaching rate limits",
+        "Goal hit usage limits (/goal resume)",
     ] {
         let flags = classify_screen(&p, text);
         assert!(!flags.contains(&ScreenFlag::Quota), "{text}: {flags:?}");
