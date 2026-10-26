@@ -41,7 +41,7 @@ fn cap() -> (Env, Fingerprint) {
 fn run(s: &mut Store, text: &str, rid: &str, now: i64) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let draft = parse(text).unwrap();
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &draft, text, rid, now)
+    apply(s, &env, Some(&fp), None, &draft, text, rid, now)
 }
 
 /// A draft with one milestone block (body as given) and two tasks on it.

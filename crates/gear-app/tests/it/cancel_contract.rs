@@ -40,7 +40,7 @@ fn world() -> Store {
 fn run(s: &mut Store, queue: &str, base: i64, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, T0 + 10)
+    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
 }
 
 fn attempt(s: &mut Store, task: &str, n: i64) -> AttemptState {
@@ -157,7 +157,7 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     let mut s = world();
     let text = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\nstate: cancelled\n";
     let (env, fp) = cap();
-    apply(&mut s, &env, Some(&fp), &parse(text).unwrap(), text, "v2", T0 + 10).unwrap();
+    apply(&mut s, &env, Some(&fp), None, &parse(text).unwrap(), text, "v2", T0 + 10).unwrap();
     assert_eq!(state(&mut s, "T-2"), TaskState::Cancelled);
     assert!(lane_messages(&mut s, "T-2").is_empty(), "nothing was running");
 
@@ -169,7 +169,7 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     })
     .unwrap();
     let bad = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
-    let error = apply(&mut s, &env, Some(&fp), &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
+    let error = apply(&mut s, &env, Some(&fp), None, &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
 }

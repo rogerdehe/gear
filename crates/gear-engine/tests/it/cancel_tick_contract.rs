@@ -82,7 +82,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
 fn cancel(s: &mut Store) {
     let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &parse(text).unwrap(), text, "cancel-1", T0 + 5).unwrap();
+    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, "cancel-1", T0 + 5).unwrap();
 }
 
 fn t2_attempt(s: &mut Store) -> Option<gear_model::AttemptState> {

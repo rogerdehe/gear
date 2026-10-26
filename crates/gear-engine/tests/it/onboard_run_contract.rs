@@ -303,3 +303,76 @@ on_quota = { lanes = "wait", review = "wait" }
     }
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// T-133 (review F1): a held lane whose agent exited — its binding still
+/// `Active` — is released to the queue from the plan, onboarded again and given
+/// its next task, all by the engine.
+#[test]
+fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
+    use gear_app::identity::Fingerprint;
+    use gear_herdr::HerdrRead as _;
+    use gear_model::GearCtx;
+
+    let mut s = Store::open_in_memory().unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env { ctx: None, pane_id: None, admin: true },
+        CONFIG,
+        Some(crate::skill_home()),
+        T0,
+    )
+    .unwrap();
+    let mut herdr = FakeHerdr::new();
+    let cfg = cfg();
+
+    let cap = Fingerprint { pane_id: "w1:p1".into(), kind: Some("claude".into()), session_ref: None };
+    let env = Env {
+        ctx: Some(GearCtx { project: "toy".into(), seat: "captain".into(), generation: 1 }),
+        pane_id: Some("w1:p1".into()),
+        admin: false,
+    };
+    let apply = |s: &mut Store, herdr: &mut FakeHerdr, text: &str, rid: &str, now: i64| {
+        let draft = gear_app::draft::parse(text).unwrap();
+        let agents = herdr.agents().unwrap();
+        gear_app::plan::apply(s, &env, Some(&cap), Some(&agents), &draft, text, rid, now)
+    };
+
+    // 1. the engine onboards the lane: an agent runs in its pane
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 1).unwrap();
+    let binding = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+    assert_eq!(binding.status, BindingStatus::Active);
+
+    // 2. one task waits for heat; the captain holds the lane, so nothing is
+    //    assigned
+    let r = apply(
+        &mut s,
+        &mut herdr,
+        "<!-- gear-plan project=toy base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\nestimate: 30\ndeps: -\n# Staff\n- hold heat reason=the machine is recovering\n",
+        "v1",
+        T0 + 2,
+    )
+    .unwrap();
+    assert_eq!(r.created, vec!["T-1".to_string()]);
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 100).unwrap();
+    assert_eq!(herdr.prompts_to(&binding.pane_id).len(), 0, "a held lane is assigned nothing");
+
+    // 3. its agent exits; the store keeps the binding Active
+    herdr.exit_agent(&binding.pane_id);
+    let binding_now = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+    assert_eq!(binding_now.status, BindingStatus::Active, "an exited agent keeps its binding");
+
+    // 4. release: no agent in the pane, so the lane goes back to the queue
+    apply(&mut s, &mut herdr, "<!-- gear-plan project=toy base=1 -->\n# Staff\n- release heat\n", "v2", T0 + 200).unwrap();
+    let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Queued, "its agent is gone: {:?}", seat.state_reason);
+
+    // 5. the engine onboards it again and delivers its task
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 300).unwrap();
+    gear_engine::tick(&mut s, &mut herdr, &cfg, T0 + 400).unwrap();
+    let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Active);
+    let binding = s.read(|tx| tx.get_binding("toy:heat", seat.generation)).unwrap().unwrap();
+    let prompts = herdr.prompts_to(&binding.pane_id);
+    assert_eq!(prompts.len(), 1, "its next task is delivered: {prompts:?}");
+    assert!(prompts[0].starts_with("New task T-1 (contract v1)"), "{}", prompts[0]);
+}
