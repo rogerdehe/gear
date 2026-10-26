@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS decisions (
   plan_version INTEGER, created INTEGER NOT NULL,
   PRIMARY KEY (project, key));
 
+-- §5.1: the rework estimate written on a fail verdict
+ALTER TABLE tasks ADD COLUMN rework_estimate_min INTEGER;
+-- §5.2: structured fields of a progress answer, JSON {"left": <min>, "blocker": "<text>"}
+ALTER TABLE messages ADD COLUMN meta TEXT;
+
 -- §5.3: a declared wait
 -- tasks.wait_on and tasks.wait_cond exist already and are reused:
 --   wait_on = 'T-<m>', wait_cond = 'merged'
@@ -615,7 +620,8 @@ Tasks of different lanes meet only at these names. A task writes against them be
 ### 13.1 Store (`crates/gear-store`, deck)
 
 ```rust
-// TaskRow gains: pub repo: Option<String>, pub base: Option<String>, pub gate: Option<String>
+// TaskRow gains: pub repo, base, gate: Option<String>, pub rework_estimate_min: Option<i64>
+// MessageRow / NewMessage gain: pub meta: Option<String>
 // AttemptRow gains: pub session_ref: Option<String>, pub session_cli: Option<String>,
 //                   pub session_action: Option<String>, pub sent_at: Option<Ts>
 impl Tx<'_> {
