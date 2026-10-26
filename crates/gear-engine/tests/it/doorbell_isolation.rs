@@ -26,6 +26,10 @@ const JOB_STARTED: i64 = T0 + 100;
 fn profile(kind: &str) -> gear_herdr::Profile {
     gear_herdr::Profile {
         kind: kind.into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],

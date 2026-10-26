@@ -1090,14 +1090,26 @@ fn run_plan(
     })?;
     let draft = gear_app::draft::parse(&text)?;
     let fp = observe_identity(store, env, herdr)?;
-    // T-133 (review F1): a `- release` line must know whether the lane's agent
-    // is really in its pane, and only the session can say so. The agents are
-    // read here, before the write transaction (Herdr is never touched inside
-    // one); a read that fails refuses the apply rather than guessing.
-    let releasing = draft
-        .staff
-        .iter()
-        .any(|item| matches!(item, gear_app::draft::StaffItem::Release { .. }));
+    // T-133 (review F1): a `- release` of a **lane** must know whether the
+    // lane's agent is really in its pane, and only the session can say so. The
+    // agents are read here, before the write transaction (Herdr is never
+    // touched inside one); a read that fails refuses the apply rather than
+    // guessing. A `- release` of a **reviewer** needs no session fact (T-140):
+    // its seat is idle or it is refused, and the agents say nothing about that.
+    let releasing = draft.staff.iter().any(|item| {
+        let gear_app::draft::StaffItem::Release { name, .. } = item else {
+            return false;
+        };
+        let Some(project) = env.ctx.as_ref().map(|ctx| ctx.project.clone()) else {
+            return false;
+        };
+        store
+            .read(|tx| tx.get_seat(&format!("{project}:{name}")))
+            .ok()
+            .flatten()
+            .map(|seat| seat.role == gear_model::SeatRole::Lane)
+            .unwrap_or(false)
+    });
     let agents = if releasing {
         Some(herdr.agents().map_err(|e| {
             GearError::new(
@@ -2177,6 +2189,37 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    /// T-140: the captain's `- release <reviewer>` line releases a reviewer
+    /// seat in Standby, through the real command.
+    #[test]
+    fn plan_apply_releases_a_standby_reviewer() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p5", "codex", T0)?;
+                tx.set_seat_state("p:review-1", gear_model::SeatState::Standby, Some("review done"), T0 + 1)
+            })
+            .unwrap();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- release review-1\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, gear_model::SeatState::Releasing);
     }
 
     /// T-58: after a successful apply the captain hears about a lane that
