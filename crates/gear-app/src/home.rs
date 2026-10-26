@@ -237,8 +237,13 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         lines.push(format!("+{} more lanes", plan.lanes.len() - SNAPSHOT_LANES));
     }
     lines.push(format!(
-        "deliveries not confirmed: {} · temps {}/{}",
-        plan.unconfirmed_deliveries, plan.temps.in_use, plan.temps.quota
+        "deliveries not confirmed: {} · temps {} running · {} starting · {} blocked ({} of {})",
+        plan.unconfirmed_deliveries,
+        plan.temps.running,
+        plan.temps.starting,
+        plan.temps.blocked,
+        plan.temps.in_use,
+        plan.temps.quota
     ));
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
     // planned landing, so the captain sees the bar before the inbox. The

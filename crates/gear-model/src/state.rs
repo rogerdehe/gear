@@ -201,7 +201,7 @@ impl OpState {
             (self, to),
             (Intended, Executing | Void)
                 | (Executing, Submitted | Failed | Unknown)
-                | (Submitted, Confirmed)
+                | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
         )
     }
@@ -282,6 +282,11 @@ mod tests {
         assert!(OpState::Submitted.holds_delivery_slot());
         assert!(OpState::Unknown.holds_delivery_slot());
         assert!(!OpState::Confirmed.holds_delivery_slot());
-        assert!(!OpState::Submitted.can_transition(OpState::Failed));
+        assert!(!OpState::Confirmed.can_transition(OpState::Failed), "a settled op stays settled");
+        // T-97: a delivery that is never confirmed fails past its check
+        // budget, which frees the seat's slot — the one way a submitted op
+        // ends without being confirmed.
+        assert!(OpState::Submitted.can_transition(OpState::Failed));
+        assert!(!OpState::Failed.holds_delivery_slot());
     }
 }
