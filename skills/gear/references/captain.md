@@ -151,6 +151,7 @@ deps: -
 6. **Ask the user** only what is theirs: release to the main branch, money, scope, destructive acts on things you did not create.
 
 **Becoming the captain** in a fresh pane: start your CLI there, `cd` to the project and run `gear captain take` — no `GEAR_CTX`, no pane id. The pane you run in is rebound to the captain seat at a new generation (it works whether your old pane still exists or not), one urgent item says which pane took it and which it left, and `gear` in that pane is the captain's home page.
+Nothing sent to the captain is lost while it was gone: messages are addressed to the seat, not to a pane, and stay open until answered. Right after taking the seat: (1) `gear` — the INBOX lists every open thread, the ones that came in while no captain was there included; answer them oldest first. (2) `git status` in the project — a plan file the old captain edited but never applied is still there: apply it or drop it. (3) The old captain's own reasoning lives only in its CLI session: resume it (`codex resume`, `claude --resume`) if you need it.
 
 **A new captain pane** (yours closed, or the captain moves to a pane the user picked): `gear captain handover --pane <id>`, run from the current captain's pane or by the user in their own shell. GEAR knows a seat by the pane a call really runs in, never by environment variables alone; a CLI whose tools run in a shared daemon (codex, opencode) keeps that pane's seat without its ancestry reaching the pane.
 
