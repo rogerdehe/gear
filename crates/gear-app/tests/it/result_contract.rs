@@ -39,7 +39,8 @@ fn result(contract: i64, candidate: Option<&str>, rid: &str) -> SendArgs {
         verdict: None, blocking: None, base: None, urgent: false,
         left: None,
         blocker: None,
-        on: None, request_id: rid.into() }
+        on: None,
+        friction: None, request_id: rid.into() }
 }
 
 #[test]
