@@ -183,12 +183,14 @@ CREATE TABLE IF NOT EXISTS rounds (
   PRIMARY KEY (project, task, attempt, role));
 
 -- Every stretch a seat could not work (§5.4): a quota park, a declared wait.
+-- The key carries the kind: the two stretches of one seat — a quota park and
+-- a declared wait — are independent and may overlap.
 CREATE TABLE IF NOT EXISTS seat_pauses (
   project TEXT NOT NULL, seat TEXT NOT NULL,
   kind TEXT NOT NULL,                 -- quota | wait
   reason TEXT,                        -- provider and window, or the task waited for
   start_at INTEGER NOT NULL, end_at INTEGER,   -- end_at NULL while it lasts
-  PRIMARY KEY (project, seat, start_at));
+  PRIMARY KEY (project, seat, kind, start_at));
 
 -- The friction reports (§6): what cost a round time the captain could fix.
 CREATE TABLE IF NOT EXISTS frictions (

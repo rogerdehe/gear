@@ -186,6 +186,34 @@ fn step_5_to_6(tx: &Transaction<'_>) -> GearResult<()> {
                 .map_err(map_sqlite)?;
         }
     }
+
+    // The `seat_pauses` key carries the kind (§5.4): a quota park and a
+    // declared wait of one seat are independent and may overlap. A store that
+    // a first attempt of this task migrated has the older key (without the
+    // kind); it is rebuilt with its rows.
+    if table_exists(tx, "seat_pauses")? {
+        let key = primary_key_of(tx, "seat_pauses")?;
+        if key != ["project", "seat", "kind", "start_at"] {
+            rebuild_seat_pauses(tx)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild the `seat_pauses` table with the key of §5.4, carrying the rows
+/// over.
+fn rebuild_seat_pauses(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(
+        "CREATE TABLE seat_pauses_v6 (project TEXT NOT NULL, seat TEXT NOT NULL,
+           kind TEXT NOT NULL, reason TEXT,
+           start_at INTEGER NOT NULL, end_at INTEGER,
+           PRIMARY KEY (project, seat, kind, start_at));
+         INSERT OR IGNORE INTO seat_pauses_v6 (project, seat, kind, reason, start_at, end_at)
+           SELECT project, seat, kind, reason, start_at, end_at FROM seat_pauses;
+         DROP TABLE seat_pauses;
+         ALTER TABLE seat_pauses_v6 RENAME TO seat_pauses;",
+    )
+    .map_err(map_sqlite)?;
     Ok(())
 }
 
@@ -265,6 +293,28 @@ fn column_is_not_null(tx: &Transaction<'_>, table: &str, column: &str) -> GearRe
         }
     }
     Ok(false)
+}
+
+/// The primary key of a table: the columns of it, in the order of the key.
+/// Empty for a table without one.
+fn primary_key_of(tx: &Transaction<'_>, table: &str) -> GearResult<Vec<String>> {
+    if !table_exists(tx, table)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = tx
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(map_sqlite)?;
+    let mut rows = stmt.query([]).map_err(map_sqlite)?;
+    let mut keyed: Vec<(i64, String)> = Vec::new();
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        let name: String = row.get(1).map_err(map_sqlite)?;
+        let position: i64 = row.get(5).map_err(map_sqlite)?;
+        if position > 0 {
+            keyed.push((position, name));
+        }
+    }
+    keyed.sort_by_key(|(position, _)| *position);
+    Ok(keyed.into_iter().map(|(_, name)| name).collect())
 }
 
 /// The columns of a table: `(name, NOT NULL)` in the order of the table.

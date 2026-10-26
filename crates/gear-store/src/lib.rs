@@ -453,7 +453,6 @@ pub struct NewFriction {
     pub body: String,
     /// True when the round passed its budget, so the report was required (§6.2).
     pub required: bool,
-    pub created: Ts,
 }
 
 /// One friction report (v6, §6).
@@ -500,7 +499,6 @@ pub struct NewDecision {
     /// The plan line, verbatim (source = plan).
     pub line: Option<String>,
     pub plan_version: Option<i64>,
-    pub created: Ts,
 }
 
 /// One decision of the log (v6, §7).
@@ -2678,6 +2676,9 @@ impl<'s> Tx<'s> {
     }
 
     /// Store a friction report (§6). Returns its id, `F-<n>`.
+    ///
+    /// The time of the report is the store's own: the input carries the
+    /// report, not the moment it was written (§13.1).
     pub fn insert_friction(&self, f: &NewFriction) -> GearResult<String> {
         let id = self.next_id(&f.project, 'F')?;
         self.tx
@@ -2685,7 +2686,8 @@ impl<'s> Tx<'s> {
                 "INSERT INTO frictions
                    (project, id, task, attempt, role, seat, body, required, created,
                     closed_at, outcome)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                         CAST(strftime('%s', 'now') AS INTEGER), NULL, NULL)",
                 params![
                     f.project,
                     id,
@@ -2695,7 +2697,6 @@ impl<'s> Tx<'s> {
                     f.seat,
                     f.body,
                     f.required as i64,
-                    f.created,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -2755,6 +2756,9 @@ impl<'s> Tx<'s> {
     /// Log a decision (§7). A key that is already there is skipped: false says
     /// the decision was already logged, true says it was written now. The
     /// table is append-only (§7.3).
+    ///
+    /// The time of the entry is the store's own: the input carries the
+    /// decision, not the moment it was written (§13.1).
     pub fn insert_decision_if_new(&self, d: &NewDecision) -> GearResult<bool> {
         let changed = self
             .tx
@@ -2764,7 +2768,8 @@ impl<'s> Tx<'s> {
                     line, plan_version, created)
                  VALUES (?1, ?2,
                          (SELECT COALESCE(MAX(seq), 0) + 1 FROM decisions WHERE project=?1),
-                         ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                         ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                         CAST(strftime('%s', 'now') AS INTEGER))
                  ON CONFLICT(project, key) DO NOTHING",
                 params![
                     d.project,
@@ -2780,7 +2785,6 @@ impl<'s> Tx<'s> {
                     d.source,
                     d.line,
                     d.plan_version,
-                    d.created,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -2803,9 +2807,13 @@ impl<'s> Tx<'s> {
         Ok(decisions)
     }
 
-    /// Open a pause: the seat cannot work from `at` on (§5.4). A seat that
-    /// already has an open pause keeps it: the stretches do not overlap, and
-    /// the row key (project, seat, start_at) stays unique.
+    /// Open a pause: the seat cannot work from `at` on (§5.4).
+    ///
+    /// The stretches of one kind do not overlap: a pause of that kind that is
+    /// already open stays. A pause of **another** kind is independent — a
+    /// quota park and a declared wait may be there at once — so it neither
+    /// stops this one nor is dropped by it. The row key is
+    /// (project, seat, kind, start_at).
     pub fn open_pause(
         &self,
         project: &str,
@@ -2814,12 +2822,16 @@ impl<'s> Tx<'s> {
         reason: &str,
         at: Ts,
     ) -> GearResult<()> {
+        // A pause of this kind that is already open stays: the stretches of
+        // one kind do not overlap (§5.4). A pause of **another** kind is a
+        // different thing — a quota park and a declared wait are independent
+        // and may be there at once — so it does not stop this one.
         let open: Option<i64> = self
             .tx
             .query_row(
                 "SELECT count(*) FROM seat_pauses
-                 WHERE project=?1 AND seat=?2 AND end_at IS NULL",
-                params![project, seat],
+                 WHERE project=?1 AND seat=?2 AND kind=?3 AND end_at IS NULL",
+                params![project, seat, kind],
                 |row| row.get(0),
             )
             .optional()
@@ -2827,41 +2839,48 @@ impl<'s> Tx<'s> {
         if open.unwrap_or(0) > 0 {
             return Ok(());
         }
-        // The row key carries the start second: a pause that starts in a
-        // second another pause of the seat already starts in moves to the
-        // next free one, so no pause is lost.
-        let mut start_at = at;
-        for _ in 0..60 {
-            let taken: i64 = self
-                .tx
-                .query_row(
-                    "SELECT count(*) FROM seat_pauses
-                     WHERE project=?1 AND seat=?2 AND start_at=?3",
-                    params![project, seat, start_at],
-                    |row| row.get(0),
+        // The row key is (project, seat, kind, start_at): a pause of this kind
+        // that starts in a second one of them already starts in is that row
+        // again — it is reopened, not a second row with a time of its own.
+        let existing: Option<i64> = self
+            .tx
+            .query_row(
+                "SELECT count(*) FROM seat_pauses
+                 WHERE project=?1 AND seat=?2 AND kind=?3 AND start_at=?4",
+                params![project, seat, kind, at],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sqlite)?;
+        if existing.unwrap_or(0) > 0 {
+            self.tx
+                .execute(
+                    "UPDATE seat_pauses SET reason=?5, end_at=NULL
+                     WHERE project=?1 AND seat=?2 AND kind=?3 AND start_at=?4",
+                    params![project, seat, kind, at, reason],
                 )
                 .map_err(map_sqlite)?;
-            if taken == 0 {
-                break;
-            }
-            start_at += 1;
+            return Ok(());
         }
         self.tx
             .execute(
                 "INSERT INTO seat_pauses (project, seat, kind, reason, start_at, end_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-                params![project, seat, kind, reason, start_at],
+                params![project, seat, kind, reason, at],
             )
             .map_err(map_sqlite)?;
         Ok(())
     }
 
     /// Close the open pause of that kind: the seat can work again (§5.4).
+    ///
+    /// The pause never ends before it began: the end is the later of the two
+    /// times.
     pub fn close_pause(&self, project: &str, seat: &str, kind: &str, at: Ts) -> GearResult<()> {
         let changed = self
             .tx
             .execute(
-                "UPDATE seat_pauses SET end_at=?4
+                "UPDATE seat_pauses SET end_at=max(?4, start_at)
                  WHERE project=?1 AND seat=?2 AND kind=?3 AND end_at IS NULL",
                 params![project, seat, kind, at],
             )

@@ -178,8 +178,7 @@ fn a_round(store: &mut Store, task: &str, attempt: i64, role: &str, start_at: i6
 }
 
 #[test]
-fn a_v5_store_migrates_to_v6_with_the_new_columns_null() {
-    let dir = tempfile::tempdir().unwrap();
+fn a_v5_store_migrates_to_v6_with_the_new_columns_null() {    let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("gear.db");
     a_store_of_v5(&path);
 
@@ -215,6 +214,61 @@ fn a_v5_store_migrates_to_v6_with_the_new_columns_null() {
     assert_eq!(attempt.session_action, None);
     assert_eq!(attempt.sent_at, None);
     assert_eq!(message.meta, None);
+}
+
+#[test]
+fn a_pause_table_of_the_older_key_is_rebuilt_by_the_migration() {
+    // A store that a first attempt of this task migrated has the older
+    // `seat_pauses` key (project, seat, start_at): the kind was not in it, so
+    // a quota park and a declared wait of one seat could not be there at once.
+    // The migration rebuilds the table with the key of §5.4 and keeps the
+    // rows.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.db");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: PROJECT.into(),
+                    herdr_session: "sess".into(),
+                    config_toml: String::new(),
+                    config_version: 1,
+                    quota_lanes: 4,
+                    quota_temps: 2,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: NOW,
+                })?;
+                tx.open_pause(PROJECT, "p:hull", "quota", "minimax-cn 5h", NOW)
+            })
+            .unwrap();
+    }
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "DROP TABLE seat_pauses;
+         CREATE TABLE seat_pauses (project TEXT NOT NULL, seat TEXT NOT NULL, kind TEXT NOT NULL,
+           reason TEXT, start_at INTEGER NOT NULL, end_at INTEGER,
+           PRIMARY KEY (project, seat, start_at));
+         INSERT INTO seat_pauses (project, seat, kind, reason, start_at, end_at)
+           VALUES ('p', 'p:hull', 'quota', 'minimax-cn 5h', 1800000000, NULL);
+         UPDATE meta SET value='5' WHERE key='schema_version';",
+    )
+    .unwrap();
+
+    let mut store = Store::open(&path).unwrap();
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses.len(), 1, "{pauses:?}");
+    assert_eq!(pauses[0].kind, "quota");
+    assert_eq!(pauses[0].start_at, NOW);
+    assert_eq!(pauses[0].end_at, None);
+
+    // The key of §5.4 is there: a wait of the same seat may be open beside it.
+    store
+        .write(|tx| tx.open_pause(PROJECT, "p:hull", "wait", "T-2 is not merged", NOW + 10))
+        .unwrap();
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
 }
 
 #[test]
@@ -449,7 +503,7 @@ fn the_budget_of_a_review_round_is_measured_and_falls_back_to_thirty() {
 }
 
 #[test]
-fn a_friction_report_is_F_1_then_F_2_and_can_be_closed() {
+fn a_friction_report_is_f_1_then_f_2_and_can_be_closed() {
     let mut store = Store::open_in_memory().unwrap();
     a_task(&mut store, "T-1", Some(45));
 
@@ -463,7 +517,6 @@ fn a_friction_report_is_F_1_then_F_2_and_can_be_closed() {
                 seat: "p:hull".into(),
                 body: "the build took too long".into(),
                 required: true,
-                created: NOW,
             })
         })
         .unwrap();
@@ -477,7 +530,6 @@ fn a_friction_report_is_F_1_then_F_2_and_can_be_closed() {
                 seat: "p:hull".into(),
                 body: "an unclear contract".into(),
                 required: false,
-                created: NOW + 1,
             })
         })
         .unwrap();
@@ -490,6 +542,10 @@ fn a_friction_report_is_F_1_then_F_2_and_can_be_closed() {
     assert!(open[0].required);
     assert!(!open[1].required);
     assert_eq!(open[0].closed_at, None);
+    // The store writes the time of the report itself (§13.1: the input has no
+    // `created`).
+    assert!(open[0].created > 0, "{:?}", open[0].created);
+    assert!(open[1].created >= open[0].created, "{:?}", open[1].created);
 
     store
         .write(|tx| tx.close_friction(PROJECT, "F-1", "fixed (a cache)", NOW + 10))
@@ -520,7 +576,6 @@ fn a_decision_is_logged_once_and_read_back_in_its_order() {
         source: "gear".into(),
         line: None,
         plan_version: Some(20),
-        created: NOW,
     };
 
     let written = store.write(|tx| tx.insert_decision_if_new(&decision)).unwrap();
@@ -541,6 +596,9 @@ fn a_decision_is_logged_once_and_read_back_in_its_order() {
     assert!(decisions[0].star);
     assert_eq!(decisions[0].source, "gear");
     assert_eq!(decisions[0].plan_version, Some(20));
+    // The store writes the time of the entry itself (§13.1: the input has no
+    // `created`).
+    assert!(decisions[0].created > 0, "{:?}", decisions[0].created);
 
     // A second decision gets the next number.
     let mut other = decision.clone();
@@ -587,6 +645,76 @@ fn a_pause_opens_and_closes_and_the_project_reads_them_back() {
         .err()
         .expect("must refuse");
     assert_eq!(err.code, ErrorCode::NoTarget);
+}
+
+/// A quota park and a declared wait of one seat are independent stretches
+/// (§5.4): they may be there at once, and each keeps its own time.
+#[test]
+fn a_quota_pause_and_a_declared_wait_of_one_seat_overlap() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    store
+        .write(|tx| tx.open_pause(PROJECT, "p:hull", "wait", "T-2 is not merged", NOW))
+        .unwrap();
+    store
+        .write(|tx| tx.open_pause(PROJECT, "p:hull", "quota", "minimax-cn 5h", NOW + 10))
+        .unwrap();
+
+    // Both are there: the quota park is not dropped by the wait.
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
+    let wait = pauses.iter().find(|pause| pause.kind == "wait").expect("the wait");
+    let quota = pauses.iter().find(|pause| pause.kind == "quota").expect("the quota park");
+    assert_eq!(wait.start_at, NOW);
+    assert_eq!(quota.start_at, NOW + 10);
+
+    // Each is closed on its own.
+    store
+        .write(|tx| tx.close_pause(PROJECT, "p:hull", "quota", NOW + 3610))
+        .unwrap();
+    store
+        .write(|tx| tx.close_pause(PROJECT, "p:hull", "wait", NOW + 100))
+        .unwrap();
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses.len(), 2, "{pauses:?}");
+    let wait = pauses.iter().find(|pause| pause.kind == "wait").expect("the wait");
+    let quota = pauses.iter().find(|pause| pause.kind == "quota").expect("the quota park");
+    assert_eq!(wait.end_at, Some(NOW + 100));
+    assert_eq!(quota.end_at, Some(NOW + 3610));
+    // Both durations survive: an hour of quota wait and 100 s of wait.
+    assert_eq!(quota.end_at.unwrap() - quota.start_at, 3600);
+    assert_eq!(wait.end_at.unwrap() - wait.start_at, 100);
+}
+
+/// The row key of a pause is (project, seat, kind, start_at): a pause of the
+/// same kind that starts in the same second is that row again, and a pause
+/// never ends before it began.
+#[test]
+fn a_pause_of_the_same_kind_in_the_same_second_reopens_that_row() {
+    let mut store = Store::open_in_memory().unwrap();
+
+    store
+        .write(|tx| tx.open_pause(PROJECT, "p:hull", "quota", "minimax-cn 5h", NOW))
+        .unwrap();
+    store
+        .write(|tx| tx.close_pause(PROJECT, "p:hull", "quota", NOW))
+        .unwrap();
+    // The same kind in the same second: the row is opened again, not a second
+    // row with a time of its own.
+    store
+        .write(|tx| tx.open_pause(PROJECT, "p:hull", "quota", "minimax-cn 5h", NOW))
+        .unwrap();
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses.len(), 1, "{pauses:?}");
+    assert_eq!(pauses[0].start_at, NOW);
+    assert_eq!(pauses[0].end_at, None);
+
+    // A pause never ends before it began.
+    store
+        .write(|tx| tx.close_pause(PROJECT, "p:hull", "quota", NOW - 60))
+        .unwrap();
+    let pauses = store.read(|tx| tx.pauses_of_project(PROJECT)).unwrap();
+    assert_eq!(pauses[0].end_at, Some(NOW), "{pauses:?}");
 }
 
 #[test]
