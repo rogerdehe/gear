@@ -13,12 +13,19 @@
 //! to`); [`last_context`] reads the context of its last assistant record
 //! (§3.5). A log that cannot be read is **unknown** (`None`), never zero: the
 //! caller leaves the columns of its round NULL.
+//!
+//! The quota of the providers is read apart ([`read_quota`], §9.1): the screen
+//! is not the source of quota facts.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use gear_model::Ts;
 use serde_json::Value;
+
+mod quota;
+
+pub use quota::{read_quota, read_quota_in, QuotaReader, Reading, Window};
 
 /// The kinds of log of §4.3, named by the profile's `usage_log` (§2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
