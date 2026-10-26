@@ -397,6 +397,9 @@ fn doorbell_inputs(
     use gear_store::BindingStatus;
     use std::collections::BTreeSet;
 
+    // The sender whose instruction reaches a lane that queues input while it
+    // works (T-130).
+    let captain = tx.captain_of(project)?.map(|seat| seat.id);
     let mut inputs = Vec::new();
     for seat_obs in observed {
         let seat = &seat_obs.seat;
@@ -409,6 +412,24 @@ fn doorbell_inputs(
             .filter(|b| b.status == BindingStatus::Active)
         else {
             continue;
+        };
+
+        // One doorbell per message, never repeated (T-130): an id an earlier
+        // doorbell of this seat named is not named again — not after the
+        // cooldown, and not when that doorbell was never confirmed. A voided
+        // doorbell never reached the pane, so it covers nothing.
+        //
+        // The captain is the exception: its unanswered items are reminded on
+        // purpose, once per configured period (T-40), and that reminder is the
+        // one thing that brings an ignored item back.
+        let doorbelled: BTreeSet<String> = if seat.role == gear_model::SeatRole::Captain {
+            BTreeSet::new()
+        } else {
+            tx.ops_of_seat_kind(&seat.id, OpKind::Doorbell)?
+                .into_iter()
+                .filter(|op| op.state != OpState::Void)
+                .flat_map(|op| covers_of(&op))
+                .collect()
         };
 
         // What this generation has already been shown: an open item it has
@@ -426,7 +447,21 @@ fn doorbell_inputs(
         // about the task it reviews now (F1 of the T-71 review).
         let since = gear_app::seats::generation_since(tx, &seat.id, seat.generation)?;
         let period = attention::period(tx, project)?;
-        let mut actionable = Vec::new();
+        // A captain instruction reaches a lane that queues input even while
+        // it works; everything else waits for idle unless it is urgent
+        // (T-130). `binding.kind` is the CLI that runs in the seat's pane; a
+        // reviewer (Temp) is not a lane and is not interrupted mid-review.
+        let item = |message: &gear_store::MessageRow| doorbell::DoorbellItem {
+            id: message.id.clone(),
+            urgent: message.urgent,
+            at_once: doorbell::reaches_while_working(
+                message,
+                seat,
+                &binding.kind,
+                captain.as_deref(),
+            ),
+        };
+        let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -437,18 +472,22 @@ fn doorbell_inputs(
                 gear_app::seats::message_belongs(seat, &message, since)
                     && !shown.contains(&message.id)
             };
-            if include { actionable.push(message); }
+            if include && !doorbelled.contains(&message.id) {
+                waiting.push(item(&message));
+            }
         }
-        let urgent = actionable.iter().filter(|m| m.urgent).count();
-        let actionable_ids: Vec<String> = actionable.into_iter().map(|m| m.id).collect();
 
         // Reply/Instruction messages this generation has not shown yet.
-        let unshown: Vec<String> = tx
-            .messages_to_since(project, &seat.id, since)?
-            .into_iter()
-            .filter(|m| !shown.contains(&m.id) && gear_app::seats::message_belongs(seat, m, since))
-            .map(|m| m.id)
-            .collect();
+        for message in tx.messages_to_since(project, &seat.id, since)? {
+            if shown.contains(&message.id)
+                || doorbelled.contains(&message.id)
+                || !gear_app::seats::message_belongs(seat, &message, since)
+                || waiting.iter().any(|item| item.id == message.id)
+            {
+                continue;
+            }
+            waiting.push(item(&message));
+        }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
@@ -468,10 +507,22 @@ fn doorbell_inputs(
             idle: seat_obs.idle && observe::reachable(seat.state),
             slot_busy,
             last_settled_at,
-            actionable: actionable_ids,
-            unshown,
-            urgent,
+            waiting,
         });
     }
     Ok(inputs)
+}
+
+/// The message ids a doorbell op named (`payload.covers`).
+fn covers_of(op: &gear_store::OpRow) -> Vec<String> {
+    op.payload
+        .get("covers")
+        .and_then(serde_json::Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }

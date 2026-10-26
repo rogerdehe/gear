@@ -1,6 +1,23 @@
 //! Doorbells (design/07). `decide` is pure: callers gather inputs first.
+//!
+//! T-130: a message for a lane reaches it while it works. An urgent message,
+//! and every captain instruction for a lane whose agent queues input typed
+//! while it works (pi, claude), is typed at once — one doorbell per message,
+//! and the text names the message ids. A working agent of a kind that does
+//! not queue input (opencode, codex) still waits for idle, as before.
 
-use gear_model::Ts;
+use gear_model::{MsgKind, Ts};
+
+/// One waiting message a doorbell would name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoorbellItem {
+    /// `M-<n>`
+    pub id: String,
+    pub urgent: bool,
+    /// Typed into the pane even while the agent works (T-130): urgent, or a
+    /// captain instruction for an agent that queues input.
+    pub at_once: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoorbellInput {
@@ -14,12 +31,12 @@ pub struct DoorbellInput {
     pub slot_busy: bool,
     /// When the last doorbell op for this seat was settled (Confirmed/Failed/Void), if any.
     pub last_settled_at: Option<Ts>,
-    /// Open/due-Waiting message ids for this seat.
-    pub actionable: Vec<String>,
-    /// Reply/Instruction message ids not yet shown in any view of this generation.
-    pub unshown: Vec<String>,
-    /// How many of `actionable` are urgent.
-    pub urgent: usize,
+    /// This seat's waiting messages that no earlier doorbell named, in the
+    /// order they are named: the actionable ones first, then the unshown
+    /// replies/instructions. One doorbell per message, never repeated (T-130),
+    /// is the caller's filter: an id covered by an earlier doorbell op is not
+    /// in here.
+    pub waiting: Vec<DoorbellItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,55 +45,109 @@ pub struct DoorbellAction {
     pub seat: String,
     pub generation: i64,
     pub pane_id: String,
-    /// One line, no message bodies, e.g. "3 items waiting for you (1 urgent); run gear first".
+    /// One line, no message bodies, e.g.
+    /// "GEAR: 2 item(s) waiting for you (1 urgent): M-3 M-7. Run `gear` now."
     pub text: String,
     /// The message ids this doorbell is about (evidence target for confirmation).
     pub covers: Vec<String>,
 }
 
-/// Ring when: something to show (actionable or unshown), agent idle, no slot
-/// held, and cooldown elapsed since the last settled doorbell
-/// (`last_settled_at` is None, or `now - last_settled_at >= cooldown_s`).
+/// Ring when: something new to show, no slot held, and either the message must
+/// arrive while the seat works (T-130: [`DoorbellItem::at_once`]) or the agent
+/// is idle and the cooldown since the last settled doorbell elapsed.
 ///
-/// One action per ringing input, in input order. `covers` = `actionable` in
-/// order, then the `unshown` ids not already in it. Text, exactly:
-/// `GEAR: <n> item(s) waiting for you. Run `gear` to see them.` where n =
-/// covers.len(); when urgent > 0 the first sentence becomes
-/// `GEAR: <n> item(s) waiting for you (<urgent> urgent).` Never message bodies.
+/// `at_once` bypasses the idle check and the cooldown: an urgent message (or a
+/// captain instruction for a queueing agent) is typed at once, and the cooldown
+/// is only there to keep ordinary reminders apart. The slot check is not
+/// bypassed: a prompt in the same moment as a delivery is swallowed (T-71).
+///
+/// A working agent is told only about the messages that must reach it now; the
+/// others wait for idle, as before. An idle agent is told about everything.
+///
+/// One action per ringing input, in input order. `covers` = the ids named, in
+/// order. Text = [`text`]: the ids, and "Run `gear` now."
 pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<DoorbellAction> {
     inputs
         .iter()
         .filter(|input| rings(input, cooldown_s, now))
         .map(|input| {
-            let covers = covered_ids(input);
-            let n = covers.len();
-            let urgent = if input.urgent > 0 {
-                format!(" ({} urgent)", input.urgent)
-            } else {
-                String::new()
-            };
+            let named = named(input);
             DoorbellAction {
                 project: input.project.clone(),
                 seat: input.seat.clone(),
                 generation: input.generation,
                 pane_id: input.pane_id.clone(),
-                text: format!("GEAR: {n} item(s) waiting for you{urgent}. Run `gear` to see them."),
-                covers,
+                text: text(&named),
+                covers: named.into_iter().map(|item| item.id).collect(),
             }
         })
         .collect()
 }
 
+/// Must this message be typed into the pane even while the agent works? (T-130)
+///
+/// An urgent message always (a codex or opencode agent takes it mid-turn too).
+/// A captain instruction only when the agent queues input typed while it works
+/// (pi, claude): it reads the text after the current step, so nothing is lost.
+pub fn at_once(urgent: bool, kind: MsgKind, from_captain: bool, queues_input: bool) -> bool {
+    urgent || (from_captain && kind == MsgKind::Instruction && queues_input)
+}
+
+/// [`at_once`] for one stored message and the seat it is addressed to: the seat
+/// is a lane whose agent kind queues input, and `captain` is the project's
+/// captain (so the message is a captain instruction). Used by the engine tick
+/// and by `gear send` alike, so the two never drift apart.
+pub fn reaches_while_working(
+    message: &gear_store::MessageRow,
+    seat: &gear_store::SeatRow,
+    agent_kind: &str,
+    captain: Option<&str>,
+) -> bool {
+    let queues_input =
+        seat.role == gear_model::SeatRole::Lane && gear_herdr::queues_input(agent_kind);
+    at_once(
+        message.urgent,
+        message.kind,
+        captain == Some(message.sender.as_str()),
+        queues_input,
+    )
+}
+
+/// The one-line doorbell text: the message ids, and "Run `gear` now."
+///
+/// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run `gear` now.`
+/// Never message bodies.
+pub fn text(items: &[DoorbellItem]) -> String {
+    let urgent = items.iter().filter(|item| item.urgent).count();
+    let urgent = if urgent > 0 {
+        format!(" ({urgent} urgent)")
+    } else {
+        String::new()
+    };
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+    format!(
+        "GEAR: {} item(s) waiting for you{urgent}: {}. Run `gear` now.",
+        items.len(),
+        ids.join(" ")
+    )
+}
+
 /// Whether this seat may be rung right now.
 fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
-    if input.actionable.is_empty() && input.unshown.is_empty() {
+    if input.waiting.is_empty() {
         return false; // nothing to show
-    }
-    if !input.idle {
-        return false; // the agent is busy: a doorbell would interrupt a turn
     }
     if input.slot_busy {
         return false; // a delivery already occupies the seat
+    }
+    let at_once = input.waiting.iter().any(|item| item.at_once);
+    if !input.idle {
+        // A working agent is only interrupted for a message that must reach
+        // it now (T-130).
+        return at_once;
+    }
+    if at_once {
+        return true; // urgent even when idle: the cooldown is not a reason to wait
     }
     match input.last_settled_at {
         None => true,
@@ -84,14 +155,11 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
     }
 }
 
-/// The message ids this doorbell is about: `actionable` in order, then the
-/// `unshown` ids not already covered.
-fn covered_ids(input: &DoorbellInput) -> Vec<String> {
-    let mut covers = input.actionable.clone();
-    for id in &input.unshown {
-        if !covers.contains(id) {
-            covers.push(id.clone());
-        }
+/// The messages this doorbell names: everything for an idle agent, only the
+/// at-once ones for a working agent.
+fn named(input: &DoorbellInput) -> Vec<DoorbellItem> {
+    if input.idle {
+        return input.waiting.clone();
     }
-    covers
+    input.waiting.iter().filter(|item| item.at_once).cloned().collect()
 }

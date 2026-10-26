@@ -8,6 +8,82 @@ use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 /// Reason stored with an op that the engine found Executing after a restart.
 const RECOVERED_REASON: &str = "engine restarted before the call finished";
 
+/// Result stored on a doorbell typed by the sender itself (T-130).
+const SENT_BY_SENDER: &str = "typed by the sender";
+
+/// Type one doorbell into its pane now, from a caller outside the tick
+/// (`gear send`, T-130), and record it so the engine never rings the message
+/// again.
+///
+/// The seat and its active binding are re-read here, as the tick does: a stale
+/// generation, an unreachable seat or a closed pane is never typed into. The
+/// op is written **only when Herdr took the text**; a refused or uncertain
+/// prompt leaves nothing behind, so the engine rings the message on its next
+/// tick. Returns the pane the text went to.
+pub fn deliver_doorbell_now(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &str,
+    generation: i64,
+    message: &str,
+    urgent: bool,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let items = [crate::doorbell::DoorbellItem {
+        id: message.to_string(),
+        urgent,
+        at_once: true,
+    }];
+    let text = crate::doorbell::text(&items);
+    let pane = store.read(|tx| {
+        let Some(row) = tx.get_seat(seat)? else { return Ok(None) };
+        if row.generation != generation || !crate::observe::reachable(row.state) {
+            return Ok(None);
+        }
+        let Some(binding) = tx.get_binding(seat, generation)? else { return Ok(None) };
+        if binding.status != BindingStatus::Active {
+            return Ok(None);
+        }
+        Ok(Some(binding.pane_id))
+    })?;
+    let Some(pane_id) = pane else { return Ok(None) };
+    // Outside any transaction: call Herdr.
+    if !matches!(herdr.prompt(&pane_id, &text), Outcome::Ok(())) {
+        return Ok(None);
+    }
+    // Herdr took it: record the doorbell, so the next tick does not ring the
+    // same message again (T-130).
+    let action = crate::doorbell::DoorbellAction {
+        project: project.to_string(),
+        seat: seat.to_string(),
+        generation,
+        pane_id: pane_id.clone(),
+        text: text.clone(),
+        covers: vec![message.to_string()],
+    };
+    store.write(|tx| {
+        crate::attention::record(tx, &action, now)?;
+        let op = tx.insert_op(&NewOp {
+            project: project.to_string(),
+            seat: seat.to_string(),
+            generation,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": text, "covers": action.covers }),
+            created: now,
+        })?;
+        // The text is already in the pane: the op of the tick's own path —
+        // Intended → Executing → Submitted — recorded in one transaction.
+        tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
+        tx.set_op_state(project, &op.id, OpState::Submitted, Some(SENT_BY_SENDER), now)
+    })?;
+    Ok(Some(pane_id))
+}
+
 /// Write Intended ops for the doorbell actions (one transaction). Each op
 /// fixes seat, generation and the covered message ids in its payload.
 pub fn intend_doorbells(tx: &Tx<'_>, actions: &[crate::doorbell::DoorbellAction], now: Ts) -> GearResult<Vec<OpRow>> {
