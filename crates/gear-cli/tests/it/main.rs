@@ -4,7 +4,6 @@ mod fixtures_contract;
 mod import_issues_contract;
 mod install_skill_contract;
 mod push_check_contract;
-mod push_hook_contract;
 mod readonly_no_engine;
 mod scratch;
 mod skill_contract;

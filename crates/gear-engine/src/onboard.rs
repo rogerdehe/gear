@@ -9,6 +9,40 @@ use gear_store::{SeatRow, Store};
 
 use crate::model::{lane_primary, model_start};
 
+/// T-107: GEAR no longer ships a pre-push hook, and no allow-list is checked.
+/// A worktree that still sets GEAR's own `core.hooksPath` (installed by an
+/// older engine) gets it unset here, so an existing lane or reviewer loses the
+/// hook the moment it is onboarded again. Only GEAR's own path is touched: a
+/// repository's own hooks stay as they are.
+pub(crate) fn forget_gear_hooks(worktree: &std::path::Path) -> Result<(), String> {
+    let set = match git_config(worktree, &["--worktree", "--get", "core.hooksPath"]) {
+        Ok(path) => path.trim().to_string(),
+        // No worktree override at all (or no worktree config extension).
+        Err(_) => return Ok(()),
+    };
+    if set.is_empty() || !std::path::Path::new(&set).ends_with("gear-hooks") {
+        return Ok(()); // the repository's own hooks: not ours to touch
+    }
+    git_config(worktree, &["--worktree", "--unset", "core.hooksPath"])?;
+    // The directory holds nothing but GEAR's script.
+    let _ = std::fs::remove_dir_all(&set);
+    Ok(())
+}
+
+fn git_config(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["config"])
+        .args(args)
+        .output()
+        .map_err(|e| format!("git config {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Where a lane's long-lived worktree comes from (17 §3–§4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeStep {
@@ -311,9 +345,9 @@ fn onboard_seat(
         other => return Err(step_failure("worktree_open", &other)),
     };
     let pane = created.pane_id;
-    // The worktree pushes only where the project registered it (T-72): the hook
-    // must be in place before the agent can push anything.
-    crate::hooks::install(std::path::Path::new(&created.path))?;
+    // T-107: an older engine left its pre-push hook here; the worktree loses
+    // it now that GEAR has no allow-list.
+    crate::onboard::forget_gear_hooks(std::path::Path::new(&created.path))?;
     // The worktree's path is kept: a fallback to another CLI may have to trust
     // it (grok asks before its first start in a directory, T-32).
     store
@@ -1363,5 +1397,74 @@ repo = "web"
         assert_eq!(branch, "home/heat");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "toy-heat");
+    }
+
+    /// T-107: GEAR used to install its own pre-push check in every worktree.
+    /// A worktree that still sets it (`core.hooksPath` in its worktree config)
+    /// loses the hook when the lane is onboarded again, while a repository's
+    /// own hooks stay as they are.
+    #[test]
+    fn an_old_gear_hooks_path_is_unset_on_onboarding() {
+        let sh = |dir: &std::path::Path, command: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{command}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A real repo with a linked worktree for the lane.
+        let root = std::env::temp_dir().join(format!(
+            "gear-onboard-hooks-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, "git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("README.md"), "dev\n").unwrap();
+        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+        sh(&work, "git worktree add -q -b home/heat ../heat dev");
+        let worktree = root.join("heat");
+        // The hook an older engine installed: its own path, worktree-only.
+        sh(&worktree, "git config extensions.worktreeConfig true");
+        let hooks = format!("{}/gear-hooks", sh(&worktree, "git rev-parse --absolute-git-dir"));
+        sh(
+            &worktree,
+            &format!("mkdir -p {hooks} && printf '#!/bin/sh\\nexit 1\\n' > {hooks}/pre-push && chmod +x {hooks}/pre-push"),
+        );
+        sh(&worktree, &format!("git config --worktree core.hooksPath {hooks}"));
+        assert_eq!(sh(&worktree, "git config --worktree core.hooksPath"), hooks);
+
+        // The engine opens that very worktree for the lane.
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("home/heat", &worktree.to_string_lossy(), "w1:p2");
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert_eq!(active, vec!["toy:heat".to_string()]);
+        let set = std::process::Command::new("git")
+            .args(["-C", &worktree.to_string_lossy(), "config", "--worktree", "--get", "core.hooksPath"])
+            .output()
+            .unwrap();
+        assert!(
+            !set.status.success() || set.stdout.is_empty(),
+            "the hook is gone: {}",
+            String::from_utf8_lossy(&set.stdout)
+        );
+        assert!(!std::path::Path::new(&hooks).exists(), "the hook directory is gone");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

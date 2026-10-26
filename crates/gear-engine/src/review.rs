@@ -450,10 +450,10 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
-            // The reviewer's worktree pushes only where the project registered
-            // it (T-72): the hook goes in before the agent starts.
-            if let Err(reason) = crate::hooks::install(std::path::Path::new(&worktree.path)) {
-                park(store, &seat.id, &format!("push hook: {reason}"), now)?;
+            // T-107: a reviewer's worktree left with GEAR's old pre-push hook
+            // loses it before the agent starts.
+            if let Err(reason) = crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path)) {
+                park(store, &seat.id, &format!("old hook: {reason}"), now)?;
                 return Ok(Started::NotYet);
             }
             store.write(|tx| {
