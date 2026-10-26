@@ -73,7 +73,10 @@ fn delivery_is_intended_then_executed() {
         generation: 1, contract_version: 1, adopted_version: 1, pending_update: None, state: gear_model::AttemptState::Delivered,
         candidate: None, report: None, safe_point: None, started: T0, updated: T0 })).unwrap();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    // The agent carries the seat's name (T-149: a delivery aims at the live
+    // agent name; an agent that lost its name is renamed and the packet goes
+    // on the next tick — see `targeting_contract.rs`).
+    herdr.add_agent_named(LANE_PANE, "opencode", AgentStatus::Idle, "p-heat");
     let done = execute_intended(&mut s, &mut herdr, "p", T0 + 1).unwrap();
     assert_eq!(done, vec![(op.id.clone(), "submitted".to_string())]);
     assert_eq!(herdr.prompts_to(LANE_PANE), vec![text.as_str()]);

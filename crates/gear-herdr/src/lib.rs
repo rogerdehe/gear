@@ -194,8 +194,11 @@ pub trait HerdrAct: HerdrRead {
     fn opencode_api(&mut self, _args: &[String]) -> Result<Value, String> {
         Err("OpenCode service API unavailable".into())
     }
-    /// Submit `text` + Enter to the agent in `pane_id` (no --wait).
-    fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()>;
+    /// Submit `text` + Enter to the agent Herdr knows as `target` (no
+    /// --wait). The target is the agent's **name** (design §10.1: a prompt
+    /// targets the live agent name, never the pane id, so a pane whose agent
+    /// is gone refuses the text instead of typing it into a shell).
+    fn prompt(&mut self, target: &str, text: &str) -> Outcome<()>;
     /// Run a shell command in a shell pane (used to export GEAR_CTX before start).
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()>;
     /// Start an agent of `kind` in an available shell pane.
@@ -345,9 +348,9 @@ impl HerdrAct for SocketHerdr {
     fn opencode_api(&mut self, args: &[String]) -> Result<Value, String> {
         opencode::request(args)
     }
-    fn prompt(&mut self, pane_id: &str, text: &str) -> Outcome<()> {
+    fn prompt(&mut self, target: &str, text: &str) -> Outcome<()> {
         let params = board_herdr::AgentPromptParams {
-            target: pane_id.to_string(),
+            target: target.to_string(),
             text: text.to_string(),
             wait: None, // no --wait: "submitted" is confirmed by the next observation round
         };
@@ -358,6 +361,25 @@ impl HerdrAct for SocketHerdr {
     }
 
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()> {
+        // Design §10.1: a shell command runs only in a pane that hosts no
+        // agent. With an agent in it, the command would be typed into the
+        // agent's input — the wrong thing.
+        match self.agent_get(pane_id) {
+            Ok(Some(info)) => {
+                return Outcome::Refused {
+                    code: AGENT_PRESENT.to_string(),
+                    message: format!(
+                        "pane {pane_id} hosts the {} agent {}",
+                        info.agent.as_deref().unwrap_or("unknown"),
+                        info.pane_id
+                    ),
+                }
+            }
+            // A pane that hosts no agent is a shell: the command belongs there.
+            Ok(None) => {}
+            // The pane could not be read: nothing is typed.
+            Err(error) => return Outcome::Uncertain { reason: error.0 },
+        }
         // `pane.send_input` is the atomic "text + Enter" submission Herdr's
         // own `pane run` uses (the socket protocol has no other one): the
         // command is queued and submitted as one unit, so a rejected line
@@ -523,6 +545,9 @@ pub fn outcome_from_error<T>(err: &board_herdr::HerdrError) -> Outcome<T> {
     }
 }
 
+/// The code of a refusal that says "the pane hosts an agent" (design §10.1).
+pub const AGENT_PRESENT: &str = "agent_present";
+
 /// Protocol error codes that prove nothing was executed: the call was
 /// rejected before it ran. Every other code (and every transport error) is
 /// Uncertain — the call may have taken effect.
@@ -553,6 +578,9 @@ const REFUSED_CODES: &[&str] = &[
     // not an active named agent"): nothing was typed. The engine names the
     // agent first, so this is the code for "that did not happen yet".
     "agent_unnamed",
+    // A shell command aimed at a pane that hosts an agent (design §10.1):
+    // nothing was typed.
+    AGENT_PRESENT,
 ];
 
 /// Protocol error codes that answer "there is no agent in that pane": an

@@ -80,8 +80,11 @@ fn ok_is_submitted_and_prompts_text() {
     assert_eq!(herdr.prompts_to(CAP_PANE), vec![TEXT], "the doorbell text is prompted");
 }
 
+/// T-149 (design §10.1): a refused prompt is not a failed delivery. The
+/// agent of the seat is in the pane, so it is named again and the op waits for
+/// the next tick — nothing is restarted and nothing is lost.
 #[test]
-fn refused_is_failed() {
+fn refused_is_named_again_and_retried_next_tick() {
     let mut store = store_with_projects();
     store
         .write(|tx| {
@@ -94,8 +97,14 @@ fn refused_is_failed() {
 
     let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
-    assert_eq!(done, vec![("O-1".to_string(), "failed".to_string())]);
-    assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Failed);
+    assert_eq!(done, vec![("O-1".to_string(), "intended".to_string())]);
+    assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Intended);
+
+    // The next tick: the text goes out.
+    let done = execute_intended(&mut store, &mut herdr, "p", T0 + 3).unwrap();
+    assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+    assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Submitted);
+    assert!(herdr.started_agents.is_empty(), "nothing is restarted");
 }
 
 #[test]
