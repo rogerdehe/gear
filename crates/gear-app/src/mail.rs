@@ -800,28 +800,41 @@ fn check_friction(
         .find(|round| round.attempt == attempt && round.role == role);
     let model = round.and_then(|round| round.model.as_deref());
     let budget = tx.round_budget_min(project, task, attempt, role, model)?;
-    // The active time of the round: now − the attempt's start − the pauses.
-    let started = tx
-        .attempt_times(project, task, attempt)
-        .ok()
-        .and_then(|times| times.started)
-        .or_else(|| {
-            tx.get_attempt(project, task, attempt)
-                .ok()
-                .flatten()
-                .map(|attempt| attempt.started)
-        });
+    // The round's own clock (design §5.1). A review is charged from the
+    // reviewer's own start — its delivery confirmation, else the round's
+    // start — and never from the writer's check-in: the reviewer did not
+    // spend the writer's time.
+    let started = if role == "review" {
+        tx.get_attempt(project, task, attempt)?
+            .and_then(|attempt| attempt.sent_at)
+            .or_else(|| round.map(|round| round.start_at))
+    } else {
+        tx.attempt_times(project, task, attempt)
+            .ok()
+            .and_then(|times| times.started)
+            .or_else(|| {
+                tx.get_attempt(project, task, attempt)
+                    .ok()
+                    .flatten()
+                    .map(|attempt| attempt.started)
+            })
+    };
+    // The active time of the round: now − its start − its own pauses.
     let paused = round.map(|round| round.paused_s).unwrap_or(0);
-    let active = match started {
-        Some(started) => (now - started - paused).max(0) / 60,
+    let active_s = match started {
+        Some(started) => (now - started - paused).max(0),
         None => 0,
     };
-    let over = active > budget;
+    // The budget is in minutes and the active time in seconds: a round that is
+    // one second over its budget is over (§6.2). The minutes are for the
+    // message only.
+    let over = active_s > budget * 60;
     if over && friction.is_none() {
         return Err(GearError::new(
             ErrorCode::FrictionRequired,
             format!(
-                "{task} took {active} min against {budget} min. Add --friction \"<what made it slow>\" and send again."
+                "{task} took {} min against {budget} min. Add --friction \"<what made it slow>\" and send again.",
+                (active_s + 59) / 60
             ),
         ));
     }

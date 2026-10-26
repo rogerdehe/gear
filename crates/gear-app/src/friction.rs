@@ -81,11 +81,15 @@ pub fn close(
             Some(&[SeatRole::Captain]),
             Some(&[SeatState::Active]),
         )?;
-        if !OUTCOMES.iter().any(|kind| outcome.starts_with(kind)) {
+        // The outcome is the word, then the text that says what happened
+        // (§6.4): the word ends at a word boundary ("fixedwhatever" is not
+        // "fixed") and the text after it is not empty ("fixed" alone says
+        // nothing).
+        if parse_outcome(outcome).is_none() {
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
-                    "the outcome is one of {}: fixed (what), lesson (which), not worth it (why)",
+                    "the outcome is one of {}: fixed (what), lesson (which), not worth it (why) — the word, then what changed",
                     OUTCOMES.join(", ")
                 ),
             ));
@@ -93,6 +97,33 @@ pub fn close(
         tx.close_friction(project, id, outcome, now)?;
         Ok(format!("closed {id}: {outcome}"))
     })
+}
+
+/// The outcome of a closed report: the word and the text after it. `None`
+/// when the text is not one of the three words at a word boundary, or when
+/// nothing follows it (§6.4).
+fn parse_outcome(outcome: &str) -> Option<(&str, &str)> {
+    let trimmed = outcome.trim();
+    for kind in OUTCOMES {
+        let Some(rest) = trimmed.strip_prefix(kind) else {
+            continue;
+        };
+        // The word must end at a word boundary.
+        let boundary = rest
+            .chars()
+            .next()
+            .map(|c| c.is_whitespace() || c == ':')
+            .unwrap_or(false);
+        if !boundary {
+            continue;
+        }
+        let text = rest.trim_start_matches([':', ' ', '\t']).trim();
+        if text.is_empty() {
+            continue;
+        }
+        return Some((kind, text));
+    }
+    None
 }
 
 /// The round's own facts, next to the report (design §6.3): its budget, the

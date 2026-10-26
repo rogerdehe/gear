@@ -83,7 +83,7 @@ enum CaptainOp {
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct SendCmd {
     #[arg(long)]
     kind: String,
@@ -3657,6 +3657,73 @@ mod tests {
         assert!(reports[0].required, "the round passed its budget");
     }
 
+    /// §6.2: the budget is compared in seconds, so a round that is one second
+    /// over its budget is over.
+    #[test]
+    fn a_hand_in_one_second_over_the_budget_needs_a_friction_report() {
+        // Exactly the 30 minute budget: no report needed.
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1800,
+            false,
+        )
+        .unwrap();
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+
+        // One second more: the report is required.
+        let (mut store, mut herdr) = world_with_task();
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1801,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::FrictionRequired,
+            "{}",
+            error.detail
+        );
+
+        // With the report the hand-in goes through, and the report says it
+        // was required.
+        let mut with_report = c.clone();
+        with_report.friction = Some("the fixture was missing".into());
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &with_report,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1801,
+            false,
+        )
+        .unwrap();
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].required, "the round passed its budget");
+    }
+
     /// §6.2: under the budget the report is optional.
     #[test]
     fn a_hand_in_under_budget_needs_no_friction_report() {
@@ -3687,6 +3754,66 @@ mod tests {
             .read(|tx| tx.frictions_of_project("p"))
             .unwrap()
             .is_empty());
+    }
+
+    /// §5.1: a review is charged from the reviewer's own start — its delivery
+    /// confirmation — and never from the writer's check-in.
+    #[test]
+    fn a_review_is_charged_from_the_reviewers_own_start() {
+        let (mut store, mut herdr) = world_with_task();
+        herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
+        // The lane hands the candidate in.
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "abc1234",
+                    "ops/reports/T-1.md",
+                    T0,
+                )
+            })
+            .unwrap();
+        // The reviewer gets the packet an hour later.
+        store
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 3600))
+            .unwrap();
+        // A reviewer seat, bound to the task.
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
+                tx.set_seat_task("p:review-1", "T-1")
+            })
+            .unwrap();
+
+        // The verdict five minutes after the delivery: well inside the review's
+        // own budget, even though the writer checked in an hour before.
+        let mut c = send_cmd("review");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.verdict = Some("pass".into());
+        run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 300,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .read(|tx| tx.frictions_of_project("p"))
+                .unwrap()
+                .is_empty(),
+            "the reviewer was inside its own budget"
+        );
     }
 
     /// §6.3, §6.4: the captain reads the reports and closes one.
@@ -3773,21 +3900,35 @@ mod tests {
             })
             .unwrap();
 
-        let error = run_friction(
+        // The word must end at a word boundary and something must follow it.
+        for outcome in ["we looked at it", "fixedwhatever", "fixed", "lesson"] {
+            let error = run_friction(
+                &mut store,
+                &env("captain", CAP_PANE),
+                &mut herdr,
+                &friction_close("F-1", outcome),
+                T0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                gear_model::ErrorCode::BadFormat,
+                "{outcome:?}: {}",
+                error.detail
+            );
+            assert!(error.detail.contains("not worth it"), "{}", error.detail);
+        }
+
+        // The word and what changed: the report closes.
+        let out = run_friction(
             &mut store,
             &env("captain", CAP_PANE),
             &mut herdr,
-            &friction_close("F-1", "we looked at it"),
-            T0,
+            &friction_close("F-1", "fixed: the fixture is in the repo"),
+            T0 + 1,
         )
-        .unwrap_err();
-        assert_eq!(
-            error.code,
-            gear_model::ErrorCode::BadFormat,
-            "{}",
-            error.detail
-        );
-        assert!(error.detail.contains("not worth it"), "{}", error.detail);
+        .unwrap();
+        assert!(out.contains("closed F-1"), "{out}");
     }
 
     fn friction_cmd(all: bool) -> FrictionCmd {
