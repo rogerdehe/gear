@@ -293,7 +293,7 @@ Each round has a budget:
 
 | Round | Budget |
 |---|---|
-| dev (attempt 1) | the task's `estimate_min` |
+| dev (attempt 1) | the task's `estimate_min`; a task without one (only tasks from before M4) gets 30 min (`gear_store::DEFAULT_ROUND_BUDGET_MIN`) |
 | rework (attempt n ≥ 2) | the `estimate=<min>` written on the fail verdict that asked for it (`# Verdicts` fail lines take an optional `estimate=`); without one, max(10, ⌈estimate_min / 2⌉) |
 | review | measured: 1.5 × the median active time of the last 10 finished review rounds on the same reviewer model, at least 10 min; with fewer than 3 such rounds, 30 min |
 
