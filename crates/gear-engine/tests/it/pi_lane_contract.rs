@@ -64,6 +64,8 @@ unattended_args = ["--approve"]
 exit_keys = ["ctrl+d"]
 quota_markers = ["usage limit reached"]
 busy_markers = ["esc to interrupt"]
+# The policy needs two quota screens in a row; the test counts the ticks.
+confirm_rounds = 2
 "#
     )
 }
