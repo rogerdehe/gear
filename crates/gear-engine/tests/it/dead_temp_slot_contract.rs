@@ -60,9 +60,10 @@ fn cfg() -> EngineCfg {
     cfg
 }
 
-/// A project whose task T-1 was handed in: the attempt is `Submitted` with a
-/// candidate, the task is `Verifying` — a review is owed.
-fn world() -> Store {
+/// A project with `tasks` handed-in tasks (T-1 … T-n): each attempt is
+/// `Submitted` with a candidate, each task `Verifying` — a review is owed for
+/// every one of them.
+fn handed_in_world(tasks: usize) -> Store {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
@@ -79,43 +80,58 @@ fn world() -> Store {
             })?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", T0)?;
-            tx.insert_task(&TaskRow {
-                project: "p".into(),
-                id: "T-1".into(),
-                rank: 1,
-                state: gear_model::TaskState::Ready,
-                priority: "must".into(),
-                lane: Some("heat".into()),
-                milestone: None,
-                required: false,
-                contract_version: 1,
-                deps: vec![],
-                followup_of: None,
-                wait_on: None,
-                wait_cond: None,
-                rework_note: None,
-                estimate_min: None,
-                issue: None,
-                updated: T0,
-            })?;
-            tx.insert_contract(&ContractRow {
-                project: "p".into(),
-                task: "T-1".into(),
-                version: 1,
-                goal: "the goal".into(),
-                accept: "the accept criteria".into(),
-                evidence_files: vec![],
-                evidence_due_min: None,
-                body: String::new(),
-                created: T0,
-            })?;
-            tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
-            tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
-            tasks::submit_result(tx, "p", "T-1", 1, 1, CANDIDATE, "ops/reports/T-1.md", T0)?;
+            for n in 1..=tasks {
+                hand_in(tx, &format!("T-{n}"), n as i64)?;
+            }
             Ok(())
         })
         .unwrap();
     store
+}
+
+/// One task handed in by the lane: a `Submitted` attempt with a candidate, the
+/// task `Verifying`.
+fn hand_in(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        project: "p".into(),
+        id: id.into(),
+        rank,
+        state: gear_model::TaskState::Ready,
+        priority: "must".into(),
+        lane: Some("heat".into()),
+        milestone: None,
+        required: false,
+        contract_version: 1,
+        deps: vec![],
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: None,
+        issue: None,
+        updated: T0,
+    })?;
+    tx.insert_contract(&ContractRow {
+        project: "p".into(),
+        task: id.into(),
+        version: 1,
+        goal: "the goal".into(),
+        accept: "the accept criteria".into(),
+        evidence_files: vec![],
+        evidence_due_min: None,
+        body: String::new(),
+        created: T0,
+    })?;
+    tasks::start_attempt(tx, "p", id, "p:heat", 1, T0)?;
+    tasks::on_delivery_confirmed(tx, "p", id, 1, T0)?;
+    tasks::submit_result(tx, "p", id, 1, 1, CANDIDATE, &format!("ops/reports/{id}.md"), T0)?;
+    Ok(())
+}
+
+/// A project whose task T-1 was handed in: the attempt is `Submitted` with a
+/// candidate, the task is `Verifying` — a review is owed.
+fn world() -> Store {
+    handed_in_world(1)
 }
 
 /// A reviewer seat that runs no reviewer: parked (`Unknown`), its binding
@@ -152,11 +168,13 @@ fn temps_in_use(store: &mut Store) -> usize {
         .count()
 }
 
-/// The token of the checkout the engine submitted in the reviewer's pane.
+/// The token of the **latest** checkout the engine submitted in a reviewer's
+/// pane (a retry submits a new one; the pane reports the one it ran).
 fn checkout_token(herdr: &FakeHerdr) -> String {
     herdr
         .calls
         .iter()
+        .rev()
         .find_map(|call| match call {
             Call::PaneRun { command, .. } if command.contains("GEAR_CK_OK") => command
                 .strip_prefix("T=")
@@ -165,6 +183,19 @@ fn checkout_token(herdr: &FakeHerdr) -> String {
             _ => None,
         })
         .expect("the engine submitted the checkout")
+}
+
+/// How many checkout commands the engine submitted for `branch` (one per try).
+fn checkout_submissions(herdr: &FakeHerdr, branch: &str) -> usize {
+    herdr
+        .calls
+        .iter()
+        .filter(|call| {
+            matches!(call, Call::PaneRun { command, .. }
+                if command.contains("GEAR_CK_OK")
+                    && command.contains(&format!("git checkout -f -B {branch} ")))
+        })
+        .count()
 }
 
 /// The pane the seat's current generation is bound to.
@@ -247,15 +278,18 @@ fn an_unknown_temp_seat_is_released_and_the_next_review_takes_it() {
     assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
 }
 
-/// T-116: temps in use never exceed the quota — dead seats do not count, and
-/// more than the quota cannot run at once.
+/// T-116 (F1 of the review): temps in use never exceed the quota — dead seats
+/// do not count, and the seats a release frees do not start beyond the quota,
+/// however many reviews are waiting. Finishing one review lets the next one
+/// take its slot.
 #[test]
 fn temps_in_use_never_exceed_the_quota() {
-    let mut store = world();
+    // Three handed-in tasks and one slot.
+    let mut store = handed_in_world(3);
     // Three dead seats with one slot: the trial's `temps 4/2`.
-    dead_seat(&mut store, "review-1", "T-1");
-    dead_seat(&mut store, "review-2", "T-9");
-    dead_seat(&mut store, "review-3", "T-8");
+    dead_seat(&mut store, "review-1", "T-9");
+    dead_seat(&mut store, "review-2", "T-8");
+    dead_seat(&mut store, "review-3", "T-7");
     let mut herdr = FakeHerdr::new();
     assert_eq!(temps_in_use(&mut store), 3, "three dead seats hold three slots");
 
@@ -263,16 +297,100 @@ fn temps_in_use_never_exceed_the_quota() {
     assert_eq!(released.len(), 3, "every dead seat is released");
     assert_eq!(temps_in_use(&mut store), 0, "no dead seat counts");
 
-    // Every review that starts fits the quota: one reviewer, the one slot.
-    let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-    assert!(report.started.is_empty(), "the checkout comes first: {report:?}");
+    // Every review that starts fits the quota: three reviews are waiting and
+    // one slot is free, so exactly one starts — and the bound holds on each
+    // tick.
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+    assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
+    assert_eq!(checkout_submissions(&herdr, "review/t1"), 1, "the first review starts");
+    assert_eq!(checkout_submissions(&herdr, "review/t2"), 0, "the second waits for a slot");
+    assert_eq!(checkout_submissions(&herdr, "review/t3"), 0, "the third waits for a slot");
+
+    // The first review's checkout lands and its reviewer comes up: still one.
     checkout_lands(&mut store, &mut herdr, "review/t1");
     start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-    assert_eq!(temps_in_use(&mut store), 1, "one slot, one reviewer");
-    assert!(
-        temps_in_use(&mut store) <= 1,
-        "the quota is one and is never passed"
+    assert!(temps_in_use(&mut store) <= 1, "the quota is never passed");
+    assert_eq!(checkout_submissions(&herdr, "review/t2"), 0, "no second reviewer yet");
+
+    // The first review finishes: its task settles and the reviewer is released
+    // (pane closed, then gone), so its slot is free again.
+    store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = gear_model::TaskState::Done;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    for tick in 0..2 {
+        gear_engine::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30 + tick).unwrap();
+    }
+    assert!(temps_in_use(&mut store) <= 1, "the released reviewer holds no slot");
+
+    // The next waiting review takes the freed slot — one reviewer again.
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 40).unwrap();
+    assert_eq!(temps_in_use(&mut store), 1, "one reviewer again, the one slot");
+    assert_eq!(
+        checkout_submissions(&herdr, "review/t2"),
+        1,
+        "the waiting review took the slot: {:?}",
+        herdr.calls
     );
+    assert_eq!(checkout_submissions(&herdr, "review/t3"), 0, "the third still waits");
+}
+
+/// T-116 (F2 of the review): a checkout that failed three times stays stuck
+/// when its seat is recovered — a fresh generation must not restart the loop —
+/// and the freed seat serves another task.
+#[test]
+fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
+    // T-1's checkout fails; T-2 waits for a review and can use the seat.
+    let mut store = handed_in_world(2);
+    let mut herdr = FakeHerdr::new();
+
+    // T-1 takes the seat and its checkout is submitted (attempt 1 of 3).
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+    for tick in 0..3 {
+        // The checkout chain reports a failure (a branch another worktree
+        // holds, a dirty holder): three tries, then the seat is parked and the
+        // captain gets one item.
+        let token = checkout_token(&herdr);
+        let pane = pane_of(&mut store, "p:review-1");
+        herdr.set_screen(&pane, &format!("GEAR_CK_FAIL_{token}"));
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20 + tick).unwrap();
+    }
+    let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Unknown, "{:?}", seat.state_reason);
+    let submissions = checkout_submissions(&herdr, "review/t1");
+    assert_eq!(submissions, 3, "three tries, no more: {submissions}");
+    let items = store
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 40))
+        .unwrap();
+    assert_eq!(
+        items.iter().filter(|m| m.body.contains("failed 3 times")).count(),
+        1,
+        "one captain item: {items:?}"
+    );
+
+    // The dead seat is recovered (B02-04): its slot frees, but the stuck
+    // attempt is not handed to it again — no fourth try for T-1.
+    release_dead_temps(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+    assert_eq!(temps_in_use(&mut store), 0, "the dead seat holds nothing");
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 60).unwrap();
+    assert_eq!(
+        checkout_submissions(&herdr, "review/t1"),
+        3,
+        "a recovered seat does not restart the loop: {:?}",
+        herdr.calls
+    );
+
+    // The freed seat serves the other task: T-2's checkout is submitted.
+    assert_eq!(
+        checkout_submissions(&herdr, "review/t2"),
+        1,
+        "the freed seat took T-2: {:?}",
+        herdr.calls
+    );
+    assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
 }
 
 /// T-116: the engine's tick releases a dead seat **before** the reviews start,
