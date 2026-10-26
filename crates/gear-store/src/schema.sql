@@ -12,17 +12,6 @@ CREATE TABLE IF NOT EXISTS projects (
 CREATE TABLE IF NOT EXISTS id_seq (project TEXT NOT NULL, kind TEXT NOT NULL, next INTEGER NOT NULL,
   PRIMARY KEY (project, kind));
 
--- Where a repo of the project may be pushed (T-73): the destinations
--- `gear admin init` froze from the repo's own `origin` remote, normalised as
--- host + path. One row per destination; a repo with no row may not be pushed
--- to at all. The list is read again on every re-init.
-CREATE TABLE IF NOT EXISTS push_destinations (
-  project TEXT NOT NULL,
-  repo TEXT NOT NULL,           -- '' for the project root, else the [[repos]] name
-  destination TEXT NOT NULL,    -- normalised host + path
-  created INTEGER NOT NULL,
-  PRIMARY KEY (project, repo, destination));
-
 CREATE TABLE IF NOT EXISTS milestones (project TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
   scope TEXT, state TEXT NOT NULL, PRIMARY KEY (project, id));
 
