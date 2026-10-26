@@ -388,6 +388,47 @@ fn onboard_seat(
         .write(|tx| tx.set_meta(&worktree_path_key(&seat.id), &created.path))
         .map_err(|e| format!("worktree path: {}", e.detail))?;
 
+    // 3b. the pane must be a shell. A seat retried while its agent still runs
+    //    there (the agent never exited, M3 fixture re-run) would get the
+    //    environment line typed into the agent's prompt — the agent then runs
+    //    it as an instruction — and the start refused as agent_name_taken. The
+    //    agent is asked to exit first (its profile's exit keys or command, once
+    //    per tick) and the start waits for the shell; after three ticks the
+    //    seat stops with a reason.
+    if let Some(occupant) = herdr.agent_get(&pane).ok().flatten() {
+        let key = format!("engine.onboard_exit.{}", seat.id);
+        let tries = store
+            .read(|tx| tx.get_meta(&key))
+            .map_err(|e| e.detail)?
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        if tries >= 3 {
+            store.write(|tx| tx.set_meta(&key, "")).map_err(|e| e.detail)?;
+            return Err(format!(
+                "the {} agent in pane {pane} did not exit after three tries; a seat starts only in a shell",
+                occupant.agent.as_deref().unwrap_or("unknown")
+            ));
+        }
+        let exit_profile = occupant
+            .agent
+            .as_deref()
+            .and_then(|kind| crate::restart::profile_for_kind(profiles, kind))
+            .map(|(_, profile)| profile)
+            .unwrap_or(profile);
+        if let Some(command) = exit_profile.exit_command.as_deref() {
+            let _ = herdr.prompt(&pane, command);
+        } else if !exit_profile.exit_keys.is_empty() {
+            let _ = herdr.send_keys(&pane, &exit_profile.exit_keys);
+        }
+        store
+            .write(|tx| tx.set_meta(&key, &(tries + 1).to_string()))
+            .map_err(|e| e.detail)?;
+        return Ok(false);
+    }
+    store
+        .write(|tx| tx.set_meta(&format!("engine.onboard_exit.{}", seat.id), ""))
+        .map_err(|e| e.detail)?;
+
     // 4. the seat moves to Starting with a pending binding for the pane. The
     //    seat's profile follows the CLI that runs its model (T-35). A start
     //    left pending by an earlier generation goes with it: it belonged to
@@ -1013,6 +1054,28 @@ repo = "web"
         assert!(!herdr.calls.iter().any(|call| matches!(call,
             gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::PaneType { .. })),
             "no terminal model keys: {:?}", herdr.calls);
+    }
+
+    /// M3 fixture re-run: a lane retried while its agent still runs in its
+    /// pane gets no environment line typed into that agent — the agent is asked
+    /// to exit, and the start runs in the shell on a later tick.
+    #[test]
+    fn a_retried_lane_whose_agent_still_runs_is_exited_before_the_start() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_worktree("home/heat", "/wt/heat", "w5:p1");
+        herdr.add_agent("w5:p1", "opencode", gear_herdr::AgentStatus::Idle);
+
+        assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
+        assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneRun { .. })),
+            "nothing typed into the agent: {:?}", herdr.calls);
+        assert!(herdr.calls.iter().any(|call| matches!(call,
+            gear_herdr::fake::Call::SendKeys { pane, .. } if pane == "w5:p1")), "{:?}", herdr.calls);
+
+        herdr.exit_agent("w5:p1");
+        onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2).unwrap();
+        assert!(herdr.calls.iter().any(|call| matches!(call,
+            gear_herdr::fake::Call::PaneRun { pane, .. } if pane == "w5:p1")), "{:?}", herdr.calls);
     }
 
     /// T-67 (trial G01): an empty `model.list` for a fresh directory means
