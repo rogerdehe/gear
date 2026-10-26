@@ -73,3 +73,8 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - T-127 review F4 (M3.1, logged): the FIFO handshakes in merge.rs tests (~2928) have no failure bound and can hang a failing test; bound them through a channel result with a timeout.
 - T-134 review F2/F3 (M3.1, logged): a captain name collision never creates the captain item (names.rs report_taken returns for Captain); onboarding teardown prompts an unnamed leftover occupant without ensuring its name first (onboard.rs ~440).
 - T-127 review F5 (M3.1, logged): onboard::tests::an_empty_model_list_is_waited_for still sleeps 10 ms (opencode::start_args with model_list_poll_ms = 10); set the test's poll to 0 and guard the sleep.
+
+## Added 2026-10-26 (user, M4 alignment)
+
+- Hand-in retrospective: a lane's or reviewer's hand-in carries an optional short report of friction on the way (a permission it lacked and worked around, a test or build that took far too long, an unclear contract, a missing tool, a step that cost much time). A smooth task reports nothing. The engine adds its own facts to each task (wall time, gate time, attempts, tokens), so a slow task is visible even when the agent says nothing. The captain reads unread reports when it has no other work (an idle doorbell lists them), and the voyage report has a "friction found" section; each one is fixed, logged as a lesson, or judged not worth it.
+- Session at hand-in: besides new session / keep / resume on rework, the captain can have a kept session compacted before the next related task (Claude, Codex, pi and OpenCode all have one). The compact command is part of the agent profile as data, sent through Herdr like any prompt; a kind without one gets a new session instead.
