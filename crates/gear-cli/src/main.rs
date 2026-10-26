@@ -18,7 +18,7 @@ struct Cli {
     /// Expand a task id (T-n): its packet.
     #[arg(long, global = false)]
     show: Option<String>,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok | agent:pi.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -179,7 +179,7 @@ enum AdminOp {
     Kickoff,
     /// Write the GEAR skill where an agent CLI loads its skills.
     InstallSkill {
-        /// The agent CLI: claude | codex | opencode.
+        /// The agent CLI: claude | codex | opencode | grok | pi.
         #[arg(long)]
         agent: String,
     },
@@ -725,7 +725,7 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin install-skill --agent <claude|codex|opencode|grok>`: write the
+/// `gear admin install-skill --agent <claude|codex|opencode|grok|pi>`: write the
 /// skill (SKILL.md and its references) into the directory the agent CLI loads
 /// its skills from, and say where it was written.
 ///
@@ -1491,7 +1491,7 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // A passing review merges without the captain; a failing one waits for
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
-    for kind in ["opencode", "claude", "codex", "grok"] {
+    for kind in ["opencode", "claude", "codex", "grok", "pi"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
             cfg.profiles.insert(kind.to_string(), profile);
         }

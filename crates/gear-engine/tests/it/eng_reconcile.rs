@@ -19,6 +19,7 @@ fn profile(kind: &str) -> Profile {
         quota_bar: None,
         auth_markers: vec![],
         backoff_markers: vec![],
+        blocked_markers: vec![],
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],

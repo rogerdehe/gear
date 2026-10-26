@@ -87,6 +87,52 @@ fn home_with_skills() -> tempfile::TempDir {
     home
 }
 
+/// T-113: `init` accepts a lane and a reviewer of kind `pi`: pi is a kind
+/// GEAR knows (its built-in profile and its skill), and the built-in profile
+/// may run unattended (`--approve`).
+#[test]
+fn a_lane_or_reviewer_of_kind_pi_is_accepted() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let config = CONFIG
+        .replace(
+            "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"",
+            "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"pi\"\nprofile = \"pi\"",
+        )
+        + "\n[temps]\nkind = \"pi\"\nprofile = \"pi\"\n";
+    assert_ne!(config, CONFIG, "the config changed");
+    let r = init_with_home(&mut s, &admin(), &config, Some(home.path()), T0).unwrap();
+    assert_eq!(r.config_version, 1);
+    let seat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
+    assert_eq!(seat.profile, "pi");
+    // The reviewer of kind pi is accepted too: the init needs its skill and
+    // its profile, and it got both.
+    let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
+    assert!(project.config_toml.contains("[temps]"), "{}", project.config_toml);
+}
+
+/// A kind GEAR knows but whose skill is not installed is refused like any
+/// other (T-113): pi's skill lives in `~/.pi/agent/skills`.
+#[test]
+fn a_pi_kind_without_its_skill_is_refused() {
+    use gear_app::skill::SkillAgent;
+    let mut s = Store::open_in_memory().unwrap();
+    // The captain's and the other lane's skills are there; pi's is not.
+    let home = home_with(&[SkillAgent::Codex, SkillAgent::OpenCode]);
+    let config = CONFIG.replace(
+        "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"",
+        "[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"pi\"\nprofile = \"pi\"",
+    );
+    let error = init_with_home(&mut s, &admin(), &config, Some(home.path()), T0).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(
+        error.detail.contains("gear admin install-skill --agent pi"),
+        "the fix is named: {}",
+        error.detail
+    );
+    assert!(s.read(|tx| tx.get_project("harbor")).unwrap().is_none(), "nothing written");
+}
+
 /// T-83 (trial G06): `init` refuses a config that uses a kind whose GEAR skill
 /// is not installed, naming the command — and writes nothing.
 #[test]

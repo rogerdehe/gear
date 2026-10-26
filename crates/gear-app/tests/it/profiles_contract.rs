@@ -101,9 +101,9 @@ fn a_profile_without_unattended_args_is_refused_at_init() {
 kind = "grok"
 unattended_args = ["--yolo"]
 exit_keys = ["ctrl+c", "ctrl+d"]"#,
-        r#"[profiles.pi]
-kind = "pi""#,
-    ).replace(r#"profile = "opencode""#, r#"profile = "pi""#);
+        r#"[profiles.omp]
+kind = "omp""#,
+    ).replace(r#"profile = "opencode""#, r#"profile = "omp""#);
 
     let err = admin::init_with_home(&mut s, &admin_env(), &text,Some(crate::skill_home()), NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
@@ -135,17 +135,17 @@ fn a_configured_profile_is_accepted_at_init() {
 fn the_kickoff_prints_a_skeleton_for_an_unknown_kind() {
     let inventory = kickoff::Inventory {
         installed: vec![kickoff::Installed {
-            kind: "pi".into(),
-            executable: "/usr/local/bin/pi".into(),
-            models: vec!["pi-1".into()],
+            kind: "omp".into(),
+            executable: "/usr/local/bin/omp".into(),
+            models: vec!["omp-1".into()],
             note: None,
             skill: false,
         }],
         missing: vec![],
     };
     let text = kickoff::skeleton(&inventory);
-    assert!(text.contains("[profiles.pi]"), "{text}");
-    assert!(text.contains("# kind = \"pi\""), "{text}");
+    assert!(text.contains("[profiles.omp]"), "{text}");
+    assert!(text.contains("# kind = \"omp\""), "{text}");
     assert!(text.contains("# unattended_args"), "{text}");
     // A kind with a built-in profile needs no block.
     let known = kickoff::Inventory {

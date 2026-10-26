@@ -177,6 +177,29 @@ fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
                 Some(format!("cannot read {}: {e}", codex_cache().display())),
             ),
         },
+        // Pi lists its models in a table: `provider  model  context  …`. The
+        // id pi's `--model` takes is `provider/model` (T-113).
+        "pi" => match Command::new("pi").arg("--list-models").output() {
+            Ok(out) if out.status.success() => {
+                let models = parse_pi_models(&String::from_utf8_lossy(&out.stdout));
+                if models.is_empty() {
+                    (
+                        Vec::new(),
+                        Some("no model listed by `pi --list-models`".to_string()),
+                    )
+                } else {
+                    (models, None)
+                }
+            }
+            Ok(out) => (
+                Vec::new(),
+                Some(format!("`pi --list-models` exited {}", out.status)),
+            ),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("cannot run `pi --list-models`: {e}")),
+            ),
+        },
         // The other CLIs do not print their models.
         _ => (Vec::new(), Some("no model list from this CLI".to_string())),
     }
@@ -226,6 +249,26 @@ pub fn parse_codex_models(text: &str) -> GearResult<Vec<String>> {
         }
     }
     Ok(slugs)
+}
+
+/// The model ids of `pi --list-models`: the first two columns of every row,
+/// `provider/model` — the form pi's `--model` takes (T-113).
+pub fn parse_pi_models(text: &str) -> Vec<String> {
+    let mut models = Vec::new();
+    for line in text.lines() {
+        let mut columns = line.split_whitespace();
+        let (Some(provider), Some(model)) = (columns.next(), columns.next()) else {
+            continue;
+        };
+        if provider == "provider" {
+            continue; // the header row
+        }
+        let id = format!("{provider}/{model}");
+        if !models.iter().any(|seen| seen == &id) {
+            models.push(id);
+        }
+    }
+    models
 }
 
 /// The kind the lanes run: OpenCode when it is installed (GEAR's built-in
