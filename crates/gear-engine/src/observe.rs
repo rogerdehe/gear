@@ -193,6 +193,12 @@ fn screen_of(
         if profile.backoff(&tail) {
             flags.insert(ScreenFlag::Backoff);
         }
+        // A guardrails refusal (T-113) is read on every screen that is read:
+        // the agent goes on after it, so the screen is the only place it is
+        // ever visible.
+        if profile.blocked(&tail) {
+            flags.insert(ScreenFlag::Blocked);
+        }
     }
     (flags, false, Some(tail))
 }

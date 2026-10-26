@@ -40,6 +40,7 @@ fn texts_carry_no_screen_marker() {
         quota_bar: None,
         auth_markers: vec!["Unauthorized".into()],
         backoff_markers: vec![],
+        blocked_markers: vec![],
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
