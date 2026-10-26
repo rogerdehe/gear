@@ -444,6 +444,7 @@ profile = "codex"
             flags: std::collections::BTreeSet::new(),
             idle: true,
             screen: None,
+            session: None,
         }]
     }
 
