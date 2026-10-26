@@ -26,6 +26,7 @@ pub mod feed;
 pub mod guardrails;
 pub mod merge;
 pub mod model;
+pub mod names;
 pub mod observe;
 pub mod onboard;
 mod opencode;
@@ -138,6 +139,13 @@ pub struct TickReport {
     pub blocked: Vec<String>,
     /// Seats whose own guardrails refused one of their actions (T-113).
     pub guardrails: Vec<String>,
+    /// Seats whose agent was renamed back to its seat name this tick (T-134).
+    pub renamed: Vec<String>,
+    /// Seats whose name another pane holds (reported, never stolen; T-134).
+    pub name_taken: Vec<String>,
+    /// `seat: reason` of a name the engine could neither read nor give back
+    /// (T-134).
+    pub name_failed: Vec<String>,
     /// Seats that wait for their provider (T-75): a provider back-off is not
     /// a stall, and the home page shows it.
     pub backoff: Vec<String>,
@@ -195,7 +203,30 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         return Ok(report);
     };
 
+    // 0c. names (T-134): Herdr clears an agent's name when it re-detects the
+    //     occupant, and a prompt to an unnamed agent is refused. Read every
+    //     agent's name once, then give each seat its name back before anything
+    //     is delivered this tick. A failed read is not an observation failure:
+    //     the deliveries below still make sure of the name they prompt.
+    let names = match names::read(herdr) {
+        Ok(names) => names,
+        Err(error) => {
+            report.name_failed.push(format!("agent.list: {}", error.0));
+            std::collections::BTreeMap::new()
+        }
+    };
+
     for project in projects {
+        // 0d. every seat with an active binding carries its name (`<project>-
+        //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
+        //     captain once, never stolen.
+        if !names.is_empty() {
+            let restored = names::restore(store, herdr, &project, &names, now)?;
+            report.renamed.extend(restored.renamed);
+            report.name_taken.extend(restored.taken);
+            report.name_failed.extend(restored.failed);
+        }
+
         // Seat observations (reads screen tails; no write transaction is held).
         // The profile table of this project: the built-ins with the project's
         // own `[profiles.<name>]` on top (T-31). A config that does not parse

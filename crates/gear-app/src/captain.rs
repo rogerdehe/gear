@@ -149,6 +149,10 @@ pub struct Taken {
     pub to: String,
     pub generation: i64,
     pub kind: String,
+    /// What naming the new captain's agent did (T-134): Herdr refuses a prompt
+    /// to an unnamed agent, so the pane carries the captain's name from the
+    /// moment it takes the seat.
+    pub named: gear_herdr::Ensured,
 }
 
 /// `gear captain take` (T-126): the agent in this pane **becomes** the
@@ -168,7 +172,7 @@ pub struct Taken {
 pub fn take(
     store: &mut Store,
     env: &Env,
-    herdr: &mut dyn HerdrRead,
+    herdr: &mut dyn gear_herdr::HerdrAct,
     ancestors: &[u32],
     cwd: &Path,
     named: Option<&str>,
@@ -278,7 +282,16 @@ pub fn take(
         })
     })?;
 
-    Ok(Taken { project, captain, from, to: pane, generation, kind })
+    // 6. The new captain's agent carries the captain's name (T-134): Herdr
+    //    clears a name when it re-detects the occupant, and a prompt to an
+    //    unnamed agent is refused, so the seat must not start out nameless.
+    let named = gear_herdr::ensure_agent_name(
+        herdr,
+        &pane,
+        &crate::config::agent_name(&project, "captain"),
+    );
+
+    Ok(Taken { project, captain, from, to: pane, generation, kind, named })
 }
 
 /// The one rebind a handover and a `captain take` share (T-104, T-126): a new

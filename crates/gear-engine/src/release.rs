@@ -362,8 +362,10 @@ fn retire_one(
 
     // 1. the agent leaves: the profile's own goodbye (a command for the CLIs
     //    whose exit is a slash command, keys for the others). A pane that is
-    //    already gone is fine.
+    //    already gone is fine. T-134: an unnamed agent refuses a prompt, so it
+    //    carries its seat name first.
     if let Some(pane) = pane.as_deref() {
+        crate::names::ensure(herdr, pane, &crate::names::desired(seat));
         if let Some(profile) = profiles.get(&seat.profile) {
             if let Some(command) = profile.exit_command.as_deref() {
                 let _ = herdr.prompt(pane, command);

@@ -19,8 +19,74 @@ pub mod quota_bar;
 pub use quota_bar::{QuotaBar, QuotaReading};
 
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
+
+/// What making sure an agent carries its name did (T-134).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ensured {
+    /// Herdr already reports the wanted name.
+    Named,
+    /// The agent was renamed now.
+    Renamed,
+    /// Another pane holds the name: it is reported, never stolen.
+    Taken { holder: Option<String> },
+    /// The pane hosts no agent (between agents, or a shell).
+    NoAgent,
+    /// Herdr refused the rename or the outcome is unknown.
+    Failed(String),
+}
+
+/// The other pane that holds `name`, if any.
+fn name_holder(
+    names: &BTreeMap<String, Option<String>>,
+    pane: &str,
+    name: &str,
+) -> Option<String> {
+    names
+        .iter()
+        .find(|(other, held)| other.as_str() != pane && held.as_deref() == Some(name))
+        .map(|(other, _)| other.clone())
+}
+
+/// Make sure the agent in `pane` carries `name`, against a snapshot of
+/// [`HerdrRead::agent_names`] already read. A name another pane holds is never
+/// stolen.
+pub fn ensure_agent_name_with(
+    herdr: &mut dyn HerdrAct,
+    names: &BTreeMap<String, Option<String>>,
+    pane: &str,
+    name: &str,
+) -> Ensured {
+    match names.get(pane) {
+        // The pane hosts no agent: nothing to name (a seat between agents).
+        None => return Ensured::NoAgent,
+        Some(Some(current)) if current == name => return Ensured::Named,
+        Some(_) => {}
+    }
+    if let Some(pane) = name_holder(names, pane, name) {
+        return Ensured::Taken { holder: Some(pane) };
+    }
+    match herdr.agent_rename(pane, name) {
+        Outcome::Ok(()) => Ensured::Renamed,
+        Outcome::Refused { code, .. } if code == "agent_name_taken" => Ensured::Taken {
+            holder: name_holder(names, pane, name),
+        },
+        Outcome::Refused { code, message } => Ensured::Failed(format!("{code}: {message}")),
+        Outcome::Uncertain { reason } => Ensured::Failed(reason),
+    }
+}
+
+/// [`ensure_agent_name_with`] with its own read of every agent's name: what a
+/// caller outside the engine tick uses before it prompts a pane (T-134). A read
+/// that fails is a failure to ensure, never a rename.
+pub fn ensure_agent_name(herdr: &mut dyn HerdrAct, pane: &str, name: &str) -> Ensured {
+    match herdr.agent_names() {
+        Ok(names) => ensure_agent_name_with(herdr, &names, pane, name),
+        Err(error) => Ensured::Failed(error.0),
+    }
+}
 
 /// Does an agent of this kind queue the text typed while it works, and read it
 /// after the current step? (T-130)
@@ -112,6 +178,14 @@ pub trait HerdrRead {
     /// caller really runs in may be a shell with no agent (the user's own
     /// terminal).
     fn panes(&mut self) -> Result<Vec<String>, ObserveError>;
+    /// The name Herdr holds for every agent-bearing pane, by pane id (T-134).
+    ///
+    /// Herdr clears an agent's name when it re-detects the occupant (a server
+    /// restart, a CLI that changes its session), and `agent.prompt` refuses a
+    /// pane whose agent is unnamed. The typed [`AgentInfo`] of the board
+    /// client does not carry the name, so this reads `agent.list` itself.
+    /// `None` = Herdr shows the agent with no name.
+    fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError>;
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -126,6 +200,9 @@ pub trait HerdrAct: HerdrRead {
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()>;
     /// Start an agent of `kind` in an available shell pane.
     fn agent_start(&mut self, name: &str, kind: &str, pane_id: &str, args: &[String]) -> Outcome<AgentInfo>;
+    /// Herdr `agent.rename`: give the agent in `pane_id` the name `name`
+    /// (T-134). A name another pane holds is refused, never stolen.
+    fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()>;
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()>;
     /// Type `text` into the pane as keystrokes (`pane.send_text`), without
     /// Enter. Unlike `pane_run`/`prompt` (a paste), typed text triggers an
@@ -210,6 +287,33 @@ impl HerdrRead for SocketHerdr {
         Ok(panes.into_iter().map(|pane| pane.pane_id).collect())
     }
 
+    fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError> {
+        let value = self
+            .client
+            .call("agent.list", json!({}))
+            .map_err(|e| ObserveError(format!("agent.list failed: {e}")))?;
+        let agents = value
+            .get("agents")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut names = BTreeMap::new();
+        for agent in agents {
+            let Some(pane) = agent.get("pane_id").and_then(Value::as_str) else {
+                continue;
+            };
+            // Herdr reports `null` (and, in practice, `""` after a clear) for
+            // an agent with no name: both are "unnamed".
+            let name = agent
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string);
+            names.insert(pane.to_string(), name);
+        }
+        Ok(names)
+    }
+
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
         let value = self
             .client
@@ -291,6 +395,14 @@ impl HerdrAct for SocketHerdr {
                 }
                 Outcome::Ok(info)
             }
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
+        let params = json!({ "target": pane_id, "name": name });
+        match self.client.call("agent.rename", params) {
+            Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
     }
@@ -437,6 +549,10 @@ const REFUSED_CODES: &[&str] = &[
     // A prompt to an agent Herdr has not registered yet (right after
     // `agent.start`, seen 2026-10-23): nothing was typed; retry next tick.
     "agent_not_ready",
+    // A prompt to an agent with no name (T-134: Herdr says "agent <pane> is
+    // not an active named agent"): nothing was typed. The engine names the
+    // agent first, so this is the code for "that did not happen yet".
+    "agent_unnamed",
 ];
 
 /// Protocol error codes that answer "there is no agent in that pane": an

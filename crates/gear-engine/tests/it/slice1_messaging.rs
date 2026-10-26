@@ -34,8 +34,10 @@ fn world() -> World {
         })
         .unwrap();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
-    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    // A real agent carries its seat name (T-134): an unnamed one refuses a
+    // prompt.
+    herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+    herdr.add_agent_named(LANE_PANE, "opencode", AgentStatus::Idle, "p-heat");
     let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
     // Seeded seats use profile name == kind ("codex", "opencode").
     for kind in ["codex", "opencode"] {

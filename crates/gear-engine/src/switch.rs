@@ -296,7 +296,13 @@ pub fn switch_in_place(
         return Ok(SwitchOutcome::Waiting);
     }
 
-    // 6. one submission of the plan this tick.
+    // 6. one submission of the plan this tick. T-134: the switch types keys and
+    //    text into the agent's pane, so give the agent its seat name first —
+    //    after every gate, so a working agent or another occupant is not even
+    //    renamed.
+    if let Ok(Some(seat)) = store.read(|tx| tx.get_seat(seat_id)) {
+        crate::names::ensure(herdr, &pane, &crate::names::desired(&seat));
+    }
     let mut sent = false;
     match plan.step {
         Step::ApiConfirm => {
@@ -672,7 +678,7 @@ mod tests {
         let mut store = world();
         store.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_api")).unwrap();
         let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
         herdr.set_screen(PANE, OTHER_BAR);
         (store, herdr)
     }
@@ -807,7 +813,7 @@ mod tests {
     /// selects the row and the bar follows.
     fn switching() -> FakeHerdr {
         let mut herdr = FakeHerdr::new();
-        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent_named(PANE, "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
         herdr.set_screen(PANE, "  Error: Token Plan ... (2056)\n  Session failed");
         herdr.screen_after = vec![
             ("esc".into(), "  Ask anything…".into()),

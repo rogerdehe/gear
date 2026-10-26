@@ -150,10 +150,9 @@ deps: -
 5. **Hold the course** (`gear --skill course`): judge findings against the bar, calibrate the eta, answer the signals.
 6. **Ask the user** only what is theirs: release to the main branch, money, scope, destructive acts on things you did not create.
 
-**Becoming the captain** in a fresh pane: start your CLI there, `cd` to the project and run `gear captain take` — no `GEAR_CTX`, no pane id. The pane you run in is rebound to the captain seat at a new generation (it works whether your old pane still exists or not), one urgent item says which pane took it and which it left, and `gear` in that pane is the captain's home page.
-Nothing sent to the old captain is lost: its open messages are yours in `gear`; `git status` shows a plan it never applied.
+**Becoming the captain** in a fresh pane: start your CLI there and run `gear captain take` in the project's root; the pane becomes the captain seat at a new generation. Nothing sent to the old captain is lost: its open messages are yours in `gear`; `git status` shows a plan it never applied.
 
-**A new captain pane** (yours closed, or the captain moves to a pane the user picked): `gear captain handover --pane <id>`, run from the current captain's pane or by the user in their own shell. GEAR knows a seat by the pane a call really runs in, never by environment variables alone; a CLI whose tools run in a shared daemon (codex, opencode) keeps that pane's seat without its ancestry reaching the pane.
+**A new captain pane** (yours closed, or the captain moves to a pane the user picked): `gear captain handover --pane <id>`, run from the current captain's pane or by the user in their own shell. GEAR knows a seat by the pane a call really runs in, never by environment variables alone.
 
 `gear report time` shows where the time went (per task and voyage: estimate, dev, review, waiting for you, merge, rework, actual/estimate).
 
