@@ -1186,9 +1186,11 @@ fn run_plan(
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
-    for warning in warnings {
+    // The apply's own warnings (design §7.2: a decision line that is not
+    // structured is logged as a note).
+    for warning in result.warnings.iter().chain(warnings.iter()) {
         lines.push('\n');
-        lines.push_str(&warning);
+        lines.push_str(warning);
     }
     for lane in &tailed {
         lines.push('\n');

@@ -36,6 +36,10 @@ pub struct ApplyResult {
     /// cancelled done task, resolved "cancelled by the captain".
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// What the captain should know about this apply (design §7.2: a decision
+    /// line that is not structured is logged as a note).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -188,6 +192,35 @@ fn apply_queue(
     // 4. sections that belong to later cuts (after the base check, as the doc
     // comment orders the steps).
     reject_sections(draft)?;
+
+    // The captain's decision lines (design §7): every line of `# Decisions` is
+    // read, structured or a note (§7.2), and recorded (§7.3).
+    let decisions: Vec<crate::decision::Decision> = draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .collect();
+    let voyage = voyage_of(draft);
+    let applied_version = current + 1;
+    let mut warnings: Vec<String> = Vec::new();
+    for (index, line) in draft.decisions.iter().enumerate() {
+        let decision = &decisions[index];
+        if decision.note {
+            warnings.push(format!(
+                "warning: decision line {} is not structured; logged as a note",
+                index + 1
+            ));
+        }
+        record_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            line,
+            decision,
+            now,
+        )?;
+    }
 
     let existing: BTreeMap<String, TaskRow> = tx
         .tasks_of_project(project)?
@@ -431,6 +464,21 @@ fn apply_queue(
                         task.state = TaskState::Cancelled;
                         if was != TaskState::Cancelled {
                             cancelled.push(id.clone());
+                            // The decision log (design §7.4): a cancelled task
+                            // is a cut, and the why is the one the captain
+                            // wrote about it.
+                            record_gear_decision(
+                                tx,
+                                project,
+                                &voyage,
+                                applied_version,
+                                "cut",
+                                &format!("{id} cancelled"),
+                                why_naming(&decisions, id)
+                                    .or_else(|| Some("(no why written)".to_string())),
+                                id,
+                                now,
+                            )?;
                         }
                         // T-112: a done task's open merge items close with it —
                         // the failed merge and the push refusal are history,
@@ -524,16 +572,50 @@ fn apply_queue(
     for item in &draft.staff {
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
+            // The decision log (design §7.4): a staff line is a decision.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         if let StaffItem::Release { name, .. } = item {
             release_seat(tx, project, name, staff_line(item), agents, now)?;
             staffed.push(format!("release {name}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         let (lane, verb, target, reason) = match item {
@@ -595,6 +677,18 @@ fn apply_queue(
         })?;
         tx.set_seat_state(&seat_id, target, Some(&reason), now)?;
         staffed.push(format!("{verb} {lane}"));
+        // The decision log (design §7.4): a staff line is a decision.
+        record_gear_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            "staff",
+            &staff_text(item),
+            None,
+            &staff_text(item),
+            now,
+        )?;
     }
 
     let version = current + 1;
@@ -604,16 +698,14 @@ fn apply_queue(
     for line in &draft.verdicts {
         // A pass over a failed review says why (design §7.4): the captain
         // overrules the reviewer, and the reason is recorded.
-        if line.pass && line.why.is_none() {
-            let failed_review = tx
-                .get_review_verdict(project, &line.task, line.attempt)?
-                .is_some_and(|review| !review.passed);
-            if failed_review {
-                return Err(bad(
-                    line.line,
-                    "a pass over a failed review needs why=\"…\"",
-                ));
-            }
+        let failed_review = tx
+            .get_review_verdict(project, &line.task, line.attempt)?
+            .is_some_and(|review| !review.passed);
+        if line.pass && failed_review && line.why.is_none() {
+            return Err(bad(
+                line.line,
+                "a pass over a failed review needs why=\"…\"",
+            ));
         }
         let verdict = crate::tasks::Verdict {
             project: project.to_string(),
@@ -630,6 +722,38 @@ fn apply_queue(
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The decision log (design §7.4): a pass over a failed review is an
+        // override, a fail is a rework.
+        if line.pass {
+            if failed_review {
+                record_gear_decision(
+                    tx,
+                    project,
+                    &voyage,
+                    applied_version,
+                    "override",
+                    &format!(
+                        "{} attempt {} passed over a failed review",
+                        line.task, line.attempt
+                    ),
+                    line.why.clone(),
+                    &format!("{}|{}", line.task, line.attempt),
+                    now,
+                )?;
+            }
+        } else {
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "rework",
+                line.rework.as_deref().unwrap_or_default(),
+                None,
+                &format!("{}|{}", line.task, line.attempt),
+                now,
+            )?;
+        }
         // The minutes the rework round gets (design §5.1): written after the
         // settle, which writes the task row itself.
         if let Some(minutes) = line.estimate {
@@ -654,6 +778,7 @@ fn apply_queue(
 
     Ok(ApplyResult {
         version,
+        warnings,
         created,
         contract_changed,
         not_mentioned,
@@ -1377,7 +1502,7 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
 
 /// `YYYY-MM-DD` for unix seconds (civil-from-days, no extra crate) — enough to
 /// date a departure without pulling a time library in.
-fn utc_date(ts: i64) -> String {
+pub fn utc_date(ts: i64) -> String {
     let (days, _) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -2041,6 +2166,113 @@ fn cancel_task(
         })?;
     }
     Ok(())
+}
+
+
+/// The voyage a plan is for: the last milestone block of the file (the
+/// current one). The decisions of the log belong to it.
+fn voyage_of(draft: &Draft) -> String {
+    draft
+        .milestones
+        .last()
+        .map(|(header, _)| crate::draft::milestone_parts(header).0.to_string())
+        .unwrap_or_default()
+}
+
+/// Record a decision of the captain (§7.3): the line as it was written, its
+/// parts, and its key — the sha256 of the line with its whitespace collapsed.
+/// A line that is already in the log is skipped, and an edited line is a new
+/// decision (the table is append-only).
+fn record_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    line: &str,
+    decision: &crate::decision::Decision,
+    now: Ts,
+) -> GearResult<()> {
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key(line),
+        voyage: voyage.to_string(),
+        at: if decision.at.is_empty() {
+            crate::decision::apply_time(now)
+        } else {
+            decision.at.clone()
+        },
+        kind: decision.kind.clone(),
+        what: decision.what.clone(),
+        why: decision.why.clone(),
+        alt: decision.alt.clone(),
+        changes: decision.changes.clone(),
+        star: decision.star,
+        source: "plan".to_string(),
+        line: Some(line.to_string()),
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// Record an entry GEAR writes itself (§7.4): the event, its kind and what it
+/// was about. The key is the sha256 of the entry's own text, so the same event
+/// is recorded once.
+fn record_gear_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    kind: &str,
+    what: &str,
+    why: Option<String>,
+    event: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let text = format!("{kind}|{event}|{what}|{}", why.clone().unwrap_or_default());
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key_of(&text),
+        voyage: voyage.to_string(),
+        at: crate::decision::apply_time(now),
+        kind: kind.to_string(),
+        what: what.to_string(),
+        why,
+        alt: None,
+        changes: None,
+        // GEAR's own entries are never starred (§7.2).
+        star: false,
+        source: "gear".to_string(),
+        line: None,
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// The text of a staff line as the captain wrote it (§7.4: the `staff`
+/// entry's "what" is the line).
+fn staff_text(item: &StaffItem) -> String {
+    match item {
+        StaffItem::Temp { id, task, .. } => format!("temp {id} task={task}"),
+        StaffItem::Park { lane, until, until_task, .. } => match (until, until_task) {
+            (Some(until), _) => format!("park {lane} until={until}"),
+            (_, Some(task)) => format!("park {lane} until-task={task}"),
+            _ => format!("park {lane}"),
+        },
+        StaffItem::Hold { lane, reason, .. } => format!("hold {lane} reason={reason}"),
+        StaffItem::Retire { lane, .. } => format!("retire {lane}"),
+        StaffItem::Retry { lane, .. } => format!("retry {lane}"),
+        StaffItem::Release { name, .. } => format!("release {name}"),
+        StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+    }
+}
+
+/// The why of the decision line that names this task (§7.4: the `cut` entry's
+/// why is the one the captain wrote, or `(no why written)`).
+fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<String> {
+    decisions
+        .iter()
+        .filter(|decision| decision.what.contains(task))
+        .find_map(|decision| decision.why.clone())
 }
 
 /// The departure is fixed when the milestone gets its first task: the time of
