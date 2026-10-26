@@ -247,8 +247,10 @@ fn state_list(states: &[SeatState]) -> String {
 /// The process ids this caller runs under, nearest first: its own pid, then
 /// its parents (T-104). The parent chain is the OS's own answer — no
 /// environment variable can change it, and no `$PATH` either: a caller can put
-/// an executable `ps` in front of the real one, so the walk only asks `/proc`
-/// (Linux) or the system `ps` by **absolute path**.
+/// an executable `ps` in front of the real one. T-131: no program is started at
+/// all — the parent is read in process, `/proc/<pid>/stat` on Linux and
+/// `proc_pidinfo(PROC_PIDTBSDINFO)` on macOS — because a slow system left the
+/// old `ps` calls stuck, and `gear` hung behind them.
 pub fn process_ancestors() -> Vec<u32> {
     let mut chain = vec![std::process::id()];
     let mut pid = std::process::id();
@@ -268,30 +270,19 @@ pub fn process_ancestors() -> Vec<u32> {
     chain
 }
 
-/// The parent of `pid`, from the OS itself (T-104): `/proc/<pid>/stat` where the
-/// platform has it, else the system `ps` at an absolute path. Never `$PATH`: a
-/// shell that prepends a directory could print another pane's pid and fake a
-/// whole ancestry.
+/// The parent of `pid`, read in process — no program started (T-131), so a
+/// slow system cannot leave anything stuck behind a `gear` call and no
+/// `$PATH` can answer for the OS.
 fn parent_of(pid: u32) -> Option<u32> {
     #[cfg(target_os = "linux")]
-    if let Some(parent) = parent_from_proc(pid) {
-        return Some(parent);
+    return parent_from_proc(pid);
+    #[cfg(target_os = "macos")]
+    return parent_from_pidinfo(pid);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
     }
-    for ps in ["/bin/ps", "/usr/bin/ps"] {
-        let Ok(output) = std::process::Command::new(ps)
-            .args(["-o", "ppid=", "-p", &pid.to_string()])
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-        if let Ok(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
-            return Some(parent);
-        }
-    }
-    None
 }
 
 /// The parent pid from `/proc/<pid>/stat` (Linux): the third field is the
@@ -302,6 +293,39 @@ fn parent_from_proc(pid: u32) -> Option<u32> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = stat.rsplit_once(')')?.1;
     rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// The parent pid from `proc_pidinfo(PROC_PIDTBSDINFO)` (macOS): the kernel's own
+/// record of the process (`proc_bsdinfo.pbi_ppid`), read in process. The old
+/// `/bin/ps` spawn was the T-131 hang: when the system was slow to launch
+/// programs, one `ps` per ancestor piled up stuck and `gear` was killed by its
+/// callers. A short answer is the pid gone or the buffer too small — no parent.
+#[cfg(target_os = "macos")]
+fn parent_from_pidinfo(pid: u32) -> Option<u32> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, and the
+    // struct is only read when it reports exactly those `size` bytes filled.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if got != size {
+        return None;
+    }
+    // SAFETY: `got == size`, so every field of the struct was written.
+    let info = unsafe { info.assume_init() };
+    // A pid can be recycled between the ask and the answer: the record names
+    // the pid it describes, and only its own record is this pid's parent.
+    if info.pbi_pid != pid {
+        return None;
+    }
+    Some(info.pbi_ppid)
 }
 
 /// Whether the caller runs in `info`'s pane (T-104): the pane's shell or one of
