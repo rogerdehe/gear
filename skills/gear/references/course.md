@@ -29,7 +29,7 @@ A reviewer looks at one task and will always find more. Judge each finding with 
 
 - Keep 2–3 independent, valuable tasks queued per lane — not a full plan up front. Re-plan a lane when its horizon runs down.
 - Small corrections, rarely a reversal: the rowers keep rowing while you steer.
-- Never fill a queue with busywork. When a lane has no valuable work left, declare the tail (`- tail: <lanes>` in `# Decisions`) and let it stand idle.
+- Never fill a queue with busywork. When a lane has no valuable work left, declare the tail (`- tail: <lanes>` in `# Decisions`) and let it stand idle — this turns its idle warnings off, so a lane that only waits for a dependency is never in the tail.
 
 ## 5. Never-stop is not never-stop growth
 
