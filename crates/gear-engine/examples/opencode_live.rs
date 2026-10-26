@@ -242,6 +242,8 @@ impl HerdrAct for NoKeys {
     fn pane_type(&mut self, _: &str, _: &str) -> Outcome<()> {
         panic!("unexpected typed keys")
     }
+    /// This driver refuses typed keys, so it never settles after them.
+    fn type_settle(&mut self) {}
     fn send_keys(&mut self, _: &str, _: &[String]) -> Outcome<()> {
         panic!("unexpected keys")
     }
