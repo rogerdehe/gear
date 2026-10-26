@@ -324,6 +324,10 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
     store
         .write(|tx| {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,

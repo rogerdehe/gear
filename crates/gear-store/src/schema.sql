@@ -69,6 +69,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- The GitHub issue a task came from (T-79): the plan's `issue: #<n>`. NULL
   -- for a task with none.
   issue INTEGER,
+  -- v6 (§1 of ops/plan/m4-design.md): the task keeps its own repo, base and
+  -- gate, copied from the lane's config when it is created. A reader that
+  -- finds NULL falls back to the lane's current config (old tasks behave as
+  -- today). `rework_estimate_min` is the `estimate=<min>` of the fail verdict
+  -- that asked for the rework (§5.1).
+  repo TEXT, base TEXT, gate TEXT,
+  rework_estimate_min INTEGER,
   updated INTEGER NOT NULL, PRIMARY KEY (project, id));
 
 CREATE TABLE IF NOT EXISTS contracts (project TEXT NOT NULL, task TEXT NOT NULL, version INTEGER NOT NULL,
@@ -91,6 +98,10 @@ CREATE TABLE IF NOT EXISTS attempts (
   -- binary keeps working on it).
   delivered_at INTEGER, started_at INTEGER, handed_in_at INTEGER,
   verdict_at INTEGER, settled_at INTEGER, merged_at INTEGER,
+  -- v6 (§1): which session the attempt ran in, and what the engine did before
+  -- the packet. `session_action` is one of keep | new | compact | resume |
+  -- fresh | new-unconfirmed | compact-fallback | resume-fallback.
+  session_ref TEXT, session_cli TEXT, session_action TEXT, sent_at INTEGER,
   PRIMARY KEY (project, task, n));
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -99,6 +110,9 @@ CREATE TABLE IF NOT EXISTS messages (
   kind TEXT NOT NULL, urgent INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL, reply_to TEXT,
   needs_ack INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
   wait_on TEXT, wait_until INTEGER, result TEXT,
+  -- v6 (§5.2): the structured fields of a progress answer, JSON
+  -- {"left": <min>, "blocker": "<text>"}.
+  meta TEXT,
   created INTEGER NOT NULL, resolved INTEGER, PRIMARY KEY (project, id));
 CREATE INDEX IF NOT EXISTS messages_recipient ON messages (project, recipient, state);
 
@@ -144,3 +158,61 @@ CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, args_hash TEXT NOT NUL
 
 CREATE TABLE IF NOT EXISTS audit (ts INTEGER NOT NULL, project TEXT, actor TEXT NOT NULL,
   action TEXT NOT NULL, detail TEXT);
+
+-- v6 (§1 of ops/plan/m4-design.md). The tables of the M4 schema: the rounds
+-- and their tokens, the stretches a seat could not work, the friction reports
+-- and the captain's decision log.
+
+-- One round of work by one seat (§4): a dev round (attempt 1 of a task), a
+-- rework round (attempt n >= 2) or a review round (the review of one
+-- attempt). A round owns every agent record on its seat from `start_at` until
+-- `end_at`; there is no other rule (§4.1).
+CREATE TABLE IF NOT EXISTS rounds (
+  project TEXT NOT NULL, task TEXT NOT NULL, attempt INTEGER NOT NULL,
+  role TEXT NOT NULL,                 -- dev | rework | review
+  seat TEXT NOT NULL, generation INTEGER NOT NULL,
+  cli TEXT NOT NULL, model TEXT,
+  start_at INTEGER NOT NULL,          -- the engine's first input of this round (§4.1)
+  end_at INTEGER,                     -- the next round's start on this seat, or the seat's release
+  sessions TEXT NOT NULL DEFAULT '[]',-- JSON list of every session_ref seen on the seat in the window
+  active_s INTEGER NOT NULL DEFAULT 0,-- §5.1: time on the clock (pauses excluded)
+  paused_s INTEGER NOT NULL DEFAULT 0,
+  input INTEGER, output INTEGER, cache_read INTEGER, cache_write INTEGER, reasoning INTEGER,
+  cost_usd REAL, cost_source TEXT,    -- agent | prices | none
+  counted_at INTEGER,                 -- when the tokens were last read
+  PRIMARY KEY (project, task, attempt, role));
+
+-- Every stretch a seat could not work (§5.4): a quota park, a declared wait.
+-- The key carries the kind: the two stretches of one seat — a quota park and
+-- a declared wait — are independent and may overlap.
+CREATE TABLE IF NOT EXISTS seat_pauses (
+  project TEXT NOT NULL, seat TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- quota | wait
+  reason TEXT,                        -- provider and window, or the task waited for
+  start_at INTEGER NOT NULL, end_at INTEGER,   -- end_at NULL while it lasts
+  PRIMARY KEY (project, seat, kind, start_at));
+
+-- The friction reports (§6): what cost a round time the captain could fix.
+CREATE TABLE IF NOT EXISTS frictions (
+  project TEXT NOT NULL, id TEXT NOT NULL,              -- F-<n>, next_id(project,'F')
+  task TEXT NOT NULL, attempt INTEGER NOT NULL, role TEXT NOT NULL,
+  seat TEXT NOT NULL, body TEXT NOT NULL,
+  required INTEGER NOT NULL,          -- 1: the round passed its budget (§6.2)
+  created INTEGER NOT NULL,
+  closed_at INTEGER, outcome TEXT,    -- §6.4: what the captain did about it
+  PRIMARY KEY (project, id));
+
+-- The decision log (§7): every decision the captain made, keyed by the hash
+-- of the normalized line, so an apply is idempotent (§7.3).
+CREATE TABLE IF NOT EXISTS decisions (
+  project TEXT NOT NULL, key TEXT NOT NULL,             -- sha256 of the normalized line (§7.3)
+  seq INTEGER NOT NULL,               -- order of first appearance
+  voyage TEXT NOT NULL,
+  at TEXT NOT NULL,                   -- the date written on the line, or the apply time
+  kind TEXT NOT NULL,                 -- §7.2
+  what TEXT NOT NULL, why TEXT, alt TEXT, changes TEXT,
+  star INTEGER NOT NULL,              -- 1: worth a look at landing (§7.2)
+  source TEXT NOT NULL,               -- plan | gear
+  line TEXT,                          -- the plan line, verbatim (source = plan)
+  plan_version INTEGER, created INTEGER NOT NULL,
+  PRIMARY KEY (project, key));

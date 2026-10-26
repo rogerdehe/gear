@@ -59,6 +59,7 @@ impl World {
             .write(|tx| {
                 Ok(tx
                     .insert_message(&NewMessage {
+                        meta: None,
                         project: "p".into(),
                         thread: format!("keel:{at}"),
                         task: None,

@@ -93,6 +93,7 @@ pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
         return Ok(false);
     }
     tx.insert_message(&NewMessage {
+        meta: None,
         project: seat.project.clone(),
         thread: thread(&seat.id),
         task: None,

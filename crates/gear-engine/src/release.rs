@@ -465,6 +465,10 @@ profile = "codex"
                     created: T0,
                 })?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -508,6 +512,10 @@ profile = "codex"
                     created: T0,
                 })?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -773,6 +781,10 @@ profile = "codex"
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-2".into(),
                     rank: 2,
@@ -879,6 +891,10 @@ profile = "codex"
         store
             .write(|tx| {
                 let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap_or(gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: "T-1".into(),
                     n: 1,

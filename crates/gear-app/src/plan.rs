@@ -324,6 +324,10 @@ fn apply_queue(
                     .cloned()
                     .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?;
                 let task = TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: project.to_string(),
                     id: id.clone(),
                     rank,
@@ -1587,6 +1591,7 @@ fn cancel_task(
     let lane_seat = format!("{project}:{lane}");
     if closed && tx.get_seat(&lane_seat)?.is_some() {
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("{}:cancel", task.id),
             task: Some(task.id.clone()),

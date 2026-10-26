@@ -141,6 +141,10 @@ fn world() -> Store {
                 created: T0,
             })?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,
@@ -170,6 +174,10 @@ fn deliver(store: &mut Store) {
     store
         .write(|tx| {
             tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(),
                 task: "T-1".into(),
                 n: 1,
@@ -464,6 +472,10 @@ fn a_backlog_is_worked_off_a_bounded_number_of_calls_at_a_time() {
             for n in 2..=10 {
                 let task = format!("T-{n}");
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: task.clone(),
                     rank: n,
@@ -483,6 +495,10 @@ fn a_backlog_is_worked_off_a_bounded_number_of_calls_at_a_time() {
                     issue: Some(100 + n),
                 })?;
                 tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: task.clone(),
                     n: 1,

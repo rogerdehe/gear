@@ -13,6 +13,7 @@ fn store() -> Store {
 
 fn msg(sender: &str, recipient: &str, kind: MsgKind, state: MsgState, created: i64) -> NewMessage {
     NewMessage {
+        meta: None,
         project: "p".into(),
         thread: "T-1:1".into(),
         task: Some("T-1".into()),

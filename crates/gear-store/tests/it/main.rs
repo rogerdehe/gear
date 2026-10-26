@@ -3,3 +3,4 @@ mod contract;
 mod migration_contract;
 mod slice2_contract;
 mod time_contract;
+mod v6_contract;

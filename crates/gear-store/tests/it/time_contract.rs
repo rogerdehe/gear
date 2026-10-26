@@ -8,6 +8,10 @@ const T0: i64 = 1_800_000_000;
 
 fn attempt() -> AttemptRow {
     AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: "p".into(),
         task: "T-1".into(),
         n: 1,

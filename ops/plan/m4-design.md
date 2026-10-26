@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS seat_pauses (
   kind TEXT NOT NULL,                 -- quota | wait
   reason TEXT,                        -- provider and window, or the task waited for
   start_at INTEGER NOT NULL, end_at INTEGER,   -- end_at NULL while it lasts
-  PRIMARY KEY (project, seat, start_at));
+  PRIMARY KEY (project, seat, kind, start_at));   -- kind in the key (T-135 review F4)
 
 -- §6: friction reports
 CREATE TABLE IF NOT EXISTS frictions (

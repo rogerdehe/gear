@@ -110,6 +110,10 @@ mod tests {
     /// A task with the given id, state and dependencies.
     fn task(id: &str, state: TaskState, deps: &[&str]) -> TaskRow {
         TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: id.into(),
             rank: 0,

@@ -70,6 +70,10 @@ fn store_with_plan(db: &Path, github: bool) -> Store {
             };
             tx.update_project(&project)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,
