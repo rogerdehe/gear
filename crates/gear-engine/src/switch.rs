@@ -740,6 +740,7 @@ mod tests {
             flags: BTreeSet::new(),
             idle: true,
             screen: None,
+            session: None,
         }
     }
 
