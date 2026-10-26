@@ -36,3 +36,15 @@ libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tempfile = "3"
+
+# T-132: a debug build carries line tables only — enough to name the file and
+# line in a panic or a backtrace, without the type and variable detail nothing
+# here reads. Smaller objects to write and link (macOS keeps debug info out of
+# the binary, in `<binary>.dSYM`, so this is where the difference lands).
+# `test` inherits `dev`; it is named too, so the two profiles a lane builds with
+# both say it.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"

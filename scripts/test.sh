@@ -5,6 +5,16 @@
 #
 #   scripts/test.sh            all tests
 #   scripts/test.sh -p gear-app  extra arguments go to `cargo nextest run`
+#
+# Why `cargo nextest` and not `cargo test` (T-132). Measured here, warm cache,
+# six interleaved runs of each on the same build: nextest 61-99 s (median 72 s)
+# against `cargo test --workspace` 72-125 s (median 101 s) — a process per test
+# runs the binaries side by side, a process per binary waits for each one in
+# turn. nextest also is the only one of the two that prints a time per test on a
+# stable compiler: `cargo test -- --report-time` and `--format json` both need
+# nightly, so under `cargo test` the over-10 s warning would have nothing to
+# read. Re-measure before switching: the numbers above are the reason, not the
+# tool's reputation.
 set -uo pipefail
 
 SLOW_S=10
@@ -64,8 +74,8 @@ elif [ "$elapsed" -gt 10 ];  then verdict="good (30 s)"
 else verdict="excellent (10 s)"; fi
 echo "build: ${build_s} s (compiling the test binaries; not in the red line, but every lane waits for it)"
 if [ "$elapsed" -gt 60 ]; then
-  echo "warning: the whole suite took ${elapsed} s to run: ${verdict}" >&2
+  echo "warning: the whole suite took ${elapsed} s to run under cargo nextest: ${verdict}" >&2
 else
-  echo "suite: ${elapsed} s to run: ${verdict}"
+  echo "suite: ${elapsed} s to run under cargo nextest: ${verdict}"
 fi
 exit "$status"
