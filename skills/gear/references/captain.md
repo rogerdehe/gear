@@ -129,7 +129,7 @@ deps: -
 
 - `# Goal` — one paragraph.
 - `# Milestone <id>: <title>` — `done:`, `bar:`, `eta:` (all three required).
-- `# Decisions` — one `- ` line per decision, newest last. Special lines: `- tail: <lanes>` (these lanes may stand idle: their idle and run-dry warnings are off until `- tail: -` clears it — only for lanes with no valuable work left, never for a dependency wait) and `- station M-<n>: keep course|time-box|cut|move|land <why>` (answers a station or landing item).
+- `# Decisions` — one `- ` line per decision, newest last. Special lines: `- tail: <lanes>` (these lanes may stand idle: their idle and run-dry warnings are off until `- tail: -` clears it — only for lanes with no valuable work left, never for a dependency wait; `until=T-<n>` or `until=<RFC3339>` ends the tail by itself) and `- station M-<n>: keep course|time-box|cut|move|land <why>` (answers a station or landing item).
 - `# Queue` — order = the order lanes work in. Header: `## <T-<n>|NEW> [now|must|should|could|wont] lane=<lane> milestone=<M> [required]`. Fields: `goal`, `accept`, `estimate` (minutes; required for `NEW`), `deps` (`-` or `T-a, T-b`), `state` (`ready`|`cancelled`), `followup-of`, `evidence-files`, `evidence-due`. A task you do not list keeps its state and place. Rewriting `goal`/`accept` makes a new contract version; a lane mid-task is told to rework to it. `deps` never sits between two tasks of one lane: a lane works its own queue in order, on its own branch, and takes its next task as soon as it hands the first in — the review runs in the background (`gear --skill decompose` rule 3).
 - `# Verdicts` — how you settle a task the engine did not settle (a fail, or an override):
 
@@ -139,7 +139,7 @@ deps: -
   ```
 
   A `fail` puts the task at the head of its lane's queue with your rework text. A `fail` may carry `estimate=<min>` — the minutes its rework round gets. A `pass` over a failed review needs `why="<why you overrule the reviewer>"`; a `pass` may carry `integrated-by=T-<m>` when the work landed with another task's merge. The quoted value (`rework="…"`, `why="…"`) is the **last** field of the line — the `estimate=`, `integrated-by=` and `evidence=` fields come before it — and it may contain quotes of its own.
-- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- release <lane>` (a held lane whose agent runs continues, one whose agent is gone is onboarded again), `- release <reviewer>` (a reviewer seat in Standby is released; one that is reviewing is refused — when you are idle and judge that no hand-in comes within 10 min, release the idle reviewers), `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted; delete the line after the apply).
+- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- release <lane>` (a held lane whose agent runs continues, one whose agent is gone is onboarded again), `- release <reviewer>` (a reviewer seat in Standby is released; one that is reviewing is refused — when you are idle and judge that no hand-in comes within 10 min, release the idle reviewers), `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted). A staff line is an instruction: the apply carries it out and the line is gone from the file, so it is never carried out twice.
 
 ## 3. The daily loop
 

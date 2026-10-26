@@ -140,7 +140,7 @@ fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::Ta
 /// The lanes that are about to stand idle: the lane and its current task
 /// (None when it has none).
 fn idle(s: &mut Store) -> Vec<(String, Option<String>, Vec<String>)> {
-    s.read(|tx| gear_app::plan::idle_lanes(tx, "p"))
+    s.read(|tx| gear_app::plan::idle_lanes(tx, "p", NOW))
         .unwrap()
         .into_iter()
         .map(|lane| (lane.lane, lane.current, lane.blocked))

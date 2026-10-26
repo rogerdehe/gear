@@ -227,8 +227,8 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
 
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
     assert!(
-        page.text.contains(&format!("# Verdicts: {VERDICTS_LINE}")),
-        "{}",
+        page.text.contains("# Staff: - remerge T-1"),
+        "a failed merge is retried, not reworked (B5): {}",
         page.text
     );
 
@@ -355,13 +355,18 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
         })
         .unwrap();
 
-    // Only the Failed op: the item still asks for a `# Verdicts` line, and a
-    // reply that would close it is refused with that line.
+    // Only the Failed op: the item still asks for a plan line, and a reply
+    // that would close it is refused with that line.
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
-    assert!(page.text.contains(&format!("# Verdicts: {VERDICTS_LINE}")), "{}", page.text);
+    assert!(
+        page.text.contains("# Staff: - remerge T-1"),
+        "a failed merge is retried, not reworked (B5): {}",
+        page.text
+    );
     let err = resolve(&mut s, &merge_item).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
-    assert!(err.detail.contains("fail rework"), "{err:?}");
+    assert!(err.detail.contains("- remerge T-1"), "{err:?}");
+    assert!(err.detail.contains("fail rework"), "the rework line is named too: {err:?}");
 
     // … then the remerge landed: a Confirmed op for the same attempt.
     s.write(|tx| {
