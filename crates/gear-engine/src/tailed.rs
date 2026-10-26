@@ -21,7 +21,7 @@ fn thread() -> &'static str {
 
 /// The project's all-tail **state** marker: "1" while the state has been
 /// announced. It outlives the message: a captain who resolves the item has
-/// acknowledged it, not ended the state (F1 of the T-116 review — resolving
+/// acknowledged it, not ended the state (F1 of the T-117 review — resolving
 /// used to bring a fresh item on the next tick).
 fn active_key(project: &str) -> String {
     format!("all-tail-active:{project}")

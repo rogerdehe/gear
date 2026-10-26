@@ -115,6 +115,9 @@ pub struct TickReport {
     pub reviewers: Vec<String>,
     /// Reviewer seats released this tick (their task left review).
     pub released: Vec<String>,
+    /// Reviewer seats released this tick because they run no reviewer
+    /// (B02-04): a dead seat that held a temp slot.
+    pub dead_temps: Vec<String>,
     /// Tasks merged into the integration branch this tick (`task @ branch`).
     pub merged: Vec<String>,
     /// Lane items for the captain opened, updated or closed this tick
@@ -278,6 +281,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 .into_iter()
                 .map(|change| format!("{}:{}", change.lane, change.action)),
         );
+
+        // 6a. a reviewer seat that runs no reviewer frees its slot (B02-04):
+        //     a dead temp seat is released before the reviews start, so the
+        //     count of temps in use never passes the quota and the next
+        //     review can take the seat.
+        report.dead_temps.extend(release::release_dead_temps(store, herdr, &project, now)?);
 
         // 6c. every lane in the tail while required work remains: one item in
         //     the captain's inbox, so the warnings a captain turned off do not

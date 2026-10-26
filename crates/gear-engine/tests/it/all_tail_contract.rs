@@ -142,7 +142,8 @@ fn a_required_task_ending_closes_the_item() {
 }
 
 #[test]
-fn one_lane_out_of_the_tail_opens_nothing() {    let mut w = world();
+fn one_lane_out_of_the_tail_opens_nothing() {
+    let mut w = world();
     tail(&mut w.store, "heat", true);
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     assert!(report.tail.is_empty(), "{report:?}");

@@ -44,6 +44,18 @@ pub(crate) fn role_chain<'a>(
         .collect()
 }
 
+/// The chain a reviewer runs on: `[models].review`, empty entries dropped
+/// (T-115). Its first entry is the reviewer's starting model, the next ones
+/// its quota fallbacks.
+pub(crate) fn review_chain(config: &ProjectConfig) -> Vec<&ModelEntry> {
+    config
+        .models
+        .review
+        .iter()
+        .filter(|entry| !entry.model().is_empty())
+        .collect()
+}
+
 /// The model the writer of an attempt runs on: the lane's primary model, or
 /// the captain's own chain.
 pub(crate) fn writer_model(config: &ProjectConfig, writer_seat: &str) -> Option<String> {
@@ -67,8 +79,7 @@ pub(crate) fn writer_model(config: &ProjectConfig, writer_seat: &str) -> Option<
 pub(crate) fn review_entry<'a>(
     config: &'a ProjectConfig,
     writer_model: Option<&str>,
-) -> Option<&'a ModelEntry> {
-    config
+) -> Option<&'a ModelEntry> {    config
         .models
         .review
         .iter()

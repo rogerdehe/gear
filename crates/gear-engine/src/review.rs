@@ -71,6 +71,13 @@ pub fn start_reviews(
     report.started.extend(recover_missing_packets(store, project, &config, now)?);
 
     for task in tasks_to_review(store, project)? {
+        // T-69 / B02-04: an attempt whose checkout already failed three times
+        // is not tried again. A recovered seat (the park's slot freed) must
+        // not restart the loop with a fresh generation and a fresh budget; a
+        // new attempt of the task has a fresh budget and its own key.
+        if checkout_stuck(store, project, &task.task, task.attempt)? {
+            continue;
+        }
         // 1. the model the reviewer runs on: the first entry of the review
         //    chain that differs from the writer's **current** model (T-35).
         //    Without a review chain the model is not managed.
@@ -123,11 +130,14 @@ pub fn start_reviews(
         }
 
         // 3. a free temp slot? A reviewer that already holds one (starting)
-        //    carries on; a queued one waits, and the captain is told once
-        //    (design/10: QUEUED happens only when the quota is exhausted; the
-        //    quota is the project config's `[quota].temps`).
-        if seat.state != SeatState::Released
-            && !occupies_quota(seat.state)
+        //    carries on; **every** other seat — a warm or recovered one
+        //    included — needs a slot before it starts, and a queued one waits,
+        //    and the captain is told once (design/10: QUEUED happens only when
+        //    the quota is exhausted; the quota is the project config's
+        //    `[quota].temps`). A `Released` seat used to skip this check, so
+        //    several seats recovered by `release_dead_temps` started at once
+        //    and passed the quota (F1 of the T-116 review).
+        if !occupies_quota(seat.state)
             && !has_free_slot(store, project, i64::from(config.quota.temps))?
         {
             report.waiting.push(task.task.clone());
@@ -445,6 +455,12 @@ fn start_reviewer(
                         }
                     }
                 }
+                // The answer could not be read: a detached checkout (its HEAD
+                // is kept, the branch let go of — T-69) answers without a
+                // branch, and the worktree may well be open. The seat waits:
+                // it is not parked, so it holds no temp slot, and the next
+                // tick opens the worktree again.
+                Outcome::Uncertain { .. } => return Ok(Started::NotYet),
                 other => {
                     park(store, &seat.id, &step_failure("worktree_open", &other), now)?;
                     return Ok(Started::NotYet);
@@ -480,7 +496,7 @@ fn start_reviewer(
     let generation = if pending { seat.generation } else { seat.generation + 1 };
     if !pending {
         if let Err(reason) =
-            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now))
+            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, kind, now))
         {
             park(store, &seat.id, &format!("begin_onboard: {}", reason.detail), now)?;
             return Ok(Started::NotYet);
@@ -510,7 +526,7 @@ fn start_reviewer(
         // The start was accepted before the restart: adopt it. Nothing is
         // typed into it — not the environment, not the checkout.
         Some(info) => {
-            if !recorded_start(store, &seat.id, generation, &pane, &kind)? {
+            if !recorded_start(store, &seat.id, generation, &pane, kind)? {
                 // Another agent is in the pane: do not start, and never take
                 // the pane from it. A human decides.
                 park(
@@ -582,7 +598,12 @@ fn start_reviewer(
                 Checked::Stuck(reason) => {
                     // It keeps failing: the seat is parked for a human and the
                     // captain gets one item, not a fight every tick (T-69).
+                    // The attempt is marked, so a seat recovered from the park
+                    // (B02-04) is not handed the same failing checkout again:
+                    // the new generation's budget would restart the loop (F2
+                    // of the T-116 review). A new attempt has a fresh budget.
                     park(store, &seat.id, &reason, now)?;
+                    mark_checkout_stuck(store, &config.project.id, &task.task, task.attempt, &reason)?;
                     tell_captain(store, &config.project.id, task, &reason, now)?;
                     return Ok(Started::NotYet);
                 }
@@ -985,6 +1006,33 @@ fn bump_checkout_fails(store: &mut Store, seat: &str, generation: i64) -> GearRe
     })
 }
 
+/// The key of an attempt whose checkout already failed three times.
+fn checkout_stuck_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_checkout_stuck.{project}.{task}.{attempt}")
+}
+
+/// Remember that this attempt's checkout is stuck: the seat is parked for a
+/// human and the attempt is not handed to another seat (B02-04: a recovered
+/// seat would restart the three-try loop with a fresh budget). A new attempt
+/// of the task has its own key.
+fn mark_checkout_stuck(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    reason: &str,
+) -> GearResult<()> {
+    store.write(|tx| tx.set_meta(&checkout_stuck_key(project, task, attempt), reason))
+}
+
+/// Whether this attempt's checkout is already stuck (three failed tries): no
+/// reviewer is started for it until a new attempt is handed in.
+fn checkout_stuck(store: &mut Store, project: &str, task: &str, attempt: i64) -> GearResult<bool> {
+    Ok(store
+        .read(|tx| tx.get_meta(&checkout_stuck_key(project, task, attempt)))?
+        .is_some_and(|reason| !reason.is_empty()))
+}
+
 /// Submit the checkout of a job and remember its token, so that the next tick
 /// can read the chain's report.
 fn submit_checkout(
@@ -1107,6 +1155,80 @@ fn writer_current_model(
         .read(|tx| tx.get_meta(&crate::model::model_meta_key(writer)))?
         .filter(|model| !model.is_empty());
     Ok(recorded.or_else(|| crate::model::writer_model(config, writer)))
+}
+
+/// The review job a reviewer seat holds: the task it is bound to, the attempt
+/// under review and the full packet (T-115). `None` when the seat holds no
+/// job, the attempt carries no candidate, or the verdict is already in: a
+/// restarted reviewer must not be sent work that no longer waits for it.
+pub(crate) struct ReviewJob {
+    pub task: String,
+    pub attempt: i64,
+    pub packet: String,
+}
+
+/// The job of a reviewer seat, with its packet — what a reviewer is given
+/// again when its model changed under it (T-115).
+pub(crate) fn job_for_seat(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+) -> GearResult<Option<ReviewJob>> {
+    let Some(task) = seat.task_id.clone() else {
+        return Ok(None);
+    };
+    let Some(row) = store.read(|tx| tx.get_project(project))? else {
+        return Ok(None);
+    };
+    let Ok(config) = gear_app::config::parse(&row.config_toml) else {
+        return Ok(None);
+    };
+    let Some(attempt) = store
+        .read(|tx| tx.attempts_of_task(project, &task))?
+        .into_iter()
+        .last()
+    else {
+        return Ok(None);
+    };
+    if store.read(|tx| tx.get_review_verdict(project, &task, attempt.n))?.is_some() {
+        return Ok(None);
+    }
+    let Some(candidate) = attempt.candidate.clone() else {
+        return Ok(None);
+    };
+    let packet = review_packet_for(store, &config, &task, attempt.n, &candidate)?;
+    Ok(Some(ReviewJob { task, attempt: attempt.n, packet }))
+}
+
+/// The model a reviewer seat runs on now (T-115): the one a fallback recorded,
+/// else the entry it was started on — the first review model that differs from
+/// its writer's current model (the rule `start_reviews` uses).
+pub(crate) fn seat_current_model(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+) -> GearResult<Option<String>> {
+    let recorded = store
+        .read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?
+        .filter(|model| !model.is_empty());
+    if recorded.is_some() {
+        return Ok(recorded);
+    }
+    let Some(task) = seat.task_id.clone() else {
+        return Ok(None);
+    };
+    let writer = store
+        .read(|tx| tx.attempts_of_task(project, &task))?
+        .into_iter()
+        .last()
+        .map(|attempt| attempt.seat);
+    let writer_model = match writer {
+        Some(writer) => writer_current_model(store, config, &writer)?,
+        None => None,
+    };
+    Ok(crate::model::review_entry(config, writer_model.as_deref())
+        .map(|entry| entry.model().to_string()))
 }
 
 /// The review packet of an attempt: the contract's goal and accept, the
@@ -3364,7 +3486,7 @@ fn packet_text(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<
                 && op.attempt == Some(attempt)
                 && op.payload.get("nudge").is_none()
         })
-        .last();
+        .next_back();
     Ok(first
         .and_then(|op| op.payload.get("text").and_then(|t| t.as_str()).map(str::to_string))
         .unwrap_or_default())
