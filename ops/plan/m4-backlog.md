@@ -49,3 +49,4 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 
 - Tokens per task: next to the time and decision records, record how many tokens each task cost (lane and reviewer, per attempt), so a voyage report can show it.
 - Quota reset time of connected models: with an API key OpenCode shows no reset time, and pi has the same gap. Find a way to learn when each connected model's quota resets (provider API, response headers, or the CLI). Research item; its scope in M4 is to be discussed with the user first.
+- Live Codex quota fallback: watch a reviewer hit Codex's spent weekly limit and the review finish on opencode-go/deepseek-v4-pro (M3.1 could not: the quota reset first).
