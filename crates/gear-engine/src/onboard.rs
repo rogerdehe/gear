@@ -20,13 +20,47 @@ pub(crate) fn forget_gear_hooks(worktree: &std::path::Path) -> Result<(), String
         // No worktree override at all (or no worktree config extension).
         Err(_) => return Ok(()),
     };
-    if set.is_empty() || !std::path::Path::new(&set).ends_with("gear-hooks") {
-        return Ok(()); // the repository's own hooks: not ours to touch
+    if set.is_empty() {
+        return Ok(());
+    }
+    // Only the exact directory the old installer made — `<this worktree's git
+    // dir>/gear-hooks` — is ours. A repository that happens to point its hooks
+    // at another directory by that name keeps it: the removal is recursive and
+    // must never reach a directory GEAR did not create (F2 of the review).
+    let git_dir = match git(worktree, &["rev-parse", "--absolute-git-dir"]) {
+        Ok(dir) => dir.trim().to_string(),
+        Err(_) => return Ok(()),
+    };
+    if git_dir.is_empty() {
+        return Ok(());
+    }
+    let ours = std::path::Path::new(&git_dir).join("gear-hooks");
+    let set_path = std::path::Path::new(&set);
+    let same = match (std::fs::canonicalize(set_path), std::fs::canonicalize(&ours)) {
+        (Ok(set), Ok(ours)) => set == ours,
+        _ => set_path == ours,
+    };
+    if !same {
+        return Ok(()); // not the hook GEAR installed: leave it alone
     }
     git_config(worktree, &["--worktree", "--unset", "core.hooksPath"])?;
     // The directory holds nothing but GEAR's script.
-    let _ = std::fs::remove_dir_all(&set);
+    let _ = std::fs::remove_dir_all(&ours);
     Ok(())
+}
+
+/// Run `git <args>` in `dir`; the trimmed stdout, or the stderr as the error.
+fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn git_config(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
@@ -1465,6 +1499,20 @@ repo = "web"
             String::from_utf8_lossy(&set.stdout)
         );
         assert!(!std::path::Path::new(&hooks).exists(), "the hook directory is gone");
+
+        // F2 of the review: a repository that points its hooks at *another*
+        // directory named `gear-hooks` keeps it — the removal is recursive and
+        // must only reach the one the old installer made.
+        let own = format!("{}/my-tools/gear-hooks", root.display());
+        sh(&worktree, &format!("mkdir -p {own} && printf '#!/bin/sh\\nexit 0\\n' > {own}/pre-push"));
+        sh(&worktree, &format!("git config --worktree core.hooksPath {own}"));
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w1:p2");
+        herdr.add_worktree("home/heat", &worktree.to_string_lossy(), "w1:p2");
+        onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+        assert_eq!(sh(&worktree, "git config --worktree core.hooksPath"), own, "not ours");
+        assert!(std::path::Path::new(&own).join("pre-push").exists(), "its hooks stay");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
