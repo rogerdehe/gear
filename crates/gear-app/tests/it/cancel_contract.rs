@@ -173,3 +173,216 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
 }
+
+// ---- T-112: a done task whose merge was given up can be cancelled ----------
+
+use std::path::{Path, PathBuf};
+
+use gear_model::{OpKind, OpState};
+use gear_store::{AttemptRow, ContractRow, NewMessage, NewOp, OpRow, TaskRow};
+
+fn sh(dir: &Path, command: &str) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn sh_out(dir: &Path, command: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A repo whose `dev` is on a bare origin and whose lane branch carries one
+/// commit — merged into `dev` when `merged`, pushed only on its own otherwise.
+fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
+    let origin = scratch.join("origin.git");
+    let work = scratch.join("work");
+    sh(scratch, &format!("git init -q --bare {}", origin.display()));
+    sh(scratch, &format!("git init -q -b dev {}", work.display()));
+    std::fs::write(work.join("README.md"), "dev\n").unwrap();
+    sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+    sh(&work, &format!("git remote add origin {}", origin.display()));
+    sh(&work, "git push -q origin dev");
+    sh(
+        &work,
+        "git switch -qc heat/t1 && echo work >> README.md && git add -A \
+         && git -c user.email=a@b -c user.name=a commit -qm work && git push -q origin heat/t1",
+    );
+    let candidate = sh_out(&work, "git rev-parse HEAD");
+    if merged {
+        sh(
+            &work,
+            "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 \
+             -m merge && git push -q origin dev",
+        );
+    }
+    (work, candidate)
+}
+
+fn config(repo: &Path) -> String {
+    format!(
+        "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+         \n[quota]\nlanes = 1\ntemps = 0\n\
+         \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+         \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+         kind = \"opencode\"\nprofile = \"opencode\"\n\
+         \n[conventions]\nintegration = \"dev\"\n",
+        repo = serde_json::json!(repo.to_string_lossy()).to_string()
+    )
+}
+
+/// The project with T-1 Done, its accepted attempt on `candidate`, a failed
+/// merge op and the merge/push items still open.
+fn done_world(repo: &Path, candidate: &str) -> Store {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T0)?;
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = config(repo);
+        tx.update_project(&project)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "codex", T0)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+        tx.insert_task(&TaskRow {
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Done,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: T0,
+        })?;
+        tx.insert_contract(&ContractRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            version: 1,
+            goal: "A".into(),
+            accept: "a".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0,
+        })?;
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 1,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: AttemptState::Accepted,
+            candidate: Some(candidate.to_string()),
+            report: Some("ops/reports/T-1.md".into()),
+            safe_point: None,
+            started: T0,
+            updated: T0,
+        })?;
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Merge,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "branch": "heat/t1" }),
+            created: T0,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+        tx.set_op_state("p", &op.id, OpState::Failed, Some("the gate said no"), T0)?;
+        for thread in ["merge-failed:T-1", "push:T-1"] {
+            tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: thread.into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: "the merge was refused".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0,
+            })?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+const CANCEL_DONE: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
+
+fn merge_ops(s: &mut Store) -> Vec<OpRow> {
+    s.read(|tx| tx.ops_in_state("p", OpState::Failed)).unwrap()
+}
+
+/// A done task whose accepted work never reached the integration branch is
+/// cancelled from the plan: the task ends Cancelled, its open merge and push
+/// items are resolved "cancelled by the captain", the failed merge op stays as
+/// history and no op is created.
+#[test]
+fn a_done_task_whose_merge_was_given_up_is_cancelled_with_its_items() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), false);
+    let mut s = done_world(&work, &candidate);
+
+    let result = run(&mut s, CANCEL_DONE, 0, "v1").unwrap();
+
+    assert_eq!(result.cancelled, vec!["T-1".to_string()]);
+    assert_eq!(result.resolved.len(), 2, "the merge and push items: {result:?}");
+    assert_eq!(state(&mut s, "T-1"), TaskState::Cancelled);
+    for thread in ["merge-failed:T-1", "push:T-1"] {
+        let items = s.read(|tx| tx.thread_messages("p", thread)).unwrap();
+        assert_eq!(items.len(), 1, "{thread}: {items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{thread}: {items:?}");
+        assert_eq!(items[0].result.as_deref(), Some("cancelled by the captain"));
+    }
+    let ops = merge_ops(&mut s);
+    assert_eq!(ops.len(), 1, "the failed merge op stays as history: {ops:?}");
+    assert_eq!(ops[0].result.as_deref(), Some("the gate said no"));
+    assert_eq!(merge_ops(&mut s).len(), 1, "no op was created");
+}
+
+/// A done task whose accepted work *is* on the integration branch stays
+/// uncancellable, as before.
+#[test]
+fn a_done_task_whose_work_is_merged_cannot_be_cancelled() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), true);
+    let mut s = done_world(&work, &candidate);
+
+    let error = run(&mut s, CANCEL_DONE, 0, "v1").unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("T-1"), "{}", error.detail);
+    assert!(error.detail.contains("cannot be cancelled"), "{}", error.detail);
+    assert_eq!(state(&mut s, "T-1"), TaskState::Done);
+    let items = s.read(|tx| tx.thread_messages("p", "merge-failed:T-1")).unwrap();
+    assert_eq!(items[0].state, MsgState::Open, "nothing was resolved");
+}
