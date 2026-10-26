@@ -237,3 +237,46 @@ fn a_lane_with_nothing_at_all_says_nothing_is_left() {
     assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
     assert_eq!(text, "nothing left planned");
 }
+
+#[test]
+fn a_lane_whose_work_is_in_review_has_nothing_left() {
+    // The work was handed in and waits for its review in the background: the
+    // lane is idle and has nothing left (review F1).
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Verifying, vec![], None);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+
+    let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(reason, Some(IdleReason::NoWork), "{reason:?}");
+    assert_eq!(text, "nothing left planned");
+}
+
+#[test]
+fn the_task_after_the_one_in_review_is_the_next_one() {
+    // The work in review does not hide the task that is queued behind it.
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Verifying, vec![], None);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    task(&mut store, "T-3", 2, TaskState::Ready, vec![], None);
+
+    let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(reason, Some(IdleReason::Undelivered { task: "T-3".into() }), "{reason:?}");
+    assert_eq!(text, "next T-3 is ready but not delivered");
+}
+
+#[test]
+fn the_task_after_the_one_in_review_may_wait_for_a_dependency() {
+    let mut store = world();
+    task(&mut store, "T-2", 1, TaskState::Verifying, vec![], None);
+    attempt(&mut store, "T-2", 1, AttemptState::Submitted);
+    task(&mut store, "T-3", 2, TaskState::Ready, vec!["T-9"], None);
+    task(&mut store, "T-9", 3, TaskState::Ready, vec![], None);
+
+    let (reason, text) = reason_of(&mut store, T0);
+    assert_eq!(
+        reason,
+        Some(IdleReason::DepWait { task: "T-3".into(), on: "T-9".into() }),
+        "{reason:?}"
+    );
+    assert_eq!(text, "next T-3 waits for T-9 (heat, queued)");
+}

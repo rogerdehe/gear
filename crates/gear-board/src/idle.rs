@@ -120,8 +120,11 @@ pub fn idle_reason(
         return Ok(None);
     }
 
-    // The next task of the queue: the first one that is not finished.
-    let Some(next) = queue.iter().find(|task| !is_finished(task.state)) else {
+    // The next task of the queue: the first one that is queued. A task that
+    // was handed in waits for its review in the background and does not hide
+    // the work that is left (the engine gives the lane its next task while
+    // the review runs).
+    let Some(next) = queue.iter().find(|task| is_queued(task.state)) else {
         return Ok(Some(IdleReason::NoWork));
     };
 
@@ -139,14 +142,8 @@ pub fn idle_reason(
         }
     }
 
-    // The task is ready and nobody gave it to the lane.
-    if next.state == TaskState::Ready {
-        return Ok(Some(IdleReason::Undelivered { task: next.id.clone() }));
-    }
-
-    // The task is in flight or in review and the lane has no attempt of it:
-    // the lane is not idle, the work is somewhere else.
-    Ok(None)
+    // The task is queued and nobody gave it to the lane.
+    Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
 }
 
 /// The text of the reason (§8.2).
@@ -192,10 +189,10 @@ fn queue_of(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<Vec<TaskRow>> 
     Ok(queue)
 }
 
-/// Is the task finished? A lane whose tasks are all finished has nothing
-/// left.
-fn is_finished(state: TaskState) -> bool {
-    matches!(state, TaskState::Done | TaskState::Failed | TaskState::Cancelled)
+/// Is the task queued? A task that was handed in (it waits for its review in
+/// the background) is not: the lane may take its next task meanwhile.
+fn is_queued(state: TaskState) -> bool {
+    matches!(state, TaskState::Ready | TaskState::Waiting)
 }
 
 /// Does the lane work? It has an attempt in flight.
