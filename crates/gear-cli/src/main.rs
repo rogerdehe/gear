@@ -29,7 +29,9 @@ struct Cli {
 enum Cmd {
     /// Report: progress | question | result | instruction | review.
     Send(SendCmd),
-    /// Captain: handle exact message ids.
+    /// Captain: handle exact message ids. Without a mode the item is
+    /// resolved (the default) and its sender is answered; `--wait`, `--note`
+    /// and `--reopen` are the other modes.
     Reply(ReplyCmd),
     /// Captain: plan operations.
     Plan {
@@ -122,7 +124,8 @@ struct ReplyCmd {
     /// Message ids to handle (M-…).
     #[arg(required = true)]
     ids: Vec<String>,
-    /// Close the item; the text is answered to its sender when that is a live seat.
+    /// Close the item; this is the default. The text is answered to its
+    /// sender when that is a live seat.
     #[arg(long, conflicts_with_all = ["wait", "note"])]
     resolve: bool,
     /// Keep the item waiting until WHO can answer; the text is answered to its
@@ -134,6 +137,10 @@ struct ReplyCmd {
     /// Keep the item open with the text as the captain's record on it; sent to nobody.
     #[arg(long)]
     note: bool,
+    /// Reopen an item that was resolved by mistake: it goes back to the
+    /// captain's inbox. Nothing is sent to the seat that asked.
+    #[arg(long, conflicts_with_all = ["resolve", "wait", "note"])]
+    reopen: bool,
     #[arg(long)]
     downgrade: bool,
     #[arg(long = "request-id")]
@@ -1246,7 +1253,15 @@ fn run_send(
         ring_recipient_now(store, herdr, &result, now)?
     };
     if json {
-        return serde_json::to_string(&result).map_err(json_error);
+        let mut doc = serde_json::to_value(&result).map_err(json_error)?;
+        // The answer to a hand-in travels with the receipt (design §10.7, row
+        // B03-04/10).
+        if kind == gear_model::MsgKind::Result && !result.replayed {
+            if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
+                doc["hand_in"] = serde_json::Value::String(hand_in);
+            }
+        }
+        return serde_json::to_string(&doc).map_err(json_error);
     }
     {
         let mut line = format!(
@@ -1259,8 +1274,44 @@ fn run_send(
         if result.replayed {
             line.push_str(" [replayed]");
         }
+        // The answer to a hand-in (design §10.7, row B03-04/10): the work is
+        // in, the next task comes by itself, and the task branch is not
+        // pushed again. The lane reads the line where it handed in.
+        if kind == gear_model::MsgKind::Result && !result.replayed {
+            if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
+                line.push('\n');
+                line.push_str(&hand_in);
+            }
+        }
         Ok(line)
     }
+}
+
+/// The reply a hand-in gets (design §10.7, row B03-04/10): "Handed in. End
+/// your turn: the next task comes by itself; do not push to <lane>/t<n>
+/// again."
+///
+/// The branch is the task's own: the lane that owns the task, else the seat
+/// that hands in (a lane's seat name is its lane name). `None` when the
+/// hand-in names no task.
+fn hand_in_reply(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    task: Option<&str>,
+) -> GearResult<Option<String>> {
+    let Some(task) = task else { return Ok(None) };
+    let project = env.ctx.as_ref().map(|ctx| ctx.project.clone()).unwrap_or_default();
+    let lane = store
+        .read(|tx| tx.get_task(&project, task))
+        .ok()
+        .flatten()
+        .and_then(|row| row.lane)
+        .or_else(|| env.ctx.as_ref().map(|ctx| ctx.seat.clone()))
+        .unwrap_or_default();
+    let branch = gear_app::base::task_branch(&lane, task);
+    Ok(Some(format!(
+        "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
+    )))
 }
 
 /// Type the doorbell of a message that must reach the recipient while it works
@@ -1381,10 +1432,14 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
     }
 }
 
-/// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`, or
-/// `--resolve` (the default; `--downgrade` alone also means a note).
+/// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`,
+/// `--reopen`, or `--resolve` (the default; `--downgrade` alone also means a
+/// note).
 fn reply_mode(c: &ReplyCmd, now: i64) -> GearResult<(gear_app::mail::ReplyMode, Option<String>, Option<i64>)> {
     use gear_app::mail::ReplyMode;
+    if c.reopen {
+        return Ok((ReplyMode::Reopen, None, None));
+    }
     if let Some(who) = &c.wait {
         let until = c.until.as_deref().ok_or_else(|| {
             GearError::new(gear_model::ErrorCode::BadFormat, "--wait needs --until <t>".to_string())
@@ -1935,6 +1990,48 @@ mod tests {
         assert!(text.contains("heat · agent working · no current task · 0 queued"), "{text}");
     }
 
+    /// The world with a task the lane works on, so a hand-in goes through.
+    fn world_with_task() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
     fn send_cmd(kind: &str) -> SendCmd {
         SendCmd {
             kind: kind.into(),
@@ -1963,6 +2060,7 @@ mod tests {
             wait: None,
             until: None,
             note: false,
+            reopen: false,
             downgrade: false,
             request_id: Some("r-2".into()),
             message: "Use v2".into(),
@@ -2797,6 +2895,104 @@ mod tests {
         let reply = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
         assert_eq!(reply.kind, MsgKind::Reply);
         assert_eq!(reply.recipient, "p:heat");
+    }
+
+    #[test]
+    fn a_reopen_reopens_a_resolved_item() {
+        // §10.7 row B03-07: an item resolved by mistake goes back to the
+        // captain's inbox.
+        let (mut store, mut herdr) = world();
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &send_cmd("question"),
+            "v1 or v2?".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        run_reply(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &reply_cmd(&["M-1"]),
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
+            MsgState::Resolved
+        );
+
+        let mut c = reply_cmd(&["M-1"]);
+        c.reopen = true;
+        c.request_id = Some("r-3".into());
+        let out = run_reply(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &c,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("M-1: open"), "{out}");
+        assert_eq!(
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
+            MsgState::Open
+        );
+        // The item is back in the captain's inbox.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 4)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+    }
+
+    #[test]
+    fn the_reply_help_says_the_default_resolves() {
+        // §10.7 row B03-07: the help says what the default does, and names
+        // the way back.
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let help = command
+            .get_subcommands_mut()
+            .find(|command| command.get_name() == "reply")
+            .expect("the reply command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("resolved"), "the default resolves: {help}");
+        assert!(help.contains("--reopen"), "the way back: {help}");
+    }
+
+    #[test]
+    fn a_hand_in_answers_with_the_next_task_line() {
+        // §10.7 row B03-04/10: after a hand-in the lane is told that its
+        // work is in, that the next task comes by itself and that its task
+        // branch is not pushed again.
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/tasks/T-1.md".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap();
+        assert!(
+            out.contains(
+                "Handed in. End your turn: the next task comes by itself; do not push to heat/t1 again."
+            ),
+            "{out}"
+        );
     }
 
     #[test]
