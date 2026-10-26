@@ -389,6 +389,9 @@ pub struct Verdict {
     pub evidence: Option<String>,
     /// required for fail
     pub rework: Option<String>,
+    /// The task whose merge landed this work (design §10.7, row B03-01):
+    /// `integrated-by=T-m`. The settle decides what it means.
+    pub integrated_by: Option<String>,
     pub by_seat: String,
 }
 

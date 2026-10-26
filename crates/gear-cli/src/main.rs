@@ -2816,8 +2816,11 @@ mod tests {
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
-        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
-        herdr.add_agent(LANE_PANE, lane_kind, status);
+        // Every agent carries the name of its seat (T-149: a text aims at the
+        // live agent name, and Herdr refuses a prompt to an agent that lost
+        // its name).
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+        herdr.add_agent_named(LANE_PANE, lane_kind, status, "p-heat");
         (store, herdr)
     }
 
@@ -2937,13 +2940,14 @@ mod tests {
         );
         let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(stored.body, "stop and read this", "the message is stored all the same");
-        // The claim is recorded, and recorded as failed: a definitely refused
-        // doorbell covers nothing, so the engine rings the message (T-130 F2).
+        // The claim is recorded, and it waits: design §10.1 recovers a refused
+        // prompt by naming the agent of the seat again and typing it on the
+        // next tick (nothing is lost).
         let ops = store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
             .unwrap();
         assert_eq!(ops.len(), 1, "{ops:?}");
-        assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
+        assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
 
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
         let said = herdr.prompts_to(LANE_PANE);
