@@ -303,7 +303,7 @@ pub fn switch_in_place(
     //    after every gate, so a working agent or another occupant is not even
     //    renamed.
     if let Ok(Some(seat)) = store.read(|tx| tx.get_seat(seat_id)) {
-        crate::names::ensure(herdr, &pane, &crate::names::agent_name(&seat.project, &seat.name));
+        crate::names::ensure(herdr, &pane, &crate::names::desired(&seat));
     }
     let mut sent = false;
     match plan.step {

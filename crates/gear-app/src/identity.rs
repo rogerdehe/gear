@@ -400,11 +400,10 @@ pub fn seat_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Option<SeatRow>> {
             let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
                 continue;
             };
-            if binding.status == BindingStatus::Active && binding.pane_id == pane {
-                if best.as_ref().is_none_or(|(created, _)| binding.created > *created) {
+            if binding.status == BindingStatus::Active && binding.pane_id == pane
+                && best.as_ref().is_none_or(|(created, _)| binding.created > *created) {
                     best = Some((binding.created, seat));
                 }
-            }
         }
     }
     Ok(best.map(|(_, seat)| seat))

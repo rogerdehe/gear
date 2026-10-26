@@ -8,15 +8,17 @@
 //! reported to the captain once and never stolen; and a delivery to a pane whose
 //! agent lost its name renames it and delivers in the same tick.
 
-use gear_engine::{tick, EngineCfg};
+use gear_engine::ops::execute_intended;
+use gear_engine::{names, tick, EngineCfg};
 use gear_herdr::fake::{Call, FakeHerdr};
 use gear_herdr::AgentStatus;
-use gear_model::{MsgState, SeatRole, TaskState};
-use gear_store::{testing, Store, TaskRow};
+use gear_model::{MsgState, OpKind, SeatRole, TaskState};
+use gear_store::{testing, NewOp, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
 const LANE_PANE: &str = "w1:p2";
+const REV_PANE: &str = "w1:p3";
 /// A pane with an agent that is nobody's seat.
 const OTHER_PANE: &str = "w1:p9";
 
@@ -52,6 +54,62 @@ fn world() -> World {
 }
 
 impl World {
+    /// A reviewer seat `review-1` on task T-7 (the seat is warm, the agent is
+    /// named after the task it reviews: `<project>-review-t7`), with the packet
+    /// delivery still to do.
+    fn reviewer(&mut self) -> gear_store::SeatRow {
+        let seat = self
+            .store
+            .write(|tx| {
+                let seat = testing::seed_temp_seat(tx, "p", "review-1", "T-7", REV_PANE, "codex", T0)?;
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-7".into(),
+                    rank: 1,
+                    state: TaskState::Verifying,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                Ok(seat)
+            })
+            .unwrap();
+        self.herdr.add_agent(REV_PANE, "codex", AgentStatus::Idle);
+        seat
+    }
+
+    /// An Intended delivery of the review packet to `seat`.
+    fn packet(&mut self, seat: &gear_store::SeatRow) -> String {
+        self.store
+            .write(|tx| {
+                Ok(tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: seat.id.clone(),
+                        generation: seat.generation,
+                        kind: OpKind::Deliver,
+                        task: Some("T-7".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "Review T-7 attempt 1: packet at p/T-7.md" }),
+                        created: T0 + 5,
+                    })?
+                    .id)
+            })
+            .unwrap()
+    }
+
     fn name(&self, pane: &str) -> Option<&str> {
         self.herdr.agent_name(pane)
     }
@@ -125,6 +183,78 @@ fn a_correctly_named_agent_gets_no_rename() {
         w.herdr.calls
     );
     assert!(report.renamed.is_empty(), "{report:?}");
+}
+
+/// F1 of the T-134 review: a reviewer's agent is named after the task it
+/// reviews (`<project>-review-<task>`, the name its review started with), not
+/// after its warm seat — so a correctly named reviewer is left alone.
+#[test]
+fn a_correctly_named_reviewer_gets_no_rename() {
+    let mut w = world();
+    let seat = w.reviewer();
+    w.herdr.set_agent_name(REV_PANE, Some("p-review-t7"));
+
+    // The tick's own step (restore), with the names Herdr reports now.
+    let names = names::read(&mut w.herdr).unwrap();
+    let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, T0 + 10).unwrap();
+
+    assert!(!restored.renamed.contains(&seat.id), "{restored:?}");
+    assert_eq!(
+        w.name(REV_PANE),
+        Some("p-review-t7"),
+        "the reviewer keeps the name its review started with"
+    );
+    assert!(
+        !w.herdr
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::Rename { pane, .. } if pane == REV_PANE)),
+        "a correctly named reviewer is not renamed: {:?}",
+        w.herdr.calls
+    );
+}
+
+/// F1: a cleared reviewer is restored to its **task-based** name before the
+/// delivery — not to its warm seat's name, and the packet still goes out.
+#[test]
+fn a_cleared_reviewer_is_restored_to_its_task_name_before_delivery() {
+    let mut w = world();
+    let seat = w.reviewer();
+    w.packet(&seat);
+    assert_eq!(w.name(REV_PANE), None, "Herdr cleared the name");
+    assert_eq!(
+        names::desired(&seat),
+        "p-review-t7",
+        "the seat's agent is named after the task it reviews"
+    );
+
+    // The delivery path makes sure of the name before it types.
+    execute_intended(&mut w.store, &mut w.herdr, "p", T0 + 10).unwrap();
+
+    let renamed_at = w
+        .herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Rename { name, .. } if name == "p-review-t7"))
+        .unwrap_or_else(|| panic!("no task-based rename: {:?}", w.herdr.calls));
+    let prompt_at = w
+        .herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Prompt { pane, .. } if pane == REV_PANE))
+        .unwrap_or_else(|| panic!("no packet: {:?}", w.herdr.calls));
+    assert!(renamed_at < prompt_at, "named first: {:?}", w.herdr.calls);
+    assert_eq!(w.name(REV_PANE), Some("p-review-t7"));
+    assert!(
+        w.herdr.prompts_to(REV_PANE)[0].contains("Review T-7"),
+        "{:?}",
+        w.herdr.prompts_to(REV_PANE)
+    );
+    assert!(
+        w.herdr.renames_to("p-review-1").is_empty(),
+        "the warm seat's name is never the agent's name: {:?}",
+        w.herdr.calls
+    );
 }
 
 #[test]

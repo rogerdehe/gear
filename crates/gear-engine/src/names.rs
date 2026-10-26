@@ -13,7 +13,9 @@
 //!   rename the agent first when it does not carry the seat's name, so delivery
 //!   never fails on a cleared name.
 //!
-//! Names are `<project>-<seat>` (17 §2/§3), the same name `agent.start` gives.
+//! Names are `<project>-<seat>` (17 §2/§3), the same name `agent.start` gives
+//! — except a temp reviewer, whose agent is named after the task it reviews
+//! (17 §2: `<project>-review-<task>`), not after its warm seat.
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
@@ -23,6 +25,29 @@ use std::collections::BTreeMap;
 /// The Herdr agent name of a seat (17 §2/§3): `<project>-<seat>`. One
 /// convention, shared with the config's own length check.
 pub use gear_app::config::agent_name;
+
+/// The agent name of a task's reviewer (17 §2): `<project>-review-<task>`,
+/// the task id lowercased without its dash (`gear-review-t134`). This is the
+/// name `review::start_reviewer` starts the agent with, and the name a review
+/// seat's agent must keep (T-134 review F1).
+pub fn review_agent_name(project: &str, task: &str) -> String {
+    format!("{project}-review-{}", task.to_lowercase().replace('-', ""))
+}
+
+/// The name a seat's agent must carry (T-134 review F1) — derived from the
+/// store's seat, never from what Herdr happens to report now (a cleared or
+/// wrong name is exactly what is being repaired).
+///
+/// - an assigned Temp reviewer: [`review_agent_name`] of the task it reviews,
+///   the name its review started with (the seat's warm name `review-10` is the
+///   *seat's* own name, not its agent's);
+/// - the captain and every lane: [`agent_name`], `<project>-<seat name>`.
+pub fn desired(seat: &SeatRow) -> String {
+    match (seat.role, seat.task_id.as_deref()) {
+        (SeatRole::Temp, Some(task)) => review_agent_name(&seat.project, task),
+        _ => agent_name(&seat.project, &seat.name),
+    }
+}
 
 /// The naming rules are Herdr's: [`gear_herdr::ensure_agent_name`] and
 /// [`gear_herdr::ensure_agent_name_with`]. Re-exported so the engine's call
@@ -68,7 +93,7 @@ pub fn restore(
         if binding.status != BindingStatus::Active {
             continue;
         }
-        let name = agent_name(&seat.project, &seat.name);
+        let name = desired(&seat);
         match ensure_snapshot(herdr, names, &binding.pane_id, &name) {
             Ensure::Named => {
                 if let Some(open) = open_taken(store, project, &seat.id)? {

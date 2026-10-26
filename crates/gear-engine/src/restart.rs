@@ -303,7 +303,7 @@ fn stop(
 
     // T-134: the exit is a prompt (or keys) to the agent in this pane; an agent
     // Herdr shows unnamed refuses a prompt, so name it first.
-    crate::names::ensure(herdr, &pane, &crate::names::agent_name(&seat.project, &seat.name));
+    crate::names::ensure(herdr, &pane, &crate::names::desired(seat));
 
     // The exit keys go once: a second `ctrl+c` a moment later would land in
     // the shell instead of the agent.

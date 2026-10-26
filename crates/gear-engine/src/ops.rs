@@ -47,7 +47,7 @@ pub fn deliver_doorbell_now(
         }
         Ok(Some((
             binding.pane_id,
-            crate::names::agent_name(&row.project, &row.name),
+            crate::names::desired(&row),
         )))
     })?;
     let Some((pane_id, agent_name)) = pane else { return Ok(None) };
@@ -361,7 +361,7 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         pane_id: binding.pane_id.clone(),
         text: text.to_string(),
         // T-134: the name the agent in that pane must carry before the prompt.
-        agent_name: crate::names::agent_name(&seat.project, &seat.name),
+        agent_name: crate::names::desired(&seat),
     })
 }
 
