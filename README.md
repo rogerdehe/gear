@@ -96,7 +96,6 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 | `gear report time` | captain | where the time went, per task and per voyage |
 | `gear --skill [topic]` | everyone | the version-matched instructions |
 | `gear board` | you | the plan, full screen |
-| `gear push-check <remote> <url>` | git hook | may this repo be pushed to this destination? |
 | `gear admin kickoff / init / install-skill / stop` | you | inventory, register, install the skill, stop the engine |
 | `gear --version` | everyone | the installed version |
 
