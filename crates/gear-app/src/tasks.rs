@@ -306,14 +306,24 @@ pub fn verdict_hint(
     // or a rework over the cap): the captain decides, the task stays
     // Verifying.
     let captain_decision = handed_in && message.thread == format!("{task}:cap");
-    // A failed merge: the attempt passed, its work is not in the integration
-    // branch. Once the captain's reopening fail is recorded the item is an
-    // ordinary one — the historical op stays Failed, but it has been decided.
+    // The merge ops of this task and attempt, in a state: a merge that failed
+    // and one that went through are both about the same attempt.
+    let merge_in = |state: gear_model::OpState| -> GearResult<bool> {
+        Ok(tx.ops_in_state(project, state)?.iter().any(|op| {
+            op.kind == OpKind::Merge
+                && op.task.as_deref() == Some(task)
+                && op.attempt == Some(attempt)
+        }))
+    };
+    // A failed merge: the attempt passed and its work is not in the integration
+    // branch. It holds only while **no** merge of that attempt has gone through
+    // (T-109: a remerge that landed closes the question, whatever the old
+    // Failed op still says), and once the captain's reopening fail is recorded
+    // the item is an ordinary one — the historical op stays, but it has been
+    // decided.
     let merge_failed = !reopened(tx, project, task, attempt, &candidate)?
-        && tx
-            .ops_in_state(project, gear_model::OpState::Failed)?
-            .iter()
-            .any(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some(task) && op.attempt == Some(attempt));
+        && !merge_in(gear_model::OpState::Confirmed)?
+        && merge_in(gear_model::OpState::Failed)?;
     // Any other item — an ordinary question about the same task — is answered
     // and closed by a reply, and settles nothing.
     if !review_fail && !captain_decision && !merge_failed {
