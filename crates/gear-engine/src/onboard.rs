@@ -363,9 +363,31 @@ fn onboard_seat(
         .ok_or_else(|| "a lane gets a worktree, but the plan has none".to_string())?;
 
     // 3. the worktree, with the root pane the agent starts in. A lane's home
-    //    worktree is long-lived (17 §3): reopen it when its branch exists (a
-    //    restart, or a lane GEAR takes over), create it otherwise.
-    let created = match herdr.worktree_open(&worktree.repo, &worktree.branch, &worktree.label) {
+    //    worktree is long-lived (17 §3): it is **reused** before anything is
+    //    created —
+    //    a. by its own recorded path (the lane worked in it before: a restart,
+    //       or a lane retired and registered again — its checkout is usually on
+    //       the task branch it last worked, so the home-branch lookup below
+    //       does not find it, and a create would refuse "already exists";
+    //       T-125);
+    //    b. by its home branch (a lane whose checkout is still there);
+    //    c. only a lane that has neither gets a new worktree.
+    let recorded = store
+        .read(|tx| tx.get_meta(&worktree_path_key(&seat.id)))
+        .map_err(|e| format!("worktree path: {}", e.detail))?
+        .filter(|path| !path.is_empty());
+    let by_path = match recorded.as_deref() {
+        Some(path) => herdr.worktree_open_path(&worktree.repo, path, &worktree.label),
+        None => Outcome::Refused { code: "worktree_not_found".into(), message: String::new() },
+    };
+    let opened = match by_path {
+        // A stale record (the worktree was removed): fall back to the branch.
+        Outcome::Refused { code, .. } if code == "worktree_not_found" => {
+            herdr.worktree_open(&worktree.repo, &worktree.branch, &worktree.label)
+        }
+        other => other,
+    };
+    let created = match opened {
         Outcome::Ok(worktree) => worktree,
         Outcome::Refused { code, .. } if code == "worktree_not_found" => match herdr.worktree_create(
             &worktree.repo,
@@ -1076,6 +1098,94 @@ repo = "web"
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 2).unwrap();
         assert!(herdr.calls.iter().any(|call| matches!(call,
             gear_herdr::fake::Call::PaneRun { pane, .. } if pane == "w5:p1")), "{:?}", herdr.calls);
+    }
+
+    /// T-125: a lane registered again reuses its home worktree. Its checkout
+    /// is on the task branch it last worked, so `worktree open --branch
+    /// home/heat` finds nothing and a create would collide with the path that
+    /// already exists; the recorded path is opened instead.
+    #[test]
+    fn a_lane_registered_again_reuses_its_home_worktree() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        // The worktree the lane worked in before, its checkout on a task
+        // branch (Herdr's registry names it by that branch, not the home one).
+        herdr.add_worktree("heat/t7", "/wt/heat", "w5:p1");
+        herdr.add_shell("w5:p1");
+        // The engine remembers the path it made for this lane.
+        store
+            .write(|tx| tx.set_meta(&worktree_path_key("toy:heat"), "/wt/heat"))
+            .unwrap();
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call,
+                gear_herdr::fake::Call::WorktreeOpenPath { path, .. } if path == "/wt/heat")),
+            "the lane's worktree is opened by its path: {:?}",
+            herdr.calls
+        );
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeCreate { .. })),
+            "nothing is created for a lane that has its worktree: {:?}",
+            herdr.calls
+        );
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
+        // The reused worktree's pane is the lane's.
+        let binding = store.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
+        assert_eq!(binding.pane_id, "w5:p1");
+    }
+
+    /// T-125: a lane with no worktree at all still gets one created.
+    #[test]
+    fn a_lane_without_a_worktree_gets_one_created() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+        assert!(
+            herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeCreate { .. })),
+            "a lane that never had one gets a worktree: {:?}",
+            herdr.calls
+        );
+        assert!(
+            !herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpenPath { .. })),
+            "there is no path to open: {:?}",
+            herdr.calls
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap().state,
+            SeatState::Active
+        );
+    }
+
+    /// T-125: a recorded path whose worktree is gone (removed by hand) is not
+    /// a failure — the home branch, then a create, are tried in order.
+    #[test]
+    fn a_stale_recorded_path_falls_back_to_a_new_worktree() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| tx.set_meta(&worktree_path_key("toy:heat"), "/wt/gone"))
+            .unwrap();
+
+        assert_eq!(
+            onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap(),
+            ["toy:heat"]
+        );
+        let calls: Vec<String> = herdr.calls.iter().map(|call| format!("{call:?}")).collect();
+        let created = calls.iter().position(|call| call.starts_with("WorktreeCreate"));
+        assert!(created.is_some(), "{calls:?}");
+        assert_eq!(
+            store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap().state,
+            SeatState::Active
+        );
     }
 
     /// T-67 (trial G01): an empty `model.list` for a fresh directory means
