@@ -8,10 +8,6 @@ A trial project had a lane bound to a repo whose work was a dozen lines; the voy
 - a supported rebind: `- rebind <lane> repo=<name> owns=[…]` (or retire + register) that waits for the lane's open tasks to land, previews the change and keeps history;
 - the captain's guide: a lane whose repo has no ready work is rebound at once, never left idle.
 
-## M4 must-fix (user, 2026-10-26): urgent messages reach a working lane at once
-
-- A message for a lane reaches it while it works. Today the engine rings a lane only when it is idle, so a lane busy for long stretches never sees the captain's instructions (M3.1: deck had 5 unread instructions for an hour). In the engine's doorbell: an `--urgent` message, and every captain instruction for a lane whose agent queues input while working (pi, claude), is typed in at once with `herdr agent prompt` even when the agent is working (these agents queue it and read it after the current step); for agents that do not queue input (opencode, codex) an urgent message is typed in at once too, and a normal one waits for idle as today. The doorbell text names the message ids and says "run `gear` now". One doorbell per message, never repeated for the same message. Accept: Engine tests with a fake Herdr: a working pi lane gets a captain instruction's doorbell in the same tick; a working codex lane gets an urgent one at once and a normal one only when idle; no second doorbell for the same message. `scripts/test.sh` passes once (parallel; no test over 10 s added).
-
 ## Moved out of M3 (user, 2026-10-25)
 
 - **Every built-in agent fully described by its profile (data, not code).** Today only OpenCode has `quota_markers`; Claude Code, Codex and Grok have none, so the engine cannot tell their quota stop from a finished turn. Only Claude Code has a `quota_bar` (profile.rs), so captain quota protection works only for a Claude captain. Fill, for all four kinds, from real screen captures:
