@@ -11,7 +11,7 @@
 use gear_app::identity::Fingerprint;
 use gear_app::{draft, home, mail, plan, Env};
 use gear_engine::{tick, EngineCfg};
-use gear_herdr::{fake::FakeHerdr, AgentStatus};
+use gear_herdr::{fake::FakeHerdr, AgentStatus, HerdrRead as _};
 use gear_model::{AttemptState, GearCtx, MsgKind, SeatRole, TaskState};
 use gear_store::{testing, Store};
 
@@ -76,7 +76,10 @@ fn fp(pane: &str, kind: &str) -> Fingerprint {
 
 fn apply(w: &mut World, text: &str, rid: &str, now: i64) -> plan::ApplyResult {
     let d = draft::parse(text).unwrap();
-    plan::apply(&mut w.store, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), &d, text, rid, now).unwrap()
+    // The session's agents, as the captain's `gear plan apply` reads them
+    // before its write transaction (T-133).
+    let agents = w.herdr.agents().unwrap();
+    plan::apply(&mut w.store, &env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), Some(&agents), &d, text, rid, now).unwrap()
 }
 
 fn lane_home(w: &mut World, now: i64) -> String {
@@ -144,4 +147,31 @@ fn full_work_loop() {
     // 8. quiet: nothing more for the lane
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1000).unwrap();
     assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 1);
+}
+
+/// T-133: a held lane is assigned nothing; the plan's `- release` puts it back
+/// on the loop, and it gets its next task — no store edit, no `retry`.
+#[test]
+fn a_held_lane_gets_its_next_task_after_release() {
+    let mut w = world();
+
+    // 1. one task waits for lane heat
+    apply(&mut w, "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: Fix the login crash\naccept: repro passes\nestimate: 30\ndeps: -\n", "v1", T0 + 1);
+
+    // 2. the captain holds the lane: the engine assigns it nothing
+    let r = apply(&mut w, "<!-- gear-plan project=p base=1 -->\n# Staff\n- hold heat reason=the machine is recovering\n", "v2", T0 + 2);
+    assert_eq!(r.staffed, vec!["hold heat".to_string()]);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 100).unwrap();
+    assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 0, "a held lane is assigned nothing");
+
+    // 3. release it: its agent is still in its pane, so it continues — and the
+    //    engine gives it the task it was held away from
+    let r = apply(&mut w, "<!-- gear-plan project=p base=2 -->\n# Staff\n- release heat\n", "v3", T0 + 200);
+    assert_eq!(r.staffed, vec!["release heat".to_string()]);
+    let seat = w.store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    assert_eq!(seat.state, gear_model::SeatState::Active, "its agent continues");
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 300).unwrap();
+    let prompts = w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(), 1, "its next task is delivered");
+    assert!(prompts[0].starts_with("New task T-1 (contract v1). Branch: heat/t1"), "{}", prompts[0]);
 }

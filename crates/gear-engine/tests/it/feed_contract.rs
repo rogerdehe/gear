@@ -395,7 +395,7 @@ fn tail_plan_closes_existing_idle_alert_and_prevents_its_doorbell() {
     let (env, fp) = cap_env();
     let text = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: heat\n";
     let draft = gear_app::draft::parse(text).unwrap();
-    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "tail1", T0 + 1).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), None, &draft, text, "tail1", T0 + 1).unwrap();
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1200).unwrap();
     assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "tail prevents even the old stale idle alert ringing");
     assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Resolved);
@@ -403,11 +403,11 @@ fn tail_plan_closes_existing_idle_alert_and_prevents_its_doorbell() {
     // Omitted declaration persists; explicit clearing resumes monitoring.
     let omitted = "<!-- gear-plan project=p base=1 -->\n# Decisions\n- keep sailing\n";
     let draft = gear_app::draft::parse(omitted).unwrap();
-    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, omitted, "tail-omitted", T0 + 1301).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), None, &draft, omitted, "tail-omitted", T0 + 1301).unwrap();
     assert!(w.store.read(|tx| gear_app::plan::lane_in_tail(tx, "p", "heat")).unwrap());
     let text = "<!-- gear-plan project=p base=2 -->\n# Decisions\n- tail: -\n";
     let draft = gear_app::draft::parse(text).unwrap();
-    gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "tail2", T0 + 1400).unwrap();
+    gear_app::plan::apply(&mut w.store, &env, Some(&fp), None, &draft, text, "tail2", T0 + 1400).unwrap();
     feed::keep_lanes_fed(&mut w.store, "p", T0 + 1401).unwrap();
     let all = items(&mut w.store, "heat");
     assert_eq!(all.len(), 2);
@@ -462,7 +462,7 @@ fn tail_rejects_unknown_lanes_without_changing_the_plan() {
     let (env, fp) = cap_env();
     let text = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: missing\n";
     let draft = gear_app::draft::parse(text).unwrap();
-    let error = gear_app::plan::apply(&mut w.store, &env, Some(&fp), &draft, text, "bad-tail", T0).unwrap_err();
+    let error = gear_app::plan::apply(&mut w.store, &env, Some(&fp), None, &draft, text, "bad-tail", T0).unwrap_err();
     assert_eq!(error.code, gear_model::ErrorCode::BadFormat);
     assert_eq!(w.store.read(|tx| tx.plan_version("p")).unwrap(), 0);
     assert!(!w.store.read(|tx| gear_app::plan::lane_in_tail(tx, "p", "heat")).unwrap());

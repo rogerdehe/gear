@@ -46,7 +46,7 @@ fn world() -> Store {
 fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::ApplyResult> {
     let draft = draft::parse(text).unwrap();
     let (env, fp) = captain();
-    plan::apply(s, &env, Some(&fp), &draft, text, rid, T0)
+    plan::apply(s, &env, Some(&fp), None, &draft, text, rid, T0)
 }
 
 /// The plan: one new task of the voyage M2, planned for 60 minutes.

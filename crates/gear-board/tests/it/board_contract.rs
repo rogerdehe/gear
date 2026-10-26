@@ -583,3 +583,25 @@ fn a_needs_check_lane_says_why_and_how_to_retry_it() {
     assert!(line.contains("agent "), "{line}");
     assert!(!line.contains("- retry"), "{line}");
 }
+
+/// T-133: a held lane says it is held, why, and the plan line that releases it.
+#[test]
+fn a_held_lane_names_the_line_that_releases_it() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.set_seat_state(
+                "p:runtime",
+                gear_model::SeatState::Held,
+                Some("hold: the machine is recovering"),
+                T0 + 1,
+            )
+        })
+        .unwrap();
+
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 2)).unwrap();
+    let runtime = board.lanes.iter().find(|lane| lane.lane == "runtime").unwrap();
+    let line = gear_board::lane_line(runtime);
+    assert!(line.contains("held: hold: the machine is recovering"), "{line}");
+    assert!(line.contains("- release runtime"), "the way back is shown: {line}");
+}
