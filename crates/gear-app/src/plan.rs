@@ -8,7 +8,7 @@ use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::state::require_transition;
 use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx};
+use gear_store::{BindingStatus, ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
@@ -475,9 +475,9 @@ fn apply_queue(
         not_mentioned.push(task.id);
     }
 
-    // Staff (T-55): park/hold/retire move a lane seat of this project in this
-    // transaction; a target already reached is skipped. `remerge` (T-92) is
-    // not a seat: it queues a new merge op for a task whose merge failed.
+    // Staff (T-55): park/hold/retire/release move a lane seat of this project
+    // in this transaction; a target already reached is skipped. `remerge` (T-92)
+    // is not a seat: it queues a new merge op for a task whose merge failed.
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
         if let StaffItem::Remerge { task, .. } = item {
@@ -487,6 +487,11 @@ fn apply_queue(
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
+            continue;
+        }
+        if let StaffItem::Release { lane, .. } = item {
+            release_lane(tx, project, lane, staff_line(item), now)?;
+            staffed.push(format!("release {lane}"));
             continue;
         }
         let (lane, verb, target, reason) = match item {
@@ -514,6 +519,7 @@ fn apply_queue(
             }
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
+            StaffItem::Release { .. } => unreachable!("release is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -789,6 +795,7 @@ fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Hold { line, .. }
         | StaffItem::Retire { line, .. }
         | StaffItem::Retry { line, .. }
+        | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. } => *line,
     }
 }
@@ -843,6 +850,71 @@ fn retry_lane(
         Some("retried by the captain"),
         now,
     )?;
+    Ok(())
+}
+
+/// `- release <lane>` (T-133): a lane the captain held goes back to the state
+/// the engine continues or onboards from. A held lane whose agent GEAR still
+/// holds (an active binding for the seat's generation) continues where it was —
+/// `Active`; one whose agent is gone goes back to `Queued`, so the engine
+/// onboards it again (`- retry` refuses Held, and editing the store was the
+/// captain's only way out, M3.1 machine recovery).
+///
+/// Only a held lane is released: any other state is a transition this line
+/// cannot mean, and it is refused with the reason.
+fn release_lane(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx
+        .get_seat(&seat_id)?
+        .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
+    if seat.role != SeatRole::Lane {
+        return Err(bad(
+            line,
+            format!(
+                "seat {seat_id} is a {} seat, staff lines name lanes",
+                seat.role.as_str()
+            ),
+        ));
+    }
+    if seat.state != SeatState::Held {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {lane} reason=…` puts it there)",
+                seat.state.as_str()
+            ),
+        ));
+    }
+    // The seat's binding is GEAR's record of the agent it started: an active
+    // binding for this generation means the agent is there to continue; none
+    // means it is gone, and the engine onboards the lane again.
+    let bound = tx
+        .get_binding(&seat_id, seat.generation)?
+        .is_some_and(|binding| binding.status == BindingStatus::Active);
+    let (target, reason) = if bound {
+        (
+            SeatState::Active,
+            "released by the captain: its agent continues",
+        )
+    } else {
+        (
+            SeatState::Queued,
+            "released by the captain: its agent is gone",
+        )
+    };
+    require_transition(
+        SeatState::can_transition(SeatRole::Lane, seat.state, target),
+        "seat",
+        seat.state.as_str(),
+        target.as_str(),
+    )?;
+    tx.set_seat_state(&seat_id, target, Some(reason), now)?;
     Ok(())
 }
 
