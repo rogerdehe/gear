@@ -55,7 +55,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    ```bash
    export GEAR_CTX=acme:captain:1
-   export GEAR_ADMIN=1                          # lets the captain register the project
+   export GEAR_ADMIN=1                          # lets the captain re-apply a config change
    claude                                       # or codex, opencode, grok
    ```
 
@@ -65,7 +65,13 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1.md`.
 
-3. **Confirming the sheet is your consent.** The captain registers the project itself right after, from its own pane (`GEAR_ADMIN=1 gear admin init gear/gear.toml`), and re-runs that after every config change. You run nothing. `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge) and the captain fixes the config and re-runs it.
+3. **Register the project — in your own shell** (not inside an agent), in the repository:
+
+   ```bash
+   GEAR_ADMIN=1 gear admin init gear/gear.toml
+   ```
+
+   Creating a project is your act: `init` refuses an agent that tries, whatever `GEAR_ADMIN` says. After this, the captain re-applies the config itself whenever it changes (that is the one `init` an agent may run). `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge) — fix it and run it again.
 
 4. **Tell the captain to apply the plan.** The engine starts in the background, brings up the lanes in their own Herdr worktrees and delivers their first tasks. From here on nobody asks you anything until the voyage lands.
 

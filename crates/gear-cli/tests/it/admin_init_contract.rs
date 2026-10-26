@@ -69,23 +69,38 @@ fn config_version(db: &Path) -> i64 {
         .expect("the project")
 }
 
+/// T-100: a project that is not registered yet is created from the user's own
+/// shell only. An agent — even the captain of that very project — may re-apply
+/// a registered project's config (the test below), never create one.
 #[test]
-fn the_captain_registers_its_own_project_at_kickoff() {
-    // The kickoff flow (T-86): the captain's pane carries
-    // `GEAR_CTX=<project>:captain:1` and the user's consent `GEAR_ADMIN=1`, and
-    // the project is not registered yet.
-    let dir = scratch("captain");
+fn a_first_registration_is_the_users_own() {
+    let dir = scratch("first");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config(&dir, &repo);
+
+    // The user's own shell registers it.
     let db = dir.join("gear.db");
-    let o = init(&dir, &db, &config(&dir, &repo), Some("p:captain:1"), true);
+    let o = init(&dir, &db, &path, None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert!(
-        String::from_utf8_lossy(&o.stdout).contains("project p (config v1)"),
-        "{}",
-        String::from_utf8_lossy(&o.stdout)
-    );
-    assert_eq!(config_version(&db), 1, "the captain registered the project");
+    assert_eq!(config_version(&db), 1, "the user registered the project");
+
+    // An agent may not create one, whatever GEAR_ADMIN says.
+    let other = scratch("first-agent");
+    let other_repo = other.join("repo");
+    std::fs::create_dir_all(&other_repo).expect("the repo");
+    let other_db = other.join("gear.db");
+    let o = init(&other, &other_db, &config(&other, &other_repo), Some("p:captain:1"), true);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR FORBIDDEN: "), "{err}");
+    assert!(err.contains("user's own shell"), "{err}");
+    assert_eq!(config_version(&other_db), 0, "nothing was registered");
+
+    // And a plain shell pane with no agent in it is still the user (no Herdr
+    // here means the pane cannot be read: the answer is no, and it says why).
+    let o = init(&other, &other_db, &config(&other, &other_repo), None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }
 
 #[test]
