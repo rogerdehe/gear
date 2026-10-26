@@ -112,6 +112,9 @@ fn send_args(kind: MsgKind) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
         request_id: "r1".into(),
     }
 }

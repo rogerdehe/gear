@@ -204,12 +204,29 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
 
 /// The command that settles an item with a `# Verdicts` line (T-90): the
 /// voyage file of the task's milestone, then the line with the real values.
+///
+/// A failed merge is settled by a `# Staff` line instead (B5): `- remerge
+/// T-<n>` retries the merge, which is what a merge that failed needs — a
+/// rework is the other way round.
 pub fn verdict_command(hint: &crate::tasks::VerdictHint) -> String {
     let path = match &hint.milestone {
         Some(milestone) => format!("gear/voyages/{milestone}.md"),
         None => "gear/voyages/<M>.md".to_string(),
     };
-    format!("gear plan apply {path} (# Verdicts: {})", hint.line)
+    match &hint.remerge {
+        Some(task) => format!("gear plan apply {path} (# Staff: - remerge {task})"),
+        None => format!("gear plan apply {path} (# Verdicts: {})", hint.line),
+    }
+}
+
+/// What kind of plan line settles an item (B5): a `# Staff` line for a failed
+/// merge, a `# Verdicts` line for the rest.
+pub fn verdict_section(hint: &crate::tasks::VerdictHint) -> &'static str {
+    if hint.remerge.is_some() {
+        "# Staff"
+    } else {
+        "# Verdicts"
+    }
 }
 
 /// The most lanes the snapshot lists; the rest is one line of count, so the

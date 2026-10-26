@@ -15,6 +15,7 @@
 
 mod deps;
 pub mod graph;
+pub mod idle;
 mod screen;
 pub mod voyage;
 

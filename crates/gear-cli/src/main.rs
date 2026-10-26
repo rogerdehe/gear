@@ -109,6 +109,16 @@ struct SendCmd {
     /// Review only: the ids of the findings that block (T-23), comma separated.
     #[arg(long)]
     blocking: Option<String>,
+    /// Progress only (design §5.2): the minutes the lane says are left.
+    #[arg(long, value_name = "MIN")]
+    left: Option<i64>,
+    /// Progress only (design §5.2): what stops the lane ("none" when nothing
+    /// does).
+    #[arg(long, value_name = "TEXT")]
+    blocker: Option<String>,
+    /// Blocked only (design §5.3): the task the lane waits for.
+    #[arg(long, value_name = "T-N")]
+    on: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -1136,8 +1146,16 @@ fn run_plan(
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
     // (T-34): base= the applied version, each NEW block gets its id, the
-    // Verdicts section goes (verdicts live in the store).
-    let rewritten = gear_app::draft::rewrite_applied(&text, result.version, &result.created);
+    // Verdicts section goes (verdicts live in the store), and the staff
+    // lines the apply used go with it (B5: an instruction that was carried
+    // out must not be carried out again).
+    let used_staff: Vec<usize> = draft
+        .staff
+        .iter()
+        .map(gear_app::plan::staff_line)
+        .collect();
+    let rewritten =
+        gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
     write_in_place(path, &rewritten).map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -1148,22 +1166,39 @@ fn run_plan(
         )
     })?;
     // After a successful apply: the captain hears about a lane that would
-    // stand idle (T-58, ops/lessons.md 7a). Printed only — the apply itself
-    // is unchanged.
+    // stand idle (T-58, ops/lessons.md 7a) and about the lanes his own tail
+    // silences (B5: a lane that gets no warning is not a mystery). Printed
+    // only — the apply itself is unchanged.
     let warnings: Vec<String> = store
-        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project))?
+        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project, now))?
         .iter()
         .map(|lane| lane.warning())
         .collect();
+    let (tailed, until) = store.write(|tx| {
+        let lanes = gear_app::plan::tailed_lanes(tx, &draft.project, now)?;
+        let until = gear_app::plan::tail_until(tx, &draft.project)?;
+        Ok((lanes, until))
+    })?;
     if json {
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
+        value["tailed"] = serde_json::json!(tailed);
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
     for warning in warnings {
         lines.push('\n');
         lines.push_str(&warning);
+    }
+    for lane in &tailed {
+        lines.push('\n');
+        let until = until
+            .as_ref()
+            .map(|until| format!(" {}", until.as_text()))
+            .unwrap_or_default();
+        lines.push_str(&format!(
+            "tail: lane {lane} is silenced{until} (it may stand idle)"
+        ));
     }
     Ok(lines)
 }
@@ -1252,6 +1287,11 @@ fn run_send(
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
         urgent: c.urgent,
+        // The minutes left and what stops the lane (design §5.2).
+        left: c.left,
+        blocker: c.blocker.clone(),
+        // The task the lane waits for (design §5.3).
+        on: c.on.clone(),
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
@@ -1434,11 +1474,12 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Question
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Instruction
-        | gear_model::MsgKind::Review => Ok(kind),
+        | gear_model::MsgKind::Review
+        | gear_model::MsgKind::Blocked => Ok(kind),
         _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
-                "--kind {text} is not a `gear send` kind: progress, question, result, instruction or review"
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review or blocked"
             ),
         )),
     }
@@ -2063,6 +2104,9 @@ mod tests {
             to: None,
             reply_to: None,
             urgent: false,
+            left: None,
+            blocker: None,
+            on: None,
             candidate: None,
             verdict: None,
             blocking: None,
@@ -2189,6 +2233,133 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    /// A task that passed and whose merge failed: the captain retries it with
+    /// `- remerge T-1`.
+    fn world_with_a_failed_merge() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "report", T0)?;
+                // The review passed: the attempt is accepted and the task done.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "all good".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0,
+                })?;
+                gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0)?;
+                // The merge failed.
+                let op = tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: gear_model::OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: T0,
+                })?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("conflict"), T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// B5: a staff line the apply used is gone from the plan file. A
+    /// `- remerge T-<n>` line that was carried out must not be carried out
+    /// again — the second apply would refuse it.
+    #[test]
+    fn an_applied_remerge_line_is_gone_from_the_plan_file() {
+        let (mut store, mut herdr) = world_with_a_failed_merge();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- remerge T-1\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("remerge"), "the line is gone: {rewritten}");
+        assert!(!rewritten.contains("# Staff"), "the empty section is gone: {rewritten}");
+    }
+
+    /// B5: the apply says which lanes the captain's own tail silences, so a
+    /// lane that gets no warning is not a mystery.
+    #[test]
+    fn the_apply_prints_the_tailed_lanes() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: heat\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("tail: lane heat is silenced"),
+            "the tailed lane is named: {out}"
+        );
     }
 
     /// T-140: the captain's `- release <reviewer>` line releases a reviewer
@@ -3068,6 +3239,260 @@ mod tests {
             ),
             "{out}"
         );
+    }
+
+    /// A lane working on T-1 (its attempt is open) and a task T-2 it can
+    /// wait for.
+    fn world_with_a_wait() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                for (id, state, lane) in [
+                    ("T-1", gear_model::TaskState::Ready, "heat"),
+                    ("T-2", gear_model::TaskState::Ready, "wire"),
+                ] {
+                    tx.insert_task(&TaskRow {
+                        project: "p".into(),
+                        id: id.into(),
+                        rank: 1,
+                        state,
+                        priority: "must".into(),
+                        lane: Some(lane.into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_contract(&ContractRow {
+                        project: "p".into(),
+                        task: id.into(),
+                        version: 1,
+                        goal: "g".into(),
+                        accept: "a".into(),
+                        evidence_files: vec![],
+                        evidence_due_min: None,
+                        body: String::new(),
+                        created: T0,
+                    })?;
+                }
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// §5.2: a progress answer carries the minutes left and what stops the
+    /// lane, in the message's meta.
+    #[test]
+    fn a_progress_answer_stores_its_meta() {
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("progress");
+        c.left = Some(30);
+        c.blocker = Some("the api is late".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser is done; the api is not".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(message.meta.as_deref().expect("the answer has a meta")).unwrap();
+        assert_eq!(meta["left"], serde_json::json!(30));
+        assert_eq!(meta["blocker"], serde_json::json!("the api is late"));
+    }
+
+    /// §5.3: a declared wait is written on the task; the attempt stays
+    /// Started, and the captain gets the info item.
+    #[test]
+    fn a_blocked_message_declares_a_wait() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap();
+
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on.as_deref(), Some("T-2"));
+        assert_eq!(task.wait_cond.as_deref(), Some("merged"));
+        // The attempt goes on: a wait is not a hand-in.
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Started
+        );
+        // The captain has the info item.
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(message.recipient, "p:captain");
+        assert_eq!(message.kind, MsgKind::Blocked);
+        assert_eq!(message.state, MsgState::Info);
+    }
+
+    /// §5.3: a wait for a task that is already done would never end.
+    #[test]
+    fn a_blocked_message_on_a_done_task_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = gear_model::TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("T-2 is done"), "{}", error.detail);
+        // Nothing was written: the task waits for nothing.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+    }
+
+    /// §5.3: the contract the lane names must be the one the task carries
+    /// now: a captain who changed the contract (and ended the wait with it)
+    /// must not have the lane's old command park the task on an obsolete
+    /// dependency.
+    #[test]
+    fn a_blocked_message_with_a_stale_contract_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        // The captain changed the task's contract.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1); // the contract the lane still works to
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("is on contract v2"), "{}", error.detail);
+        // Nothing was written: no wait and no message.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+        assert!(store.read(|tx| tx.get_message("p", "M-1")).unwrap().is_none());
+    }
+
+    /// The request fingerprint carries the answer's fields: a request id
+    /// reused with a changed field is a conflict, not a replay of the old
+    /// answer.
+    #[test]
+    fn a_reused_request_id_with_a_changed_field_is_a_conflict() {
+        let (mut store, mut herdr) = world();
+        let mut first = send_cmd("progress");
+        first.left = Some(30);
+        first.blocker = Some("none".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        // The same request id, another answer: a conflict, not a replay.
+        let mut changed = send_cmd("progress");
+        changed.left = Some(60);
+        changed.blocker = Some("the api is late".into());
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &changed,
+            "the parser is done".into(),
+            None,
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::RequestConflict,
+            "{}",
+            error.detail
+        );
+
+        // The same request id with the same answer: a replay.
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("[replayed]"), "{out}");
     }
 
     #[test]
