@@ -103,7 +103,7 @@ fn bump(s: &mut Store, base: i64, goal: &str, rid: &str) -> i64 {
     );
     let draft: Draft = parse(&text).unwrap();
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &draft, &text, rid, T0 + 10).unwrap();
+    apply(s, &env, Some(&fp), None, &draft, &text, rid, T0 + 10).unwrap();
     s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version
 }
 

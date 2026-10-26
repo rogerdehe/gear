@@ -47,6 +47,10 @@ pub struct FakeHerdr {
     panes: BTreeMap<String, FakePane>,
     /// When true every read returns ObserveError.
     pub observe_fails: bool,
+    /// When true only `agents()` returns ObserveError: the session cannot list
+    /// its agents while single-pane reads still answer (a release asks for the
+    /// list, T-133).
+    pub agents_fail: bool,
     /// Consumed by the next side-effecting call.
     pub inject_next: Option<Inject>,
     pub calls: Vec<Call>,
@@ -227,7 +231,7 @@ impl FakeHerdr {
 
 impl HerdrRead for FakeHerdr {
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
-        if self.observe_fails {
+        if self.observe_fails || self.agents_fail {
             return Err(ObserveError("injected".into()));
         }
         Ok(self.panes.iter().filter_map(|(id, p)| Self::info(id, p)).collect())
