@@ -8,7 +8,7 @@
 
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
-use gear_app::plan::{apply, lane_in_tail_at, tailed_lanes, tail_until};
+use gear_app::plan::{apply, lane_in_tail, lane_in_tail_at, parse_rfc3339, tailed_lanes, tail_until};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
 use gear_store::{testing, Store, TaskRow};
@@ -39,6 +39,10 @@ fn world() -> Store {
             rework_note: None,
             estimate_min: None,
             issue: None,
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             updated: NOW,
         })?;
         Ok(())
@@ -125,11 +129,11 @@ fn a_tail_without_an_end_lasts_until_it_is_cleared() {
 #[test]
 fn the_tailed_lanes_are_named() {
     let mut s = world();
-    assert_eq!(s.read(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
+    assert_eq!(s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
 
     apply_decision(&mut s, "tail: heat until=T-1", "r1").unwrap();
     assert_eq!(
-        s.read(|tx| tailed_lanes(tx, "p", NOW)).unwrap(),
+        s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(),
         vec!["heat".to_string()]
     );
 
@@ -140,7 +144,7 @@ fn the_tailed_lanes_are_named() {
         tx.update_task(&task)
     })
     .unwrap();
-    assert_eq!(s.read(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
+    assert_eq!(s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
 }
 
 /// A tail that names an unknown lane, an unknown task or a broken time is
@@ -160,4 +164,109 @@ fn a_broken_tail_is_refused() {
         assert!(error.detail.contains(needle), "{rid}: {}", error.detail);
         assert!(!in_tail(&mut s, "heat", NOW), "{rid}: nothing was tailed");
     }
+}
+
+/// B6 (F1): a deadline may carry fractional seconds and a zone offset — the
+/// stamps a serializer writes.
+#[test]
+fn a_deadline_may_carry_fractional_seconds_and_an_offset() {
+    // 2026-10-26T18:00:00Z is 1793037600 (seconds since the epoch).
+    assert_eq!(parse_rfc3339("2026-10-26T18:00:00Z"), Some(1793037600));
+    // A zero fraction is that second.
+    assert_eq!(parse_rfc3339("2026-10-26T18:00:00.000Z"), Some(1793037600));
+    // A nonzero fraction rounds up: the tail must not end before the instant
+    // the captain named.
+    assert_eq!(parse_rfc3339("2026-10-26T18:00:00.123Z"), Some(1793037601));
+    // An offset: +02:00 is two hours ahead of UTC.
+    assert_eq!(parse_rfc3339("2026-10-26T20:00:00+02:00"), Some(1793037600));
+    assert_eq!(parse_rfc3339("2026-10-26T16:00:00-02:00"), Some(1793037600));
+}
+
+/// F3: a day beyond the length of its month is not a date.
+#[test]
+fn a_day_beyond_the_month_is_refused() {
+    assert_eq!(parse_rfc3339("2026-02-31T18:00:00Z"), None);
+    assert_eq!(parse_rfc3339("2026-04-31T18:00:00Z"), None);
+}
+
+/// F3: the 29th of February exists only in a leap year.
+#[test]
+fn the_twenty_ninth_of_february_needs_a_leap_year() {
+    assert_eq!(parse_rfc3339("2026-02-29T18:00:00Z"), None);
+    // 2028 is a leap year: the day exists (1835460000).
+    assert_eq!(parse_rfc3339("2028-02-29T18:00:00Z"), Some(1835460000));
+}
+
+/// B6 (F2): a tail that has ended is not revived by a task that is reopened
+/// for a rework, and the same declaration replayed does not revive it either.
+#[test]
+fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
+    let mut s = world();
+    apply_decision(&mut s, "tail: heat until=T-1", "r1").unwrap();
+    assert!(in_tail(&mut s, "heat", NOW));
+
+    // T-1 is done: the tail ends.
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Done;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    // The path the engine reads the tail through writes the end once.
+    assert!(!s.write(|tx| lane_in_tail(tx, "p", "heat")).unwrap());
+    assert_eq!(
+        s.read(|tx| tx.get_meta("lane-tail:p:heat")).unwrap().as_deref(),
+        Some("0"),
+        "the end is written"
+    );
+
+    // The task is reopened for a rework (a failed merge): the tail stays off.
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.unwrap();
+        task.state = TaskState::Ready;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    assert!(
+        !in_tail(&mut s, "heat", NOW),
+        "a reopened task does not revive a tail that ended"
+    );
+
+    // The same declaration, replayed (its line is still in the plan file),
+    // does not revive it either.
+    apply_decision(&mut s, "tail: heat until=T-1", "r2").unwrap();
+    assert!(
+        !in_tail(&mut s, "heat", NOW),
+        "the same declaration does not revive the tail"
+    );
+
+    // A new declaration is a new tail.
+    s.write(|tx| {
+        tx.insert_task(&gear_store::TaskRow {
+            project: "p".into(),
+            id: "T-2".into(),
+            rank: 2,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            updated: NOW,
+        })
+    })
+    .unwrap();
+    apply_decision(&mut s, "tail: heat until=T-2", "r3").unwrap();
+    assert!(in_tail(&mut s, "heat", NOW), "a new declaration is a new tail");
 }

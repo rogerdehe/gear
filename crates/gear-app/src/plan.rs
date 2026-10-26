@@ -1399,20 +1399,77 @@ fn utc_date(ts: i64) -> String {
 /// wall clock — a deadline is a wall-clock stamp, so that is the clock it is
 /// compared with.
 pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> {
-    lane_in_tail_at(tx, project, lane, wall_clock())
+    lane_in_tail_now(tx, project, lane, wall_clock(), true)
 }
 
-/// The same, with the caller's clock (the plan apply and the tests).
+/// The same, with the caller's clock, writing nothing: the read-only callers
+/// (the plan's own checks) see the tail as it is, without ending it.
 pub fn lane_in_tail_at(
     tx: &Tx<'_>,
     project: &str,
     lane: &str,
     now: Ts,
 ) -> GearResult<bool> {
+    lane_in_tail_now(tx, project, lane, now, false)
+}
+
+/// Whether the captain's tail silences this lane now, and — when the caller
+/// writes — the end of a tail that has ended.
+///
+/// The end is written once: the lanes the tail silences go back to "not
+/// tailed" and the declaration is marked spent. A task that is reopened for a
+/// rework (a failed merge, a fail verdict) therefore never revives a tail
+/// that has already ended (design §10.7, row B6).
+fn lane_in_tail_now(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    now: Ts,
+    write: bool,
+) -> GearResult<bool> {
     if tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() != Some("1") {
         return Ok(false);
     }
-    Ok(!tail_is_over(tx, project, now)?)
+    if !tail_is_over(tx, project, now)? {
+        return Ok(true);
+    }
+    if write {
+        persist_tail_end(tx, project)?;
+    }
+    Ok(false)
+}
+
+/// Write the end of a tail: the lanes it silences go back to "not tailed" and
+/// the declaration is marked spent — a later apply of the same line (it is
+/// still in the plan file) does not revive it.
+fn persist_tail_end(tx: &Tx<'_>, project: &str) -> GearResult<()> {
+    let mut lanes: Vec<String> = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        if tx.get_meta(&format!("lane-tail:{project}:{}", seat.name))?.as_deref() == Some("1") {
+            lanes.push(seat.name);
+        }
+    }
+    if lanes.is_empty() {
+        return Ok(());
+    }
+    lanes.sort();
+    let until = tx.get_meta(&format!("lane-tail-until:{project}"))?.unwrap_or_default();
+    let declaration = tail_declaration(&lanes, &until);
+    for lane in &lanes {
+        tx.set_meta(&format!("lane-tail:{project}:{lane}"), "0")?;
+    }
+    tx.set_meta(&format!("lane-tail-spent:{project}"), &declaration)?;
+    Ok(())
+}
+
+/// The fingerprint of a tail declaration: the lanes it silences and its end.
+/// The same declaration replayed (the line is still in the plan file) has the
+/// same fingerprint.
+fn tail_declaration(lanes: &[String], until: &str) -> String {
+    format!("{}|{}", lanes.join(","), until)
 }
 
 /// When the captain's tail ends by itself (B6).
@@ -1478,14 +1535,15 @@ fn tail_is_over(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<bool> {
 }
 
 /// The lanes the captain's tail silences right now (B5: the apply says which
-/// ones, so a lane that gets no warning is not a mystery).
+/// ones, so a lane that gets no warning is not a mystery). The end of a tail
+/// that has ended is written here, so the apply's path ends it too.
 pub fn tailed_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
     let mut tailed = Vec::new();
     for seat in tx.seats_of_project(project)? {
         if seat.role != SeatRole::Lane {
             continue;
         }
-        if lane_in_tail_at(tx, project, &seat.name, now)? {
+        if lane_in_tail_now(tx, project, &seat.name, now, true)? {
             tailed.push(seat.name);
         }
     }
@@ -1548,7 +1606,7 @@ impl IdleLane {
 /// one — and stands idle when there is none.
 ///
 /// Read-only: the apply is not changed by this, the captain is only told.
-pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
+pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLane>> {
     let tasks = tx.tasks_of_project(project)?;
     let done: BTreeSet<&str> = tasks
         .iter()
@@ -1562,8 +1620,9 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
         {
             continue;
         }
-        // The captain's tail: these lanes may stand idle (design/05).
-        if lane_in_tail(tx, project, &seat.name)? {
+        // The captain's tail: these lanes may stand idle (design/05). The
+        // read does not end a tail (the apply's path does).
+        if lane_in_tail_at(tx, project, &seat.name, now)? {
             continue;
         }
         let lane_tasks: Vec<&TaskRow> = tasks
@@ -1652,14 +1711,21 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
         if lanes.contains("-") && until.is_some() {
             return Err(bad(1, "tail: - clears the tail, it takes no `until=`"));
         }
+        let until_stored = until.as_ref().map(TailUntil::as_stored).unwrap_or_default();
+        // The same declaration, replayed (its line is still in the plan file),
+        // must not revive a tail that has already ended: only a genuinely new
+        // declaration resets it.
+        let declaration = tail_declaration(&lanes.iter().cloned().collect::<Vec<_>>(), &until_stored);
+        let spent = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+        let spent = spent == declaration;
         for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
             tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-                if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
+                if spent { "0" } else if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
         }
-        tx.set_meta(
-            &format!("lane-tail-until:{project}"),
-            &until.as_ref().map(TailUntil::as_stored).unwrap_or_default(),
-        )?;
+        if !spent {
+            tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
+        }
+        tx.set_meta(&format!("lane-tail-until:{project}"), &until_stored)?;
     }
     Ok(())
 }
@@ -1694,7 +1760,12 @@ pub fn parse_rfc3339(text: &str) -> Option<Ts> {
     let year: i64 = date_parts.next()?.parse().ok()?;
     let month: i64 = date_parts.next()?.parse().ok()?;
     let day: i64 = date_parts.next()?.parse().ok()?;
-    if date_parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    // The day must exist in that month: 2026-02-31 is not a date, and
+    // counting it as one would end the tail in March.
+    if date_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+    {
         return None;
     }
     // The zone: `Z`, `+HH:MM`, `-HH:MM` or nothing (UTC).
@@ -1712,9 +1783,29 @@ pub fn parse_rfc3339(text: &str) -> Option<Ts> {
     let mut clock_parts = clock.split(':');
     let hour: i64 = clock_parts.next()?.parse().ok()?;
     let minute: i64 = clock_parts.next().unwrap_or("0").parse().ok()?;
-    let second: i64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    // The seconds, with an optional fraction (`18:00:00.123`).
+    let (seconds_text, fraction) = match clock_parts.next() {
+        Some(text) => match text.split_once('.') {
+            Some((seconds, fraction)) => (seconds, Some(fraction)),
+            None => (text, None),
+        },
+        None => ("0", None),
+    };
+    let second: i64 = seconds_text.parse().ok()?;
     if clock_parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
         return None;
+    }
+    // The fraction: digits only, and a nonzero one rounds the moment up to the
+    // next second — the tail must not end before the instant the captain
+    // named.
+    let mut second = second;
+    if let Some(fraction) = fraction {
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if fraction.bytes().any(|byte| byte != b'0') {
+            second += 1;
+        }
     }
     let offset = match zone {
         "Z" | "z" => 0,
@@ -1748,6 +1839,22 @@ fn rfc3339(ts: Ts) -> String {
         (seconds % 3600) / 60,
         seconds % 60
     )
+}
+
+/// The days in a month of a year (0 for a month that does not exist).
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
 }
 
 /// The days since the Unix epoch of a civil date (Howard Hinnant's civil

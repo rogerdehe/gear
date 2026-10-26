@@ -1170,11 +1170,11 @@ fn run_plan(
     // silences (B5: a lane that gets no warning is not a mystery). Printed
     // only — the apply itself is unchanged.
     let warnings: Vec<String> = store
-        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project))?
+        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project, now))?
         .iter()
         .map(|lane| lane.warning())
         .collect();
-    let (tailed, until) = store.read(|tx| {
+    let (tailed, until) = store.write(|tx| {
         let lanes = gear_app::plan::tailed_lanes(tx, &draft.project, now)?;
         let until = gear_app::plan::tail_until(tx, &draft.project)?;
         Ok((lanes, until))
@@ -2258,6 +2258,10 @@ mod tests {
                     rework_note: None,
                     estimate_min: None,
                     issue: None,
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
