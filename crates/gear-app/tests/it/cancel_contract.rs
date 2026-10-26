@@ -212,21 +212,30 @@ fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
     std::fs::write(work.join("README.md"), "dev\n").unwrap();
     sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
     sh(&work, &format!("git remote add origin {}", origin.display()));
-    sh(&work, "git push -q origin dev");
+    publish(&origin, &work, "dev");
     sh(
         &work,
         "git switch -qc heat/t1 && echo work >> README.md && git add -A \
-         && git -c user.email=a@b -c user.name=a commit -qm work && git push -q origin heat/t1",
+         && git -c user.email=a@b -c user.name=a commit -qm work",
     );
+    publish(&origin, &work, "heat/t1");
     let candidate = sh_out(&work, "git rev-parse HEAD");
     if merged {
         sh(
             &work,
-            "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 \
-             -m merge && git push -q origin dev",
+            "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 -m merge",
         );
+        publish(&origin, &work, "dev");
     }
     (work, candidate)
+}
+
+/// Publish `branch` of `source` in the bare origin's refs: the origin fetches
+/// the objects and the ref is set — no test pushes (T-108).
+fn publish(origin: &Path, source: &Path, branch: &str) {
+    let sha = sh_out(source, &format!("git rev-parse refs/heads/{branch}"));
+    sh(origin, &format!("git fetch -q {} refs/heads/{branch}", source.display()));
+    sh(origin, &format!("git update-ref refs/heads/{branch} {}", sha.trim()));
 }
 
 fn config(repo: &Path) -> String {
