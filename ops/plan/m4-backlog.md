@@ -1,5 +1,13 @@
 # M4 backlog (ideas, not yet tasks)
 
+## First item of M4 (user, 2026-10-26): a seat follows the work (B02-01)
+
+A trial project had a lane bound to a repo whose work was a dozen lines; the voyage ran 30-40 hours, that lane stood idle 99% of the time and held its slot for good. M4 must fix it:
+- a task stores its own repo (and base, gate) when it is created, so rebinding a lane never moves an old task's review or merge target (today a task has no repo column: it is read from its lane's config);
+- the lane quota counts active seats, not configured or retired ones;
+- a supported rebind: `- rebind <lane> repo=<name> owns=[…]` (or retire + register) that waits for the lane's open tasks to land, previews the change and keeps history;
+- the captain's guide: a lane whose repo has no ready work is rebound at once, never left idle.
+
 ## Moved out of M3 (user, 2026-10-25)
 
 - **Every built-in agent fully described by its profile (data, not code).** Today only OpenCode has `quota_markers`; Claude Code, Codex and Grok have none, so the engine cannot tell their quota stop from a finished turn. Only Claude Code has a `quota_bar` (profile.rs), so captain quota protection works only for a Claude captain. Fill, for all four kinds, from real screen captures:
