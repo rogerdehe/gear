@@ -60,6 +60,6 @@ queues the calls and never stops local work.
 ## Agents never write with `gh`
 
 Only the engine writes. A lane that needs something said on GitHub reports it
-and the captain decides. This cannot be enforced by a hook — `gh` has no
-pre-push — so it is a rule here and the captain's eye; the engine being the only
-writer is what keeps the record true.
+and the captain decides. Git's own hooks cannot see `gh`, so this is a rule here
+and the captain's eye; the engine being the only writer is what keeps the record
+true.
