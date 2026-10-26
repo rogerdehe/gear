@@ -36,7 +36,10 @@ fn lane() -> (Env, Fingerprint) {
 fn result(contract: i64, candidate: Option<&str>, rid: &str) -> SendArgs {
     SendArgs { kind: MsgKind::Result, body: "Report: ops/tasks/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(contract), candidate: candidate.map(String::from), about: None, to: None, reply_to: None,
-        verdict: None, blocking: None, base: None, urgent: false, request_id: rid.into() }
+        verdict: None, blocking: None, base: None, urgent: false,
+        left: None,
+        blocker: None,
+        on: None, request_id: rid.into() }
 }
 
 #[test]
