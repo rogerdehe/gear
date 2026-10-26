@@ -665,6 +665,9 @@ pub fn confirm_pending_with(
                         tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                         // Design/06: the confirmed delivery starts the attempt.
                         if start_confirmed_attempt(tx, project, &op, now)? {
+                            // §3.2 step 5: at the check-in the attempt records
+                            // the session it ran in.
+                            record_attempt_session(tx, project, &op)?;
                             // The lane is not stuck any more (design §10.3):
                             // its stall item closes with the confirmation.
                             crate::stall::resolve(tx, project, &op.seat, now, None)?;
@@ -869,6 +872,35 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
             view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
         })
         .map(|view| view.ts))
+}
+
+/// The session the attempt ran in (design §3.2 step 5): at the check-in the
+/// seat's binding knows the session the agent is in.
+fn record_attempt_session(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<()> {
+    // A review delivery names the **writer's** attempt, while its binding
+    // belongs to the reviewer: the writer's session is not the reviewer's, and
+    // a review says nothing about the session the writer worked in.
+    if is_reviewer(tx, &op.seat)? {
+        return Ok(());
+    }
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(());
+    };
+    // Only the seat's own attempt, in its own generation: a delivery of
+    // another seat's round leaves the attempt alone.
+    let Some(row) = tx.get_attempt(project, task, attempt)? else {
+        return Ok(());
+    };
+    if row.seat != op.seat || row.generation != op.generation {
+        return Ok(());
+    }
+    let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
+        return Ok(());
+    };
+    let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    tx.set_attempt_session(project, task, attempt, session, &binding.kind)
 }
 
 /// A confirmed delivery starts its attempt: `Delivered` → `Started` and the
