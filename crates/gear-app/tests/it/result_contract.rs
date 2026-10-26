@@ -3,10 +3,10 @@
 
 use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, SendArgs};
-use gear_app::tasks::{on_delivery_confirmed, start_attempt};
+use gear_app::tasks::{on_delivery_confirmed, settle_review, start_attempt};
 use gear_app::Env;
 use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, SeatRole, TaskState};
-use gear_store::{testing, ContractRow, Store, TaskRow};
+use gear_store::{testing, ContractRow, ReviewVerdictRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const LANE_PANE: &str = "w1:p2";
@@ -60,4 +60,52 @@ fn bad_result_writes_nothing() {
     assert_eq!(mail::send(&mut s, &env, Some(&fp), &result(2, Some("c"), "b"), T0).unwrap_err().code, ErrorCode::BadFormat, "wrong contract");
     assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Started);
     assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 1)).unwrap().is_empty(), "no message stored");
+}
+
+/// T-118: a candidate that already failed is not a rework. The lane that
+/// hands the same one in again read the first report, found nothing to fix
+/// and loops (trial B02-06): the hand-in is refused and the refusal names
+/// the attempt that failed on it.
+#[test]
+fn a_result_with_an_already_failed_candidate_is_refused() {
+    let mut s = world();
+    let (env, fp) = lane();
+    // The first round: the candidate is handed in and the review fails.
+    mail::send(&mut s, &env, Some(&fp), &result(1, Some("aaa1111"), "r1"), T0 + 5).unwrap();
+    s.write(|tx| {
+        tx.insert_review_verdict(&ReviewVerdictRow {
+            project: "p".into(),
+            task: "T-1".into(),
+            attempt: 1,
+            passed: false,
+            findings: "F1: the rework is missing".into(),
+            by_seat: "p:r-1".into(),
+            created: T0 + 6,
+        })?;
+        tx.set_review_blocking("p", "T-1", 1, "F1", T0 + 6)?;
+        settle_review(tx, "p", "T-1", 1, T0 + 7)?;
+        // The lane starts the rework and works on it.
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 8)?;
+        on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 8)
+    })
+    .unwrap();
+
+    // The same candidate again: refused, and the refusal says which attempt
+    // failed on it.
+    let args = SendArgs { attempt: Some(2), candidate: Some("aaa1111".into()), request_id: "r2".into(), ..result(1, None, "") };
+    let error = mail::send(&mut s, &env, Some(&fp), &args, T0 + 9).unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
+    assert!(error.detail.contains("aaa1111"), "{}", error.detail);
+    assert!(error.detail.contains("attempt 1"), "{}", error.detail);
+    // Nothing was written: attempt 2 is still started, the task is running.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Started, "the hand-in was refused");
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Running);
+
+    // A new candidate: the hand-in goes through.
+    let args = SendArgs { attempt: Some(2), candidate: Some("bbb2222".into()), request_id: "r3".into(), ..result(1, None, "") };
+    mail::send(&mut s, &env, Some(&fp), &args, T0 + 10).unwrap();
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
+    assert_eq!((attempt.state, attempt.candidate.as_deref()), (AttemptState::Submitted, Some("bbb2222")));
+    assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Verifying);
 }
