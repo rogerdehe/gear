@@ -602,7 +602,9 @@ pub struct ReplyResult {
 /// this project that is still running **at the generation that asked**
 /// (T-103): the engine has no seat to read an answer, and a reviewer seat
 /// reused for a later job must not read the note on an earlier one. Info and
-/// Result records never send an answer. Never changes task state.
+/// Result records never send an answer, and neither does an item the captain
+/// itself raised: its text stays the item's record (T-119). Never changes task
+/// state.
 ///
 /// Slice 1 rules:
 /// - a repeated id is handled once; `handled` lists every id once;
@@ -749,6 +751,15 @@ pub fn reply(
                 // A note is the captain's bookkeeping: stored on the item just
                 // above, sent to nobody (T-103).
                 if args.mode == ReplyMode::Note {
+                    continue;
+                }
+
+                // An item the captain raised itself has no other seat to
+                // answer: the text is already the item's record above, and a
+                // reply addressed to the captain is the same seat — no new
+                // fact, and the engine would ring the captain's own doorbell
+                // for nothing (T-119).
+                if original.sender == captain_id {
                     continue;
                 }
 
