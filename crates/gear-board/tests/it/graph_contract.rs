@@ -190,6 +190,20 @@ fn world() -> Store {
                     body: String::new(),
                     created: T0,
                 })?;
+                if task.id == "T-141" {
+                    // The task was accepted: it waits for its merge.
+                    tx.insert_verdict(&gear_store::VerdictRow {
+                        project: "p".into(),
+                        task: task.id.into(),
+                        attempt: 1,
+                        contract_version: 1,
+                        candidate: "abc1234".into(),
+                        passed: true,
+                        evidence: None,
+                        by_seat: "p:captain".into(),
+                        created: T0,
+                    })?;
+                }
                 for round in 1..=task.rounds {
                     let started = task.merged.unwrap_or(moment(12, 0)) - task.actual * 60;
                     tx.insert_attempt(&AttemptRow {
@@ -246,6 +260,8 @@ fn the_graph_has_the_columns_of_the_prototype() {
         vec![
             "T-148", "T-150", "T-151", "T-143", "T-144", "T-141", "T-142", "T-139", "T-136", "T-135"
         ]
+        // T-141 is being merged and T-142 waits for its verdict: they stand
+        // next to each other, in the order of the plan (review F2).
     );
 
     let lines = lines(&tasks, &lanes, None);
@@ -306,12 +322,22 @@ fn a_task_in_review_draws_the_line_of_the_review() {
         .unwrap();
     let lines = lines(&tasks, &lanes, None);
 
-    // T-141 is in review: the review column reaches its lane (deck).
+    // T-142 waits for its verdict: the review column reaches its lane
+    // (hull, the second column).
+    let row = line_of(&lines, "T-142");
+    assert_eq!(at(row, 9, 1), "◎", "{row:?}");
+    // The deck's lane line crosses the line of the review.
+    assert_eq!(at(row, 10, 11), "─────│─────", "{row:?}");
+    assert_eq!(at(row, 21, 1), "◎", "{row:?}");
+    assert!(row.contains("in review"), "{row:?}");
+
+    // T-141 was accepted and waits for its merge: the same line, and the info
+    // column says so.
     let row = line_of(&lines, "T-141");
     assert_eq!(at(row, 9, 1), "◎", "{row:?}");
     assert_eq!(at(row, 10, 5), "─────", "{row:?}");
     assert_eq!(at(row, 15, 1), "◎", "{row:?}");
-    assert!(row.contains("in review"), "{row:?}");
+    assert!(row.contains("merging"), "{row:?}");
 }
 
 #[test]
@@ -428,4 +454,71 @@ fn line_of<'a>(lines: &'a [String], task: &str) -> &'a str {
         .find(|line| line.contains(&needle))
         .map(String::as_str)
         .unwrap_or_else(|| panic!("no line for {task}"))
+}
+
+#[test]
+fn a_stored_review_round_shows_how_the_review_ended() {
+    // The review of T-141 ended with a pass.
+    let mut store = world();
+    review_round(&mut store, "T-141", Some(true));
+    let text = store
+        .read(|tx| panel(tx, "p", "T-141", T0))
+        .unwrap()
+        .join("\n");
+    assert!(text.contains("review attempt 1"), "{text}");
+    assert!(text.contains("→ pass"), "{text}");
+
+    // The review came back: the lane works on it again.
+    let mut store = world();
+    review_round(&mut store, "T-141", Some(false));
+    let text = store
+        .read(|tx| panel(tx, "p", "T-141", T0))
+        .unwrap()
+        .join("\n");
+    assert!(text.contains("→ fail: rework"), "{text}");
+
+    // The review is still running: there is no verdict yet.
+    let mut store = world();
+    review_round(&mut store, "T-141", None);
+    let text = store
+        .read(|tx| panel(tx, "p", "T-141", T0))
+        .unwrap()
+        .join("\n");
+    assert!(text.contains("(running)"), "{text}");
+}
+
+/// A review round of a task in the store, with the verdict of the review (None
+/// while it is still running).
+fn review_round(store: &mut Store, task: &str, passed: Option<bool>) {
+    let key = RoundKey {
+        project: "p".into(),
+        task: task.into(),
+        attempt: 1,
+        role: "review".into(),
+    };
+    store
+        .write(|tx| {
+            tx.insert_round(&NewRound {
+                key: key.clone(),
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: Some("gpt-6.1-sol".into()),
+                start_at: moment(12, 10),
+            })?;
+            tx.set_round_active(&key, 7 * 60)?;
+            if let Some(passed) = passed {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: task.into(),
+                    attempt: 1,
+                    passed,
+                    findings: String::new(),
+                    by_seat: "p:review-1".into(),
+                    created: moment(12, 20),
+                })?;
+            }
+            Ok(())
+        })
+        .unwrap();
 }

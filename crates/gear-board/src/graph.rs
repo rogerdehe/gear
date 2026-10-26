@@ -143,8 +143,9 @@ pub fn tasks(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<GraphTask>> 
     Ok(order(tasks))
 }
 
-/// The order of the prototype: queued, working, in review, then the merged
-/// ones with the newest first.
+/// The order of the prototype: queued, working, the work that is in review
+/// (one group, in the order of the plan), then the merged ones with the
+/// newest first.
 fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     let stage = |task: &GraphTask| task.stage;
     let mut done: Vec<GraphTask> = Vec::new();
@@ -159,14 +160,17 @@ fn order(mut tasks: Vec<GraphTask>) -> Vec<GraphTask> {
     done.sort_by_key(|task| task.finished.unwrap_or(0));
     done.reverse();
     let mut ordered: Vec<GraphTask> = Vec::new();
-    for wanted in [
-        GraphStage::Queued,
-        GraphStage::Working,
-        GraphStage::Review,
-        GraphStage::Merging,
-    ] {
+    for wanted in [GraphStage::Queued, GraphStage::Working] {
         ordered.extend(rest.iter().filter(|task| stage(task) == wanted).cloned());
     }
+    // The work that waits for a verdict is one group: a task that is being
+    // merged and a task that is in review stand next to each other, in the
+    // order of the plan.
+    ordered.extend(
+        rest.iter()
+            .filter(|task| matches!(stage(task), GraphStage::Review | GraphStage::Merging))
+            .cloned(),
+    );
     ordered.extend(done);
     ordered
 }
@@ -373,21 +377,32 @@ pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<
     lines.push("ROUNDS".to_string());
     let rounds = tx.rounds_of_task(project, task)?;
     if !rounds.is_empty() {
-        // The rounds of the store (§4): the time on the clock and the tokens.
+        // The rounds of the store (§4): the time on the clock, the tokens and
+        // the verdict of a review.
         for round in &rounds {
             let minutes = round.active_s / 60;
             let tokens = round.input.unwrap_or(0)
                 + round.output.unwrap_or(0)
                 + round.cache_read.unwrap_or(0)
                 + round.cache_write.unwrap_or(0);
-            lines.push(format!(
+            let mut line = format!(
                 "  {:<5} {:<7} {:<6} {:>3}m   {}k tokens",
                 round.role,
                 format!("attempt {}", round.attempt),
                 round.cli,
                 minutes,
                 tokens / 1000
-            ));
+            );
+            if round.role == "review" {
+                // How the review ended: it is still running when there is no
+                // verdict yet.
+                line.push_str(match tx.get_review_verdict(project, task, round.attempt)? {
+                    Some(verdict) if verdict.passed => "  → pass",
+                    Some(_) => "  → fail: rework",
+                    None => "  (running)",
+                });
+            }
+            lines.push(line);
         }
     } else if history.attempts.is_empty() {
         lines.push("  not started".to_string());
