@@ -117,7 +117,7 @@ fn staff_lines_are_strict() {
 #[test]
 fn release_is_a_staff_line() {
     let d = parse("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n").unwrap();
-    assert!(matches!(&d.staff[0], StaffItem::Release { lane, .. } if lane == "heat"));
+    assert!(matches!(&d.staff[0], StaffItem::Release { name, .. } if name == "heat"));
     assert!(bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release\n").contains("`release` needs a lane"));
     assert!(
         bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat now\n")

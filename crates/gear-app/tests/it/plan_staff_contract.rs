@@ -108,6 +108,72 @@ fn retry_puts_a_parked_lane_back_in_the_queue() {
     assert_eq!(run_at(&mut s, "- retry captain\n", "retry-6").unwrap_err().code, ErrorCode::BadFormat);
 }
 
+/// T-140: a reviewer seat in Standby is released by the captain's line, and a
+/// reviewer that is reviewing is refused with the task it is reviewing.
+///
+/// A reviewer release needs no session fact (the seat is idle or it is
+/// refused), so it works without the session's agents.
+#[test]
+fn release_brings_a_standby_reviewer_back() {
+    /// `run_at` applies against the plan version the store holds.
+    fn run_at(s: &mut Store, staff: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+        let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
+        let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
+        apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
+    }
+
+    let mut s = world();
+    s.write(|tx| {
+        // A reviewer in a job: it is reviewing T-12.
+        testing::seed_temp_seat(tx, "p", "review-1", "T-12", "w1:p5", "codex", T0)?;
+        // A reviewer without a job: the engine left it in Standby.
+        testing::seed_active_seat(tx, "p", "review-2", SeatRole::Temp, "w1:p6", "codex", T0)?;
+        tx.set_seat_state("p:review-2", SeatState::Standby, Some("review done"), T0 + 1)
+    })
+    .unwrap();
+
+    // The idle reviewer goes: the engine closes its pane as for any release.
+    let r = run_at(&mut s, "- release review-2\n", "release-1").unwrap();
+    assert_eq!(r.staffed, vec!["release review-2".to_string()]);
+    assert_eq!(
+        seat(&mut s, "review-2"),
+        (SeatState::Releasing, Some("released by the captain: it was idle".into())),
+    );
+
+    // A reviewer that is reviewing is not pulled out of its job.
+    let error = run_at(&mut s, "- release review-1\n", "release-2").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(
+        error.detail.contains("review-1 is reviewing T-12"),
+        "{}",
+        error.detail
+    );
+    assert_eq!(seat(&mut s, "review-1").0, SeatState::Active, "nothing written");
+
+    // A reviewer that is not idle is refused with the reason: it is not in
+    // Standby, so the captain cannot let it go.
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "review-3", SeatRole::Temp, "w1:p7", "codex", T0)?;
+        Ok(())
+    })
+    .unwrap();
+    let error = run_at(&mut s, "- release review-3\n", "release-3").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
+    assert!(
+        error.detail.contains("only a reviewer in Standby is released"),
+        "{}",
+        error.detail
+    );
+    assert_eq!(seat(&mut s, "review-3").0, SeatState::Active, "nothing written");
+
+    // A seat that is neither a lane nor a reviewer is refused, and so is a
+    // name that does not exist.
+    assert_eq!(run_at(&mut s, "- release captain\n", "release-4").unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(run_at(&mut s, "- release nobody\n", "release-5").unwrap_err().code, ErrorCode::BadFormat);
+}
+
 /// T-133: a held lane comes back from the plan — `Active` while its agent is
 /// still there, `Queued` (the engine onboards it again) once it is gone — and a
 /// lane that is not held is refused with the reason.
