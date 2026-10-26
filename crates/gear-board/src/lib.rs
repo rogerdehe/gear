@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod idle;
 mod screen;
 pub mod voyage;
 
