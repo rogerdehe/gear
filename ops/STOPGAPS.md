@@ -5,11 +5,12 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| the old `home-deck` and `home-hull` worktrees removed by hand (`git worktree remove`) so the re-registered lanes could onboard on pi | onboarding a re-registered lane creates its worktree again and fails on "already exists" | T-125 lands (onboarding reopens an existing worktree) | captain: delete this row |
-| every captain instruction to a lane is also typed into its pane with `herdr agent prompt` | the engine rings only idle lanes, so a working lane never reads mid-task instructions | T-130 lands (urgent and captain messages reach a working lane) | captain: delete this row |
-| hull and deck moved from held to needs_check by hand in the store, then `- retry` | no Staff verb releases a held lane | T-133 lands (`- release <lane>`) | captain: delete this row |
 
 ## Removed
+
+- 2026-10-26 home-deck/home-hull worktrees removed by hand: T-125 (a re-registered lane reuses its worktree).
+- 2026-10-26 captain instructions typed into lane panes: T-130 (messages reach a working lane).
+- 2026-10-26 held lanes moved to needs_check by hand: T-133 (`- release <lane>`).
 
 - 2026-10-23 captain switches a lane from MiniMax (OpenCode) to Codex gpt-6.1-sol medium by hand on a quota stop: the engine closes the agent and starts codex in the same pane and worktree (T-35, the cross-CLI fallback).
 - 2026-10-23 `merge-task.sh`, `switch-model.sh`, `timer.sh`: the engine merges (T-12), switches models in place (T-33) and waits for quota (T-15).
