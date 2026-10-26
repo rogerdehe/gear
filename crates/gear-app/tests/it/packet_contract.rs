@@ -45,6 +45,20 @@ fn packet_has_contract_and_copyable_commands() {
     assert!(!text.contains("Pending update"));
 }
 
+/// T-168 (design §6.2): the packet says what the round's budget is and
+/// what a hand-in past it must carry.
+#[test]
+fn the_packet_says_the_budget_and_the_friction_flag() {
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(
+        text.contains("Budget: 30 min. Past it, your hand-in must carry --friction"),
+        "{text}"
+    );
+    // The packet lists what belongs in a friction report (design §6.1).
+    assert!(text.contains("a permission you lacked"), "{text}");
+}
+
 #[test]
 fn pending_update_and_missing_task() {
     let mut s = world(true);

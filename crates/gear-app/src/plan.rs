@@ -2405,6 +2405,17 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("Estimate: {minutes} minutes\n"));
     }
+    // The round's budget (design §5.1) and what a hand-in past it must carry
+    // (design §6.2): the friction report is then required.
+    if let Some(n) = open_n {
+        let role = if n >= 2 { "rework" } else { "dev" };
+        let budget = tx.round_budget_min(project, task, n, role, None)?;
+        text.push_str(&format!(
+            "Budget: {budget} min. Past it, your hand-in must carry --friction \"…\" \
+             (a permission you lacked and worked around, a test or build that took far too long, \
+             an unclear contract, a missing tool or fixture, a step that cost much time).\n"
+        ));
+    }
     // The project standard (T-84): the writer judges against it too.
     if let Some(line) = crate::standard::line_for(tx, project)? {
         text.push_str(&line);

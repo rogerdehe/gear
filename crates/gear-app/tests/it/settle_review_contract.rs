@@ -282,6 +282,7 @@ fn send_review(outcome: Outcome, rid: &str) -> SendArgs {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: rid.into(),
     }
 }
