@@ -4,7 +4,7 @@
 
 use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
-use gear_herdr::{AgentStatus, ScreenFlag};
+use gear_herdr::ScreenFlag;
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
 use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, TaskRow, Tx};
@@ -98,12 +98,12 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     if v.switch_pending {
         return none("a model switch is under way for this seat");
     }
-    // 4. Never type into a working agent. A blocked one is not working: it
-    //    may be handed work, and the delivery waits for the dialog to clear
-    //    instead of failing every tick (T-68).
-    let blocked = obs.status == Some(AgentStatus::Blocked);
-    if !obs.idle && !blocked {
-        return none("the agent is not idle");
+    // 4. Design §10.2: only `idle` and `done` are ready. A working, blocked
+    //    or unknown agent is never ready for a delivery — the text waits for
+    //    the agent to be idle again (T-68: a seat on a dialog is not
+    //    re-delivered every tick).
+    if !obs.idle {
+        return none("the agent is not ready");
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
     if obs.flags.iter().any(|flag| {

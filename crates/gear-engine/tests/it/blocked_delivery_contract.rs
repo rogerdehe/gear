@@ -1,9 +1,10 @@
 //! T-68: a blocked seat is not re-delivered every tick (trial G09).
 //!
 //! While Herdr reports a seat blocked, the engine kept creating a delivery op
-//! that the blocked agent refused, every ~4 s. Now a blocked seat gets no new
-//! delivery: at most one stays pending, the blocked-seat alert (T-57) carries
-//! it, and when the seat works or is idle again it is delivered once.
+//! that the blocked agent refused, every ~4 s. Now a blocked seat gets no
+//! delivery at all (design §10.2: only `idle` and `done` are ready, and a
+//! blocked agent is never ready), the blocked-seat alert (T-57) carries it,
+//! and when the seat works or is idle again it is delivered once.
 
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
@@ -106,21 +107,23 @@ fn ticks(w: &mut World, from: i64, to: i64) {
 }
 
 #[test]
-fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
+fn a_blocked_seat_gets_no_delivery_and_one_after_it_clears() {
     let mut w = world(AgentStatus::Blocked);
     // Ten ticks while the agent sits on its dialog.
     ticks(&mut w, 0, 10);
 
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "one op, not one per tick: {ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "it stays pending: {ops:?}");
+    assert!(
+        ops.is_empty(),
+        "a blocked agent is never ready for a delivery (design 10.2): {ops:?}"
+    );
     assert!(
         w.herdr.prompts_to(LANE).is_empty(),
         "nothing is typed into a blocked agent: {:?}",
         w.herdr.prompts_to(LANE)
     );
 
-    // The dialog is dismissed: the lane is idle, and the pending delivery goes.
+    // The dialog is dismissed: the lane is idle, and the delivery goes.
     w.herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 41).unwrap();
     // The lane reads it (T-97: a delivery nobody confirms fails after its
@@ -159,13 +162,12 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
 /// alerted (its pane is a dialog nobody may ignore), and its pending delivery
 /// keeps waiting; when the dialog clears it is delivered once.
 #[test]
-fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
+fn a_retiring_blocked_lane_is_alerted_and_gets_no_delivery() {
     let mut w = world(AgentStatus::Blocked);
-    // The delivery is pending: a blocked seat is not typed into.
+    // A blocked seat is not typed into and gets no delivery (design 10.2).
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "{ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+    assert!(ops.is_empty(), "no delivery for a blocked seat: {ops:?}");
 
     // The captain retires the lane while it is blocked.
     w.store
@@ -179,8 +181,7 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
         tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
     }
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "one pending delivery: {ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+    assert!(ops.is_empty(), "still no delivery while it is blocked: {ops:?}");
     let alerts = w
         .store
         .read(|tx| tx.thread_messages("p", "blocked:p:heat"))
@@ -206,19 +207,17 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
             })
         })
         .unwrap();
-    // The next tick confirms it. (A later Continue is the normal nudge of a
-    // lane that never worked; the assignment itself went once.)
+    // The dialog is dismissed, but the lane is retiring: the dispatch never
+    // assigns to a retiring seat, so no delivery goes out (design/09).
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 180).unwrap();
     let ops = deliveries(&mut w);
-    let assignment = ops
-        .iter()
-        .find(|op| op.payload.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.starts_with("New task T-1")))
-        .expect("the task was delivered");
-    assert_eq!(assignment.state, OpState::Confirmed, "{ops:?}");
-    assert_eq!(
-        w.herdr.prompts_to(LANE).iter().filter(|prompt| prompt.contains("New task T-1")).count(),
-        1,
-        "the assignment went once: {:?}",
+    assert!(
+        ops.is_empty(),
+        "a retiring seat is never handed a task: {ops:?}"
+    );
+    assert!(
+        w.herdr.prompts_to(LANE).is_empty(),
+        "nothing was typed into it: {:?}",
         w.herdr.prompts_to(LANE)
     );
 }
