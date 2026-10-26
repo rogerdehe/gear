@@ -73,6 +73,14 @@ pub struct SendResult {
 ///   captain with the verdict in its first line (a fail is actionable, a pass is information).
 /// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
 ///   must return BadFormat until then rather than silently storing.
+/// - Messages to a reviewer seat carry the task (design §3.8): a reviewer
+///   seat is bound to a task for life, so the messages it writes carry that
+///   task, and an instruction the captain addresses to it without `--task`
+///   takes its `task_id`; an idle reviewer has no job, and the instruction
+///   is refused ("<reviewer> has no review job; nothing would show").
+/// - A hand-in is answered (design §10.7, row B03-04/10): the lane is told
+///   that its work is in and that the next task comes by itself. The line is
+///   printed by `gear send` — the CLI owns the reply a hand-in gets.
 pub fn send(
     store: &mut Store,
     env: &Env,
@@ -197,6 +205,15 @@ pub fn send(
             ));
         }
 
+        // The task the message is about (design §3.8). A reviewer seat is
+        // bound to a task for life: the messages it writes carry that task,
+        // so the captain's answer comes back to the job it belongs to and
+        // shows on the reviewer's home page.
+        let mut task = args.task.clone();
+        if task.is_none() && seat.role == SeatRole::Temp {
+            task = seat.task_id.clone();
+        }
+
         // Recipient: the sender of the answered message, a seat the captain
         // addresses, or the project captain.
         let (recipient, inherited_thread) = if let Some(reply_to) = &args.reply_to {
@@ -215,9 +232,25 @@ pub fn send(
                 ));
             }
             let seat_id = format!("{}:{}", ctx.project, to);
-            tx.get_seat(&seat_id)?.ok_or_else(|| {
+            let target = tx.get_seat(&seat_id)?.ok_or_else(|| {
                 GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id} in this project"))
             })?;
+            // A message to a reviewer seat carries the task it is about
+            // (design §3.8): without it nothing would show on the reviewer's
+            // home page. An idle reviewer has no job and no task, so the
+            // instruction would be invisible — it is refused, with the
+            // reason.
+            if task.is_none() && target.role == SeatRole::Temp {
+                match target.task_id.clone() {
+                    Some(job) => task = Some(job),
+                    None => {
+                        return Err(GearError::new(
+                            ErrorCode::BadFormat,
+                            format!("{to} has no review job; nothing would show"),
+                        ))
+                    }
+                }
+            }
             (seat_id, None)
         } else {
             let captain = tx.captain_of(&ctx.project)?.ok_or_else(|| {
@@ -252,7 +285,7 @@ pub fn send(
             let review = match (args.kind, args.verdict) {
                 (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
                     project: ctx.project.clone(),
-                    task: args.task.clone().unwrap_or_default(),
+                    task: task.clone().unwrap_or_default(),
                     attempt: args.attempt.unwrap_or_default(),
                     outcome: verdict,
                     findings: if seat.role == SeatRole::Temp {
@@ -281,7 +314,7 @@ pub fn send(
                 crate::tasks::submit_result(
                     tx,
                     &ctx.project,
-                    args.task.as_deref().ok_or_else(|| {
+                    task.as_deref().ok_or_else(|| {
                         GearError::new(ErrorCode::BadFormat, "a result needs `--task`")
                     })?,
                     args.attempt.ok_or_else(|| {
@@ -310,7 +343,7 @@ pub fn send(
             let thread = match &inherited_thread {
                 Some(thread) => thread.clone(),
                 None => {
-                    let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
+                    let prefix = task.clone().unwrap_or_else(|| ctx.seat.clone());
                     let seq = next_thread_seq(tx, &ctx.project, &recipient, now, &prefix)?;
                     format!("{prefix}:{seq}")
                 }
@@ -319,7 +352,7 @@ pub fn send(
                 meta: None,
                 project: ctx.project.clone(),
                 thread: thread.clone(),
-                task: args.task.clone(),
+                task: task.clone(),
                 attempt: args.attempt,
                 sender: seat.id.clone(),
                 sender_gen: ctx.generation,
@@ -575,6 +608,10 @@ pub enum ReplyMode {
     Resolve,
     Wait,
     Note,
+    /// Open an item that was resolved by mistake (design §10.7, row
+    /// B03-07). The item goes back to the captain's inbox; nothing is sent
+    /// to the seat that asked.
+    Reopen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -598,11 +635,28 @@ pub struct ReplyResult {
     pub replayed: bool,
 }
 
+/// May this item be handled in this mode? (design §10.7, row B03-07): a
+/// reopen works on a resolved item — one resolved by mistake — and every
+/// other mode works on an open or waiting one; only a resolve may close an
+/// informational record.
+fn handlable(message: &MessageRow, mode: ReplyMode) -> bool {
+    match mode {
+        ReplyMode::Reopen => message.state == MsgState::Resolved,
+        _ => {
+            message.state == MsgState::Open
+                || message.state == MsgState::Waiting
+                || (message.state == MsgState::Info && mode == ReplyMode::Resolve)
+        }
+    }
+}
+
 /// `gear reply` (captain only). Each id must be in this project, addressed to
 /// the captain, Open or Waiting (Info may only be resolved). Resolve → Resolved; Wait → Waiting until
 /// wait_until (required; wait_on is an optional label); Note → state unchanged,
 /// with the text kept on the item and sent to nobody (T-103: a note is the
-/// captain's record, not a message).
+/// captain's record, not a message); Reopen → a Resolved item goes back to
+/// Open (design §10.7, row B03-07: an item resolved by mistake is reopened),
+/// and nothing is sent to anybody.
 ///
 /// Resolve and Wait write one Reply (state Info) per (live sender, thread) into
 /// that sender's inbox for actionable items — only when the sender is a seat of
@@ -686,10 +740,7 @@ pub fn reply(
                         ),
                     ));
                 }
-                if message.state != MsgState::Open
-                    && message.state != MsgState::Waiting
-                    && !(message.state == MsgState::Info && args.mode == ReplyMode::Resolve)
-                {
+                if !handlable(&message, args.mode) {
                     return Err(GearError::new(
                         ErrorCode::BadTransition,
                         format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
@@ -728,10 +779,20 @@ pub fn reply(
                     ReplyMode::Resolve => MsgState::Resolved,
                     ReplyMode::Wait => MsgState::Waiting,
                     ReplyMode::Note => original.state,
+                    // A resolved item resolved by mistake goes back to the
+                    // captain's inbox (design §10.7, row B03-07). The model's
+                    // transition table (gear-model, deck's file) knows no
+                    // Resolved → Open, so the reopen states it here: nothing
+                    // else reopens, and nothing else moves.
+                    ReplyMode::Reopen => MsgState::Open,
                 };
                 if new_state != original.state {
+                    let allowed = match args.mode {
+                        ReplyMode::Reopen => original.state == MsgState::Resolved,
+                        _ => MsgState::can_transition(original.state, new_state),
+                    };
                     gear_model::state::require_transition(
-                        MsgState::can_transition(original.state, new_state),
+                        allowed,
                         "reply",
                         original.state.as_str(),
                         new_state.as_str(),
@@ -741,7 +802,7 @@ pub fn reply(
                 // and the wait fields it had; resolve and wait set their own
                 // (T-103).
                 let (wait_on, wait_until) = match args.mode {
-                    ReplyMode::Note => (original.wait_on.clone(), original.wait_until),
+                    ReplyMode::Note | ReplyMode::Reopen => (original.wait_on.clone(), original.wait_until),
                     _ => (args.wait_on.clone(), args.wait_until),
                 };
                 tx.update_message_state(
@@ -756,8 +817,9 @@ pub fn reply(
                 handled.push((original.id.clone(), new_state.as_str().to_string()));
 
                 // A note is the captain's bookkeeping: stored on the item just
-                // above, sent to nobody (T-103).
-                if args.mode == ReplyMode::Note {
+                // above, sent to nobody (T-103). A reopen is the same: the
+                // item is back in the inbox, the captain answers it there.
+                if args.mode == ReplyMode::Note || args.mode == ReplyMode::Reopen {
                     continue;
                 }
 
