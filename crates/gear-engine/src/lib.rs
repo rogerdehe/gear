@@ -31,16 +31,19 @@ pub mod observe;
 pub mod onboard;
 mod opencode;
 pub mod ops;
+pub mod overrun;
 pub mod parallel;
 pub mod quota;
 pub mod release;
 pub mod restart;
+pub mod rounds;
 pub mod review;
 pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
 pub mod tailed;
+pub mod waits;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -161,6 +164,8 @@ pub struct TickReport {
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
     pub parallel_failed: Vec<String>,
+    /// The rounds that ended or learned a session this tick (design §4.1).
+    pub rounds: crate::rounds::RoundReport,
 }
 
 /// Run one engine tick over every project in the store.
@@ -395,6 +400,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
         }
     }
+    // 13. the rounds bookkeeping of every project (design §4.1): the session of
+    //     a seat joins its open round, and a round ends at the next round on
+    //     its seat or at the seat's release. The overrun question (§5.2) and
+    //     the declared waits (§5.3) tick with it; both are empty until their
+    //     own tasks land.
+    report.rounds = rounds::tick(store, herdr, cfg, now)?;
+    overrun::tick(store, herdr, cfg, now)?;
+    waits::tick(store, herdr, cfg, now)?;
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
     for seat in report.flagged.clone() {
