@@ -136,6 +136,37 @@ pub struct Pending {
     pub waited: i64,
 }
 
+/// The model and labels a pending switch plan aims at (its `to` is the bar
+/// text): the `[models.switch]` entry when the config has one, else the labels
+/// OpenCode's catalogue gives a chain model (T-94), in the seat's worktree. A
+/// plan begun on derived labels must be continued on them too — a lane with no
+/// hand-written labels was flagged on its first resumed step (M3 acceptance).
+pub(crate) fn plan_target(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    config: &gear_app::config::ProjectConfig,
+    seat_id: &str,
+    to: &str,
+) -> GearResult<Option<(String, gear_app::config::ModelSwitch)>> {
+    if let Some((model, labels)) = config.models.switch.iter().find(|(_, labels)| labels.bar == to) {
+        return Ok(Some((model.clone(), labels.clone())));
+    }
+    let directory = store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(seat_id)))?;
+    let chain = config.models.lanes.iter().chain(config.models.review.iter()).chain(config.models.captain.iter());
+    for entry in chain {
+        let model = entry.model();
+        if config.models.switch.contains_key(model) {
+            continue;
+        }
+        if let Some(labels) = crate::opencode::derived_labels(herdr, model, None, directory.as_deref()) {
+            if labels.bar == to {
+                return Ok(Some((model.to_string(), labels)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// The switch plan of a seat, if one is unfinished.
 pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Pending>> {
     let Some(raw) = meta_get(store, &pending_key(seat_id))? else {
