@@ -4,6 +4,7 @@ use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
 use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
+use std::collections::BTreeMap;
 
 /// Reason stored with an op that the engine found Executing after a restart.
 const RECOVERED_REASON: &str = "engine restarted before the call finished";
@@ -105,6 +106,12 @@ pub fn deliver_doorbell_now(
         // T-134: the name this seat's agent must carry before the prompt —
         // a reviewer keeps the task-based name its review started with.
         let agent_name = crate::names::desired(&row);
+        // The CLI that runs in the seat's pane: only an agent of this kind is
+        // the seat's agent (design §10.1).
+        let kind = tx
+            .get_binding(seat, generation)?
+            .map(|binding| binding.kind)
+            .unwrap_or_default();
         let op = tx.insert_op(&NewOp {
             project: project.to_string(),
             seat: seat.to_string(),
@@ -121,24 +128,30 @@ pub fn deliver_doorbell_now(
         // Intended ops, so nobody else types this one, and the seat's slot is
         // held from here on.
         tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
-        Ok(Some((op.id, binding.pane_id, agent_name)))
+        Ok(Some((op.id, binding.pane_id, agent_name, kind)))
     })?;
-    let Some((op_id, pane_id, agent_name)) = claimed else { return Ok(None) };
-    // Outside any transaction: call Herdr. T-134: Herdr refuses a prompt to an
-    // agent whose name it cleared, so make sure of the name first.
-    crate::names::ensure(herdr, &pane_id, &agent_name);
-    let outcome = herdr.prompt(&pane_id, &text);
+    let Some((op_id, pane_id, agent_name, kind)) = claimed else { return Ok(None) };
+    // Outside any transaction: call Herdr. Design §10.1: the text goes to the
+    // live agent **name**, never to the pane id — a pane that lost its agent
+    // refuses the text instead of typing it into a shell.
+    let names = crate::names::read(herdr).unwrap_or_default();
+    let outcome = aim(herdr, &names, &pane_id, &agent_name, &kind, &text, true);
     let state = match &outcome {
-        Outcome::Ok(()) => OpState::Submitted,
+        Aimed::Sent => OpState::Submitted,
+        // Nothing was typed: the doorbell waits for the next tick (the agent
+        // had lost its name and was renamed).
+        Aimed::Retry(..) => OpState::Intended,
         // A refusal proves nothing was typed: the engine rings it again (F2).
-        Outcome::Refused { .. } => OpState::Failed,
+        Aimed::Refused(..) | Aimed::Gone(..) => OpState::Failed,
         // The text may be in the pane: never resent (design/07).
-        Outcome::Uncertain { .. } => OpState::Unknown,
+        Aimed::Uncertain(..) => OpState::Unknown,
     };
     let result = match &outcome {
-        Outcome::Ok(()) => SENT_BY_SENDER.to_string(),
-        Outcome::Refused { code, message } => format!("{code}: {message}"),
-        Outcome::Uncertain { reason } => reason.clone(),
+        Aimed::Sent => SENT_BY_SENDER.to_string(),
+        Aimed::Retry(reason) => reason.clone(),
+        Aimed::Gone(reason) => format!("agent-gone: {reason}"),
+        Aimed::Refused(reason) => reason.clone(),
+        Aimed::Uncertain(reason) => reason.clone(),
     };
     store.write(|tx| {
         if state == OpState::Submitted {
@@ -293,18 +306,19 @@ pub fn execute_intended(
         Ok(prepared)
     })?;
 
-    // 2. Outside any transaction: call Herdr.
+    // 2. Outside any transaction: call Herdr. The names are read here, after
+    //    the tick's own name step, so the name the agent carries now is the
+    //    one the text is aimed at (design §10.1).
+    let names = crate::names::read(herdr).unwrap_or_default();
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, agent_name, .. } => {
-                // T-134: Herdr refuses a prompt to an agent whose name it
-                // cleared; name the agent first, then deliver in this same
-                // tick. A rename that fails (the name is held elsewhere) is
-                // reported by the tick's own name step; the prompt is tried
-                // all the same.
-                crate::names::ensure(herdr, pane_id, agent_name);
-                Some(herdr.prompt(pane_id, text))
+            Prepared::Run { pane_id, text, agent_name, kind, .. } => {
+                // Design §10.1: the text goes to the live agent **name**. The
+                // agent of the pane is read first: only an agent of the
+                // seat's kind is the seat's agent, and a pane without one
+                // never receives the text.
+                Some(aim(herdr, &names, pane_id, agent_name, kind, text, false))
             }
             // Waiting ops never reach here (they are not prepared).
             Prepared::Wait { .. } => None,
@@ -328,13 +342,22 @@ pub fn execute_intended(
                         format!("waiting operation {} was prepared", item.id()),
                     ))
                 }
-                (Prepared::Run { .. }, Some(Outcome::Ok(()))) => {
-                    (OpState::Submitted, None)
+                (Prepared::Run { .. }, Some(Aimed::Sent)) => (OpState::Submitted, None),
+                // Nothing was typed: the op waits for the next tick (the agent
+                // had lost its name and was renamed, or the pane could not be
+                // read).
+                (Prepared::Run { .. }, Some(Aimed::Retry(reason))) => {
+                    (OpState::Intended, Some(reason))
                 }
-                (Prepared::Run { .. }, Some(Outcome::Refused { code, message })) => {
-                    (OpState::Failed, Some(format!("{code}: {message}")))
+                // The seat's agent is gone: the op fails at once, with that
+                // reason (design §10.1).
+                (Prepared::Run { .. }, Some(Aimed::Gone(reason))) => {
+                    (OpState::Failed, Some(format!("agent-gone: {reason}")))
                 }
-                (Prepared::Run { .. }, Some(Outcome::Uncertain { reason })) => {
+                (Prepared::Run { .. }, Some(Aimed::Refused(reason))) => {
+                    (OpState::Failed, Some(reason))
+                }
+                (Prepared::Run { .. }, Some(Aimed::Uncertain(reason))) => {
                     (OpState::Unknown, Some(reason))
                 }
                 (Prepared::Run { .. }, None) => {
@@ -359,9 +382,9 @@ pub fn execute_intended(
 
 /// What to do with one Intended op after the guard checks.
 enum Prepared {
-    /// The op may run: send `text` to `pane_id`, whose agent must carry
-    /// `agent_name` first (T-134).
-    Run { id: String, pane_id: String, text: String, agent_name: String },
+    /// The op may run: send `text` to the agent of `pane_id`, which must
+    /// carry `agent_name` (T-134) and be of the seat's kind (`kind`).
+    Run { id: String, pane_id: String, text: String, agent_name: String, kind: String },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
     Wait { id: String },
@@ -432,7 +455,120 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         text: text.to_string(),
         // T-134: the name the agent in that pane must carry before the prompt.
         agent_name: crate::names::desired(&seat),
+        // Design §10.1: the CLI that runs in the pane. Only an agent of this
+        // kind is the seat's agent.
+        kind: binding.kind.clone(),
     })
+}
+
+/// What happened to a text aimed at a seat's agent (design §10.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Aimed {
+    /// Herdr accepted the text.
+    Sent,
+    /// Nothing was typed: the op waits for the next tick. The agent had lost
+    /// its name (it was renamed) or the pane could not be read.
+    Retry(String),
+    /// The seat's agent is gone: the op fails at once with this reason.
+    Gone(String),
+    /// Herdr refused the text: the op fails with this reason.
+    Refused(String),
+    /// The text may be in the pane: it is never sent again.
+    Uncertain(String),
+}
+
+/// Aim `text` at the agent of `pane_id` (design §10.1: never type into the
+/// wrong thing).
+///
+/// The text goes to the agent's **name**, never to the pane id: Herdr then
+/// refuses it when no agent of that name runs, instead of a race typing it
+/// into a shell. When Herdr refuses, `agent_get` decides: an agent of the
+/// seat's kind is there → it lost its name, it is renamed and the text goes
+/// next tick (nothing is restarted); no agent in the pane → the seat's agent
+/// is gone and the op fails at once with that reason.
+///
+/// `type_after_rename` says what happens when the agent had lost its name:
+/// the engine's tick waits for the next one (`false`: the tick's own name
+/// step gives the name back and the text goes out then), while the sender
+/// types its text before it returns (T-130, `true`).
+fn aim(
+    herdr: &mut dyn HerdrAct,
+    names: &BTreeMap<String, Option<String>>,
+    pane_id: &str,
+    agent_name: &str,
+    kind: &str,
+    text: &str,
+    type_after_rename: bool,
+) -> Aimed {
+    match crate::names::resolve_target(herdr, names, pane_id, agent_name, kind) {
+        crate::names::Target::Prompt { name } => match herdr.prompt(&name, text) {
+            Outcome::Ok(()) => Aimed::Sent,
+            Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
+            Outcome::Refused { code, message } => {
+                // Herdr refused the text: `agent_get` decides (design §10.1).
+                match herdr.agent_get(pane_id) {
+                    Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
+                        // The agent of the seat is there. Did it lose its name
+                        // (M3.1)? A fresh read of the names says: an agent
+                        // with no name at all lost it, so it is renamed and the
+                        // text goes next tick, and nothing is restarted. Any
+                        // other refusal (a dialog, a busy pane) fails the op as
+                        // it did before.
+                        let lost = match crate::names::read(herdr) {
+                            Ok(names) => matches!(names.get(pane_id), Some(None)),
+                            Err(_) => true,
+                        };
+                        if !lost {
+                            return Aimed::Refused(format!("{code}: {message}"));
+                        }
+                        let note = match herdr.agent_rename(pane_id, agent_name) {
+                            Outcome::Ok(()) => "it was renamed".to_string(),
+                            Outcome::Refused { code, message } => {
+                                format!("it could not be renamed ({code}: {message})")
+                            }
+                            Outcome::Uncertain { reason } => {
+                                format!("the rename is unknown ({reason})")
+                            }
+                        };
+                        Aimed::Retry(format!(
+                            "the agent of {pane_id} lost its name ({code}: {message}); {note} and the text goes again next tick"
+                        ))
+                    }
+                    Ok(None) => Aimed::Gone(format!(
+                        "{code}: {message} (no agent in the pane {pane_id})"
+                    )),
+                    Ok(Some(info)) => Aimed::Gone(format!(
+                        "{code}: {message} (the pane {pane_id} hosts a {} agent, not the seat's {kind})",
+                        info.agent.as_deref().unwrap_or("unknown")
+                    )),
+                    // The pane could not be read: that is an observation
+                    // failure, never "the agent is gone" (design/08). Nothing
+                    // was typed, so the text may go next tick.
+                    Err(error) => Aimed::Retry(format!(
+                        "{code}: {message} (the pane {pane_id} could not be read: {})",
+                        error.0
+                    )),
+                }
+            }
+        },
+        // The agent had lost its name: it was renamed now, the text goes next
+        // tick. Nothing is typed and nothing is restarted.
+        crate::names::Target::Renamed if !type_after_rename => Aimed::Retry(format!(
+            "the agent of {pane_id} had lost its name; it was renamed and the text goes again next tick"
+        )),
+        // The sender types its text before it returns (T-130): the agent
+        // carries the name again, so the text goes out at once.
+        crate::names::Target::Renamed => match herdr.prompt(agent_name, text) {
+            Outcome::Ok(()) => Aimed::Sent,
+            Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
+            Outcome::Refused { code, message } => {
+                Aimed::Refused(format!("{code}: {message}"))
+            }
+        },
+        crate::names::Target::Gone(reason) => Aimed::Gone(reason),
+        crate::names::Target::Blocked(reason) => Aimed::Refused(reason),
+        crate::names::Target::Unreadable(reason) => Aimed::Retry(reason),
+    }
 }
 
 /// Whether the seat is a temp reviewer (design/10).

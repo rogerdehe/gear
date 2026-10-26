@@ -2628,8 +2628,11 @@ mod tests {
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
-        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
-        herdr.add_agent(LANE_PANE, lane_kind, status);
+        // Every agent carries the name of its seat (T-149: a text aims at the
+        // live agent name, and Herdr refuses a prompt to an agent that lost
+        // its name).
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+        herdr.add_agent_named(LANE_PANE, lane_kind, status, "p-heat");
         (store, herdr)
     }
 

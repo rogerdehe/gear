@@ -192,7 +192,7 @@ fn closing_calls(herdr: &FakeHerdr) -> Vec<String> {
     herdr.calls
         .iter()
         .filter_map(|call| match call {
-            Call::Prompt { pane, text } if pane == PANE => Some(format!("command:{text}")),
+            Call::Prompt { pane, text, .. } if pane == PANE => Some(format!("command:{text}")),
             Call::SendKeys { pane, keys } if pane == PANE => {
                 Some(format!("keys:{}", keys.join("+")))
             }
