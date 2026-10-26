@@ -202,7 +202,7 @@ After the previous round, the engine reads the last assistant record of the curr
 - After its verdict, a reviewer seat goes to `Standby` (agent alive, pane open). Its job binding ends: `seats.task_id = NULL`.
 - Each tick, with W = number of lane seats whose attempt is `Started` (working on a task):
   - while the Standby reviewers are more than W, the one idle longest is released (pane closed, binding void, seat `Released`, worktree kept);
-  - when W = 0, every Standby reviewer idle for 2 min or more is released.
+  - when W = 0, every Standby reviewer is released at once (no lane works, so no hand-in can come; a hand-in that does come starts a reviewer again in seconds).
 - The captain may release one at once: `# Staff` line `- release <reviewer>` (the verb exists for lanes; it now accepts a reviewer in Standby). The captain's guide says: when you are idle and judge that no hand-in comes within 10 min, release the idle reviewers.
 - The temps quota counts seats with a live agent or starting: `Active`, `Standby`, `Starting`. `Released`, `Unknown` with no agent, and retired seats never count.
 - A seat in `Starting` whose job is no longer under review (the attempt was failed, a newer attempt exists, the task is not Verifying) is cancelled: its start op is voided, its pane closed if any, the seat `Released` (B03-05).
@@ -277,8 +277,8 @@ Each round has a budget:
 | Round | Budget |
 |---|---|
 | dev (attempt 1) | the task's `estimate_min` |
-| rework (attempt n ≥ 2) | max(10, ⌈estimate_min / 2⌉) |
-| review | `timing.review_budget_min`, default 20 |
+| rework (attempt n ≥ 2) | the `estimate=<min>` written on the fail verdict that asked for it (`# Verdicts` fail lines take an optional `estimate=`); without one, max(10, ⌈estimate_min / 2⌉) |
+| review | measured: 1.5 × the median active time of the last 10 finished review rounds on the same reviewer model, at least 10 min; with fewer than 3 such rounds, 30 min |
 
 `active_s` = (now, or the round's hand-in time once handed in; for a review, its verdict time) − the round's check-in time (`started_at`; for a review, its delivery confirmation) − `paused_s`. The clock pauses (adds to `paused_s`) while the seat is quota-parked (§9) or the task is in a declared wait (§5.3).
 
@@ -364,20 +364,29 @@ In `# Decisions`, a decision is one line:
 
 ### 7.2 Kinds and stars
 
-| kind | for | star |
-|---|---|---|
-| `scope` | a task added, moved between lanes, a contract rewritten | ★ |
-| `cut` | a task cancelled or moved to the next voyage | ★ |
-| `split` | a task split | |
-| `override` | a pass against a failed review | ★ |
-| `logged` | a finding logged instead of reworked | |
-| `rework` | a fail with rework | |
-| `estimate` | an estimate changed | |
-| `staff` | park, hold, release, retire, rebind | |
-| `model`, `config` | a model or config change | ★ |
-| `hand-fix` | anything changed by hand outside GEAR | ★ |
-| `note` | anything else | |
-| `tail`, `station`, `user` | see §7.1 | station `cut`/`move` ★ |
+| kind | for |
+|---|---|
+| `scope` | a task added, moved between lanes, a contract rewritten |
+| `cut` | a task cancelled or moved to the next voyage |
+| `split` | a task split |
+| `override` | a pass against a failed review |
+| `logged` | a finding logged instead of reworked |
+| `rework` | a fail with rework |
+| `estimate` | an estimate changed |
+| `staff` | park, hold, release, retire, rebind |
+| `model`, `config` | a model or config change |
+| `hand-fix` | anything changed by hand outside GEAR |
+| `note` | anything else |
+| `tail`, `station`, `user` | see §7.1 |
+
+**The star is the captain's, and it is rare.** Everything is logged; the user reads only the starred lines at landing. A decision gets `★` (written right after the dash: `- ★ 2026-10-27 10:05 cut: …`) only when it changed the course, that is one of:
+
+1. what the voyage delivers: a part of the done sentence or a promised function is dropped, changed or added;
+2. the quality the user will meet: a known defect in a delivered function is accepted (an override or a logged finding on it);
+3. the user's own resources or contract: a model, a cost, a config or a permission the user did not set at kickoff;
+4. the time: the eta moves by more than 20%.
+
+Nothing else is starred: rework rounds, estimates, staff moves, cuts of nice-to-have tasks, fixes by hand that changed no delivered behavior. GEAR's own entries (§7.4) are never starred; the captain stars the decision line it writes about them when it meets the rule. The landing review shows the starred lines, then one line with the count of the others by kind.
 
 A line that does not match §7.1 (and is not tail/station) is kept as kind `note` without a star, and apply prints `warning: decision line <k> is not structured; logged as a note`.
 
@@ -402,7 +411,7 @@ Every apply re-reads every line. A line's key = sha256 of the line with whitespa
 1. The voyage report lines (today's `VoyageReport::lines`).
 2. The milestone's `done:` text, clause by clause (the captain marks met / not met in its own landing decision lines).
 3. Time and tokens: totals, per lane, and the five tasks with the highest actual/estimate.
-4. Decisions, ★ first, then all in order.
+4. The ★ decisions in full; the others as one count per kind (`--all` prints them).
 5. Friction reports with outcomes; open ones marked.
 6. Rework: tasks with more than one round.
 
@@ -411,7 +420,7 @@ The landing item (station.rs:65-77) says instead:
 ```
 Voyage <M> is ready to land: all <done> tasks are done (elapsed <e> / eta <eta>).
 1. Run `gear report voyage` and write the voyage report into # Decisions.
-2. Review it with the user first: the report, the ★ decisions, the friction reports. Write each correction as `- <date> user: <text>`.
+2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.
 3. Only then ask about reclaiming the lanes and the release.
 Close this with `station <id>: land`.
 ```
@@ -584,9 +593,9 @@ The local gate ran on the integration tip of its own moment. If the base moves b
 
 ---
 
-## 12. Live checks the profile task runs first
+## 12. Live checks the captain settles before dispatch
 
-Each answer goes into the profile or into this document before the dependent tasks start.
+The captain runs these itself before the tasks that depend on them are delivered (no lane is asked to find them out), and writes each answer into this section and the profile table of §2.
 
 1. pi, Codex, Claude: after typing `new_session`, does Herdr's `agent_session` change, and is the agent's Herdr name kept?
 2. Same after `compact`: does Herdr report `working` then ready, and does the session id stay?

@@ -81,3 +81,9 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - One seat model for lanes and reviewers (user, 2026-10-26): a reviewer seat is a seat like a lane's, not a pane started and closed per review. Every task starts with a session choice from the agent profile: new (`/new`, `/clear`), keep, keep after compact, or resume (rework, re-review). A review always takes new or resume, so it stays independent of the work it judges. Seats stay warm while there is work and are released after an idle spell, so the quota counts active seats (B02-01); a quota fallback or kind change is the in-place kind change. What stays different is only the role: a lane owns a worktree and branch, a reviewer reads the candidate.
   Resume is the CLI's own resume of the task's recorded session, in the same pane: the in-pane command when the CLI takes a session id there, else exit and restart with the profile's `resume_args` (what onboard.rs does today). Never an interactive picker the engine must drive.
   The session choice is a fixed rule the engine applies, never a captain call at dispatch: a review is always new, a re-review or rework resumes, a lane's next task is new unless its plan block says it continues an earlier task (then keep, compacted). The only difference between lanes and reviewers is the idle release time, a config value per role: a reviewer seat is released after a short idle spell, a lane keeps its pane, worktree and build cache.
+
+## For M5 (user, 2026-10-26)
+
+- Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
+- A light procedure for small tasks, decided from M4's per-round token and time data.
+- OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
