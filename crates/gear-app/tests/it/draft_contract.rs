@@ -105,6 +105,57 @@ fn verdict_shape_is_strict() {
     assert!(bad_line(&both).starts_with("line 33: "));
 }
 
+/// T-141 (rework F1, F2): the quoted value of a verdict line is the **last**
+/// field and runs from its first quote to its closing quote, so the prose may
+/// contain quotes of its own; the `key=value` fields come before it.
+#[test]
+fn a_verdict_quoted_value_keeps_its_quotes_and_comes_last() {
+    /// A draft with one verdict line.
+    fn draft(line: &str) -> String {
+        format!("<!-- gear-plan project=p base=0 -->\n# Verdicts\n{line}\n")
+    }
+    let quoted = "return the literal \"unknown\" on missing input";
+
+    // The reviewer's example: a quoted literal inside the rework text.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"return the literal \"unknown\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(d.verdicts[0].rework.as_deref(), Some(quoted));
+
+    // The same with the quotes escaped.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"return the literal \\\"unknown\\\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].rework.as_deref(),
+        Some("return the literal \\\"unknown\\\" on missing input")
+    );
+
+    // The estimate comes before the quoted value.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"return the literal \"unknown\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(d.verdicts[0].rework.as_deref(), Some(quoted));
+    assert_eq!(d.verdicts[0].estimate, Some(25));
+
+    // A value without a closing quote is refused (F2).
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case",
+    ));
+    assert!(detail.contains("no closing quote"), "{detail}");
+
+    // A field after the quoted value is refused, and the error names the
+    // order.
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case\" estimate=25",
+    ));
+    assert!(detail.contains("last field"), "{detail}");
+    assert!(detail.contains("estimate=25"), "{detail}");
+}
+
 #[test]
 fn staff_lines_are_strict() {
     let park_both = FULL.replace("park media until-task=T-12", "park media until=2026-10-21T15:30Z until-task=T-12");

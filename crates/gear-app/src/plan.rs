@@ -295,6 +295,17 @@ fn apply_queue(
                 ));
             }
         }
+        // The follow-up names a task that exists (design §3.3): the field is
+        // live, and a task that does not exist cannot be the one whose
+        // session the lane continues.
+        if let Some(followup) = &item.followup_of {
+            if !existing.contains_key(followup) {
+                return Err(bad(
+                    item.line,
+                    format!("followup-of {followup} does not exist"),
+                ));
+            }
+        }
         let id = match &item.id {
             Some(id) => id.clone(),
             None => new_ids
@@ -315,6 +326,9 @@ fn apply_queue(
     let mut created: Vec<String> = Vec::new();
     let mut contract_changed: Vec<(String, i64)> = Vec::new();
     let mut mentioned: BTreeSet<String> = BTreeSet::new();
+    // The lane's repo, the base and the gate (design §1.1): a task keeps the
+    // ones it was created with. The config is read once for the whole apply.
+    let config = project_config(tx, project)?;
     for (position, item) in draft.queue.iter().enumerate() {
         let rank = position as i64 + 1;
         match &item.id {
@@ -323,10 +337,20 @@ fn apply_queue(
                     .get(&position)
                     .cloned()
                     .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?;
+                // The repo, the base and the gate of the task (design §1.1):
+                // copied from the lane's config, so a lane that is rebound to
+                // another repo later leaves its old tasks where they were.
+                let (repo, base, gate) = match &config {
+                    Some(config) => {
+                        let repo = config.repo_of_lane(item.lane.as_deref().unwrap_or_default());
+                        (Some(repo.path), Some(repo.integration), Some(repo.gate))
+                    }
+                    None => (None, None, None),
+                };
                 let task = TaskRow {
-                    repo: None,
-                    base: None,
-                    gate: None,
+                    repo,
+                    base,
+                    gate,
                     rework_estimate_min: None,
                     project: project.to_string(),
                     id: id.clone(),
@@ -377,6 +401,12 @@ fn apply_queue(
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
                 task.deps = item.deps.clone();
+                // The follow-up (design §3.3): the captain sets it on an
+                // existing task too — the field is live. A block without the
+                // field keeps the follow-up the task has.
+                if let Some(followup) = &item.followup_of {
+                    task.followup_of = Some(followup.clone());
+                }
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
@@ -572,6 +602,19 @@ fn apply_queue(
     // an error aborts the whole apply, so nothing of it is kept.
     let mut settled: Vec<String> = Vec::new();
     for line in &draft.verdicts {
+        // A pass over a failed review says why (design §7.4): the captain
+        // overrules the reviewer, and the reason is recorded.
+        if line.pass && line.why.is_none() {
+            let failed_review = tx
+                .get_review_verdict(project, &line.task, line.attempt)?
+                .is_some_and(|review| !review.passed);
+            if failed_review {
+                return Err(bad(
+                    line.line,
+                    "a pass over a failed review needs why=\"…\"",
+                ));
+            }
+        }
         let verdict = crate::tasks::Verdict {
             project: project.to_string(),
             task: line.task.clone(),
@@ -581,9 +624,17 @@ fn apply_queue(
             pass: line.pass,
             evidence: line.evidence.clone(),
             rework: line.rework.clone(),
+            // The task whose merge landed this work (design §10.7, row
+            // B03-01); the settle decides what it means.
+            integrated_by: line.integrated_by.clone(),
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The minutes the rework round gets (design §5.1): written after the
+        // settle, which writes the task row itself.
+        if let Some(minutes) = line.estimate {
+            tx.set_task_rework_estimate(project, &line.task, Some(minutes))?;
+        }
         settled.push(format!(
             "{} attempt {} {}",
             line.task,
@@ -1017,6 +1068,22 @@ fn release_reviewer(
         now,
     )?;
     Ok(())
+}
+
+/// The project's config, read from the store: `None` when the project has no
+/// config yet (nothing to copy, and a reader that finds empty columns falls
+/// back to the lane's current config).
+fn project_config(
+    tx: &Tx<'_>,
+    project: &str,
+) -> GearResult<Option<crate::config::ProjectConfig>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    if row.config_toml.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::config::parse(&row.config_toml)?))
 }
 
 /// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
