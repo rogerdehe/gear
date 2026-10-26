@@ -42,3 +42,5 @@ What building GEAR with GEAR taught us. Internal notes for whoever develops GEAR
 18. **Development never touches the production store, nor acts as a seat.** Tests run with a scratch store and HOME, and with GEAR_CTX blanked (`.cargo/config.toml`): a lane's GEAR_CTX reached the tests' pre-push hook in M3 and sent the captain 300+ urgent items.
 19. **Two writers push the integration branch** (the engine's merges, the captain's plan commits): a rejected push is a race, retried.
 20. **A hand merge cleans up like the engine's merge** (task and review branches, local and remote).
+21. **The plan's allowance is the ceiling.** The captain never sets GEAR_ADMIN, never registers a project, never starts an agent outside the plan's lanes and reviewers; live acceptance runs on its own lanes. (M3: 11 agents, three self-made captains, one froze on a dialog.)
+22. **When every lane waits, the captain checks on its own.** A silent stall is found by the captain, not by the user. (M3: two reviews never started for an hour.)
