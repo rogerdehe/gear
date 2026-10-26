@@ -1124,8 +1124,16 @@ fn run_plan(
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
     // (T-34): base= the applied version, each NEW block gets its id, the
-    // Verdicts section goes (verdicts live in the store).
-    let rewritten = gear_app::draft::rewrite_applied(&text, result.version, &result.created);
+    // Verdicts section goes (verdicts live in the store), and the staff
+    // lines the apply used go with it (B5: an instruction that was carried
+    // out must not be carried out again).
+    let used_staff: Vec<usize> = draft
+        .staff
+        .iter()
+        .map(gear_app::plan::staff_line)
+        .collect();
+    let rewritten =
+        gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
     write_in_place(path, &rewritten).map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -1136,22 +1144,39 @@ fn run_plan(
         )
     })?;
     // After a successful apply: the captain hears about a lane that would
-    // stand idle (T-58, ops/lessons.md 7a). Printed only — the apply itself
-    // is unchanged.
+    // stand idle (T-58, ops/lessons.md 7a) and about the lanes his own tail
+    // silences (B5: a lane that gets no warning is not a mystery). Printed
+    // only — the apply itself is unchanged.
     let warnings: Vec<String> = store
         .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project))?
         .iter()
         .map(|lane| lane.warning())
         .collect();
+    let (tailed, until) = store.read(|tx| {
+        let lanes = gear_app::plan::tailed_lanes(tx, &draft.project, now)?;
+        let until = gear_app::plan::tail_until(tx, &draft.project)?;
+        Ok((lanes, until))
+    })?;
     if json {
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
+        value["tailed"] = serde_json::json!(tailed);
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
     for warning in warnings {
         lines.push('\n');
         lines.push_str(&warning);
+    }
+    for lane in &tailed {
+        lines.push('\n');
+        let until = until
+            .as_ref()
+            .map(|until| format!(" {}", until.as_text()))
+            .unwrap_or_default();
+        lines.push_str(&format!(
+            "tail: lane {lane} is silenced{until} (it may stand idle)"
+        ));
     }
     Ok(lines)
 }
@@ -2169,6 +2194,129 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    /// A task that passed and whose merge failed: the captain retries it with
+    /// `- remerge T-1`.
+    fn world_with_a_failed_merge() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "report", T0)?;
+                // The review passed: the attempt is accepted and the task done.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "all good".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0,
+                })?;
+                gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0)?;
+                // The merge failed.
+                let op = tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: gear_model::OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: T0,
+                })?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("conflict"), T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// B5: a staff line the apply used is gone from the plan file. A
+    /// `- remerge T-<n>` line that was carried out must not be carried out
+    /// again — the second apply would refuse it.
+    #[test]
+    fn an_applied_remerge_line_is_gone_from_the_plan_file() {
+        let (mut store, mut herdr) = world_with_a_failed_merge();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- remerge T-1\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("remerge"), "the line is gone: {rewritten}");
+        assert!(!rewritten.contains("# Staff"), "the empty section is gone: {rewritten}");
+    }
+
+    /// B5: the apply says which lanes the captain's own tail silences, so a
+    /// lane that gets no warning is not a mystery.
+    #[test]
+    fn the_apply_prints_the_tailed_lanes() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: heat\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("tail: lane heat is silenced"),
+            "the tailed lane is named: {out}"
+        );
     }
 
     /// T-58: after a successful apply the captain hears about a lane that

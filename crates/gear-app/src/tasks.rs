@@ -286,6 +286,10 @@ pub struct VerdictHint {
     /// `T-<n> attempt=<a> contract=<c> candidate=<sha> fail rework="…"` with
     /// the real values. The rework is the captain's words.
     pub line: String,
+    /// The task whose merge failed (B5): the captain retries it with a
+    /// `# Staff` `- remerge T-<n>` line, not with a verdict. `None` when the
+    /// item is settled by a verdict.
+    pub remerge: Option<String>,
 }
 
 /// The verdict that settles `message`, with the real values filled in
@@ -354,6 +358,9 @@ pub fn verdict_hint(
             "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
             attempt_row.adopted_version
         ),
+        // A failed merge is retried with `- remerge T-<n>` (B5): the work
+        // passed, the merge did not — a rework is the other way round.
+        remerge: if merge_failed { Some(task.to_string()) } else { None },
     }))
 }
 

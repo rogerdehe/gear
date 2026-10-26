@@ -752,18 +752,27 @@ pub fn reply(
                     )));
                 }
                 // A review fail (or a failed merge) is settled where it can
-                // be: by a `# Verdicts` line. Resolving it by reply would
-                // close the item and settle nothing (T-90).
+                // be: by a plan line — a `# Verdicts` line, or a `# Staff`
+                // `- remerge T-<n>` line for a failed merge (B5). Resolving it
+                // by reply would close the item and settle nothing (T-90).
                 if args.mode == ReplyMode::Resolve {
                     if let Some(hint) = crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
-                        return Err(GearError::new(
-                            ErrorCode::BadFormat,
-                            format!(
-                                "message {} is settled by a plan # Verdicts line, not by a reply: next: {}",
-                                message.id,
-                                crate::home::verdict_command(&hint),
-                            ),
-                        ));
+                        let mut detail = format!(
+                            "message {} is settled by a plan {} line, not by a reply: next: {}",
+                            message.id,
+                            crate::home::verdict_section(&hint),
+                            crate::home::verdict_command(&hint),
+                        );
+                        // A failed merge is retried with `- remerge T-<n>` (B5);
+                        // a rework is the other way round, and the line for it
+                        // is named too.
+                        if hint.remerge.is_some() {
+                            detail.push_str(&format!(
+                                " (a rework is a `# Verdicts` line: {})",
+                                hint.line
+                            ));
+                        }
+                        return Err(GearError::new(ErrorCode::BadFormat, detail));
                     }
                 }
                 originals.push(message);
