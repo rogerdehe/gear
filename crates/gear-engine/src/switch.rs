@@ -82,7 +82,8 @@ pub struct SwitchSteps {
 
 impl SwitchSteps {
     /// The steps of one CLI kind. Only OpenCode's protocol is verified; any
-    /// other kind is not switched in place (the caller flags the seat).
+    /// other kind is not switched in place (the caller starts the agent again
+    /// on the next model, or flags the seat when it cannot).
     pub fn for_kind(kind: &str, labels: &ModelSwitch) -> Option<SwitchSteps> {
         if !switches_in_place(kind) {
             return None;

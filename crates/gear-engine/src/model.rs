@@ -131,9 +131,9 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
             args: vec!["--model".to_string(), model.to_string()],
         }),
         // Pi takes the model as a start flag (`--model <provider>/<id>`; the
-        // SOP `gear --skill agent:pi`). It has no model picker GEAR drives
-        // (T-114): the model is given at the start and the agent is started
-        // again for the next one.
+        // SOP `gear --skill agent:pi`, T-113). It has no model picker GEAR
+        // drives (T-114): the model is given at the start and the agent is
+        // started again for the next one.
         "pi" => Some(ModelStart {
             env: String::new(),
             args: vec!["--model".to_string(), model.to_string()],
