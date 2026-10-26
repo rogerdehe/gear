@@ -121,6 +121,12 @@ pub trait HerdrAct: HerdrRead {
     /// agent's slash-command menu: `/model` typed opens OpenCode's picker,
     /// `/model` pasted is sent to the model as a message (L-71).
     fn pane_type(&mut self, pane_id: &str, text: &str) -> Outcome<()>;
+    /// The pause the terminal needs between typed text and the Enter that
+    /// follows it: an agent's TUI must take the keystrokes first, or the Enter
+    /// arrives before the input shows it (L-71). The real terminal waits
+    /// [`TYPE_SETTLE_MS`]; a fake has no TUI to wait for, and its wait is
+    /// nothing — so a test never sleeps on the wall clock (T-127).
+    fn type_settle(&mut self);
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()>;
     fn set_title(&mut self, pane_id: &str, title: &str) -> Outcome<()>;
     fn notify(&mut self, title: &str, body: &str) -> Outcome<()>;
@@ -138,6 +144,10 @@ pub trait HerdrAct: HerdrRead {
     /// workspace; the branch is kept.
     fn worktree_remove(&mut self, workspace_id: &str) -> Outcome<()>;
 }
+
+/// How long the terminal needs after typed text before the Enter that follows
+/// it: an agent's TUI has to draw and accept the keystrokes (L-71).
+pub const TYPE_SETTLE_MS: u64 = 300;
 
 /// Real Herdr over its unix socket. Holds one blocking client connection.
 pub struct SocketHerdr {
@@ -287,6 +297,10 @@ impl HerdrAct for SocketHerdr {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
+    }
+
+    fn type_settle(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(TYPE_SETTLE_MS));
     }
 
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()> {

@@ -77,6 +77,13 @@ pub struct MergeWorkers {
     /// the tick collects one. A caller that must know whether a step did
     /// anything waits on this instead of polling the clock (T-127).
     progress: Arc<(Mutex<u64>, Condvar)>,
+    /// The merge worktrees whose `core.hooksPath` an older engine's install was
+    /// already cleaned from (T-107). Cleaning is idempotent, the path of a
+    /// repo's merge worktree does not change, and nothing in this engine
+    /// installs a hook again — so once per worktree, not once per merge
+    /// attempt, each of which is a git process the tick pays otherwise
+    /// (T-127).
+    cleaned: Arc<Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl MergeWorkers {
@@ -96,6 +103,16 @@ impl MergeWorkers {
             .wait_timeout_while(guard, timeout, |count| *count == seen)
             .unwrap();
         *guard != seen
+    }
+
+    /// Whether this worktree still needs an older engine's hook cleaned.
+    fn hook_cleaned(&self, worktree: &str) -> bool {
+        self.cleaned.lock().unwrap().contains(worktree)
+    }
+
+    /// Record that this worktree's hook was cleaned.
+    fn hook_cleaned_now(&self, worktree: &str) {
+        self.cleaned.lock().unwrap().insert(worktree.to_string());
     }
 
     /// Whether a merge of this project is running in any of its repos.
@@ -290,7 +307,7 @@ pub fn merge_passed(
         if workers.contains_key(&key) {
             continue;
         }
-        let worktree = match integration_worktree(herdr, &repo, project) {
+        let worktree = match integration_worktree(herdr, &repo, project, &cfg.merges) {
             Ok(worktree) => worktree,
             Err(reason) => {
                 tell_captain(store, project, None, &format!("merge waits: {reason}"), now)?;
@@ -362,8 +379,7 @@ pub fn merge_passed(
 /// recovering engine. OS locks are released on process death; stale files are
 /// harmless. Never wait for a lock on the tick thread.
 fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
-    let path = git(dir, &["rev-parse", "--git-path", "gear-merge.lock"])?;
-    let path = dir.join(path.trim());
+    let path = merge_lock_path(dir);
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -376,6 +392,38 @@ fn merge_lock(dir: &Path) -> Result<Option<File>, String> {
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
         Err(error) => Err(format!("merge lock: {error}")),
     }
+}
+
+/// The lock file's path: `<git dir>/gear-merge.lock`, read from the worktree's
+/// own `.git` rather than asked of git (T-127: one git process fewer on every
+/// merge attempt, including every attempt of a merge that waits).
+/// `git rev-parse --git-path gear-merge.lock` answers the same path, and the
+/// test `the_merge_lock_is_the_file_git_names` holds the two together. A
+/// `.git` this cannot read, or a `GIT_DIR` in the environment, falls back to
+/// git itself.
+fn merge_lock_path(dir: &Path) -> std::path::PathBuf {
+    if std::env::var_os("GIT_DIR").is_none() {
+        if let Some(git_dir) = git_dir(dir) {
+            return git_dir.join("gear-merge.lock");
+        }
+    }
+    match git(dir, &["rev-parse", "--git-path", "gear-merge.lock"]) {
+        Ok(path) => dir.join(path.trim()),
+        Err(_) => dir.join("gear-merge.lock"),
+    }
+}
+
+/// The git directory of the checkout at `dir`: `.git` itself in a plain repo,
+/// the path a worktree's `.git` file names in a linked one.
+fn git_dir(dir: &Path) -> Option<std::path::PathBuf> {
+    let dot_git = dir.join(".git");
+    if std::fs::metadata(&dot_git).ok()?.is_dir() {
+        return Some(dot_git);
+    }
+    let file = std::fs::read_to_string(&dot_git).ok()?;
+    let named = file.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let named = Path::new(named);
+    Some(if named.is_absolute() { named.to_path_buf() } else { dir.join(named) })
 }
 
 /// Put a merge op back in the queue: it runs again on a later tick. The reason
@@ -656,10 +704,22 @@ impl Remote for FetchRemote {
 
 /// The origin of `dir` as a path: a local bare repo in the engine's tests.
 fn origin_path(dir: &Path) -> Result<std::path::PathBuf, String> {
+    // Remembered per checkout (T-127): a merge asks for the origin once per
+    // branch it pushes and closes, and a checkout's remote does not change
+    // while a test runs. Only the tests' runner asks this; the production
+    // runner lets `git push` resolve the same remote itself.
+    static KNOWN: std::sync::OnceLock<Mutex<BTreeMap<std::path::PathBuf, std::path::PathBuf>>> =
+        std::sync::OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(path) = known.lock().unwrap().get(dir).cloned() {
+        return Ok(path);
+    }
     let url = git(dir, &["remote", "get-url", "origin"])?;
     let url = url.trim();
     let path = Path::new(url);
-    Ok(if path.is_absolute() { path.to_path_buf() } else { dir.join(path) })
+    let path = if path.is_absolute() { path.to_path_buf() } else { dir.join(path) };
+    known.lock().unwrap().insert(dir.to_path_buf(), path.clone());
+    Ok(path)
 }
 
 /// The thread of the item that says a merge failed (T-92). One item per task:
@@ -955,6 +1015,7 @@ fn integration_worktree(
     herdr: &mut dyn HerdrAct,
     repo: &Repo,
     project: &str,
+    merges: &MergeWorkers,
 ) -> Result<gear_herdr::Worktree, String> {
     let label = merge_label(project, repo);
     let worktree = match herdr.worktree_open(&repo.path, "home/merge", &label) {
@@ -973,8 +1034,12 @@ fn integration_worktree(
         other => return Err(step_failure("worktree_open", &other)),
     };
     // T-107: an older engine's pre-push hook is unset here too, so the merge
-    // worktree carries no allow-list either.
-    crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))?;
+    // worktree carries no allow-list either. Once per worktree: the clean is
+    // idempotent and costs a git process on every attempt otherwise (T-127).
+    if !merges.hook_cleaned(&worktree.path) {
+        crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))?;
+        merges.hook_cleaned_now(&worktree.path);
+    }
     Ok(worktree)
 }
 
@@ -1097,23 +1162,29 @@ fn merge_one_locked(
     if candidate.is_empty() {
         return Step::Failed(Failed::stuck(format!("{task}: the merge op names no candidate")));
     }
-    // The commit must be known here. It is not yet: the lane's push has not
-    // landed (or has not been fetched). That can clear, so it is retried.
-    let sha = match git(dir, &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")]) {
-        Ok(out) => out.trim().to_string(),
-        Err(reason) => {
-            return Step::Failed(Failed::clear(format!(
-                "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
-                 it may not be pushed yet: the merge retries and asks the captain if it stays"
-            )))
-        }
+    // 2. the commit must be known here. An op names its candidate by full sha
+    //    (it is pinned to it), so this costs no git process (T-127); a payload
+    //    that names something else is resolved once, and pinned by sha too.
+    let sha = match git_sha(&candidate) {
+        Some(sha) => sha,
+        None => match git(dir, &["rev-parse", "--verify", &format!("{candidate}^{{commit}}")]) {
+            Ok(out) => out.trim().to_string(),
+            Err(reason) => {
+                return Step::Failed(Failed::clear(format!(
+                    "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
+                     it may not be pushed yet: the merge retries and asks the captain if it stays"
+                )))
+            }
+        },
     };
 
-    // 3. the candidate must be reachable from a pushed ref: work that was
-    //    never pushed (or whose branch is gone) is not merged, and the
+    // 3. the candidate must be here and reachable from a pushed ref: work that
+    //    was never pushed (or whose branch is gone) is not merged, and the
     //    captain is told why. The branch may have any name: the task's, a
-    //    rework's (`engine/t53-v2`), or another one.
-    let pushed = git(
+    //    rework's (`engine/t53-v2`), or another one. One process answers both
+    //    (T-127): `for-each-ref --contains` fails when the commit is not here
+    //    at all — the "not fetchable yet" of step 2, for a sha.
+    let pushed = match git(
         dir,
         &[
             "for-each-ref",
@@ -1121,12 +1192,12 @@ fn merge_one_locked(
             &format!("--contains={sha}"),
             "refs/remotes/origin/",
         ],
-    );
-    let pushed = match pushed {
+    ) {
         Ok(pushed) => pushed,
         Err(reason) => {
             return Step::Failed(Failed::clear(format!(
-                "cannot read the pushed refs of origin: {reason}"
+                "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
+                 it may not be pushed yet: the merge retries and asks the captain if it stays"
             )))
         }
     };
@@ -1144,18 +1215,28 @@ fn merge_one_locked(
     //    that are in this candidate and are not on the integration branch yet.
     //    They must land first: a task that waits for another one must not
     //    carry its unreviewed commits into the integration branch.
-    let carried = carried_tasks(dir, &git, &sha, &integration, others);
+    //
+    //    One `rev-list` names them all (T-127): the merge used to pay up to
+    //    three git processes per other task per attempt, and this attempt runs
+    //    on every tick while it waits. The range's members are exactly the
+    //    commits the candidate adds to the integration branch, which is
+    //    "carried and not landed" — and an empty list is step 5's answer too.
+    let ahead = git(
+        dir,
+        &["rev-list", &format!("origin/{integration}..{sha}")],
+    )
+    .ok();
+    let carried = match &ahead {
+        Some(ahead) => carried_tasks(dir, &git, ahead, &sha, others),
+        None => Vec::new(),
+    };
     if !carried.is_empty() {
         return Step::Waiting(carried);
     }
 
     // 5. the candidate may already be on the integration branch: a restart
     //    after the push, or another task that carried it in.
-    let already = git(
-        dir,
-        &["merge-base", "--is-ancestor", &sha, &format!("origin/{integration}")],
-    )
-    .is_ok();
+    let already = ahead.is_some_and(|ahead| ahead.trim().is_empty());
 
     // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
@@ -1293,10 +1374,12 @@ fn merge_one_locked(
 fn carried_tasks(
     dir: &Path,
     git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
+    ahead: &str,
     candidate: &str,
-    integration: &str,
     others: &[(String, String, bool)],
 ) -> Vec<(String, bool)> {
+    let ahead: std::collections::BTreeSet<&str> =
+        ahead.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let mut carried: Vec<(String, bool)> = Vec::new();
     for (task, other, passed) in others {
         // One entry per task: a task that handed in several attempts is one
@@ -1306,32 +1389,36 @@ fn carried_tasks(
         }
         // The commit of the other task, as this repo knows it. A candidate of
         // another repo is not here at all: git cannot place it, and it cannot
-        // be carried either.
-        let other_sha = match git(dir, &["rev-parse", "--verify", &format!("{other}^{{commit}}")]) {
-            Ok(out) => out.trim().to_string(),
-            Err(_) => continue,
+        // be carried either. A full sha — what an op carries — needs no git
+        // process to be read (T-127).
+        let other_sha = match git_sha(other) {
+            Some(sha) => sha,
+            None => match git(dir, &["rev-parse", "--verify", &format!("{other}^{{commit}}")]) {
+                Ok(out) => out.trim().to_string(),
+                Err(_) => continue,
+            },
         };
         // The same commit is not carried work: two tasks may hand in the same
         // one, and neither of them waits for the other.
         if other_sha == candidate {
             continue;
         }
-        // Is this attempt's candidate an ancestor of this one?
-        if git(dir, &["merge-base", "--is-ancestor", &other_sha, candidate]).is_err() {
-            continue;
-        }
-        // Is it on the integration branch already? Then this work landed.
-        if git(
-            dir,
-            &["merge-base", "--is-ancestor", &other_sha, &format!("origin/{integration}")],
-        )
-        .is_ok()
-        {
+        // Carried and not landed is exactly what `ahead` holds: if the commit
+        // is not there, it is either not in this candidate at all (not
+        // carried) or already on the integration branch (landed).
+        if !ahead.contains(other_sha.as_str()) {
             continue;
         }
         carried.push((task.clone(), *passed));
     }
     carried
+}
+
+/// `text` when it is already a full commit sha: an op names its candidate by
+/// one, and reading it costs no git process (T-127).
+fn git_sha(text: &str) -> Option<String> {
+    let text = text.trim();
+    (text.len() == 40 && text.chars().all(|c| c.is_ascii_hexdigit())).then(|| text.to_string())
 }
 
 /// Close the branches the merge consumed: the review branch, and every branch
@@ -1781,40 +1868,120 @@ mod tests {
         } else {
             name.to_string()
         };
-        let mut script = format!(
-            "set -e\n\
-             publish() {{ origin=$(git remote get-url origin); git -C \"$origin\" fetch -q \"$(pwd)\" +HEAD:refs/heads/$1 && git fetch -q origin; }}\n\
-             git init -q --bare '{origin}'\n\
-             git init -q -b {integration} '{work}'\n\
-             cd '{work}'\n\
-             echo dev > README.md\n\
-             git add -A\n\
-             git -c user.email=a@b -c user.name=a commit -qm dev\n\
-             git remote add origin ../{origin}\n\
-             publish {integration}\n"
+
+        // Three processes for a whole repo, whatever the shape (T-127): the
+        // bare origin, one `fast-import` that writes every commit and branch
+        // from the shape's data, and one shell that clones the checkout from
+        // it. The checkout keeps the relative remote (`../<origin>.git`) the
+        // fixtures and the child repo's copy rely on.
+        sh(root, &format!("git init -q --bare '{origin}'"));
+        fast_import(root, &origin, &shape_stream(shape, integration));
+        sh(
+            root,
+            &format!(
+                "set -e\n\
+                 git init -q -b {integration} '{work}'\n\
+                 git -C '{work}' remote add origin ../{origin}\n\
+                 git -C '{work}' fetch -q --update-head-ok origin \
+                   '+refs/heads/*:refs/heads/*' '+refs/heads/*:refs/remotes/origin/*'\n\
+                 git -C '{work}' reset -q --hard {integration}\n"
+            ),
         );
+        dir
+    }
+
+    /// The fast-import stream of a shape: `dev`, then every task branch cut
+    /// from its base, then the review branch cut from it. A branch on the
+    /// README appends (the conflict fixture needs two branches that touch the
+    /// same line); every other branch writes its own file.
+    fn shape_stream(shape: Shape, integration: &str) -> String {
+        let mut stream = String::new();
+        commit(&mut stream, 1, integration, None, "dev", &[("README.md", "dev\n".to_string())]);
+        let mut marks = std::collections::BTreeMap::new();
+        marks.insert(integration.to_string(), 1u32);
+        let mut mark = 2u32;
         for branch in shape.branches() {
             let Branch { task, base, file, subject, review } = branch;
-            // A branch on the README appends (the conflict fixture needs two
-            // branches that touch the same line); every other branch writes
-            // its own file.
-            let write = if file == "README.md" {
-                format!("echo {subject} >> {file}")
+            let base_mark = *marks.get(base).expect("a branch's base comes before it");
+            let content = if file == "README.md" {
+                format!("dev\n{subject}\n")
             } else {
-                format!("echo {subject} > {file}")
+                format!("{subject}\n")
             };
-            script.push_str(&format!(
-                "git switch -qc heat/{task} {base}\n{write}\ngit add -A\n\
-                 git -c user.email=a@b -c user.name=a commit -qm {subject}\n\
-                 publish heat/{task}\n\
-                 git switch -qc review/{task}\n\
-                 echo {review} > {review}.txt\ngit add -A\n\
-                 git -c user.email=a@b -c user.name=a commit -qm {review}\n\
-                 publish review/{task}\n"
-            ));
+            let heat = format!("heat/{task}");
+            commit(&mut stream, mark, &heat, Some(base_mark), subject, &[(file, content)]);
+            marks.insert(heat, mark);
+            mark += 1;
+            let review_file = format!("{review}.txt");
+            commit(
+                &mut stream,
+                mark,
+                &format!("review/{task}"),
+                Some(mark - 1),
+                review,
+                &[(&review_file, format!("{review}\n"))],
+            );
+            mark += 1;
         }
-        sh(root, &script);
-        dir
+        stream
+    }
+
+    /// One commit of a fast-import stream: `subject` as its message, each
+    /// `(path, content)` written into it.
+    fn commit(
+        stream: &mut String,
+        mark: u32,
+        branch: &str,
+        base: Option<u32>,
+        subject: &str,
+        files: &[(&str, String)],
+    ) {
+        use std::fmt::Write;
+        let _ = write!(
+            stream,
+            "commit refs/heads/{branch}\nmark :{mark}\n\
+             committer GEAR <gear@test> 0 +0000\ndata {}\n{subject}\n",
+            subject.len()
+        );
+        if let Some(base) = base {
+            let _ = writeln!(stream, "from :{base}");
+        }
+        for (path, content) in files {
+            let _ = write!(
+                stream,
+                "M 100644 inline {path}\ndata {}\n{content}\n",
+                content.len()
+            );
+        }
+        stream.push('\n');
+    }
+
+    /// Write `stream` into the bare repo `origin` (a path below `root`) with
+    /// one `fast-import` process.
+    fn fast_import(root: &Path, origin: &str, stream: &str) {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(origin)
+            .args(["fast-import", "--quiet"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "fast-import into {origin}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// The scratch directory of one test: its own copy of the shape's
@@ -3480,6 +3647,30 @@ gate = "{project_gate}"
         );
     }
 
+    /// T-127: the merge lock is found without asking git (a process saved on
+    /// every attempt), so the path it derives must be the one git names — in
+    /// the fixture's own checkout and in the linked worktree the merge runs in.
+    #[test]
+    fn the_merge_lock_is_the_file_git_names() {
+        let scratch = Scratch::new("lock-path");
+        let worktree = scratch.merge_worktree();
+        for dir in [scratch.work.as_path(), Path::new(&worktree.path)] {
+            // git answers a plain checkout relatively and a linked worktree
+            // absolutely; the merge joins it onto the worktree either way, and
+            // that is the file this must name.
+            let named = sh(dir, "git rev-parse --git-path gear-merge.lock");
+            assert_eq!(
+                super::merge_lock_path(dir),
+                dir.join(named.trim()),
+                "the lock path of {}",
+                dir.display()
+            );
+        }
+        // The worktree's `.git` is a file, not a directory: the path is
+        // resolved through it, and the lock is still one file for both sides.
+        assert!(scratch.root.join("merge/.git").is_file());
+    }
+
     #[test]
     fn a_busy_worktree_waits_without_running_a_second_merge() {
         let scratch = Scratch::new("locked");
@@ -3580,7 +3771,10 @@ gate = "{project_gate}"
         let (running, release, gate) =
             held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
-        let launched_at = wall_time();
+        // A whole second before the completion: the launching tick's time and
+        // the gate's end are then told apart by the strict `>` below, with no
+        // sleep to make the difference (T-127, review F3).
+        let launched_at = wall_time() - 1;
         let result = merge_passed(&mut store, &mut herdr, &cfg, "p", launched_at).unwrap();
         assert!(!done.exists(), "merge_passed waited for the running gate");
         assert!(result.is_empty(), "the merge is still running");
@@ -3599,11 +3793,14 @@ gate = "{project_gate}"
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Confirmed);
         // The completion time is when the gate and the push ended, not when
-        // the launching tick ran. Not `>` the launch: nothing waits a second
-        // for a clock any more (T-127).
+        // the launching tick ran, and not before the gate was let go.
         assert!(
-            op.updated >= released_at.max(launched_at),
-            "merge time follows the running gate"
+            op.updated > launched_at,
+            "the completion time is not the launching tick's"
+        );
+        assert!(
+            op.updated >= released_at,
+            "the completion time follows the running gate"
         );
         assert!(op.updated <= wall_time());
         assert_eq!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged, Some(op.updated));

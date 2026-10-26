@@ -40,8 +40,6 @@ const PICKER_MARKS: [&str; 4] = ["Search", "Recent", "Select model", "No results
 /// How many ticks one step may wait for the screen to move before it counts as
 /// a failed try. A render that never comes must not hang the lane.
 const WAIT_TICKS: i64 = 6;
-/// The pause between typed text and its Enter.
-const TYPE_SETTLE_MS: u64 = 300;
 
 /// What a switch attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -406,8 +404,9 @@ fn text(herdr: &mut dyn HerdrAct, pane: &str, text: &str) -> bool {
     if !matches!(herdr.pane_type(pane, text), Outcome::Ok(())) {
         return false;
     }
-    // Let the TUI take the typed text before the Enter arrives.
-    std::thread::sleep(std::time::Duration::from_millis(TYPE_SETTLE_MS));
+    // Let the TUI take the typed text before the Enter arrives. The wait
+    // belongs to the terminal (T-127): a real Herdr sleeps, a fake does not.
+    herdr.type_settle();
     matches!(herdr.send_keys(pane, &["enter".to_string()]), Outcome::Ok(()))
 }
 

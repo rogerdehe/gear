@@ -379,6 +379,10 @@ impl HerdrAct for FakeHerdr {
         })
     }
 
+    /// Nothing to settle: the fake records the keystrokes and has no TUI to
+    /// draw them (T-127) — so no test sleeps on the wall clock.
+    fn type_settle(&mut self) {}
+
     fn pane_close(&mut self, pane_id: &str) -> Outcome<()> {
         let pane = pane_id.to_string();
         self.act(Call::PaneClose { pane: pane_id.into() }, move |s| {
