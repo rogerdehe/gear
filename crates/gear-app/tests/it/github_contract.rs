@@ -230,7 +230,7 @@ fn cap() -> (Env, Fingerprint) {
 fn run(s: &mut Store, queue: &str, base: i64, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &parse(&text).unwrap(), &text, rid, NOW)
+    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, NOW)
 }
 
 fn issue_of(s: &mut Store, task: &str) -> Option<i64> {

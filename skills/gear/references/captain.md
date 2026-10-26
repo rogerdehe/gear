@@ -139,7 +139,7 @@ deps: -
   ```
 
   A `fail` puts the task at the head of its lane's queue with your rework text.
-- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted; delete the line after the apply).
+- `# Staff` — `- park <lane> until=<RFC3339>`, `- hold <lane> reason=<text>`, `- release <lane>` (a held lane whose agent runs continues, one whose agent is gone is onboarded again), `- retire <lane>`, and `- remerge T-<n>` (retry a merge that failed on something that can clear, after its attempt was accepted; delete the line after the apply).
 
 ## 3. The daily loop
 

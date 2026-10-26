@@ -2176,7 +2176,7 @@ mod tests {
             kind: Some("claude".into()),
             session_ref: None,
         };
-        gear_app::plan::apply(store, &env, Some(&fp), &draft, &text, &format!("remerge-{task}-{now}"), now)
+        gear_app::plan::apply(store, &env, Some(&fp), None, &draft, &text, &format!("remerge-{task}-{now}"), now)
             .map(|_| ())
     }
 

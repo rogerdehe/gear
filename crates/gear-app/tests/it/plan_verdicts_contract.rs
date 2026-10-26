@@ -18,7 +18,7 @@ fn cap() -> (Env, Fingerprint) {
 
 fn run(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), &parse(text).unwrap(), text, rid, T0 + 50)
+    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, rid, T0 + 50)
 }
 
 /// v1 creates T-1 and T-2 on lane heat; both get attempt 1 submitted with candidates c1/c2.
