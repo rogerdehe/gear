@@ -1495,6 +1495,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     // packet renders from; without one the task's current version applies.
     let mut adopted = row.contract_version;
     let mut attempt_arg = "<n>".to_string();
+    let mut open_n: Option<i64> = None;
     if let Some(lane) = &row.lane {
         let seat_id = format!("{project}:{lane}");
         if let Some(open) = tx
@@ -1505,6 +1506,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         {
             adopted = open.adopted_version;
             attempt_arg = open.n.to_string();
+            open_n = Some(open.n);
         }
     }
     let contract = tx.get_contract(project, task, adopted)?.ok_or_else(|| {
@@ -1513,6 +1515,19 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
             format!("task {task} has no contract v{adopted}"),
         )
     })?;
+
+    // The rework round this packet is for (T-118): the attempt that failed
+    // and the attempt that works on it now. A lane that read the first
+    // round's report found nothing to fix in it and handed the same
+    // candidate in again (trial B02-06) — so the packet leads with the
+    // captain's rework text and the older reports become history.
+    //
+    // A finished task is not in a rework round any more: its packet keeps the
+    // plain review history.
+    let failed_round = failed_round_of(tx, project, task)?;
+    let rework_n = failed_round
+        .filter(|_| !row.state.is_terminal())
+        .map(|failed| open_n.map_or(failed + 1, |n| n.max(failed + 1)));
 
     let mut text = String::new();
     text.push_str(&format!("# {task} — {}\n", contract.goal));
@@ -1538,6 +1553,20 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
             text.push_str(&format!("{}\n", voyage_line(&voyage)));
         }
     }
+    // The rework of this round comes before the contract (T-118): it is what
+    // this hand-in is about.
+    if let (Some(n), Some(failed)) = (rework_n, failed_round) {
+        text.push_str(&format!(
+            "\n## Rework (attempt {n}, from the review of attempt {failed})\n"
+        ));
+        let note = row.rework_note.as_deref().unwrap_or_default().trim();
+        if note.is_empty() {
+            text.push_str("(no rework note was written; the review of that attempt is below)\n");
+        } else {
+            text.push_str(note);
+            text.push('\n');
+        }
+    }
     text.push_str(&format!("\n## Goal\n{}\n", contract.goal));
     text.push_str(&format!("\n## Acceptance\n{}\n", contract.accept));
     text.push_str("\n## Evidence\n");
@@ -1554,9 +1583,15 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     ));
     // The review records of the task: what a temp reviewer already handed in
     // (T-2). The captain decides on them; they settle nothing by themselves.
+    // With a rework round they are history: the rework above is what this
+    // round is about (T-118).
     let reviews = tx.review_verdicts_of_task(project, task)?;
     if !reviews.is_empty() {
-        text.push_str("\n## Review\n");
+        if rework_n.is_some() {
+            text.push_str("\n## Earlier reviews (history)\n");
+        } else {
+            text.push_str("\n## Review\n");
+        }
         for review in &reviews {
             text.push_str(&format!(
                 "attempt {} · {} · {}\n",
@@ -1571,4 +1606,30 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
     }
     Ok(text)
+}
+
+/// The attempt whose round failed, if the task has one (T-118): the highest
+/// attempt a review failed or a captain failed on.
+///
+/// A review verdict and a captain verdict are the same kind of record — the
+/// findings of the round — so the highest of both is the round the task is
+/// in. `None` when nothing failed yet: a first hand-in is not a rework.
+fn failed_round_of(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task: &str,
+) -> GearResult<Option<i64>> {
+    let mut failed: Option<i64> = None;
+    let mut note = |attempt: i64, passed: bool| {
+        if !passed {
+            failed = Some(failed.map_or(attempt, |n: i64| n.max(attempt)));
+        }
+    };
+    for review in tx.review_verdicts_of_task(project, task)? {
+        note(review.attempt, review.passed);
+    }
+    for verdict in tx.verdicts_of_task(project, task)? {
+        note(verdict.attempt, verdict.passed);
+    }
+    Ok(failed)
 }
