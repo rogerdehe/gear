@@ -11,13 +11,16 @@
 //!   resets (`[models].quota_reset_h` hours) and resume on the first model
 //!   then.
 //!
-//! How the model changes depends on the **CLI** the next entry names (T-35):
+//! How the model changes depends on the **CLI** the next entry names (T-35)
+//! and on whether GEAR drives that CLI's model picker (T-114):
 //!
-//! - the same CLI: the model changes **in place** (T-33) — the picker, the
-//!   variant dialog and the status bar; the conversation stays.
-//! - another CLI: the agent is closed and that CLI starts in the same pane
-//!   and worktree ([`crate::restart`]) — no session crosses CLIs; the new
-//!   agent starts from the git state and the lane is told to continue.
+//! - the same CLI **with** a picker GEAR drives (OpenCode): the model changes
+//!   **in place** (T-33) — the picker, the variant dialog and the status bar;
+//!   the conversation stays.
+//! - another CLI, or a CLI without such a picker (pi): the agent is closed
+//!   and that CLI starts in the same pane and worktree ([`crate::restart`]) —
+//!   no session crosses a restart; the new agent starts from the git state and
+//!   the lane is told to continue.
 //!
 //! The engine keeps the little state this needs in the store's `meta`
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
@@ -263,9 +266,14 @@ fn next_entry<'a>(chain: &[&'a ModelEntry], current: Option<&str>) -> Option<&'a
 /// Change the lane's model to `entry`'s.
 ///
 /// The model changes **in place** when the entry runs on the seat's own CLI
-/// (T-33): no exit, no restart, the conversation stays. The model needs
-/// **another CLI** (T-35): the agent is closed, the other CLI starts in the
-/// same pane and worktree, and the lane continues its task.
+/// **and** GEAR drives that CLI's model picker (T-33): no exit, no restart, the
+/// conversation stays. Today that is OpenCode only.
+///
+/// Every other case is a **restart** (T-35, T-114): the agent is closed, the
+/// CLI of the entry starts in the same pane and worktree, and the lane
+/// continues its task. That is the case for another CLI, and for a CLI
+/// without a picker GEAR drives (pi): the model is given at the start, so the
+/// next model needs a new session.
 fn change_model(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -289,7 +297,16 @@ fn change_model(
         (Some(target), Some(current)) => target == current,
         _ => true,
     };
-    if same_cli {
+    // T-114: the in-place switch needs a model picker GEAR drives. A CLI
+    // without one (pi) is started again on the next model instead — the same
+    // pane and worktree, the lane's task delivered again in the new session.
+    // A CLI that is not known at all keeps the old path, which flags the seat
+    // with a reason.
+    let in_place = match target_cli.as_deref() {
+        None => true,
+        Some(cli) => same_cli && crate::switch::switches_in_place(cli),
+    };
+    if in_place {
         return start_switch(store, herdr, project, config, seat, profile, obs, entry.model(), now);
     }
     let target = ModelEntry::Entry(gear_app::config::ModelSpec {
