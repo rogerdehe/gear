@@ -23,7 +23,6 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
-pub mod hooks;
 pub mod merge;
 pub mod model;
 pub mod observe;

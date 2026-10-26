@@ -306,3 +306,83 @@ fn an_ordinary_question_is_answered_without_a_verdict() {
         verdicts_before
     );
 }
+
+/// T-109: a merge that failed and was later remerged through closes the
+/// question. The old Failed op stays as history, but the item is an ordinary
+/// one — the home page stops naming the verdict and a reply resolves it.
+#[test]
+fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
+    let mut s = world_with(true);
+    let merge_item = s
+        .write(|tx| {
+            gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0 + 2)?;
+            // The first merge failed…
+            let failed = tx.insert_op(&gear_store::NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({}),
+                created: T0 + 3,
+            })?;
+            tx.set_op_state("p", &failed.id, OpState::Executing, None, T0 + 4)?;
+            tx.set_op_state("p", &failed.id, OpState::Failed, Some("push refused"), T0 + 5)?;
+            let item = tx.insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "push:T-1".into(),
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::Question,
+                urgent: true,
+                body: "push refused, nothing was pushed".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0 + 6,
+            })?;
+            Ok(item.id)
+        })
+        .unwrap();
+
+    // Only the Failed op: the item still asks for a `# Verdicts` line, and a
+    // reply that would close it is refused with that line.
+    let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
+    assert!(page.text.contains(&format!("# Verdicts: {VERDICTS_LINE}")), "{}", page.text);
+    let err = resolve(&mut s, &merge_item).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("fail rework"), "{err:?}");
+
+    // … then the remerge landed: a Confirmed op for the same attempt.
+    s.write(|tx| {
+        let again = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Merge,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created: T0 + 20,
+        })?;
+        tx.set_op_state("p", &again.id, OpState::Executing, None, T0 + 21)?;
+        tx.set_op_state("p", &again.id, OpState::Confirmed, Some("merged T-1 into dev: def5678"), T0 + 22)
+    })
+    .unwrap();
+
+    let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 30).unwrap();
+    assert!(!page.text.contains("# Verdicts:"), "the merge went through: {}", page.text);
+    let handled = resolve(&mut s, &merge_item).unwrap();
+    assert_eq!(
+        handled.handled,
+        vec![(merge_item.clone(), MsgState::Resolved.as_str().to_string())]
+    );
+}
