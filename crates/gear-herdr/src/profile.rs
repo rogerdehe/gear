@@ -137,8 +137,10 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// codex: busy `esc to interrupt`; no quota/rate-limit/auth markers yet (the
-/// SOP says the limits are still to be recorded); tail 16 lines, confirm 2
+/// codex: busy `esc to interrupt`; quota `Usage limit reached` and the
+/// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
+/// warning is not one of them; no rate-limit/auth markers yet; tail 16
+/// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
 /// `-c check_for_update_on_startup=false`;
 /// session_ref true (Herdr reports the session uuid); resume
@@ -310,9 +312,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         }),
         // Codex (verified 2026-10-22, codex-cli 0.163.0 — the SOP
         // `gear --skill agent:codex`): busy `esc to interrupt` (the screen
-        // shows `• Working (<time> • esc to interrupt)`); no quota markers
-        // yet — the SOP says the five-hour and weekly limits are still to be
-        // recorded; unattended `--dangerously-bypass-approvals-and-sandbox`
+        // shows `• Working (<time> • esc to interrupt)`); unattended
+        // `--dangerously-bypass-approvals-and-sandbox`
         // and `-c check_for_update_on_startup=false` — without the second one
         // Codex shows its "Update available" dialog at start and the agent
         // sits blocked, unseen (2026-10-25, codex 0.163.0 → 0.164.0);
@@ -329,11 +330,35 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         // The agent waits for the provider for minutes without any output:
         // that is a back-off, not a stall. The other kinds keep an empty list
         // — their back-off signs are not recorded yet (M4).
+        //
+        // T-115: the spent limit. Codex says it in its own words (the
+        // installed binary, codex-cli 0.164.0): the modal titled
+        // `Usage limit reached` over
+        // `Your included usage is exhausted. Choose an option below to
+        // continue.`, the error line `Usage limit reached. You've reached
+        // your usage limit. Increase your limits to continue using codex.`,
+        // and the workspace forms `You've reached your workspace credit
+        // limit` / `Your workspace is out of credits` / `You hit your spend
+        // cap`. All of them are stops: the agent cannot work until the
+        // limit resets.
+        //
+        // The **warning** is not a stop and is not a marker: `Heads up, you
+        // have less than 5% of your weekly limit left. Run /status for a
+        // breakdown.` (read live, 2026-10-26) and the status line
+        // `⚠ weekly limit: only 3% left · resets at 3:30 AM on 1 Nov ·
+        // /status` say the limit is nearly spent; the agent still works.
         "codex" => Some(Profile {
             kind: "codex".into(),
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
-            quota_markers: vec![],
+            quota_markers: vec![
+                "Usage limit reached".into(),
+                "You've reached your usage limit".into(),
+                "Your included usage is exhausted".into(),
+                "You've reached your workspace credit limit".into(),
+                "Your workspace is out of credits".into(),
+                "You hit your spend cap".into(),
+            ],
             quota_bar: None,
             auth_markers: vec![],
             backoff_markers: vec!["Reconnecting...".into()],
