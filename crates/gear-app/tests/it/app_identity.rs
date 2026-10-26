@@ -398,3 +398,78 @@ fn the_captains_own_commands_pass_and_survive_a_restart() {
     let caller = s.read(|tx| classify(tx, &own, Some(&got))).unwrap();
     assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
 }
+
+/// F1 of the review: `ps` must never come from `$PATH`. A shell that prepends a
+/// fake `ps` printing the captain pane's pid must not add it to the ancestry —
+/// the walk asks the OS itself (or `/bin/ps` by absolute path).
+#[test]
+fn a_path_provided_ps_cannot_fabricate_ancestry() {
+    let forged: u32 = 424_242;
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("ps");
+    std::fs::write(&fake, format!("#!/bin/sh\nprintf '{forged}\\n'\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).unwrap();
+
+    // The probe is this test binary, run as a child with the fake `ps` first —
+    // and only it — in PATH.
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args(["--exact", "app_identity::ancestry_probe", "--nocapture"])
+        .env("PATH", dir.path())
+        .env("GEAR_ANCESTRY_PROBE", forged.to_string())
+        .output()
+        .expect("run the probe");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(text.contains("ANCESTRY="), "the probe ran: {text}");
+}
+
+/// The probe half of `a_path_provided_ps_cannot_fabricate_ancestry`: prints the
+/// ancestry it computes and asserts the forged pid is not in it. It runs only
+/// when the outer test asks (`GEAR_ANCESTRY_PROBE`), so the normal suite is a
+/// no-op.
+#[test]
+fn ancestry_probe() {
+    let Ok(forged) = std::env::var("GEAR_ANCESTRY_PROBE") else {
+        return;
+    };
+    let forged: u32 = forged.parse().expect("a pid");
+    let ancestors = gear_app::identity::process_ancestors();
+    println!("ANCESTRY={ancestors:?}");
+    assert!(
+        !ancestors.contains(&forged),
+        "a $PATH ps must not add pid {forged}: {ancestors:?}"
+    );
+}
+
+/// F2 of the review: a correct pane id with someone else's context is still a
+/// claim. It is refused with one item naming the real pane — not a silent
+/// NotRegistered left for require_seat to raise with no item.
+#[test]
+fn a_partial_claim_is_refused_with_one_item() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // The captain's context, the lane's own (genuine) pane id: the process is
+    // really in w1:p2, the captain is bound to w1:p1.
+    let claimed = env(Some("captain"), 1, Some(LANE_PANE), false);
+
+    let error =
+        gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, NOW).unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(error.detail.contains(CAP_PANE), "the seat's own pane: {}", error.detail);
+    let items = s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap();
+    assert_eq!(items.len(), 1, "one urgent item: {items:?}");
+    assert!(items[0].urgent);
+    assert!(items[0].body.contains("w1:p2"), "{}", items[0].body);
+    // A repeat is quiet.
+    let _ = gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, NOW + 1);
+    assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
+}

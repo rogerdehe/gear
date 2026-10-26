@@ -225,22 +225,15 @@ fn state_list(states: &[SeatState]) -> String {
 }
 
 /// The process ids this caller runs under, nearest first: its own pid, then
-/// its parents (T-104). `ps` is in every POSIX userland; the walk stops at the
-/// first pid it cannot read, at init, or when it loops.
+/// its parents (T-104). The parent chain is the OS's own answer — no
+/// environment variable can change it, and no `$PATH` either: a caller can put
+/// an executable `ps` in front of the real one, so the walk only asks `/proc`
+/// (Linux) or the system `ps` by **absolute path**.
 pub fn process_ancestors() -> Vec<u32> {
     let mut chain = vec![std::process::id()];
     let mut pid = std::process::id();
     for _ in 0..64 {
-        let Ok(output) = std::process::Command::new("ps")
-            .args(["-o", "ppid=", "-p", &pid.to_string()])
-            .output()
-        else {
-            break;
-        };
-        if !output.status.success() {
-            break;
-        }
-        let Ok(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() else {
+        let Some(parent) = parent_of(pid) else {
             break;
         };
         if parent == 0 || chain.contains(&parent) {
@@ -253,6 +246,42 @@ pub fn process_ancestors() -> Vec<u32> {
         pid = parent;
     }
     chain
+}
+
+/// The parent of `pid`, from the OS itself (T-104): `/proc/<pid>/stat` where the
+/// platform has it, else the system `ps` at an absolute path. Never `$PATH`: a
+/// shell that prepends a directory could print another pane's pid and fake a
+/// whole ancestry.
+fn parent_of(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    if let Some(parent) = parent_from_proc(pid) {
+        return Some(parent);
+    }
+    for ps in ["/bin/ps", "/usr/bin/ps"] {
+        let Ok(output) = std::process::Command::new(ps)
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        if let Ok(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+/// The parent pid from `/proc/<pid>/stat` (Linux): the third field is the
+/// parent, after the state that follows the parenthesised command name (which
+/// may itself contain spaces and parentheses).
+#[cfg(target_os = "linux")]
+fn parent_from_proc(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Whether the caller runs in `info`'s pane (T-104): the pane's shell or one of
@@ -283,6 +312,41 @@ pub fn real_pane(herdr: &mut dyn HerdrRead, ancestors: &[u32]) -> Option<String>
         }
     }
     None
+}
+
+/// Observe the caller and prove its whole claim (T-104): the pane it really
+/// runs in is the claimed pane **and** the seat it claims is bound to that pane.
+/// A claim refused at either step is reported once to the captain, naming the
+/// real pane — a correct pane id with someone else's context (the captain's
+/// `GEAR_CTX`, the lane's own pane id) included. `Ok(None)` = no context to
+/// prove (the user's own shell).
+pub fn prove_seat(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+    now: Ts,
+) -> GearResult<Option<Fingerprint>> {
+    let fp = match observe(env, herdr, ancestors) {
+        Ok(fp) => fp,
+        Err(error) => {
+            if error.code == ErrorCode::NotRegistered {
+                let _ = report_claim(store, env, herdr, &error, ancestors, now);
+            }
+            return Err(error);
+        }
+    };
+    if env.ctx.is_some() {
+        if let Some(fp) = fp.as_ref() {
+            if let Err(error) = store.read(|tx| require_seat(tx, env, Some(fp), None, None)) {
+                if error.code == ErrorCode::NotRegistered {
+                    let _ = report_claim(store, env, herdr, &error, ancestors, now);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(fp)
 }
 
 /// Tell the captain that a caller in `real_pane` claimed `seat` of its project

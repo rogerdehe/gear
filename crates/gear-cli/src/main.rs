@@ -411,7 +411,26 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         }
     }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let r = gear_app::admin::init_with_home(&mut store, &env, &text, home.as_deref(), now_ts())?;
+    // T-104: a context on a registered project is the captain's claim, and it
+    // is proven against the caller's real pane before anything is written. The
+    // first registration (above) and the user's own shell need no Herdr.
+    let needs_proof = match &env.ctx {
+        Some(ctx) => store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?,
+        None => false,
+    };
+    let mut herdr = if needs_proof { Some(open_herdr()?) } else { None };
+    let ancestors = gear_app::identity::process_ancestors();
+    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> =
+        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead);
+    let r = gear_app::admin::init_checked(
+        &mut store,
+        &env,
+        &text,
+        herdr_ref,
+        &ancestors,
+        home.as_deref(),
+        now_ts(),
+    )?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
@@ -442,27 +461,16 @@ fn open_store() -> GearResult<gear_store::Store> {
 }
 
 /// [`open_store`] over an injected variable lookup (testable).
-/// The caller's identity (T-104): a process that claims a seat from a pane it
-/// does not run in is refused here, and the captain gets one urgent item saying
-/// which pane the caller really runs in. `GEAR_CTX` and `HERDR_PANE_ID` alone
-/// prove nothing — any agent can set them in its own shell.
+/// The caller's identity (T-104): the library proves the whole claim — the
+/// pane the caller really runs in is the claimed one, and the seat is bound to
+/// it — and reports a refusal once to the captain.
 fn observe_identity(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
     herdr: &mut dyn gear_herdr::HerdrRead,
 ) -> GearResult<Option<gear_app::identity::Fingerprint>> {
     let ancestors = gear_app::identity::process_ancestors();
-    match gear_app::identity::observe(env, herdr, &ancestors) {
-        Ok(fp) => Ok(fp),
-        Err(error) => {
-            if error.code == gear_model::ErrorCode::NotRegistered {
-                // Best effort: the refusal is the answer even if the item
-                // cannot be written (the store may be the thing that is wrong).
-                let _ = gear_app::identity::report_claim(store, env, herdr, &error, &ancestors, now_ts());
-            }
-            Err(error)
-        }
-    }
+    gear_app::identity::prove_seat(store, env, herdr, &ancestors, now_ts())
 }
 
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
