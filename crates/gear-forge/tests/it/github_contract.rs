@@ -1,11 +1,12 @@
 //! Contract for [`GitHub`], the forge over the `gh` CLI (T-78).
 //!
-//! Every test runs a fake `gh` — a shell script in a scratch directory, put
-//! on the child's `PATH` — that records the argv and the sequence of calls it
-//! was given and answers recorded JSON. That is what the engine's forge calls
-//! look like from `gh`'s side: the command line, the parsing of the answer,
-//! the draft-to-ready step before a merge (T-78, F1), and a typed error when
-//! the tool is missing, fails, answers nonsense or runs too long.
+//! Every test runs a fake `gh` — a shell script in a scratch directory, named
+//! as the executable ([`GitHub::with_path`]) — that records the argv and the
+//! sequence of calls it was given and answers recorded JSON. That is what the
+//! engine's forge calls look like from `gh`'s side: the command line, the
+//! parsing of the answer, the draft-to-ready step before a merge (T-78, F1),
+//! and a typed error when the tool is missing, fails, answers nonsense or runs
+//! too long.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -411,4 +412,24 @@ fn a_call_past_its_bound_is_a_timeout() {
         "the bound was not respected: {:?}",
         started.elapsed()
     );
+}
+
+/// T-111: under `cargo test` there is no `gh` to forget. `.cargo/config.toml`
+/// names a path that does not exist, so a `GitHub::new()` with no fake fails
+/// with the harness's own reason — never with a call to the real `gh`.
+#[test]
+fn without_a_fake_no_test_reaches_a_real_gh() {
+    let gh = std::env::var_os(gear_forge::github::GH_ENV)
+        .expect("run the tests with cargo: .cargo/config.toml sets GEAR_GH");
+    assert!(
+        !Path::new(&gh).exists(),
+        "GEAR_GH = {} exists: the tests must name a gh that does not run",
+        Path::new(&gh).display()
+    );
+    let err = GitHub::new()
+        .issues("o/r", &Filter::default())
+        .expect_err("no gh means no call");
+    let said = err.to_string();
+    assert!(said.contains("no gh in tests"), "{said}");
+    assert!(said.contains("GEAR_GH"), "{said}");
 }
