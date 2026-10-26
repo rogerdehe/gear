@@ -47,14 +47,15 @@ commit() {
 
 # Give `bare` the branches of `work` and make it the work repository's origin.
 # A fixture never pushes: a unit-test run must not (T-106), so the bare is
-# seeded by fetching into it, and the origin is wired up afterwards.
+# seeded by fetching into it, and the origin is wired up afterwards. The branch
+# `work` is on is the caller's to name — asking git for it is one more process.
 seed_origin() {
     bare=$1
     work=$2
+    branch=$3
     git_ -C "$bare" fetch -q "$work" '+refs/heads/*:refs/heads/*'
     git_ -C "$work" remote add origin "$bare"
     git_ -C "$work" fetch -q origin
-    branch=$(git_ -C "$work" rev-parse --abbrev-ref HEAD)
     git_ -C "$work" branch -q --set-upstream-to="origin/$branch" "$branch"
 }
 
@@ -65,20 +66,23 @@ seed_origin() {
 # parent `dev`, the children `feat`. Each gate is a shell script that runs in
 # well under a second.
 
-for name in parent web api; do
-    git_ init -q --bare -b dev "$target/origins/$name.git"
-done
+git_ init -q --bare -b dev "$target/origins/parent.git"
 # The project that already runs has its own origin too (T-98): a project has a
 # remote, as any project does.
 git_ init -q --bare -b main "$target/origins/running.git"
 # The children's integration branch is their own (T-53): their origins start on
 # `feat`, so a clone of one is on it.
 for name in web api; do
-    git_ -C "$target/origins/$name.git" symbolic-ref HEAD refs/heads/feat
+    git_ init -q --bare -b feat "$target/origins/$name.git"
 done
 
-git_ init -q -b dev "$target/multi"
-parent="$target/multi"
+# The three repositories of `multi` are independent once the parent's
+# directory exists, and the two projects share nothing: they are built side by
+# side. What this script costs is what its git processes cost (T-128), so the
+# ones that wait on nothing wait together.
+write_parent() {
+    parent="$target/multi"
+    git_ init -q -b dev "$parent"
 
 cat > "$parent/README.md" <<'EOF'
 # fixture: multi
@@ -114,15 +118,23 @@ grep -q "fixture: multi" README.md
 EOF
 chmod +x "$parent/gate.sh" "$parent/main.sh"
 
-commit "$parent" "fixture: the multi parent (dev)"
-seed_origin "$target/origins/parent.git" "$parent"
-# A release branch, so a landing at the end of a voyage has one to ask about.
-git_ -C "$parent" branch main dev
+    commit "$parent" "fixture: the multi parent (dev)"
+}
 
-# The children: cloned into the gitignored paths of the parent, on `feat`.
-for name in web api; do
-    git_ init -q -b feat "$parent/$name"
-    child="$parent/$name"
+# The parent's own history, seeded into its origin. It runs while the children
+# are built: `web/` and `api/` are gitignored before this starts, so the parent
+# commits its files and ignores theirs.
+commit_parent() {
+    seed_origin "$target/origins/parent.git" "$parent" dev
+    # A release branch, so a landing at the end of a voyage has one to ask about.
+    git_ -C "$parent" branch main dev
+}
+
+# A child repository, in the parent's gitignored paths, on `feat`.
+build_child() {
+    name=$1
+    child="$target/multi/$name"
+    git_ init -q -b feat "$child"
     cat > "$child/README.md" <<EOF
 # fixture: $name
 
@@ -146,9 +158,22 @@ test -f README.md
 EOF
     chmod +x "$child/gate.sh" "$child/$name.sh"
     commit "$child" "fixture: the $name child (feat)"
-    seed_origin "$target/origins/$name.git" "$child"
+    seed_origin "$target/origins/$name.git" "$child" feat
     git_ -C "$child" branch main feat
-done
+}
+
+build_multi() {
+    write_parent
+    commit_parent &
+    parent_job=$!
+    build_child web &
+    web=$!
+    build_child api &
+    api=$!
+    wait "$parent_job"
+    wait "$web"
+    wait "$api"
+}
 
 # ---------------------------------------------------------------- running
 #
@@ -157,8 +182,9 @@ done
 # stale docs, and one bad pattern next to one good exemplar. This is what
 # `gear --skill adopt` is for (T-85).
 
-running="$target/running"
-git_ init -q -b main "$running"
+build_running() {
+    running="$target/running"
+    git_ init -q -b main "$running"
 
 mkdir -p "$running/.github/workflows" "$running/.claude/skills/release-check" \
     "$running/docs" "$running/src"
@@ -299,8 +325,17 @@ check:
 	sh gate.sh
 EOF
 
-commit "$running" "running: the project as it is today"
-seed_origin "$target/origins/running.git" "$running"
+    commit "$running" "running: the project as it is today"
+    seed_origin "$target/origins/running.git" "$running" main
+}
+
+# The two projects are built together: neither reads the other.
+build_multi &
+multi=$!
+build_running &
+running=$!
+wait "$multi"
+wait "$running"
 
 # ---------------------------------------------------------------- notes
 
