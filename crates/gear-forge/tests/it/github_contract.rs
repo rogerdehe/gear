@@ -20,11 +20,14 @@ use gear_forge::{marker, Error, Filter, Forge, GitHub, MergeMethod, PrRef};
 /// arguments: `out-<cmd>-<sub>`, `err-…`, `code-…` when present, else the
 /// generic `out`, `err`, `code`. Every file is optional. Shell builtins only —
 /// it runs with a `PATH` that holds nothing but itself.
-fn fake_script(dir: &Path) -> String {
-    let dir = dir.display();
-    format!(
-        r#"#!/bin/sh
-dir={dir}
+///
+/// The script is **one per test file** (T-128): it reads its own directory from
+/// `$0`, and every test's `gh` is a link to this one file. A fresh script per
+/// test meant a fresh executable image per test on macOS — the whole cost of
+/// this file, seconds for a handful of tests; one image is warm after the first
+/// call, while the answers stay per test, in that test's own directory.
+const FAKE_GH: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
 for arg in "$@"; do
   printf '%s\037' "$arg"
 done > "$dir/argv"
@@ -43,8 +46,16 @@ fi
 code=0
 if [ -f "$dir/code-$key" ]; then read -r code < "$dir/code-$key"; elif [ -f "$dir/code" ]; then read -r code < "$dir/code"; fi
 exit "$code"
-"#
-    )
+"#;
+
+/// The one `gh` file every test's fake links to, made once per test file.
+fn shared_fake() -> &'static Path {
+    static SHARED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SHARED.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("gear-forge-{}-gh", std::process::id()));
+        executable(&path, FAKE_GH);
+        path
+    })
 }
 
 /// A fake `gh` that never answers: it burns time until it is killed.
@@ -67,8 +78,10 @@ fn forge_with(tag: &str, script: Option<&str>) -> (PathBuf, GitHub) {
     fs::remove_dir_all(&dir).ok();
     fs::create_dir_all(&dir).expect("a scratch directory");
     match script {
+        // A test's own script (the hanging fake): written where it is used.
         Some(text) => executable(&dir.join("gh"), text),
-        None => executable(&dir.join("gh"), &fake_script(&dir)),
+        // The ordinary fake: a link to the one script of this test file.
+        None => fs::hard_link(shared_fake(), dir.join("gh")).expect("link the fake gh"),
     }
     let forge = GitHub::new().with_path(&dir);
     (dir, forge)

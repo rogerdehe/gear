@@ -85,12 +85,12 @@ struct Repos {
 }
 
 /// Publish `branch` of `source` in the bare origin's refs, the way the remote
-/// would learn it: the origin fetches the objects and the ref is set — nothing
-/// here pushes (T-108).
+/// would learn it: the origin fetches the objects *and* writes the ref in one
+/// process — nothing here pushes (T-108). `rev-parse` plus `update-ref` were two
+/// more git processes for the same ref (T-128).
 fn publish(origin: &Path, source: &Path, from: &str, branch: &str) {
-    let sha = git(source, &["rev-parse", from]);
-    git(origin, &["fetch", "-q", source.to_str().unwrap(), from]);
-    git(origin, &["update-ref", &format!("refs/heads/{branch}"), sha.trim()]);
+    let refspec = format!("+{from}:refs/heads/{branch}");
+    git(origin, &["fetch", "-q", source.to_str().unwrap(), &refspec]);
 }
 
 /// Delete `branch` in the bare origin's refs (a ref update, not a push).
@@ -98,22 +98,56 @@ fn unpublish(origin: &Path, branch: &str) {
     git(origin, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
 }
 
+/// The repositories every test starts from, built **once per test file**
+/// (T-128): one `git init`, two commits and a clone per test cost more than the
+/// gate under test. A test copies these trees — a file-system walk, no process
+/// — and points its copies at its own origin.
+struct Template {
+    /// The bare origin, on `dev` with two commits.
+    origin: PathBuf,
+    /// The repo the origin fetches `dev` from (the "captain's" side).
+    seed: PathBuf,
+    /// The lane's clone.
+    lane: PathBuf,
+    /// The commit before the current `origin/dev` tip.
+    older: String,
+    /// The trees above live here, for as long as the process does.
+    _root: Scratch,
+}
+
+fn template() -> &'static Template {
+    static TEMPLATE: std::sync::OnceLock<Template> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let root = Scratch::new("gate-template");
+        let origin = root.path.join("origin.git");
+        std::fs::create_dir(&origin).unwrap();
+        git(&origin, &["init", "-q", "--bare", "--initial-branch=dev"]);
+        let url = origin.to_str().unwrap().to_string();
+        let seed = root.path.join("seed");
+        git(&root.path, &["clone", "-q", &url, seed.to_str().unwrap()]);
+        commit(&seed, "a.txt", "one");
+        commit(&seed, "b.txt", "two");
+        publish(&origin, &seed, "refs/heads/dev", "dev");
+        let lane = root.path.join("lane");
+        git(&root.path, &["clone", "-q", &url, lane.to_str().unwrap()]);
+        let older = git(&lane, &["rev-parse", "origin/dev~1"]);
+        Template { origin, seed, lane, older, _root: root }
+    })
+}
+
 fn repos() -> Repos {
+    let template = template();
     let root = Scratch::new("gate");
     let origin = root.path.join("origin.git");
-    std::fs::create_dir(&origin).unwrap();
-    git(&origin, &["init", "-q", "--bare", "--initial-branch=dev"]);
+    crate::copy_tree(&template.origin, &origin);
     let seed = root.path.join("seed");
-    std::fs::create_dir(&seed).unwrap();
-    git(&seed, &["init", "-q", "--initial-branch=dev"]);
-    let older = commit(&seed, "a.txt", "one");
-    commit(&seed, "b.txt", "two");
-    git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    publish(&origin, &seed, "refs/heads/dev", "dev");
-
+    crate::copy_tree(&template.seed, &seed);
     let lane = root.path.join("lane");
-    git(&root.path, &["clone", "-q", origin.to_str().unwrap(), lane.to_str().unwrap()]);
-    Repos { _root: root, origin, seed, lane, older }
+    crate::copy_tree(&template.lane, &lane);
+    // The seed publishes to *this* test's origin, so `advance_dev` moves only it.
+    crate::point_at(&seed, &origin);
+    crate::point_at(&lane, &origin);
+    Repos { _root: root, origin, seed, lane, older: template.older.clone() }
 }
 
 impl Repos {

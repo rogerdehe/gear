@@ -32,7 +32,10 @@ cargo nextest run --workspace --no-fail-fast --status-level all --final-status-l
   }
   {
     print
-    if (match($0, /\[ *[0-9]+\.[0-9]+s\]/)) {
+    # Only a line from a test carries a time that counts: `Summary [ 12.3s]
+    # 539 tests run` is the time of the run, and must never be counted as a test
+    # over the limit (T-128).
+    if ($0 ~ /^[ \t]*(PASS|FAIL|LEAK|SIGSEGV|TIMEOUT|ABORT|TRY[ \t])/ && match($0, /\[ *[0-9]+\.[0-9]+s\]/)) {
       t = substr($0, RSTART + 1, RLENGTH - 3) + 0
       name = $0
       sub(/^.*\] */, "", name)
