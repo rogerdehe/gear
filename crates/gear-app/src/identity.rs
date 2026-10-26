@@ -32,6 +32,12 @@ pub enum Caller {
     Anonymous,
 }
 
+/// Agents whose tools run in a shared background process outside the pane:
+/// `opencode serve`, and Codex's `codex app-server` daemon (trial, 2026-10-26).
+/// A caller in no pane keeps its claim on such an agent's pane, still checked
+/// against the seat's binding.
+const TOOLS_OUTSIDE_PANE: [&str; 2] = ["opencode", "codex"];
+
 /// Phase 1 (no transaction). Returns None when there is no GEAR_CTX or no pane.
 /// Herdr failure is returned as an error: identity cannot be confirmed.
 pub fn observe(
@@ -65,12 +71,12 @@ pub fn observe(
     })?;
     if !claims_pane(&processes, ancestors) {
         let real = real_pane(herdr, ancestors);
-        // A daemon CLI runs its tools in a shared service (`opencode serve`,
-        // `codex app-server`), not under the agent's pane, so their ancestry
-        // reaches no pane at all. Such a caller keeps the env claim for a pane
-        // of a daemon kind, still checked against the seat's binding; a caller
-        // that runs in another pane, or that claims a pane whose agent runs
-        // its tools in the pane, is refused (T-104, T-126).
+        // OpenCode (`opencode serve`) and Codex in daemon mode (`codex
+        // app-server`) run their tools in a shared background process,
+        // not under the agent's pane, so its ancestry reaches no pane at all.
+        // Such a caller keeps the env claim for an OpenCode pane, still checked
+        // against the seat's binding; a caller that runs in another pane, or
+        // that claims a pane whose agent runs its tools in the pane, is refused.
         let tools_outside_pane = occupant
             .as_ref()
             .and_then(|info| info.agent.as_deref())
@@ -81,7 +87,7 @@ pub fn observe(
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
-            None => "no pane of this session runs this process".to_string(),
+            None => "no pane of this session runs this process (its tools run outside every pane, and the pane's agent is not one GEAR knows to do that)".to_string(),
         };
         return Err(GearError::new(
             ErrorCode::NotRegistered,
@@ -327,13 +333,13 @@ pub fn real_pane(herdr: &mut dyn HerdrRead, ancestors: &[u32]) -> Option<String>
     None
 }
 
-/// CLIs whose **tools do not run in the pane**: the TUI in the pane is a client
-/// and the work happens in a shared daemon (`opencode serve`, `codex
-/// app-server`), so the caller's ancestry reaches no pane at all (T-104,
-/// T-126). One list: the claim rule, the pane resolution and the skill all read
-/// it from here.
+/// Whether `kind`'s **tools do not run in its pane** — the TUI is a client and
+/// the work happens in a shared daemon (`opencode serve`, `codex app-server`),
+/// so the caller's ancestry reaches no pane at all (T-104). One list
+/// ([`TOOLS_OUTSIDE_PANE`]) serves the claim rule and the pane resolution of
+/// T-126 together.
 pub fn is_daemon_kind(kind: &str) -> bool {
-    matches!(kind, "opencode" | "codex")
+    TOOLS_OUTSIDE_PANE.contains(&kind)
 }
 
 /// The pane this process runs in, without trusting a variable (T-126): its own

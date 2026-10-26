@@ -125,8 +125,11 @@ pub fn merge_passed(
 
     // 1. queue a merge for every passed task that has none.
     let passed = passed_tasks(store, project)?;
+    // One read of the merge ops per tick, not one full scan per passed task:
+    // the scan per task grew with every op ever written and held a core.
+    let queued = merge_keys(store, project)?;
     for (task, lane, candidate, attempt, attempt_candidate) in passed {
-        if merge_op_of(store, project, &task, attempt)?.is_some() {
+        if queued.contains(&(task.clone(), attempt)) {
             continue;
         }
         let branch = branch_of(&lane, &task);
@@ -772,6 +775,33 @@ fn review_branch(task: &str) -> String {
 
 /// The merge op of a task, if one is queued, running or done (a Failed or
 /// Void one does not block a retry).
+/// The (task, attempt) of every merge op of `project`, in any state (see
+/// [`merge_op_of`]): Failed and Void count too.
+fn merge_keys(store: &mut Store, project: &str) -> GearResult<std::collections::HashSet<(String, i64)>> {
+    store.read(|tx| {
+        let mut keys = std::collections::HashSet::new();
+        for state in [
+            OpState::Intended,
+            OpState::Executing,
+            OpState::Submitted,
+            OpState::Unknown,
+            OpState::Confirmed,
+            OpState::Failed,
+            OpState::Void,
+        ] {
+            for op in tx.ops_in_state(project, state)? {
+                if op.kind == OpKind::Merge {
+                    if let (Some(task), Some(attempt)) = (op.task, op.attempt) {
+                        keys.insert((task, attempt));
+                    }
+                }
+            }
+        }
+        Ok(keys)
+    })
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn merge_op_of(store: &mut Store, project: &str, task: &str, attempt: i64) -> GearResult<Option<OpRow>> {
     // Every state counts, Failed and Void too: a merge that failed waits for
     // the captain (one item) and is never re-queued tick after tick — a new

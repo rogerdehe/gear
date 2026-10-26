@@ -14,6 +14,7 @@ const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
 const LANE_PANE: &str = "w1:p2";
 const CLAUDE_PANE: &str = "w1:p3";
+const CODEX_PANE: &str = "w1:p4";
 
 fn env(seat: Option<&str>, gen: i64, pane: Option<&str>, admin: bool) -> Env {
     Env {
@@ -476,17 +477,17 @@ fn a_partial_claim_is_refused_with_one_item() {
     assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
 }
 
-/// A daemon CLI runs its tools in a shared service, outside every pane: such a
-/// caller keeps its claim on a pane of a daemon kind, still checked against the
-/// binding (T-104). Codex joined OpenCode here in T-126: its TUI is a client of
-/// `codex app-server`, the same shape as `opencode serve`, so its ancestry
-/// reaches no pane either. A pane whose agent runs its tools **in the pane** is
-/// still refused.
+/// OpenCode and Codex-in-daemon-mode run their tools in a shared service,
+/// outside every pane: such a caller keeps its claim on a pane of a daemon kind
+/// (still checked against the binding), but it can never claim a captain whose
+/// agent runs its tools in its pane (Claude Code). Codex joined the list with
+/// T-126 — its TUI is a client of `codex app-server`, the same shape as
+/// `opencode serve` — so a Codex tool shell is the seat of its own Codex pane.
 #[test]
 fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
     herdr.add_agent(CLAUDE_PANE, "claude", AgentStatus::Idle);
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
@@ -501,12 +502,24 @@ fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
 
     // T-126: a Codex caller in no pane is the seat of the Codex pane it
-    // claims — the captain's own daemon.
-    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
-    let got = observe(&captain, &mut herdr, &service).unwrap().expect("the captain's pane");
+    // claims (its own daemon), where Claude Code's `observe` still refuses.
+    herdr.add_agent(CODEX_PANE, "codex", AgentStatus::Idle);
+    herdr.set_pane_processes(CODEX_PANE, Some(CLAUDE_CALLER[1]), &[]);
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "heat3", SeatRole::Lane, CODEX_PANE, "codex", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+    let codex = env(Some("heat3"), 1, Some(CODEX_PANE), false);
+    let got = observe(&codex, &mut herdr, &service).unwrap().expect("the codex pane");
     assert_eq!(got.kind.as_deref(), Some("codex"));
-    let caller = s.read(|tx| classify(tx, &captain, Some(&got))).unwrap();
-    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+    let caller = s.read(|tx| classify(tx, &codex, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat3"), "{caller:?}");
+
+    // The captain's pane runs Claude Code: a caller in no pane cannot claim it.
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let error = observe(&captain, &mut herdr, &service).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered, "{}", error.detail);
 
     // A CLI whose tools run in its pane is not one of those: a caller in no
     // pane claiming it is nobody.
@@ -608,4 +621,28 @@ fn a_set_ctx_is_not_replaced_by_the_pane() {
     let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
     let same = gear_app::identity::resolve_env(&mut s, &captain, &mut herdr, &LANE_CALLER).unwrap();
     assert_eq!(same, captain);
+}
+
+/// Codex in daemon mode runs its tools in the shared `codex app-server`, outside
+/// every pane (trial, 2026-10-26): a Codex captain's tool call keeps its claim,
+/// still checked against the binding; a caller that really runs in another pane
+/// is still refused.
+#[test]
+fn a_codex_daemon_caller_keeps_its_captain_seat() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    let daemon: Vec<u32> = vec![5_000_001, 5_000_000, 1];
+
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let got = observe(&captain, &mut herdr, &daemon).unwrap().expect("the captain's agent");
+    let caller = s.read(|tx| classify(tx, &captain, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+
+    // A lane's shell (really in the lane's pane) claiming the captain is refused.
+    let error = observe(&captain, &mut herdr, &LANE_CALLER).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
 }

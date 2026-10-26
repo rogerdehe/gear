@@ -7,8 +7,8 @@ herdr_session = "orch"
 repo = "/Volumes/Data/myai/gear"
 
 [quota]
-lanes = 2
-temps = 1
+lanes = 4
+temps = 4
 
 [captain]
 pane = "w2:p2"
@@ -75,3 +75,5 @@ variant = "high"
 [conventions]
 integration = "dev"
 release = "main"
+# The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
+gate = "cargo build --workspace --all-targets && scripts/test.sh"
