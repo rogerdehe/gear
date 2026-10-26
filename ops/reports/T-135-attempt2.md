@@ -62,14 +62,15 @@ table with the key of §5.4 and its rows.
 
 - `cargo build --workspace --all-targets` → clean, **no warning** (F1).
 - `cargo test -p gear-store` → 53 passed, 0 failed.
-- `scripts/test.sh` → **959 tests run, 959 passed, 0 skipped** (T-139's tests
-  came in with the merge of `origin/dev`).
+- `scripts/test.sh` → **969 tests run, 969 passed, 0 skipped**, and **no test
+  over 10 s** (T-139's and T-136's tests came in with the merges of
+  `origin/dev`).
 - The tests over 10 s are the machine, not the change (F5): the load average
   was 33–41 while the suite ran (four lanes work at once), and the same tests
-  vary from run to run — one full run had **no** test over 10 s, others had
-  one to three of the git-heavy `merge::tests::*` at 10.1–12.3 s. Alone, they
-  take 3.7–5.2 s (`a_merge_waits_for_the_task_its_commits_carry` 4.70 s,
-  `a_merge_waits_for_an_earlier_attempt_of_the_task_it_carries` 5.23 s,
+  vary from run to run — the final run had **no** test over 10 s, the runs
+  before it had one to three of the git-heavy `merge::tests::*` at 10.1–12.3 s.
+  Alone, they take 3.7–5.2 s (`a_merge_waits_for_the_task_its_commits_carry`
+  4.70 s, `a_merge_waits_for_an_earlier_attempt_of_the_task_it_carries` 5.23 s,
   `waiting_merges_take_turns_and_a_chain_lands_in_order` 4.83 s,
   `fixtures_contract::the_fixtures_build_replace_and_pass_their_gates` 3.70 s).
   Per the rework note, those four tests are left alone.
