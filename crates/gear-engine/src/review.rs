@@ -496,7 +496,7 @@ fn start_reviewer(
     let generation = if pending { seat.generation } else { seat.generation + 1 };
     if !pending {
         if let Err(reason) =
-            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, &kind, now))
+            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, kind, now))
         {
             park(store, &seat.id, &format!("begin_onboard: {}", reason.detail), now)?;
             return Ok(Started::NotYet);
@@ -526,7 +526,7 @@ fn start_reviewer(
         // The start was accepted before the restart: adopt it. Nothing is
         // typed into it — not the environment, not the checkout.
         Some(info) => {
-            if !recorded_start(store, &seat.id, generation, &pane, &kind)? {
+            if !recorded_start(store, &seat.id, generation, &pane, kind)? {
                 // Another agent is in the pane: do not start, and never take
                 // the pane from it. A human decides.
                 park(
@@ -1155,6 +1155,80 @@ fn writer_current_model(
         .read(|tx| tx.get_meta(&crate::model::model_meta_key(writer)))?
         .filter(|model| !model.is_empty());
     Ok(recorded.or_else(|| crate::model::writer_model(config, writer)))
+}
+
+/// The review job a reviewer seat holds: the task it is bound to, the attempt
+/// under review and the full packet (T-115). `None` when the seat holds no
+/// job, the attempt carries no candidate, or the verdict is already in: a
+/// restarted reviewer must not be sent work that no longer waits for it.
+pub(crate) struct ReviewJob {
+    pub task: String,
+    pub attempt: i64,
+    pub packet: String,
+}
+
+/// The job of a reviewer seat, with its packet — what a reviewer is given
+/// again when its model changed under it (T-115).
+pub(crate) fn job_for_seat(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+) -> GearResult<Option<ReviewJob>> {
+    let Some(task) = seat.task_id.clone() else {
+        return Ok(None);
+    };
+    let Some(row) = store.read(|tx| tx.get_project(project))? else {
+        return Ok(None);
+    };
+    let Ok(config) = gear_app::config::parse(&row.config_toml) else {
+        return Ok(None);
+    };
+    let Some(attempt) = store
+        .read(|tx| tx.attempts_of_task(project, &task))?
+        .into_iter()
+        .last()
+    else {
+        return Ok(None);
+    };
+    if store.read(|tx| tx.get_review_verdict(project, &task, attempt.n))?.is_some() {
+        return Ok(None);
+    }
+    let Some(candidate) = attempt.candidate.clone() else {
+        return Ok(None);
+    };
+    let packet = review_packet_for(store, &config, &task, attempt.n, &candidate)?;
+    Ok(Some(ReviewJob { task, attempt: attempt.n, packet }))
+}
+
+/// The model a reviewer seat runs on now (T-115): the one a fallback recorded,
+/// else the entry it was started on — the first review model that differs from
+/// its writer's current model (the rule `start_reviews` uses).
+pub(crate) fn seat_current_model(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    seat: &SeatRow,
+) -> GearResult<Option<String>> {
+    let recorded = store
+        .read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?
+        .filter(|model| !model.is_empty());
+    if recorded.is_some() {
+        return Ok(recorded);
+    }
+    let Some(task) = seat.task_id.clone() else {
+        return Ok(None);
+    };
+    let writer = store
+        .read(|tx| tx.attempts_of_task(project, &task))?
+        .into_iter()
+        .last()
+        .map(|attempt| attempt.seat);
+    let writer_model = match writer {
+        Some(writer) => writer_current_model(store, config, &writer)?,
+        None => None,
+    };
+    Ok(crate::model::review_entry(config, writer_model.as_deref())
+        .map(|entry| entry.model().to_string()))
 }
 
 /// The review packet of an attempt: the contract's goal and accept, the
@@ -3412,7 +3486,7 @@ fn packet_text(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<
                 && op.attempt == Some(attempt)
                 && op.payload.get("nudge").is_none()
         })
-        .last();
+        .next_back();
     Ok(first
         .and_then(|op| op.payload.get("text").and_then(|t| t.as_str()).map(str::to_string))
         .unwrap_or_default())
