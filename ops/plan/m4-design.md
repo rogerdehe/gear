@@ -293,7 +293,7 @@ Each round has a budget:
 
 | Round | Budget |
 |---|---|
-| dev (attempt 1) | the task's `estimate_min` |
+| dev (attempt 1) | the task's `estimate_min`; a task without one (only tasks from before M4) gets 30 min (`gear_store::DEFAULT_ROUND_BUDGET_MIN`) |
 | rework (attempt n ≥ 2) | the `estimate=<min>` written on the fail verdict that asked for it (`# Verdicts` fail lines take an optional `estimate=`); without one, max(10, ⌈estimate_min / 2⌉) |
 | review | measured: 1.5 × the median active time of the last 10 finished review rounds on the same reviewer model, at least 10 min; with fewer than 3 such rounds, 30 min |
 
@@ -632,12 +632,16 @@ The local gate ran on the integration tip of its own moment. If the base moves b
 
 ## 12. Live checks the captain settles before dispatch
 
-The captain runs these itself before the tasks that depend on them are delivered (no lane is asked to find them out), and writes each answer into this section and the profile table of §2.
+The captain ran these itself on 2026-10-26 (pi 1.4.0, Codex 0.164.0, Herdr in session orch), in a scratch pane closed afterwards. Results, binding on the tasks:
 
-1. pi, Codex, Claude: after typing `new_session`, does Herdr's `agent_session` change, and is the agent's Herdr name kept?
-2. Same after `compact`: does Herdr report `working` then ready, and does the session id stay?
-3. pi `--session <file>` and Codex `resume <id>` started in the same pane: does the agent come back with its history and is it recognized by Herdr?
-4. The MiniMax and OpenCode Go usage endpoints with the configured keys (one call each).
+1. **`/new`.** pi: Herdr's `agent_session` changes to the new file within ~5 s; the agent shows `unknown` for a moment; the Herdr name is kept. Codex: a new thread starts (the agent remembers nothing), but Herdr reports the new thread id only after the first turn in it, and a prompt pasted right after `/new` was lost. So §3.4 **new** waits until the agent is ready **and** at least 5 s have passed, then sends the packet; for Codex a `new-unconfirmed` is the normal case, not a warning (no captain item for codex), and the round picks the new id up when observe sees it.
+2. **`/compact` (pi).** On a small session pi answers `Compaction failed: Nothing to compact (session too small)` (below `keepRecentTokens`, 20k): no record is written and Herdr's state does not change. A successful compaction appends a line `{"type":"compaction", …, "tokensBefore": …}` to the session file. So §3.4 **compact** finishes when a `compaction` line newer than T0 appears, or when the agent has been ready for 15 s after T0 with no `working` seen (nothing was compacted: go on, `keep`); while Herdr shows `working`, wait, at most 5 min, then `compact-fallback`.
+3. **Resume.** pi: `/quit`, then `pi --model … --session <file>` in the same pane: history back (it recalled the word), Herdr reports the old session file, the name is given again by the start. Codex: `codex resume <id> …`: history back, Herdr reports the old thread id. Herdr can take more than 5 s to drop an agent after it exits; §3.4's wait for "no agent" (30 s) is needed.
+4. **Exiting Codex with ctrl+c twice is unsafe**: the second ctrl+c reached the shell after Codex had exited, as a keyboard-protocol sequence (`9;5:1u`), and broke the next typed start command. The codex profile's exit becomes the typed command `/quit` (`exit_command`), and nothing is sent to a pane after its agent is gone except the start.
+5. **MiniMax context window**: pi shows `/1.0M` for minimax-cn/MiniMax-M3.1-Flash: `context_window_k = 1000`.
+6. **Provider overload**: MiniMax answered `529 … overloaded_error` several times during the checks; pi retried 3 times, then printed `Error: Retry failed after 3 attempts: 529`. This is a provider error, not quota: the pi profile's error markers include `overloaded_error` and `Retry failed after`, and §9.2's "quota left" branch handles it.
+7. **Quota endpoints**: both answered with the keys in `~/.pi/agent/auth.json` (`minimax-cn.key`, `opencode-go.key`): MiniMax `coding_plan/remains` (5 h window end and weekly end, remaining %), OpenCode Go `zen/go/v1/usage` (rolling/weekly/monthly used % and reset).
+8. Claude was not checked: no Claude seat runs in M4. Its §2 values stay as written and are checked when a Claude seat first runs them.
 
 ---
 
