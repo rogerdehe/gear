@@ -368,7 +368,11 @@ fn retire_one(
         crate::names::ensure(herdr, pane, &crate::names::desired(seat));
         if let Some(profile) = profiles.get(&seat.profile) {
             if let Some(command) = profile.exit_command.as_deref() {
-                let _ = herdr.prompt(pane, command);
+                // Design §10.1: the command goes to the agent's name, never to
+                // the pane id — a pane whose agent is gone is a shell.
+                if let Some(name) = crate::names::live_name(herdr, pane) {
+                    let _ = herdr.prompt(&name, command);
+                }
             } else if !profile.exit_keys.is_empty() {
                 let _ = herdr.send_keys(pane, &profile.exit_keys);
             }

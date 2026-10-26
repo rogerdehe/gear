@@ -195,10 +195,9 @@ pub trait HerdrAct: HerdrRead {
         Err("OpenCode service API unavailable".into())
     }
     /// Submit `text` + Enter to the agent Herdr knows as `target` (no
-    /// --wait). The target is an **agent name** (design §10.1: a delivery
-    /// aims at the live agent name, never at the pane id, so a pane whose
-    /// agent is gone refuses the text instead of typing it into a shell) or a
-    /// pane id for a command the seat's own agent receives.
+    /// --wait). The target is the agent's **name** (design §10.1: a prompt
+    /// targets the live agent name, never the pane id, so a pane whose agent
+    /// is gone refuses the text instead of typing it into a shell).
     fn prompt(&mut self, target: &str, text: &str) -> Outcome<()>;
     /// Run a shell command in a shell pane (used to export GEAR_CTX before start).
     fn pane_run(&mut self, pane_id: &str, command: &str) -> Outcome<()>;

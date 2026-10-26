@@ -52,6 +52,10 @@ fn intended_delivery(store: &mut Store) -> String {
                 safe_point: None,
                 started: T0,
                 updated: T0,
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
             })?;
             let ops = intend_deliveries(
                 tx,
@@ -202,5 +206,81 @@ fn pane_run_in_a_pane_without_an_agent_runs() {
             .any(|call| matches!(call, gear_herdr::fake::Call::PaneRun { .. })),
         "the command went to the shell: {:?}",
         herdr.calls
+    );
+}
+
+/// The review of attempt 1, F2: a refused prompt to a **live named** agent
+/// (a transient refusal right after an agent start is an ordinary Herdr
+/// condition) renames the agent through the naming and leaves the op Intended
+/// for the next tick — the decision is `agent_get`'s alone.
+#[test]
+fn a_refused_prompt_to_a_live_agent_is_renamed_and_retried_next_tick() {
+    let mut store = world();
+    let id = intended_delivery(&mut store);
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent_named(LANE_PANE, "opencode", AgentStatus::Idle, "p-heat");
+    herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
+        code: "agent_not_ready".into(),
+    });
+
+    execute_intended(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+    assert_eq!(
+        op_state(&mut store, &id).0,
+        OpState::Intended,
+        "the op waits for the next tick: {:?}",
+        op_state(&mut store, &id)
+    );
+    assert!(
+        herdr.started_agents.is_empty(),
+        "nothing is restarted: {:?}",
+        herdr.started_agents
+    );
+
+    // The next tick: the packet goes out, aimed at the name. The call log
+    // holds the refused attempt too — a refusal proves nothing was typed.
+    execute_intended(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+    assert_eq!(op_state(&mut store, &id).0, OpState::Submitted);
+    assert_eq!(
+        herdr.prompts_to(LANE_PANE),
+        vec![TEXT, TEXT],
+        "the refused attempt and the packet"
+    );
+    assert_eq!(herdr.prompt_targets(), vec!["p-heat", "p-heat"], "both by the name");
+}
+
+/// The review of attempt 1, F3: the sender has no exception. An unnamed agent
+/// is named again and the op stays Intended: nothing is typed until the next
+/// tick, and the text goes out by name then.
+#[test]
+fn the_sender_waits_for_the_next_tick_when_the_agent_has_no_name() {
+    let mut store = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+
+    gear_engine::ops::deliver_doorbell_now(
+        &mut store, &mut herdr, "p", "p:heat", 1, "M-1", true, T0 + 10,
+    )
+    .unwrap();
+
+    assert!(
+        herdr.prompt_targets().is_empty(),
+        "nothing is typed in this call: {:?}",
+        herdr.prompt_targets()
+    );
+    assert_eq!(herdr.agent_name(LANE_PANE), Some("p-heat"), "the agent is named");
+    let op = store
+        .read(|tx| tx.ops_of_seat_kind("p:heat", gear_model::OpKind::Doorbell))
+        .unwrap();
+    assert_eq!(op.len(), 1, "{op:?}");
+    assert_eq!(op[0].state, OpState::Intended, "the op waits: {op:?}");
+
+    // The next tick: the doorbell goes out, aimed at the name.
+    execute_intended(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+    assert_eq!(herdr.prompt_targets(), vec!["p-heat"]);
+    assert!(
+        herdr.prompts_to(LANE_PANE)[0].contains("M-1"),
+        "{:?}",
+        herdr.prompts_to(LANE_PANE)
     );
 }

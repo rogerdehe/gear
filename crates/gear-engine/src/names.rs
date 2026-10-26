@@ -77,6 +77,17 @@ pub enum Target {
     Unreadable(String),
 }
 
+/// The live name of the agent in `pane_id` (design §10.1: a prompt targets
+/// the agent's name, never the pane id).
+///
+/// `None` when the pane hosts no agent, when the agent carries no name, or
+/// when the names could not be read: the caller must not type then — a pane
+/// whose agent is gone is a shell, and the text would be typed into it.
+pub fn live_name(herdr: &mut dyn HerdrAct, pane_id: &str) -> Option<String> {
+    let names = herdr.agent_names().ok()?;
+    names.get(pane_id).and_then(|name| name.clone())
+}
+
 /// Aim a text at the agent of `pane_id` (design §10.1).
 ///
 /// The agent of the pane is read first (`agent_get`): only an agent of the
