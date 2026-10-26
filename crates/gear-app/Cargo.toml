@@ -13,6 +13,8 @@ gear-forge = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# T-131: `proc_pidinfo` reads a parent pid in process on macOS (Linux reads /proc).
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
