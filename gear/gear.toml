@@ -7,8 +7,8 @@ herdr_session = "orch"
 repo = "/Volumes/Data/myai/gear"
 
 [quota]
-lanes = 3
-temps = 3
+lanes = 2
+temps = 1
 
 [captain]
 pane = "w2:p2"
@@ -16,27 +16,20 @@ kind = "claude"
 profile = "claude"
 
 [[lanes]]
-name = "steady"
-duty = "M3 engine reliability: merges, reviews, retirement, dry-lane forecast, doorbells, alerts, the push check, onboarding faults from the first trial"
+name = "hull"
+duty = "M3.1 engine: starting and switching a pi lane, a dead temp seat freeing its slot, admin stop waiting for merges, the engine side of the trial's batch-2 fixes"
 owns = ["crates/gear-engine/"]
 kind = "opencode"
 profile = "opencode"
 
 [[lanes]]
-name = "course"
-duty = "M3 config, plan, home page and agent profiles: push destinations at init, the GitHub config, retry and seat reasons, kickoff checks, the project standard line, Codex back-off and trust, the CLI handover"
-owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/", "crates/gear-herdr/"]
+name = "deck"
+duty = "M3.1 everything outside the engine: agent profiles (pi, Codex quota), skills and skill install, CLI, plan apply, packets, mail, docs"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/", "crates/gear-herdr/", "crates/gear-cli/", "crates/gear-forge/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
 kind = "opencode"
 profile = "opencode"
 
-[[lanes]]
-name = "base"
-duty = "M3 CLI, skills, docs and the GitHub layer: push-check, the forge crate and its sync, import-issues, the github and adopt skills, captain init, fixtures, the closing skill review"
-owns = ["crates/gear-cli/", "crates/gear-forge/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
-kind = "opencode"
-profile = "opencode"
-
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium; the fallback is OpenCode Go deepseek-v4-pro (M3 kickoff)
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, first; then OpenCode Go deepseek-v4-pro (M3.1 kickoff)
 kind = "codex"
 profile = "codex"
 
