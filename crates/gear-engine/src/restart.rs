@@ -301,6 +301,10 @@ fn stop(
     // planned restart is not a loss.
     leave_reachable(store, seat, plan, now)?;
 
+    // T-134: the exit is a prompt (or keys) to the agent in this pane; an agent
+    // Herdr shows unnamed refuses a prompt, so name it first.
+    crate::names::ensure(herdr, &pane, &crate::names::desired(seat));
+
     // The exit keys go once: a second `ctrl+c` a moment later would land in
     // the shell instead of the agent.
     let cli = current_cli(store, seat)?.unwrap_or_default();

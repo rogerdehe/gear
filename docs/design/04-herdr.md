@@ -28,6 +28,15 @@ All calls: default timeout 8 seconds (`agent_start` 60 seconds); concurrency lim
 - Built-in profiles are provided only for **probe-verified** CLIs; others must be supplied explicitly in project config and are refused when marked `verified=false`.
 - **A prompt typed while the agent works** (07 doorbell, T-130): `pi` and `claude` queue input while a turn runs and read it after the current step; `opencode` and `codex` take it into the running turn. So only an urgent message (or, for the queueing kinds, a captain instruction) is typed into a working agent.
 - Screen-reading signatures only match within the tail window; nudge templates are validated at load time to contain no marker (prevents "the nudge text triggering its own detection").
+## Agent names (T-134)
+
+Herdr keeps an agent's name separately from the CLI kind, and it clears the name when it re-detects the occupant — a Herdr server restart, a CLI that changes its session. A pane whose agent is unnamed refuses `agent.prompt` (`agent <pane> is not an active named agent`); key input still reaches the pane. In M3.1 the captain and both lanes came back unnamed and lost their first deliveries to it.
+
+- `HerdrRead::agent_names()` reads `agent.list` directly (the board client's typed `AgentInfo` does not carry the name) and returns pane → name, `None` for an unnamed agent (`null` and `""` alike).
+- `HerdrAct::agent_rename(pane, name)` is `agent.rename`; a name another pane holds is refused (`agent_name_taken`), never stolen.
+- `gear_herdr::ensure_agent_name(herdr, pane, name)` / `ensure_agent_name_with(names, …)` name an agent when it does not carry the name, against a snapshot when one has been read. The engine's tick reads the names once and restores every seat's name (`engine::names`); before every prompt, doorbell or key send it makes sure of that seat's name.
+- **Which name** is the seat's own (`names::desired`, T-134 review F1), derived from the store and never from what Herdr reports now: the captain and lanes `<project>-<seat>`, an assigned Temp reviewer `<project>-review-<task>` — the name its review started with (17 §2), so a warm `review-10` seat's agent is not renamed to the seat's name.
+
 ## Result classification
 
 | Herdr returns | Meaning | Upper layer handling |

@@ -48,6 +48,8 @@ The agreed answers are written to the project config and the plan; changing them
 
 The same word appears in the Herdr sidebar, the agent name, the branch and the GEAR home view. The project prefix keeps several projects on one Herdr server collision-free. Names are derived, never invented ad hoc (`lane-a`, `agent-3`, `bot` are not allowed).
 
+Herdr clears an agent's name when it re-detects the occupant (a Herdr server restart, a CLI that changes its session), and `agent.prompt` refuses an agent with no name (T-134). So the name is not a one-time `agent.start` argument: every engine tick gives each seat with an active binding its name back, and every prompt, doorbell or key send to a seat's pane makes sure of it first. A name another pane holds is reported to the captain once and never stolen.
+
 ## 3. Branches
 
 | Branch | Role | Who merges into it |

@@ -1416,11 +1416,10 @@ fn review_branch(task: &str) -> String {
 /// `<project>-review-<task-id>` — project prefix plus what the agent is for
 /// (kickoff naming rule, 17 §2).
 fn agent_name(config: &ProjectConfig, task: &str) -> String {
-    format!(
-        "{}-review-{}",
-        config.project.id,
-        task.to_lowercase().replace('-', "")
-    )
+    // One rule with `names::desired` (T-134 review F1): the reviewer's agent
+    // carries the task it reviews, so a name Herdr cleared is restored to the
+    // same name the review started with.
+    crate::names::review_agent_name(&config.project.id, task)
 }
 
 /// The packet the reviewer gets: what to review, where the rules are and the
