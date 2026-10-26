@@ -14,6 +14,7 @@
 //! the loop carries on with the next reviewer.
 
 use gear_herdr::{HerdrAct, Outcome};
+use gear_model::state::require_transition;
 use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store};
 
@@ -196,6 +197,104 @@ fn release_one(
         .map_err(|e| e.detail)?;
     let _ = project;
     Ok(true)
+}
+
+/// Release the reviewer seats that run **no reviewer** (B02-04).
+///
+/// A temp seat that is parked (`Unknown`) and holds no live agent — its
+/// binding ended, or its pane is empty — runs nothing, but it holds a temp
+/// slot for ever: a parked seat is never retried (design/10), so no review
+/// can start and the count of temps in use grows past the quota (the trial
+/// saw `temps 4/2` with no reviewer running). Such a seat is released here:
+/// the slot is free and the next job takes it.
+///
+/// A seat whose agent still runs is left alone: that is a reviewer a human has
+/// to look at, not a dead seat. A pane that cannot be read is not an absence
+/// (design/08): such a seat keeps its slot.
+pub fn release_dead_temps(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut released = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        // Only a parked reviewer: a seat that is up, starting or on its way
+        // out runs (or is about to run) a review.
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Unknown {
+            continue;
+        }
+        if runs_a_reviewer(store, herdr, &seat)? {
+            continue;
+        }
+        release_dead(store, herdr, &seat, now)?;
+        released.push(seat.id.clone());
+    }
+    Ok(released)
+}
+
+/// Whether the seat's reviewer is still there: its binding ended (nothing runs
+/// in it), or its pane still holds an agent. A pane that cannot be read is an
+/// observation failure, not an absence: the seat keeps its slot.
+fn runs_a_reviewer(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<bool> {
+    let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+    let Some(binding) = binding else { return Ok(false) };
+    if binding.status == BindingStatus::Void {
+        return Ok(false);
+    }
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(None) => Ok(false),
+        Ok(Some(_)) => Ok(true),
+        Err(_) => Ok(true),
+    }
+}
+
+/// Free a dead reviewer: its binding ends, its pane is closed and the seat is
+/// `Released` — the state that holds no temp slot (design/10). Its worktree
+/// stays: the next job on this seat reopens it (17 §8a).
+fn release_dead(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<()> {
+    let pane = store
+        .read(|tx| tx.get_binding(&seat.id, seat.generation))?
+        .map(|binding| binding.pane_id);
+    if let Some(pane) = pane.as_deref() {
+        // The pane holds no agent (that is why the seat is dead): closing it
+        // ends the shell the seat leaves behind. A pane that is already gone
+        // is fine; a refused close does not keep the seat alive.
+        match herdr.pane_close(pane) {
+            Outcome::Ok(()) => {}
+            Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
+        }
+    }
+    store
+        .write(|tx| {
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding.status != BindingStatus::Void {
+                    tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                }
+            }
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, SeatState::Unknown, SeatState::Released),
+                "seat",
+                SeatState::Unknown.as_str(),
+                SeatState::Released.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Released,
+                Some("no reviewer runs in it"),
+                now,
+            )
+        })
 }
 
 /// Finish the retirement of a lane (design/10, plan T-65).
@@ -825,5 +924,54 @@ profile = "codex"
             .unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
         assert_eq!(exits(&herdr), 1, "the reviewer is told to exit once its verdict is in");
+    }
+
+    /// B02-04: a parked reviewer that runs no reviewer is released — the slot
+    /// is free — while a parked one whose agent still runs (and a pane that
+    /// cannot be read) keeps its slot.
+    #[test]
+    fn a_parked_reviewer_without_an_agent_is_released_and_a_live_one_is_not() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        let mut herdr = FakeHerdr::new();
+        // The seat is parked; its pane is an empty shell.
+        store
+            .write(|tx| {
+                tx.set_seat_state("p:r-1", SeatState::Unknown, Some("worktree_open"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        herdr.add_shell("w2:p2");
+
+        let released = release_dead_temps(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        assert_eq!(released, vec!["p:r-1".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released);
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends with it");
+
+        // The same seat with an agent in its pane and a live binding: it is a
+        // reviewer, not a dead seat — it keeps its slot.
+        store
+            .write(|tx| {
+                tx.set_binding_status("p:r-1", 1, BindingStatus::Active)?;
+                tx.set_seat_state("p:r-1", SeatState::Unknown, Some("worktree_open"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20).unwrap().is_empty());
+        assert_eq!(
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
+            SeatState::Unknown
+        );
+
+        // A pane that cannot be read is an observation failure, not an
+        // absence: the seat keeps its slot (design/08).
+        herdr.observe_fails = true;
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30).unwrap().is_empty());
+        assert_eq!(
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
+            SeatState::Unknown
+        );
     }
 }

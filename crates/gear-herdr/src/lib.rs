@@ -442,17 +442,26 @@ const ENTER_KEY: &str = "enter";
 const METADATA_SOURCE: &str = "gear";
 
 /// Build a [`Worktree`] from a `worktree.create` / `worktree.open` reply.
-/// A reply missing any of the four fields → Uncertain: the worktree may exist
-/// even though GEAR cannot name it.
+/// A reply missing the workspace, the pane or the path → Uncertain: the
+/// worktree may exist even though GEAR cannot name it.
+///
+/// A reply **without a branch** is not incomplete: it is a **detached**
+/// checkout — its HEAD is kept and the branch was let go of (T-69) — so
+/// Herdr has no branch to name. The worktree is named with an empty branch,
+/// and the caller that only needs its pane and path goes on (B02-04: a
+/// detached answer used to leave a reviewer seat unknown).
 fn worktree_from_reply(reply: &Value) -> Outcome<Worktree> {
     let workspace_id = reply
         .pointer("/workspace/workspace_id")
         .and_then(Value::as_str);
     let pane_id = reply.pointer("/root_pane/pane_id").and_then(Value::as_str);
     let path = reply.pointer("/worktree/path").and_then(Value::as_str);
-    let branch = reply.pointer("/worktree/branch").and_then(Value::as_str);
-    match (workspace_id, pane_id, path, branch) {
-        (Some(workspace_id), Some(pane_id), Some(path), Some(branch)) => Outcome::Ok(Worktree {
+    let branch = reply
+        .pointer("/worktree/branch")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match (workspace_id, pane_id, path) {
+        (Some(workspace_id), Some(pane_id), Some(path)) => Outcome::Ok(Worktree {
             workspace_id: workspace_id.to_string(),
             pane_id: pane_id.to_string(),
             path: path.to_string(),
@@ -551,18 +560,45 @@ mod tests {
             "a null reply names no worktree"
         );
 
-        let mut no_branch = created_reply();
-        no_branch["worktree"]["branch"] = Value::Null;
-        assert!(
-            matches!(worktree_from_reply(&no_branch), Outcome::Uncertain { .. }),
-            "a null branch leaves the worktree unnamed"
-        );
-
         let mut no_path = created_reply();
         no_path["worktree"]["path"] = Value::Null;
         assert!(
             matches!(worktree_from_reply(&no_path), Outcome::Uncertain { .. }),
             "a null path leaves the worktree unnamed"
         );
+
+        let mut no_pane = created_reply();
+        no_pane["root_pane"]["pane_id"] = Value::Null;
+        assert!(
+            matches!(worktree_from_reply(&no_pane), Outcome::Uncertain { .. }),
+            "a reply without its pane names no place to start the agent"
+        );
+    }
+
+    /// B02-04: a **detached** checkout answers without a branch — its HEAD is
+    /// kept and the branch was let go of (T-69). That is a named worktree, not
+    /// an incomplete answer: the reviewer seat goes on (its pane and path are
+    /// what it needs).
+    #[test]
+    fn a_detached_worktree_reply_is_named_without_its_branch() {
+        for field in [
+            Value::Null,
+            Value::String(String::new()),
+        ] {
+            let mut reply = created_reply();
+            reply["worktree"]["branch"] = field.clone();
+            let Outcome::Ok(worktree) = worktree_from_reply(&reply) else {
+                panic!("a detached worktree is a named worktree (branch {field:?})");
+            };
+            assert_eq!(worktree.branch, "", "detached: no branch holds the checkout");
+            assert_eq!(worktree.pane_id, "w3:p1", "the pane is still named");
+        }
+        // A reply that names no branch at all (the key is missing) is the same.
+        let mut missing = created_reply();
+        missing["worktree"].as_object_mut().unwrap().remove("branch");
+        let Outcome::Ok(worktree) = worktree_from_reply(&missing) else {
+            panic!("a reply without the branch key is detached too");
+        };
+        assert_eq!(worktree.branch, "");
     }
 }
