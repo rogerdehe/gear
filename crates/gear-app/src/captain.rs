@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{config, identity, Env};
 use gear_herdr::HerdrRead;
-use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{BindingRow, BindingStatus, NewMessage, Store};
 
 /// What a handover did.
@@ -126,32 +126,7 @@ pub fn handover(
 
     // 5. Rebind: a new generation, the old bindings voided, the seat still the
     //    captain (role and profile stay; only the pane moves).
-    let generation = seat.generation + 1;
-    store.write(|tx| {
-        for old in 1..=seat.generation {
-            if tx.get_binding(&captain, old)?.is_some() {
-                tx.set_binding_status(&captain, old, BindingStatus::Void)?;
-            }
-        }
-        tx.set_seat_generation(&captain, generation)?;
-        tx.set_seat_state(
-            &captain,
-            SeatState::Active,
-            Some(&format!("handed over to pane {pane}")),
-            now,
-        )?;
-        tx.insert_binding(&BindingRow {
-            seat: captain.clone(),
-            generation,
-            session: config.project.herdr_session.clone(),
-            pane_id: pane.to_string(),
-            kind: kind.clone(),
-            session_ref: session_ref.clone(),
-            status: BindingStatus::Active,
-            handover_id: None,
-            created: now,
-        })
-    })?;
+    let generation = rebind(store, &captain, &seat, pane, &kind, session_ref, &config, now)?;
 
     Ok(Handover {
         project,
@@ -162,6 +137,165 @@ pub fn handover(
         kind,
         asker,
     })
+}
+
+/// What `gear captain take` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    pub project: String,
+    pub captain: String,
+    /// The pane it left; `None` when it had none recorded.
+    pub from: Option<String>,
+    pub to: String,
+    pub generation: i64,
+    pub kind: String,
+}
+
+/// `gear captain take` (T-126): the agent in this pane **becomes** the
+/// project's captain, with no environment and no pane id to type.
+///
+/// The caller's pane is the one it really runs in (ancestry), else
+/// `HERDR_PANE_ID`, else — an agent whose tools run in a daemon, so in no pane —
+/// the only pane of the session whose agent is of a daemon kind and is bound to
+/// no seat. That pane must host an agent (a captain is a running CLI, never a
+/// shell) and must not be a lane's or a reviewer's pane. The project comes from
+/// the working directory, as for a handover from the user's terminal.
+///
+/// The captain seat is rebound to that pane at a new generation through the same
+/// rebind as a handover, so it works whether the old captain's pane still exists
+/// or not; one urgent item tells the captain seat (and so the user) which pane
+/// took it and which one it left.
+pub fn take(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+    cwd: &Path,
+    now: Ts,
+) -> GearResult<Taken> {
+    // 1. The pane: the caller's own, else the one unbound daemon pane.
+    let pane = identity::caller_pane(herdr, ancestors, env.pane_id.as_deref())
+        .or(identity::daemon_pane(store, herdr, false)?)
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::Forbidden,
+                "`gear captain take` cannot tell which pane this is: run it from the agent's own pane, or from an agent whose CLI runs its tools in a daemon (codex, opencode) with exactly one such pane bound to no seat",
+            )
+        })?;
+    // 2. The project: the caller's own, else the checkout holding the cwd.
+    let project = project_of(store, env, cwd)?;
+    let captain = format!("{project}:captain");
+    let seat = store
+        .read(|tx| tx.get_seat(&captain))?
+        .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {captain}")))?;
+    let config = config::latest(store, &project)?;
+    // 3. The pane must host an agent, and that agent must not be another seat's.
+    let occupant = herdr
+        .agent_get(&pane)
+        .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("cannot read pane {pane}: {e:?}")))?
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("pane {pane} hosts no agent: start your CLI there and run `gear captain take` in it"),
+            )
+        })?;
+    if let Some(other) = store.read(|tx| identity::seat_bound_to(tx, &pane))? {
+        if other.role != SeatRole::Captain {
+            return Err(GearError::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "pane {pane} is the {} seat {}'s: a captain cannot take a lane's or a reviewer's pane; start your own CLI in another pane and run `gear captain take` there",
+                    other.role.as_str(),
+                    other.id
+                ),
+            ));
+        }
+    }
+    let kind = occupant
+        .agent
+        .clone()
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or_else(|| config.captain.kind.clone());
+    let session_ref = occupant
+        .agent_session
+        .as_ref()
+        .map(|session| session.value.clone());
+    // 4. The seat's binding may be gone with its pane (the old captain's pane
+    //    was closed): `from` is then simply unknown.
+    let from = store
+        .read(|tx| tx.get_binding(&captain, seat.generation))?
+        .map(|binding| binding.pane_id);
+    let generation = rebind(store, &captain, &seat, &pane, &kind, session_ref, &config, now)?;
+
+    // 5. One urgent item to the captain seat (the pane that just took it, so
+    //    the user reads it on the captain's home page).
+    let line = format!(
+        "{captain}: pane {pane} took the captain of {project} ({kind}), {}. This pane answers as the captain now: there is no GEAR_CTX to set — the pane's active binding is the seat.",
+        match &from {
+            Some(from) => format!("it left pane {from}"),
+            None => "it had no pane recorded".to_string(),
+        }
+    );
+    store.write(|tx| {
+        tx.insert_message(&NewMessage {
+            project: project.clone(),
+            thread: "captain:take".to_string(),
+            task: None,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.clone(),
+            kind: MsgKind::System,
+            urgent: true,
+            body: line.clone(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })
+    })?;
+
+    Ok(Taken { project, captain, from, to: pane, generation, kind })
+}
+
+/// The one rebind a handover and a `captain take` share (T-104, T-126): a new
+/// generation, every old binding void, the seat `Active` again, and a fresh
+/// `Active` binding on `pane` with the CLI it hosts. The seat keeps its role and
+/// profile — only the pane moves.
+#[allow(clippy::too_many_arguments)]
+fn rebind(
+    store: &mut Store,
+    captain: &str,
+    seat: &gear_store::SeatRow,
+    pane: &str,
+    kind: &str,
+    session_ref: Option<String>,
+    config: &config::ProjectConfig,
+    now: Ts,
+) -> GearResult<i64> {
+    let generation = seat.generation + 1;
+    let reason = format!("moved to pane {pane}");
+    store.write(|tx| {
+        for old in 1..=seat.generation {
+            if tx.get_binding(captain, old)?.is_some() {
+                tx.set_binding_status(captain, old, BindingStatus::Void)?;
+            }
+        }
+        tx.set_seat_generation(captain, generation)?;
+        tx.set_seat_state(captain, SeatState::Active, Some(&reason), now)?;
+        tx.insert_binding(&BindingRow {
+            seat: captain.to_string(),
+            generation,
+            session: config.project.herdr_session.clone(),
+            pane_id: pane.to_string(),
+            kind: kind.to_string(),
+            session_ref,
+            status: BindingStatus::Active,
+            handover_id: None,
+            created: now,
+        })
+    })?;
+    Ok(generation)
 }
 
 /// The project a handover is for: the caller's context, else the project whose
@@ -187,7 +321,7 @@ fn project_of(store: &mut Store, env: &Env, cwd: &Path) -> GearResult<String> {
     Err(GearError::new(
         ErrorCode::BadFormat,
         format!(
-            "no GEAR_CTX and {} belongs to no registered project: run the handover from the project's checkout or in the captain's pane",
+            "no GEAR_CTX and {} belongs to no registered project: run it from the project's checkout (`gear captain take`) or in the captain's pane",
             cwd.display()
         ),
     ))

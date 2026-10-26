@@ -9,7 +9,7 @@ GEAR runs one piece of work — a new product, or one requirement inside an exis
 
 ## 1. Guard
 
-No `GEAR_CTX` in your environment → GEAR did not start you. Run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user.
+No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did not start you. Run no write command (`gear send`, `gear reply`, `gear plan apply`, `gear admin …`); tell the user. A seat bound to the pane you really run in needs no variable at all: `gear` there is that seat's home page.
 
 ## 2. Start every turn with `gear`
 
@@ -31,6 +31,8 @@ No `GEAR_CTX` in your environment → GEAR did not start you. Run no write comma
 A temp reviewer judges one task and hands in with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`. What to deliver: `gear --skill review`.
 
 ## 5. Captain
+
+To become a project's captain, start your CLI in any pane, `cd` to the project and run `gear captain take`. It needs no `GEAR_CTX` and no pane id: the pane you run in becomes the captain seat at a new generation, and `gear` there is the captain's home page.
 
 The captain's guide: `gear --skill captain`. Holding the course: `gear --skill course`. Cutting work into tasks: `gear --skill decompose`.
 

@@ -13,6 +13,7 @@ use gear_store::{testing, BindingStatus, Store};
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
 const LANE_PANE: &str = "w1:p2";
+const CLAUDE_PANE: &str = "w1:p3";
 
 fn env(seat: Option<&str>, gen: i64, pane: Option<&str>, admin: bool) -> Env {
     Env {
@@ -321,6 +322,7 @@ fn classify_bad_ctx_is_anonymous() {
 /// are configured with these pids, so no test depends on the OS's own tree.
 const CAP_CALLER: [u32; 2] = [60_001, 60_000];
 const LANE_CALLER: [u32; 2] = [50_001, 50_000];
+const CLAUDE_CALLER: [u32; 2] = [55_001, 55_000];
 
 /// T-104: GEAR_CTX and HERDR_PANE_ID are environment variables any agent can
 /// set. The seat is the pane the caller really runs in: a lane that claims the
@@ -474,17 +476,22 @@ fn a_partial_claim_is_refused_with_one_item() {
     assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
 }
 
-/// OpenCode runs a lane's tools in its shared service, outside every pane: such
-/// a caller keeps its claim on an OpenCode pane (still checked against the
-/// binding), but it can never claim the captain, whose agent runs in its pane.
+/// A daemon CLI runs its tools in a shared service, outside every pane: such a
+/// caller keeps its claim on a pane of a daemon kind, still checked against the
+/// binding (T-104). Codex joined OpenCode here in T-126: its TUI is a client of
+/// `codex app-server`, the same shape as `opencode serve`, so its ancestry
+/// reaches no pane either. A pane whose agent runs its tools **in the pane** is
+/// still refused.
 #[test]
-fn an_opencode_service_caller_keeps_its_lane_but_never_becomes_the_captain() {
+fn a_daemon_caller_keeps_its_claim_on_a_daemon_pane() {
     let mut s = world();
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.add_agent(CLAUDE_PANE, "claude", AgentStatus::Idle);
     herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
     herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    herdr.set_pane_processes(CLAUDE_PANE, Some(CLAUDE_CALLER[1]), &[]);
     // The service's tool shell: its ancestry reaches no pane of the session.
     let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
 
@@ -493,7 +500,112 @@ fn an_opencode_service_caller_keeps_its_lane_but_never_becomes_the_captain() {
     let caller = s.read(|tx| classify(tx, &lane, Some(&got))).unwrap();
     assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:heat"), "{caller:?}");
 
-    let forged = env(Some("captain"), 1, Some(CAP_PANE), false);
-    let error = observe(&forged, &mut herdr, &service).unwrap_err();
+    // T-126: a Codex caller in no pane is the seat of the Codex pane it
+    // claims — the captain's own daemon.
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let got = observe(&captain, &mut herdr, &service).unwrap().expect("the captain's pane");
+    assert_eq!(got.kind.as_deref(), Some("codex"));
+    let caller = s.read(|tx| classify(tx, &captain, Some(&got))).unwrap();
+    assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
+
+    // A CLI whose tools run in its pane is not one of those: a caller in no
+    // pane claiming it is nobody.
+    let claude = env(Some("heat"), 1, Some(CLAUDE_PANE), false);
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "heat2", SeatRole::Lane, CLAUDE_PANE, "claude", NOW)?;
+        Ok(())
+    }).unwrap();
+    let error = observe(&claude, &mut herdr, &service).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered, "{}", error.detail);
+}
+
+// ------------------------------------------------- T-126: no GEAR_CTX needed
+
+/// A caller in a **bound** pane is that seat without `GEAR_CTX` (T-126): the
+/// pane it really runs in carries a seat through its active binding, and the
+/// generation comes from the seat — the very `GearCtx` the env would have
+/// carried. `require_seat` then proves it as usual.
+#[test]
+fn a_caller_without_ctx_in_a_bound_pane_is_that_seat() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+
+    let bare = env(None, 1, None, false);
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &LANE_CALLER).unwrap();
+    assert_eq!(
+        resolved.ctx,
+        Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 })
+    );
+    assert_eq!(resolved.pane_id.as_deref(), Some(LANE_PANE), "the real pane is kept");
+
+    let fp = observe(&resolved, &mut herdr, &LANE_CALLER).unwrap().expect("the lane's agent");
+    let (ctx, seat) = s.read(|tx| require_seat(tx, &resolved, Some(&fp), None, None)).unwrap();
+    assert_eq!((ctx.seat.as_str(), seat.id.as_str()), ("heat", "p:heat"));
+}
+
+/// A pane with no seat leaves the caller anonymous (T-126): the user's own
+/// shell, or a CLI nobody onboarded. The resolved pane is still recorded.
+#[test]
+fn a_caller_without_ctx_in_an_unbound_pane_stays_anonymous() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CLAUDE_PANE, "claude", AgentStatus::Idle);
+    herdr.set_pane_processes(CLAUDE_PANE, Some(CLAUDE_CALLER[1]), &[]);
+
+    let bare = env(None, 1, None, false);
+    let resolved =
+        gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &CLAUDE_CALLER).unwrap();
+    assert_eq!(resolved.ctx, None, "no seat is bound to this pane");
+    assert_eq!(resolved.pane_id.as_deref(), Some(CLAUDE_PANE));
+    let caller = s.read(|tx| classify(tx, &resolved, None)).unwrap();
+    assert!(matches!(caller, Caller::Anonymous), "{caller:?}");
+}
+
+/// A caller whose tools run in a daemon runs in no pane: the one daemon-kind
+/// pane of the session that is bound to a seat names its seat (T-126). Two
+/// such panes are ambiguous — the caller must name itself then.
+#[test]
+fn a_daemon_caller_without_ctx_finds_the_one_bound_daemon_pane() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    // The captain is the only daemon pane; the lane's bound pane is gone, so
+    // the daemon has exactly one seat to point at.
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(CLAUDE_PANE, "claude", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.set_pane_processes(CLAUDE_PANE, Some(CLAUDE_CALLER[1]), &[]);
+    let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
+
+    let bare = env(None, 1, None, false);
+    let resolved = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap();
+    assert_eq!(
+        resolved.ctx,
+        Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 })
+    );
+    assert_eq!(resolved.pane_id.as_deref(), Some(CAP_PANE));
+
+    // A second bound daemon pane: no answer, and the error names the one
+    // command that works.
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    let error = gear_app::identity::resolve_env(&mut s, &bare, &mut herdr, &service).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(error.detail.contains("no pane"), "{}", error.detail);
+    assert!(error.detail.contains("gear captain take"), "{}", error.detail);
+}
+
+/// `GEAR_CTX` stays an override (T-126): a set context is never second-guessed
+/// by the resolution, whatever pane the caller runs in.
+#[test]
+fn a_set_ctx_is_not_replaced_by_the_pane() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let same = gear_app::identity::resolve_env(&mut s, &captain, &mut herdr, &LANE_CALLER).unwrap();
+    assert_eq!(same, captain);
 }

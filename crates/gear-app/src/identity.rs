@@ -65,15 +65,16 @@ pub fn observe(
     })?;
     if !claims_pane(&processes, ancestors) {
         let real = real_pane(herdr, ancestors);
-        // OpenCode runs its tools in its shared service (`opencode serve`),
-        // not under the agent's pane, so its ancestry reaches no pane at all.
-        // Such a caller keeps the env claim for an OpenCode pane, still checked
-        // against the seat's binding; a caller that runs in another pane, or
-        // that claims a pane whose agent runs its tools in the pane, is refused.
+        // A daemon CLI runs its tools in a shared service (`opencode serve`,
+        // `codex app-server`), not under the agent's pane, so their ancestry
+        // reaches no pane at all. Such a caller keeps the env claim for a pane
+        // of a daemon kind, still checked against the seat's binding; a caller
+        // that runs in another pane, or that claims a pane whose agent runs
+        // its tools in the pane, is refused (T-104, T-126).
         let tools_outside_pane = occupant
             .as_ref()
             .and_then(|info| info.agent.as_deref())
-            .is_some_and(|kind| kind == "opencode");
+            .is_some_and(is_daemon_kind);
         if real.is_none() && tools_outside_pane {
             return Ok(occupant.as_ref().map(fingerprint_of));
         }
@@ -306,8 +307,7 @@ pub fn claims_pane(info: &PaneProcessInfo, ancestors: &[u32]) -> bool {
         .chain(
             info.foreground_processes
                 .iter()
-                .map(|process| Some(process.pid))
-                .flatten(),
+                .filter_map(|process| Some(process.pid)),
         );
     pane_pids.into_iter().any(|pid| ancestors.contains(&pid))
 }
@@ -325,6 +325,131 @@ pub fn real_pane(herdr: &mut dyn HerdrRead, ancestors: &[u32]) -> Option<String>
         }
     }
     None
+}
+
+/// CLIs whose **tools do not run in the pane**: the TUI in the pane is a client
+/// and the work happens in a shared daemon (`opencode serve`, `codex
+/// app-server`), so the caller's ancestry reaches no pane at all (T-104,
+/// T-126). One list: the claim rule, the pane resolution and the skill all read
+/// it from here.
+pub fn is_daemon_kind(kind: &str) -> bool {
+    matches!(kind, "opencode" | "codex")
+}
+
+/// The pane this process runs in, without trusting a variable (T-126): its own
+/// pane by process ancestry first; `HERDR_PANE_ID` only when the ancestry finds
+/// none (a daemon CLI's tools, whose parent is the daemon).
+pub fn caller_pane(
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+    env_pane: Option<&str>,
+) -> Option<String> {
+    real_pane(herdr, ancestors).or_else(|| env_pane.map(str::to_string))
+}
+
+/// The seat whose **active** binding is on `pane` (T-126): the pane a caller
+/// runs in, and the store's answer to which seat that is. `None` when no seat
+/// is bound there (an unmanaged agent, the user's own shell).
+pub fn seat_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Option<SeatRow>> {
+    for project in tx.project_ids()? {
+        for seat in tx.seats_of_project(&project)? {
+            let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
+                continue;
+            };
+            if binding.status == BindingStatus::Active && binding.pane_id == pane {
+                return Ok(Some(seat));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The **one** pane of the session that hosts an agent of a daemon kind and is
+/// (`bound`) or is not (`!bound`) bound to a seat (T-126). More than one such
+/// pane is no answer: the caller has to name itself then.
+pub fn daemon_pane(
+    store: &mut Store,
+    herdr: &mut dyn HerdrRead,
+    bound: bool,
+) -> GearResult<Option<String>> {
+    let panes = herdr.panes().unwrap_or_default();
+    let mut found = None;
+    for pane in panes {
+        let Ok(Some(info)) = herdr.agent_get(&pane) else {
+            continue;
+        };
+        if !info.agent.as_deref().is_some_and(is_daemon_kind) {
+            continue;
+        }
+        let is_bound = store.read(|tx| seat_bound_to(tx, &pane))?.is_some();
+        if is_bound != bound {
+            continue;
+        }
+        if found.is_some() {
+            return Ok(None);
+        }
+        found = Some(pane);
+    }
+    Ok(found)
+}
+
+/// Whether any pane of the session hosts an agent at all: the difference
+/// between "a shell outside Herdr" (anonymous) and "an agent whose tools run
+/// in a daemon, so in no pane" (a caller that needs `gear captain take`).
+fn any_agent_pane(herdr: &mut dyn HerdrRead) -> bool {
+    herdr
+        .panes()
+        .unwrap_or_default()
+        .iter()
+        .any(|pane| matches!(herdr.agent_get(pane), Ok(Some(_))))
+}
+
+/// The caller's environment, resolved without `GEAR_CTX` (T-126).
+///
+/// `GEAR_CTX` stays an **override**: when it is set, nothing here runs. When it
+/// is not, the caller's pane is its real pane (ancestry), else `HERDR_PANE_ID`,
+/// else — a caller in no pane, whose tools run in a daemon — the one pane of the
+/// session whose agent is of a daemon kind and is bound to a seat. The seat
+/// whose active binding is on that pane gives the project, the seat and the
+/// generation: the same [`GearCtx`] the environment would have carried.
+///
+/// A pane without a seat leaves the caller anonymous (the user's own shell). A
+/// caller in no pane at all, in a session that runs agent panes, gets the error
+/// that names the one command that fixes it.
+pub fn resolve_env(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+) -> GearResult<Env> {
+    if env.ctx.is_some() {
+        return Ok(env.clone());
+    }
+    let pane = caller_pane(herdr, ancestors, env.pane_id.as_deref())
+        .or(daemon_pane(store, herdr, true)?);
+    let Some(pane) = pane else {
+        if any_agent_pane(herdr) {
+            return Err(GearError::new(
+                ErrorCode::NotRegistered,
+                "this process runs in no pane of the Herdr session — an agent whose tools run in a shared daemon (codex, opencode) does. To become the project's captain: start your CLI in the project's checkout and run `gear captain take`",
+            ));
+        }
+        return Ok(env.clone());
+    };
+    let seat = store.read(|tx| seat_bound_to(tx, &pane))?;
+    let Some(seat) = seat else {
+        // The pane holds no seat: the caller stays anonymous, with its pane.
+        return Ok(Env { ctx: None, pane_id: Some(pane), admin: env.admin });
+    };
+    Ok(Env {
+        ctx: Some(GearCtx {
+            project: seat.project,
+            seat: seat.name,
+            generation: seat.generation,
+        }),
+        pane_id: Some(pane),
+        admin: env.admin,
+    })
 }
 
 /// Observe the caller and prove its whole claim (T-104): the pane it really
