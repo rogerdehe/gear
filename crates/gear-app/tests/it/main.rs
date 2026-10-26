@@ -9,6 +9,7 @@ mod app_send;
 mod base_gate;
 mod cancel_contract;
 mod backoff_home_contract;
+mod captain_handover_contract;
 mod config_change_contract;
 mod config_contract;
 mod draft_contract;

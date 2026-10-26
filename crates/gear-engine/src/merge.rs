@@ -264,21 +264,22 @@ pub fn merge_passed(
         let output = finished.clone();
         let job = op.clone();
         let repo = repo.clone();
+        let remote = cfg.remote.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
-                let result = std::panic::catch_unwind(|| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let lock = match merge_lock(Path::new(&worktree.path)) {
                         Ok(Some(lock)) => lock,
                         Ok(None) => return Report::Busy,
                         Err(reason) => return Report::Failed(Failed::clear(reason)),
                     };
-                    match merge_with_retries(&worktree, &repo, &job, &lock, &others) {
+                    match merge_with_retries(&worktree, &repo, &job, &lock, &others, remote.as_ref()) {
                         Step::Merged(lines) => Report::Merged(lines),
                         Step::Waiting(tasks) => Report::Waiting(tasks),
                         Step::Failed(failed) => Report::Failed(failed),
                     }
-                })
+                }))
                 .unwrap_or_else(|_| Report::Failed(Failed::stuck("merge worker panicked")));
                 *output.lock().unwrap() = Some(Finished {
                     result,
@@ -430,10 +431,11 @@ fn merge_with_retries(
     op: &OpRow,
     lock: &File,
     others: &[(String, String, bool)],
+    remote: &dyn Remote,
 ) -> Step {
     let mut attempt = 0;
     loop {
-        match merge_one_locked(worktree, repo, op, lock, others) {
+        match merge_one_locked(worktree, repo, op, lock, others, remote) {
             Step::Merged(lines) => return Step::Merged(lines),
             Step::Waiting(tasks) => return Step::Waiting(tasks),
             Step::Failed(mut failed) => {
@@ -471,6 +473,86 @@ fn fail_merge(store: &mut Store, project: &str, op: &OpRow, reason: &str, now: T
         tx.set_op_state(project, &op.id, OpState::Failed, Some(reason), now)
     })?;
     tell_captain_failed(store, project, op, reason, now)
+}
+
+/// The one place a merge touches the remote (T-107): the push of the
+/// integration branch and the delete of the branches it consumed.
+///
+/// Production is [`GitRemote`]. The engine's tests replace it with
+/// [`FetchRemote`], which moves the refs from the remote's own side, so no test
+/// in this crate runs `git push`.
+pub trait Remote: Send + Sync + std::fmt::Debug {
+    /// Push `dir`'s HEAD to `dst` on `dir`'s origin.
+    fn push(&self, dir: &Path, dst: &str) -> Result<(), String>;
+    /// Delete `branch` on `dir`'s origin; a branch already gone counts as
+    /// deleted.
+    fn delete(&self, dir: &Path, branch: &str) -> bool;
+}
+
+/// The production runner: `git push`, exactly as the merge always did.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GitRemote;
+
+impl Remote for GitRemote {
+    fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
+        git(dir, &["push", "origin", &format!("HEAD:{dst}")]).map(|_| ())
+    }
+
+    fn delete(&self, dir: &Path, branch: &str) -> bool {
+        git(dir, &["push", "origin", "--delete", branch]).is_ok()
+    }
+}
+
+/// The runner the engine's tests use (T-107): no `git push` at all. It learns
+/// the origin's path from the worktree and moves the ref from the remote's own
+/// side — `git -C <origin> fetch <dir> HEAD:refs/heads/<dst>` — and deletes
+/// with `update-ref -d`. The fetch refuses a non-fast-forward update exactly
+/// like a push, so the race tests still race.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FetchRemote;
+
+impl Remote for FetchRemote {
+    fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
+        let origin = origin_path(dir)?;
+        let work = std::fs::canonicalize(dir)
+            .map_err(|e| format!("fetch remote: {}: {e}", dir.display()))?;
+        git(
+            dir,
+            &[
+                "-C",
+                &origin.to_string_lossy(),
+                "fetch",
+                &work.to_string_lossy(),
+                &format!("HEAD:refs/heads/{dst}"),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn delete(&self, dir: &Path, branch: &str) -> bool {
+        let Ok(origin) = origin_path(dir) else {
+            return false;
+        };
+        git(
+            dir,
+            &[
+                "-C",
+                &origin.to_string_lossy(),
+                "update-ref",
+                "-d",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .is_ok()
+    }
+}
+
+/// The origin of `dir` as a path: a local bare repo in the engine's tests.
+fn origin_path(dir: &Path) -> Result<std::path::PathBuf, String> {
+    let url = git(dir, &["remote", "get-url", "origin"])?;
+    let url = url.trim();
+    let path = Path::new(url);
+    Ok(if path.is_absolute() { path.to_path_buf() } else { dir.join(path) })
 }
 
 /// The thread of the item that says a merge failed (T-92). One item per task:
@@ -756,8 +838,9 @@ fn integration_worktree(
         }
         other => return Err(step_failure("worktree_open", &other)),
     };
-    // The engine's own push obeys the same allow-list as a lane's (T-72): the
-    // in-process check in `push_allowed` runs before it.
+    // T-107: an older engine's pre-push hook is unset here too, so the merge
+    // worktree carries no allow-list either.
+    crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path))?;
     Ok(worktree)
 }
 
@@ -801,7 +884,16 @@ fn merge_one(
     repo: &Repo,
     op: &OpRow,
 ) -> Result<String, Failed> {
-    step_result(merge_one_locked(worktree, repo, op, &lock_of(worktree)?, &[]))
+    // T-107: the tests' runner moves the refs from the remote's own side, so
+    // no engine test runs `git push`.
+    step_result(merge_one_locked(
+        worktree,
+        repo,
+        op,
+        &lock_of(worktree)?,
+        &[],
+        &FetchRemote,
+    ))
 }
 
 #[cfg(test)]
@@ -834,6 +926,7 @@ fn merge_one_locked(
     op: &OpRow,
     lock: &File,
     others: &[(String, String, bool)],
+    remote: &dyn Remote,
 ) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
@@ -1031,7 +1124,7 @@ fn merge_one_locked(
     // A push the remote rejects because the integration branch moved (the
     // captain or another merge pushed meanwhile) is a race, not a failure: the
     // merge starts again from the new tip.
-    if let Err(reason) = git(dir, &["push", "origin", &format!("HEAD:{integration}")]) {
+    if let Err(reason) = remote.push(dir, &integration) {
         if reason.contains("non-fast-forward") || reason.contains("fetch first") || reason.contains("cannot lock ref") {
             return Step::Failed(Failed::clear(format!("{RACE}{reason}")));
         }
@@ -1039,7 +1132,7 @@ fn merge_one_locked(
         // hook that rejects the push once (F1 of the T-61 review).
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
-    let (closed, left) = close_branches(dir, repo, &branch, &review, &sha, &task);
+    let (closed, left) = close_branches(dir, repo, &branch, &review, &sha, &task, remote);
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
@@ -1123,11 +1216,12 @@ fn close_branches(
     review: &str,
     candidate: &str,
     task: &str,
+    remote: &dyn Remote,
 ) -> (Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
-    if remote_branch_exists(dir, review) && delete_remote(dir, review) {
+    if remote_branch_exists(dir, review) && delete_remote(dir, review, remote) {
         closed.push(review.to_string());
     }
     // The branches whose tip is the candidate: the work the review approved.
@@ -1154,7 +1248,7 @@ fn close_branches(
             left.push(name);
             continue;
         }
-        if delete_remote(dir, &name) && !closed.contains(&name) {
+        if delete_remote(dir, &name, remote) && !closed.contains(&name) {
             closed.push(name);
         }
     }
@@ -1175,8 +1269,8 @@ fn remote_branch_exists(dir: &Path, branch: &str) -> bool {
 }
 
 /// Close a branch on origin. A branch that is already gone is closed too.
-fn delete_remote(dir: &Path, branch: &str) -> bool {
-    git(dir, &["push", "origin", "--delete", branch]).is_ok()
+fn delete_remote(dir: &Path, branch: &str, remote: &dyn Remote) -> bool {
+    remote.delete(dir, branch)
 }
 
 /// The gate of the project: its build and test command, in `dir`.
@@ -1403,6 +1497,25 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    /// The engine's config with the tests' remote runner (T-107): a merge
+    /// moves refs from origin's own side, so no engine test runs `git push`.
+    fn test_cfg() -> EngineCfg {
+        EngineCfg { remote: std::sync::Arc::new(FetchRemote), ..Default::default() }
+    }
+
+    /// Move the worktree's HEAD onto `branch` in its origin, from the origin's
+    /// own side (T-107): the engine's tests never run `git push`.
+    fn publish(work: &Path, branch: &str) {
+        sh(
+            work,
+            &format!(
+                "origin=$(git remote get-url origin); \
+                 git -C \"$origin\" fetch -q \"$(pwd)\" +HEAD:refs/heads/{branch} && \
+                 git fetch -q origin"
+            ),
+        );
+    }
+
     /// A scratch repo with a bare origin: `dev` plus one commit each on
     /// `heat/t5` and `review/t5`.
     struct Scratch {
@@ -1428,17 +1541,20 @@ mod tests {
             sh(&root, &format!("git init -q -b dev {}", work.display()));
             fs::write(work.join("README.md"), "dev\n").unwrap();
             sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+            sh(&work, "git remote add origin ../origin.git");
+            publish(&work, "dev");
             sh(
                 &work,
                 "git switch -qc heat/t5 && echo task >> README.md && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm task && git push -q origin heat/t5",
+                 && git -c user.email=a@b -c user.name=a commit -qm task",
             );
+            publish(&work, "heat/t5");
             sh(
                 &work,
                 "git switch -qc review/t5 && echo review > review.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm review && git push -q origin review/t5",
+                 && git -c user.email=a@b -c user.name=a commit -qm review",
             );
+            publish(&work, "review/t5");
             Scratch { root, work }
         }
 
@@ -1522,32 +1638,37 @@ mod tests {
             sh(&root, &format!("git init -q -b dev {}", work.display()));
             fs::write(work.join("README.md"), "dev\n").unwrap();
             sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+            sh(&work, "git remote add origin ../origin.git");
+            publish(&work, "dev");
             // T-1: its branch, then its review branch.
             sh(
                 &work,
                 "git switch -qc heat/t1 && echo a > a.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm a && git push -q origin heat/t1",
+                 && git -c user.email=a@b -c user.name=a commit -qm a",
             );
+            publish(&work, "heat/t1");
             sh(
                 &work,
                 "git switch -qc review/t1 && echo r1 > r1.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm r1 && git push -q origin review/t1",
+                 && git -c user.email=a@b -c user.name=a commit -qm r1",
             );
+            publish(&work, "review/t1");
             // T-2: cut from T-1's branch (it carries T-1's work) or from dev.
             let base = if built_on { "heat/t1" } else { "dev" };
             sh(
                 &work,
                 &format!(
                     "git switch -qc heat/t2 {base} && echo b > b.txt && git add -A \
-                     && git -c user.email=a@b -c user.name=a commit -qm b && git push -q origin heat/t2"
+                     && git -c user.email=a@b -c user.name=a commit -qm b"
                 ),
             );
+            publish(&work, "heat/t2");
             sh(
                 &work,
                 "git switch -qc review/t2 && echo r2 > r2.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm r2 && git push -q origin review/t2",
+                 && git -c user.email=a@b -c user.name=a commit -qm r2",
             );
+            publish(&work, "review/t2");
             let a = sh(&root, "git -C origin.git rev-parse heat/t1");
             let b = sh(&root, "git -C origin.git rev-parse heat/t2");
             Pair { root, work, a, b }
@@ -1717,7 +1838,7 @@ mod tests {
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not (yet). The engine queues T-2's merge itself.
         pass(&mut store, "T-2", &pair.b, 10);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -1901,7 +2022,7 @@ mod tests {
         let mut store = pair_world(&pair.a, &pair.b);
         // T-2 passed; T-1 did not. T-2's commits carry none of T-1's work.
         pass(&mut store, "T-2", &pair.b, 10);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -1938,7 +2059,8 @@ mod tests {
             sh(&root, &format!("git init -q -b dev {}", work.display()));
             fs::write(work.join("README.md"), "dev\n").unwrap();
             sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+            sh(&work, "git remote add origin ../origin.git");
+            publish(&work, "dev");
             let mut candidates = Vec::new();
             for n in 1..=tasks {
                 let base = if n == 1 { "dev".to_string() } else { format!("heat/t{}", n - 1) };
@@ -1946,16 +2068,18 @@ mod tests {
                     &work,
                     &format!(
                         "git switch -qc heat/t{n} {base} && echo t{n} > t{n}.txt && git add -A \
-                         && git -c user.email=a@b -c user.name=a commit -qm t{n} && git push -q origin heat/t{n}"
+                         && git -c user.email=a@b -c user.name=a commit -qm t{n}"
                     ),
                 );
+                publish(&work, &format!("heat/t{n}"));
                 sh(
                     &work,
                     &format!(
                         "git switch -qc review/t{n} && echo r{n} > r{n}.txt && git add -A \
-                         && git -c user.email=a@b -c user.name=a commit -qm r{n} && git push -q origin review/t{n}"
+                         && git -c user.email=a@b -c user.name=a commit -qm r{n}"
                     ),
                 );
+                publish(&work, &format!("review/t{n}"));
                 candidates.push(sh(&root, &format!("git -C origin.git rev-parse heat/t{n}")));
             }
             Chain { root, work, candidates }
@@ -2066,9 +2190,10 @@ mod tests {
         sh(
             &chain.work,
             "git switch -q heat/t1 && echo rework > rework.txt && git add -A \
-             && git -c user.email=a@b -c user.name=a commit -qm a2 && git push -q origin heat/t1 \
-             && git push -q -f origin heat/t1:refs/heads/review/t1",
+             && git -c user.email=a@b -c user.name=a commit -qm a2",
         );
+        publish(&chain.work, "heat/t1");
+        publish(&chain.work, "review/t1");
         let a1 = chain.candidates[0].clone();
         let b = chain.candidates[1].clone();
         let a2 = sh(&chain.root, "git -C origin.git rev-parse heat/t1");
@@ -2115,7 +2240,7 @@ mod tests {
             .unwrap();
         // T-2 passed; T-1 has not.
         pass(&mut store, "T-2", &b, 20);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -2155,7 +2280,7 @@ mod tests {
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
         let mut store = chain_world(&chain.candidates);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -2212,18 +2337,21 @@ mod tests {
             sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
             sh(
                 &work,
-                &format!("git remote add origin ../{name}-origin.git && git push -q origin {integration}"),
+                &format!("git remote add origin ../{name}-origin.git"),
             );
+            publish(&work, integration);
             sh(
                 &work,
                 "git switch -qc heat/t5 && echo task >> README.md && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm task && git push -q origin heat/t5",
+                 && git -c user.email=a@b -c user.name=a commit -qm task",
             );
+            publish(&work, "heat/t5");
             sh(
                 &work,
                 "git switch -qc review/t5 && echo review > review.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm review && git push -q origin review/t5",
+                 && git -c user.email=a@b -c user.name=a commit -qm review",
             );
+            publish(&work, "review/t5");
             Child { root: root.to_path_buf(), work, origin }
         }
 
@@ -2405,7 +2533,7 @@ gate = "{gate}"
         // nothing is merged (T-12 adversarial case).
         let mut store = world(TaskState::Verifying);
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         // The op was queued in an earlier tick (a crash before the execution) …
         store
@@ -2488,7 +2616,7 @@ gate = "{gate}"
                 Ok(())
             })
             .unwrap();
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -2604,13 +2732,53 @@ gate = "{gate}"
         repo: &Repo,
         op: &OpRow,
     ) -> Result<String, Failed> {
+        merge_retried_with(worktree, repo, op, &FetchRemote)
+    }
+
+    fn merge_retried_with(
+        worktree: &gear_herdr::Worktree,
+        repo: &Repo,
+        op: &OpRow,
+        remote: &dyn Remote,
+    ) -> Result<String, Failed> {
         step_result(merge_with_retries(
             worktree,
             repo,
             op,
             &lock_of(worktree)?,
             &[],
+            remote,
         ))
+    }
+
+    /// A runner that fails its first push and then behaves like [`FetchRemote`]
+    /// (T-107): the merge's retry of a failure that can clear, without a hook.
+    #[derive(Debug)]
+    struct FailOnceRemote {
+        failed: std::sync::atomic::AtomicBool,
+        reason: String,
+    }
+
+    impl FailOnceRemote {
+        fn new(reason: &str) -> FailOnceRemote {
+            FailOnceRemote {
+                failed: std::sync::atomic::AtomicBool::new(false),
+                reason: reason.to_string(),
+            }
+        }
+    }
+
+    impl Remote for FailOnceRemote {
+        fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
+            if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(self.reason.clone());
+            }
+            FetchRemote.push(dir, dst)
+        }
+
+        fn delete(&self, dir: &Path, branch: &str) -> bool {
+            FetchRemote.delete(dir, branch)
+        }
     }
 
     /// T-61: a push race is not a failure. The merge waits, tries again from
@@ -2626,7 +2794,7 @@ gate = "{gate}"
             "if [ ! -e '{raced}' ]; then touch '{raced}'; cd {work} && git fetch -q origin \
              && git switch -q dev && git reset -q --hard origin/dev && echo x >> other.txt \
              && git add other.txt && git -c user.email=a@b -c user.name=a commit -qm racer \
-             && git push -q origin dev; fi",
+             && git -C ../origin.git fetch -q $(pwd) +HEAD:refs/heads/dev; fi",
             raced = raced.display(),
             work = scratch.work.display(),
         );
@@ -2783,7 +2951,7 @@ gate = "{project_gate}"
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
         let mut store = child_world(&config_toml, &candidate);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -2834,7 +3002,7 @@ gate = "{project_gate}"
         let config_toml = child_config(&scratch.root, "true", "true");
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         let mut store = child_world(&config_toml, &candidate);
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -2869,9 +3037,9 @@ gate = "{project_gate}"
         sh(
             &scratch.work,
             "git switch -q dev && git switch -qc heat/t5-v2 && echo rework > rework.txt \
-             && git add -A && git -c user.email=a@b -c user.name=a commit -qm rework \
-             && git push -q origin heat/t5-v2",
+             && git add -A && git -c user.email=a@b -c user.name=a commit -qm rework",
         );
+        publish(&scratch.work, "heat/t5-v2");
         let candidate = scratch.head_of("heat/t5-v2");
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
@@ -2895,7 +3063,7 @@ gate = "{project_gate}"
                 Ok(())
             })
             .unwrap();
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             cfg.profiles
                 .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
@@ -3233,7 +3401,7 @@ gate = "{project_gate}"
         let scratch = Scratch::new("race");
         let worktree = scratch.merge_worktree();
         let racer = format!(
-            "cd {} && git fetch -q origin && git switch -q dev && git reset -q --hard origin/dev && echo x >> other.txt && git add other.txt && git -c user.email=a@b -c user.name=a commit -qm racer && git push -q origin dev",
+            "cd {} && git fetch -q origin && git switch -q dev && git reset -q --hard origin/dev && echo x >> other.txt && git add other.txt && git -c user.email=a@b -c user.name=a commit -qm racer && git -C ../origin.git fetch -q $(pwd) +HEAD:refs/heads/dev",
             scratch.work.display()
         );
 
@@ -3244,35 +3412,29 @@ gate = "{project_gate}"
         assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
     }
 
-    /// F1 of the T-61 review: a push that a hook rejects once is not a failed
-    /// merge. The merge waits, tries again, and lands.
+    /// F1 of the T-61 review: a push that fails once for a reason that can
+    /// clear is not a failed merge. The merge waits, tries again, and lands.
+    /// (T-107: the failure comes from the runner — the engine no longer
+    /// installs a pre-push hook to reject it.)
     #[test]
-    fn a_push_that_a_hook_rejects_once_is_retried_and_lands() {
+    fn a_push_that_fails_once_is_retried_and_lands() {
         let scratch = Scratch::new("hook");
         let worktree = scratch.merge_worktree();
-        // The repo's own pre-push hook says no once, then lets it through.
-        let marker = scratch.root.join("hook-said-no");
-        let hooks = scratch.work.join(".git/hooks");
-        fs::create_dir_all(&hooks).unwrap();
-        let hook = hooks.join("pre-push");
-        fs::write(
-            &hook,
-            format!(
-                "#!/bin/sh\nif [ ! -e '{marker}' ]; then touch '{marker}'; echo 'the hook says no' >&2; exit 1; fi\nexit 0\n",
-                marker = marker.display()
-            ),
+        let remote = FailOnceRemote::new("the remote said no once");
+
+        let line = merge_retried_with(
+            &worktree,
+            &repo("true"),
+            &op(&scratch.head_of("heat/t5")),
+            &remote,
         )
         .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let line = merge_retried(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap();
 
         assert!(line.contains("merged T-5 into dev"), "{line}");
-        assert!(marker.exists(), "the hook said no once");
+        assert!(
+            remote.failed.load(std::sync::atomic::Ordering::SeqCst),
+            "the runner refused once"
+        );
         assert!(scratch.dev_has_task_commit());
     }
 
@@ -3293,7 +3455,7 @@ gate = "{project_gate}"
         let work = scratch.work.clone();
         let pusher = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(500));
-            sh(&work, "git push -q origin heat/t5-late");
+            publish(&work, "heat/t5-late");
         });
 
         let line = merge_retried(&worktree, &repo("true"), &op(&candidate)).unwrap();
@@ -3338,7 +3500,8 @@ gate = "{project_gate}"
         let scratch = Scratch::new("conflict");
         // Make the task branch and dev disagree on the same line.
         // dev moves the same line the task branch appends to.
-        sh(&scratch.work, "git switch -q dev && printf 'dev\nother\n' > README.md && git -c user.email=a@b -c user.name=a commit -qam other && git push -q origin dev");
+        sh(&scratch.work, "git switch -q dev && printf 'dev\nother\n' > README.md && git -c user.email=a@b -c user.name=a commit -qam other");
+        publish(&scratch.work, "dev");
         let worktree = scratch.merge_worktree();
         let before = scratch.dev_log();
 
@@ -3403,8 +3566,9 @@ gate = "{project_gate}"
         sh(
             &scratch.work,
             "git switch -q heat/t5 && echo sneaky > sneaky.txt && git add -A \
-             && git -c user.email=a@b -c user.name=a commit -qm sneaky && git push -q origin heat/t5",
+             && git -c user.email=a@b -c user.name=a commit -qm sneaky",
         );
+        publish(&scratch.work, "heat/t5");
 
         let line = merge_one(&worktree, &repo("true"), &op(&candidate)).unwrap();
 
@@ -3431,9 +3595,9 @@ gate = "{project_gate}"
         sh(
             &scratch.work,
             "git switch -q dev && git switch -qc heat/t5-v2 && echo rework > rework.txt \
-             && git add -A && git -c user.email=a@b -c user.name=a commit -qm rework \
-             && git push -q origin heat/t5-v2",
+             && git add -A && git -c user.email=a@b -c user.name=a commit -qm rework",
         );
+        publish(&scratch.work, "heat/t5-v2");
         let candidate = scratch.head_of("heat/t5-v2");
         assert_ne!(candidate, scratch.head_of("heat/t5"), "the branch moved on");
 
@@ -3590,7 +3754,7 @@ gate = "{project_gate}"
             })
             .unwrap();
 
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
         let merged = wait_merge(&mut store, &mut herdr, &cfg);
@@ -3674,7 +3838,7 @@ gate = "{project_gate}"
             })
             .unwrap();
 
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         let before = wall_time();
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
@@ -3710,7 +3874,7 @@ gate = "{project_gate}"
                 by_seat: "p:captain".into(), created: 10,
             })
         }).unwrap();
-        let mut cfg = EngineCfg::default();
+        let mut cfg = test_cfg();
         for kind in ["opencode", "claude"] {
             let mut profile = gear_herdr::builtin(kind).unwrap();
             profile.confirm_rounds = 1;

@@ -275,3 +275,78 @@ fn per_lane_and_role_chains_are_checked() {
         );
     }
 }
+
+/// T-104 (review F3): a lane that sets the captain's context and its own pane
+/// id cannot change a registered project's config — the config stays, and the
+/// captain gets one urgent item naming the lane's real pane. The captain's own
+/// pane still re-applies a configuration.
+#[test]
+fn a_forged_captain_claim_cannot_re_init() {
+    use gear_herdr::{fake::FakeHerdr, AgentStatus};
+
+    let mut s = Store::open_in_memory().unwrap();
+    init_with_home(&mut s, &admin(), CONFIG, Some(crate::skill_home()), T0).unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w2:p1", "codex", AgentStatus::Idle); // the captain's pane
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle); // the lane's pane
+    const CAP: [u32; 2] = [60_001, 60_000];
+    const LANE: [u32; 2] = [50_001, 50_000];
+    herdr.set_pane_processes("w2:p1", Some(CAP[1]), &[]);
+    herdr.set_pane_processes("w1:p2", Some(LANE[1]), &[]);
+
+    // The captain's context with the lane's own (genuine) pane id.
+    let claimed = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some("w1:p2".into()),
+        admin: true,
+    };
+    let changed = CONFIG.replace("lanes = 2", "lanes = 3");
+    let error = gear_app::admin::init_checked(
+        &mut s,
+        &claimed,
+        &changed,
+        Some(&mut herdr),
+        &LANE,
+        Some(crate::skill_home()),
+        T0 + 1,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::NotRegistered, "{}", error.detail);
+    let project = s.read(|tx| tx.get_project("harbor")).unwrap().unwrap();
+    assert_eq!(
+        (project.config_version, project.config_toml.as_str()),
+        (1, CONFIG),
+        "a refused claim changes nothing"
+    );
+    let items = s.read(|tx| tx.thread_messages("harbor", "identity:w1:p2")).unwrap();
+    assert_eq!(items.len(), 1, "one urgent item: {items:?}");
+    assert!(items[0].urgent);
+    assert!(items[0].body.contains("w1:p2"), "{}", items[0].body);
+
+    // The captain in its own pane may re-apply the config.
+    let captain = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some("w2:p1".into()),
+        admin: true,
+    };
+    let done = gear_app::admin::init_checked(
+        &mut s,
+        &captain,
+        &changed,
+        Some(&mut herdr),
+        &CAP,
+        Some(crate::skill_home()),
+        T0 + 2,
+    )
+    .unwrap();
+    assert_eq!(done.config_version, 2);
+}

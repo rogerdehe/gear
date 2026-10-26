@@ -9,6 +9,7 @@
 
 pub mod admin;
 pub mod base;
+pub mod captain;
 pub mod config;
 pub mod draft;
 pub mod github;

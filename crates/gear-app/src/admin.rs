@@ -225,6 +225,75 @@ pub fn init_with_home(
     })
 }
 
+/// `gear admin init` behind the seat proof (T-104).
+///
+/// A context on an **already registered** project is the captain's seat claim:
+/// only a caller that really runs in the captain's bound pane may change the
+/// configuration, and a claim from anywhere else is refused with the same one
+/// urgent item the other seat writes raise. The first registration (no seats
+/// yet) and the user's own shell (no context) keep their flow; `herdr` is only
+/// needed when there is a claim to prove.
+pub fn init_checked(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    herdr: Option<&mut dyn gear_herdr::HerdrRead>,
+    ancestors: &[u32],
+    home: Option<&std::path::Path>,
+    now: Ts,
+) -> GearResult<InitResult> {
+    if let Some(ctx) = env.ctx.clone() {
+        let registered = store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?;
+        if registered {
+            let Some(herdr) = herdr else {
+                return Err(GearError::new(
+                    ErrorCode::NotRegistered,
+                    format!(
+                        "a registered project's `gear admin init` runs in the captain's pane, which cannot be read: Herdr is unreachable for {}",
+                        ctx.project
+                    ),
+                ));
+            };
+            prove_captain(store, env, herdr, ancestors, &ctx.project, now)?;
+        }
+    }
+    init_with_home(store, env, config_text, home, now)
+}
+
+/// Prove that the caller is the captain of `project` in its own bound pane
+/// (T-104): the real pane is the seat's pane. A refusal is reported once to the
+/// captain — the same item every seat write raises.
+fn prove_captain(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    ancestors: &[u32],
+    project: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let result = (|| -> GearResult<()> {
+        let Some(fp) = crate::identity::observe(env, herdr, ancestors)? else {
+            return Err(GearError::new(
+                ErrorCode::NotRegistered,
+                format!(
+                    "the captain's pane hosts no agent, so the caller cannot be the captain of {project}"
+                ),
+            ));
+        };
+        store
+            .read(|tx| {
+                crate::identity::require_seat(tx, env, Some(&fp), Some(&[SeatRole::Captain]), None)
+            })
+            .map(|_| ())
+    })();
+    if let Err(error) = &result {
+        if error.code == ErrorCode::NotRegistered {
+            let _ = crate::identity::report_claim(store, env, herdr, error, ancestors, now);
+        }
+    }
+    result
+}
+
 /// First registration: the project row and one seat per role. The captain is
 /// bound Active as generation 1 (T-63): it is the user's running agent in
 /// `captain.pane`. The lanes stay Queued — the engine onboards them.

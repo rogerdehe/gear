@@ -103,20 +103,27 @@ fn a_first_registration_is_the_users_own() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }
 
+/// T-104: a captain's re-init is a seat claim on a registered project, and it
+/// is proven against the caller's real pane. Without a reachable Herdr the
+/// claim cannot be proven, so it is refused and nothing changes — the
+/// successful captain re-apply (with a fake Herdr for its pane) is covered by
+/// `gear_app::admin::init_checked`'s own test.
 #[test]
-fn the_captain_re_registers_after_a_config_change() {
+fn a_captains_re_init_needs_its_pane_proven() {
     let dir = scratch("reinit");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
     let db = dir.join("gear.db");
-    // The user registered it once; the captain applies the changed config.
+    // The user registered it once.
     let o = init(&dir, &db, &config(&dir, &repo), None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    // `init` bound the captain's seat at generation 1 already.
 
     let o = init(&dir, &db, &config(&dir, &repo), Some("p:captain:1"), true);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(config_version(&db), 2, "a re-init writes the next config version");
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.contains("ERROR NOT_REGISTERED"), "{err}");
+    assert!(err.contains("herdr"), "the refusal says the pane cannot be read: {err}");
+    assert_eq!(config_version(&db), 1, "nothing changed");
 }
 
 /// T-91, F1: landing a task through its pull request is not in this release,
@@ -182,10 +189,12 @@ fn a_stale_captain_generation_may_not_register() {
     let db = dir.join("gear.db");
     let o = init(&dir, &db, &config(&dir, &repo), None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    // `init` bound the captain's seat at generation 1; 2 is not it.
+    // `init` bound the captain's seat at generation 1; 2 is not it. The claim
+    // cannot be proven at all here (no Herdr), and the generation is never
+    // reached — either way the registration stands.
     let o = init(&dir, &db, &config(&dir, &repo), Some("p:captain:2"), true);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
-    assert!(stderr(&o).contains("ERROR FORBIDDEN"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("ERROR NOT_REGISTERED"), "{}", stderr(&o));
     assert_eq!(config_version(&db), 1, "the first registration stands");
 }
 
