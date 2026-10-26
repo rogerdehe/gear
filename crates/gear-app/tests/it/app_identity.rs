@@ -402,9 +402,25 @@ fn the_captains_own_commands_pass_and_survive_a_restart() {
     assert!(matches!(caller, Caller::Seat { ref seat, .. } if seat.id == "p:captain"), "{caller:?}");
 }
 
+/// T-131: the ancestry of this process itself is found in process — its parent
+/// is the pid the OS reports, and nothing was started to learn it. The old walk
+/// spawned `/bin/ps` once per ancestor; when program launch was slow those `ps`
+/// piled up stuck, `gear` hung, and its callers killed it.
+#[test]
+fn this_process_ancestry_comes_from_the_os_in_process() {
+    let ancestors = gear_app::identity::process_ancestors();
+    assert_eq!(ancestors.first().copied(), Some(std::process::id()), "own pid first: {ancestors:?}");
+    let parent = std::os::unix::process::parent_id();
+    assert_eq!(
+        ancestors.get(1).copied(),
+        Some(parent),
+        "the second entry is the parent pid the OS reports: {ancestors:?}"
+    );
+}
+
 /// F1 of the review: `ps` must never come from `$PATH`. A shell that prepends a
 /// fake `ps` printing the captain pane's pid must not add it to the ancestry —
-/// the walk asks the OS itself (or `/bin/ps` by absolute path).
+/// the walk asks the OS itself, by a read in process (T-131).
 #[test]
 fn a_path_provided_ps_cannot_fabricate_ancestry() {
     let forged: u32 = 424_242;

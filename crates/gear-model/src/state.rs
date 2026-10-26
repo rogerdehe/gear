@@ -163,6 +163,9 @@ impl SeatState {
                     // Retried by the captain (T-82): the engine onboards it again.
                     | (NeedsCheck, Queued | Active | Starting | Retired)
                     | (Unknown, Queued)
+                    // Released by the captain (T-133): its agent continues (Active)
+                    // or is gone and the engine onboards it again (Queued).
+                    | (Held, Queued)
             ),
             SeatRole::Temp => matches!(
                 (from, to),

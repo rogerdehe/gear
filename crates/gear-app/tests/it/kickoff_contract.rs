@@ -233,9 +233,9 @@ fn repo_at(dir: &std::path::Path, branch: &str) {
         );
     };
     git(&["init", "-q", "--initial-branch=main"]);
-    std::fs::write(dir.join("README.md"), "a repo\n").unwrap();
-    git(&["add", "README.md"]);
-    git(&["commit", "-q", "-m", "first"]);
+    // A commit, so the branch has a name to read — never the four processes
+    // (`add`, `commit`, `switch`) this used to spend on it (T-128).
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
     if branch != "main" {
         git(&["switch", "-q", "-c", branch]);
     }

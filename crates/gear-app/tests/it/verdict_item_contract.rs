@@ -32,7 +32,7 @@ fn fp() -> Fingerprint {
 }
 
 fn apply_plan(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
-    apply(s, &cap_env(), Some(&fp()), &parse(text).unwrap(), text, rid, T0 + 50)
+    apply(s, &cap_env(), Some(&fp()), None, &parse(text).unwrap(), text, rid, T0 + 50)
 }
 
 const V1: &str = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat milestone=M3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";

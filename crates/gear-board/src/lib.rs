@@ -480,6 +480,8 @@ fn down_seat(seat: &gear_store::SeatRow) -> Option<DownSeat> {
         action: match seat.state {
             // The captain's way back: the plan's `# Staff` line (T-82).
             SeatState::NeedsCheck | SeatState::Unknown => Some(format!("- retry {}", seat.name)),
+            // Held is left by the plan line that releases it (T-133).
+            SeatState::Held => Some(format!("- release {}", seat.name)),
             _ => None,
         },
     })
