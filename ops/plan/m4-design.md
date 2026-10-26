@@ -480,7 +480,7 @@ One function in gear-app, used by the board, `gear queue` and §8.4: `idle_reaso
 | `Quota { until }` | the seat is quota-parked | `quota until 15:12` |
 | `Parked { until }`, `Held { reason }` | seat state | `parked until …` / `held: …` |
 | `Waiting { on }` | a declared wait (§5.3) | `waiting for T-m (lane, stage)` |
-| `DepWait { task, on }` | the lane's next queued task has a dep not Done | `next T-x waits for T-y (lane, stage)` |
+| `DepWait { task, on }` | the lane's next queued task (tasks in review or Done are skipped) has a dep not Done | `next T-x waits for T-y (lane, stage)` |
 | `Undelivered { task }` | the next task is ready and not delivered | `next T-x is ready but not delivered` |
 | `NoWork` | nothing left in its queue | `nothing left planned` |
 
