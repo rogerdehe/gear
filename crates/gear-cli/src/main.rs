@@ -2734,10 +2734,13 @@ mod tests {
         );
         let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(stored.body, "stop and read this", "the message is stored all the same");
+        // The claim is recorded, and recorded as failed: a definitely refused
+        // doorbell covers nothing, so the engine rings the message (T-130 F2).
         let ops = store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
             .unwrap();
-        assert!(ops.is_empty(), "nothing recorded, so the engine rings: {ops:?}");
+        assert_eq!(ops.len(), 1, "{ops:?}");
+        assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
 
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
         let said = herdr.prompts_to(LANE_PANE);

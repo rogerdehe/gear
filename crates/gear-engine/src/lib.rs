@@ -416,8 +416,10 @@ fn doorbell_inputs(
 
         // One doorbell per message, never repeated (T-130): an id an earlier
         // doorbell of this seat named is not named again — not after the
-        // cooldown, and not when that doorbell was never confirmed. A voided
-        // doorbell never reached the pane, so it covers nothing.
+        // cooldown, and not when that doorbell was never confirmed. A doorbell
+        // that never reached the pane covers nothing: a voided one, and a
+        // definitely failed one (Herdr refused it, review F2), so a refused
+        // message is rung again on a later tick.
         //
         // The captain is the exception: its unanswered items are reminded on
         // purpose, once per configured period (T-40), and that reminder is the
@@ -425,11 +427,7 @@ fn doorbell_inputs(
         let doorbelled: BTreeSet<String> = if seat.role == gear_model::SeatRole::Captain {
             BTreeSet::new()
         } else {
-            tx.ops_of_seat_kind(&seat.id, OpKind::Doorbell)?
-                .into_iter()
-                .filter(|op| op.state != OpState::Void)
-                .flat_map(|op| covers_of(&op))
-                .collect()
+            crate::ops::covered_messages(tx, &seat.id)?
         };
 
         // What this generation has already been shown: an open item it has
@@ -511,18 +509,4 @@ fn doorbell_inputs(
         });
     }
     Ok(inputs)
-}
-
-/// The message ids a doorbell op named (`payload.covers`).
-fn covers_of(op: &gear_store::OpRow) -> Vec<String> {
-    op.payload
-        .get("covers")
-        .and_then(serde_json::Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }

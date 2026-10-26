@@ -8,7 +8,8 @@
 //! waits for idle. One doorbell per message, never repeated.
 
 use gear_engine::{tick, EngineCfg};
-use gear_herdr::{fake::FakeHerdr, AgentStatus};
+use gear_herdr::fake::{FakeHerdr, Inject};
+use gear_herdr::AgentStatus;
 use gear_model::{MsgKind, MsgState, OpKind, OpState, SeatRole};
 use gear_store::{testing, NewMessage, Store};
 
@@ -99,6 +100,35 @@ fn a_working_pi_lane_gets_the_captains_instruction_in_the_same_tick() {
     let ops = w.doorbell_ops();
     assert_eq!(ops.len(), 1, "{ops:?}");
     assert_eq!(ops[0].state, OpState::Submitted);
+}
+
+/// F2 of the T-130 review: a doorbell Herdr refused never reached the pane, so
+/// it covers nothing — the same message is rung again on the next eligible tick
+/// (an at-once message needs no cooldown).
+#[test]
+fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
+    let mut w = world(AgentStatus::Working, AgentStatus::Idle);
+    // The captain is busy too, so the only prompt of this tick is the lane's
+    // at-once doorbell — the one Herdr refuses here.
+    w.herdr.set_status(CAP_PANE, AgentStatus::Working);
+    let id = w.captain_message("p:heat", MsgKind::Instruction, false, T0 + 10);
+    w.herdr.inject_next = Some(Inject::Refuse { code: "agent_not_ready".into() });
+
+    let first = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
+    let ops = w.doorbell_ops();
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Failed, "Herdr refused: nothing was typed");
+    assert!(first.executed.iter().any(|(_, state)| state == "failed"), "{first:?}");
+
+    // Herdr is healthy again; the message was never typed, so it is rung now.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 21).unwrap();
+
+    let said = w.herdr.prompts_to(PI_PANE);
+    assert_eq!(said.len(), 2, "the refused attempt, then the real doorbell: {said:?}");
+    assert!(said[1].contains(&id), "{said:?}");
+    let ops = w.doorbell_ops();
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert_eq!(ops[1].state, OpState::Submitted);
 }
 
 #[test]
