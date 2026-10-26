@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS seat_pauses (
   kind TEXT NOT NULL,                 -- quota | wait
   reason TEXT,                        -- provider and window, or the task waited for
   start_at INTEGER NOT NULL, end_at INTEGER,   -- end_at NULL while it lasts
-  PRIMARY KEY (project, seat, start_at));
+  PRIMARY KEY (project, seat, kind, start_at));   -- kind in the key (T-135 review F4)
 
 -- §6: friction reports
 CREATE TABLE IF NOT EXISTS frictions (
@@ -269,7 +269,7 @@ The tick that closes a round (and any read of an open round: board, report) sums
 | `claude-jsonl` | `~/.claude/projects/*/<session>.jsonl` | a line `type = "assistant"`, `message.usage` | `input_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `output_tokens`; **counted once per `message.id`** (one message is written on several lines) |
 | `opencode-db` | `~/.local/share/opencode/opencode.db`, table `session_message` | a row of the session whose JSON `data` has `tokens` | `tokens.input/output/reasoning/cache.read/cache.write`, `cost`; time `time.completed` |
 
-Codex's input count includes cached input: input = `input_tokens − cached_input_tokens` so the columns never double count. A file that cannot be read leaves the token columns NULL (unknown), never 0.
+Codex's input count includes cached input: input = `input_tokens − cached_input_tokens` so the columns never double count. The first valid total of a file counts against zero; a `token_count` with `info` null (or no object `total_token_usage`) is skipped. Codex's `last_context` is `info.last_token_usage` of the last valid line (input + cache_write), not a delta. A file that cannot be read leaves the token columns NULL (unknown), never 0.
 
 ### 4.4 Cost
 
