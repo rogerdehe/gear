@@ -22,6 +22,17 @@ use serde_json::{json, Value};
 
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
 
+/// Does an agent of this kind queue the text typed while it works, and read it
+/// after the current step? (T-130)
+///
+/// pi and claude do: a prompt typed mid-turn waits in their input queue. An
+/// opencode or codex turn takes the text as keystrokes into the running turn,
+/// so only an urgent message goes in while it works. `kind` is the Herdr agent
+/// kind of the seat's active binding.
+pub fn queues_input(kind: &str) -> bool {
+    matches!(kind, "pi" | "claude")
+}
+
 /// The processes of a pane, as Herdr reports them (T-104): its shell, the
 /// foreground process group, and the terminal (`/dev/ttys…`). The one pane
 /// fact a shell cannot set with an environment variable — an identity check
