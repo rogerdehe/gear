@@ -130,6 +130,14 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
             env: String::new(),
             args: vec!["--model".to_string(), model.to_string()],
         }),
+        // Pi takes the model as a start flag (`--model <provider>/<id>`; the
+        // SOP `gear --skill agent:pi`). It has no model picker GEAR drives
+        // (T-114): the model is given at the start and the agent is started
+        // again for the next one.
+        "pi" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["--model".to_string(), model.to_string()],
+        }),
         _ => None,
     }
 }
@@ -193,7 +201,20 @@ mod tests {
 
     #[test]
     fn a_cli_without_a_verified_way_manages_no_model() {
-        assert!(model_start("pi", "gpt-6.1-sol").is_none());
+        assert!(model_start("nosuchcli", "gpt-6.1-sol").is_none());
+    }
+
+    /// T-114: pi takes the model as a start flag, like claude and grok. It
+    /// has no model picker GEAR drives, so this is the only way a pi lane
+    /// gets on its chain's model.
+    #[test]
+    fn pi_takes_the_model_as_a_flag() {
+        let start = model_start("pi", "opencode-go/deepseek-v4.1-flash").unwrap();
+        assert_eq!(start.env, "", "pi needs no environment line");
+        assert_eq!(
+            start.args,
+            vec!["--model".to_string(), "opencode-go/deepseek-v4.1-flash".to_string()]
+        );
     }
 
     #[test]

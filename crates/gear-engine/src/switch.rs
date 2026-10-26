@@ -15,7 +15,9 @@
 //!
 //! Only the OpenCode protocol is implemented: it is the one the SOP
 //! (`gear --skill agent:opencode`, ops/bin/switch-model.sh) verifies, and
-//! guessing another CLI's picker is worse than flagging the seat (P2).
+//! guessing another CLI's picker is worse than flagging the seat (P2). A CLI
+//! without a picker GEAR drives (pi) is not switched here at all: the caller
+//! starts it again on the next model ([`crate::restart`]).
 
 use gear_app::config::ModelSwitch;
 use gear_herdr::{HerdrAct, Outcome, Profile};
@@ -56,6 +58,17 @@ pub enum SwitchOutcome {
     Failed,
 }
 
+/// Can GEAR change this CLI's model **in place** (T-33)? Only OpenCode's
+/// protocol is driven today: the picker, the variant dialog and the status
+/// bar (SOP `gear --skill agent:opencode`).
+///
+/// A CLI without a picker GEAR drives (pi) is **not** switched in place: it is
+/// closed and started again on the next model ([`crate::restart`]), the same
+/// pane and worktree, the lane's task delivered again in the new session.
+pub fn switches_in_place(kind: &str) -> bool {
+    kind == "opencode"
+}
+
 /// The keys and texts the switch sends, from the config and the profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchSteps {
@@ -71,7 +84,7 @@ impl SwitchSteps {
     /// The steps of one CLI kind. Only OpenCode's protocol is verified; any
     /// other kind is not switched in place (the caller flags the seat).
     pub fn for_kind(kind: &str, labels: &ModelSwitch) -> Option<SwitchSteps> {
-        if kind != "opencode" {
+        if !switches_in_place(kind) {
             return None;
         }
         Some(SwitchSteps {
