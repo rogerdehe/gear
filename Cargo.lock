@@ -193,6 +193,7 @@ dependencies = [
  "gear-herdr",
  "gear-model",
  "gear-store",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
