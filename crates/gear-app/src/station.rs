@@ -64,6 +64,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         // would ever ring for it — M2 sat finished for 36 h (L-78).
         if left == 0 && done > 0 && tx.get_meta(&format!("{key}:land"))?.is_none() {
             let message = tx.insert_message(&NewMessage {
+                meta: None,
                 project: project.into(), thread: format!("station:{}", report.milestone),
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
@@ -87,6 +88,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
             minutes(report.remaining_estimate_min),
         );
         let message = tx.insert_message(&NewMessage {
+            meta: None,
             project: project.into(), thread: format!("station:{}", report.milestone),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,

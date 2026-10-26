@@ -231,6 +231,7 @@ fn report_taken(
     }
     let by = holder.map(|pane| format!(" (pane {pane})")).unwrap_or_default();
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread: thread(&seat.id),
         task: None,

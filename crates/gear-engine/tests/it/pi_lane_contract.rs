@@ -135,6 +135,10 @@ fn active_world(config_text: &str) -> Store {
             testing::seed_active_seat(tx, "toy", "heat", SeatRole::Lane, PANE, "pi", T0)?;
             testing::seed_active_seat(tx, "toy", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "toy".into(),
                 id: "T-1".into(),
                 rank: 1,

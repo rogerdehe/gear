@@ -51,6 +51,11 @@ pub struct ApplyResult {
 ///    state is skipped (Staff is a target, not a command); an unknown seat, a
 ///    non-lane seat or a forbidden transition → `BadFormat`; `temp` lines →
 ///    `BadFormat` "not in this cut"; applied lines are listed in `staffed`.
+///    `release` (T-133, T-140): a named **lane** in Held goes back to Active or
+///    Queued (the session's agents say whether its agent is still there); a
+///    named **reviewer** seat in Standby goes to Releasing (the engine closes
+///    its pane); a reviewer that is reviewing is refused with the task it is
+///    reviewing.
 ///    `# Verdicts` (T-50):
 ///    after the queue writes, each line → `tasks::settle` (by_seat = the caller's
 ///    seat) in draft order, in the same transaction — any error aborts the whole
@@ -319,6 +324,10 @@ fn apply_queue(
                     .cloned()
                     .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?;
                 let task = TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: project.to_string(),
                     id: id.clone(),
                     rank,
@@ -492,9 +501,9 @@ fn apply_queue(
             staffed.push(format!("retry {lane}"));
             continue;
         }
-        if let StaffItem::Release { lane, .. } = item {
-            release_lane(tx, project, lane, staff_line(item), agents, now)?;
-            staffed.push(format!("release {lane}"));
+        if let StaffItem::Release { name, .. } = item {
+            release_seat(tx, project, name, staff_line(item), agents, now)?;
+            staffed.push(format!("release {name}"));
             continue;
         }
         let (lane, verb, target, reason) = match item {
@@ -856,48 +865,65 @@ fn retry_lane(
     Ok(())
 }
 
-/// `- release <lane>` (T-133): a lane the captain held goes back to the state
-/// the engine continues or onboards from. A held lane whose agent is still in
-/// its pane continues where it was — `Active`; one whose agent is gone goes back
-/// to `Queued`, so the engine onboards it again (`- retry` refuses Held, and
-/// editing the store was the captain's only way out, M3.1 machine recovery).
+/// `- release <lane>` (T-133) and `- release <reviewer>` (T-140): the captain
+/// takes a seat out of the way.
 ///
-/// Only a held lane is released: any other state is a transition this line
-/// cannot mean, and it is refused with the reason.
+/// A **lane**: a held lane goes back to the state the engine continues or
+/// onboards from. A held lane whose agent is still in its pane continues where
+/// it was — `Active`; one whose agent is gone goes back to `Queued`, so the
+/// engine onboards it again (`- retry` refuses Held, and editing the store was
+/// the captain's only way out, M3.1 machine recovery).
 ///
-/// Whether the agent is still there is the session's fact, not the store's
-/// (review F1): the store keeps the pane GEAR started an agent in, and an agent
-/// that exits leaves that binding Active. So the target is `Active` only when
-/// the caller brought the session's agents in and one of the binding's kind sits
-/// in the binding's pane; a binding with no such agent, and no binding at all,
-/// go back to `Queued`. An unread observation is not "gone": the release is
-/// refused instead of guessed.
-fn release_lane(
+/// A **reviewer** (design §3.6): a reviewer seat in Standby — its agent alive,
+/// its pane open, no job — goes to `Releasing`, and the engine closes the pane
+/// as for any release. A reviewer with a job is refused: the captain does not
+/// pull a reviewer out of the review it is doing.
+///
+/// Whether a lane's agent is still there is the session's fact, not the
+/// store's (review F1): the store keeps the pane GEAR started an agent in, and
+/// an agent that exits leaves that binding Active. So the target is `Active`
+/// only when the caller brought the session's agents in and one of the
+/// binding's kind sits in the binding's pane; a binding with no such agent,
+/// and no binding at all, go back to `Queued`. An unread observation is not
+/// "gone": the release is refused instead of guessed.
+fn release_seat(
     tx: &Tx<'_>,
     project: &str,
-    lane: &str,
+    name: &str,
     line: usize,
     agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<()> {
-    let seat_id = format!("{project}:{lane}");
+    let seat_id = format!("{project}:{name}");
     let seat = tx
         .get_seat(&seat_id)?
         .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
-    if seat.role != SeatRole::Lane {
-        return Err(bad(
+    match seat.role {
+        SeatRole::Lane => release_lane(tx, &seat, name, line, agents, now),
+        SeatRole::Temp => release_reviewer(tx, &seat, name, now),
+        role => Err(bad(
             line,
-            format!(
-                "seat {seat_id} is a {} seat, staff lines name lanes",
-                seat.role.as_str()
-            ),
-        ));
+            format!("seat {seat_id} is a {role} seat, staff lines name lanes and reviewers"),
+        )),
     }
+}
+
+/// `- release <lane>` (T-133): only a held lane is released: any other state is
+/// a transition this line cannot mean, and it is refused with the reason.
+fn release_lane(
+    tx: &Tx<'_>,
+    seat: &gear_store::SeatRow,
+    name: &str,
+    line: usize,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = seat.id.clone();
     if seat.state != SeatState::Held {
         return Err(GearError::new(
             ErrorCode::BadTransition,
             format!(
-                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {lane} reason=…` puts it there)",
+                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there)",
                 seat.state.as_str()
             ),
         ));
@@ -944,6 +970,52 @@ fn release_lane(
         target.as_str(),
     )?;
     tx.set_seat_state(&seat_id, target, Some(reason), now)?;
+    Ok(())
+}
+
+/// `- release <reviewer>` (T-140, design §3.6): a reviewer seat in `Standby` —
+/// its agent alive, its pane open, no job — is released: the seat goes to
+/// `Releasing` and the engine closes the pane as for any release.
+///
+/// A reviewer **in a job** is refused: the captain does not pull a reviewer out
+/// of the review it is doing. The refusal names the task it is reviewing.
+///
+/// A reviewer in any other state (queued, starting, already released) is
+/// refused with the reason: only a reviewer in Standby is idle enough to let
+/// go of.
+fn release_reviewer(
+    tx: &Tx<'_>,
+    seat: &gear_store::SeatRow,
+    name: &str,
+    now: Ts,
+) -> GearResult<()> {
+    // A reviewer with a job binding is reviewing it (§3.6: the binding ends
+    // when the seat goes to Standby).
+    if let Some(task) = seat.task_id.as_deref() {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!("{name} is reviewing {task}"),
+        ));
+    }
+    if seat.state != SeatState::Standby {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {} is {}, not standby: only a reviewer in Standby is released",
+                seat.id,
+                seat.state.as_str()
+            ),
+        ));
+    }
+    // Standby → Releasing: the engine closes the pane and the seat goes to
+    // Released. The model's transition table (gear-model, deck's file) knows no
+    // reviewer in Standby yet (§3.6 is new), so the transition is stated here.
+    tx.set_seat_state(
+        &seat.id,
+        SeatState::Releasing,
+        Some("released by the captain: it was idle"),
+        now,
+    )?;
     Ok(())
 }
 
@@ -1519,6 +1591,7 @@ fn cancel_task(
     let lane_seat = format!("{project}:{lane}");
     if closed && tx.get_seat(&lane_seat)?.is_some() {
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("{}:cancel", task.id),
             task: Some(task.id.clone()),

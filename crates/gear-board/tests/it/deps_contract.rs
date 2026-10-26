@@ -27,6 +27,10 @@ fn world() -> Store {
                 ("T-5", 5, TaskState::Ready, vec![]),
             ] {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: id.into(),
                     rank,

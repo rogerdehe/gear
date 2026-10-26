@@ -71,6 +71,7 @@ fn world_with(passed: bool) -> Store {
             tx.set_review_blocking("p", "T-1", 1, "F1", T0)?;
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "T-1:1".into(),
             task: Some("T-1".into()),
@@ -203,6 +204,7 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
         tx.set_op_state("p", &op.id, OpState::Failed, Some("conflict merging abc1234"), T0 + 5)?;
         // The engine's item, naming the task and attempt (T-90).
         let item = tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "merge:1".into(),
             task: Some("T-1".into()),
@@ -272,6 +274,7 @@ fn an_ordinary_question_is_answered_without_a_verdict() {
         .write(|tx| {
             Ok(tx
                 .insert_message(&NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "T-1:2".into(),
                     task: Some("T-1".into()),
@@ -332,6 +335,7 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
             tx.set_op_state("p", &failed.id, OpState::Executing, None, T0 + 4)?;
             tx.set_op_state("p", &failed.id, OpState::Failed, Some("push refused"), T0 + 5)?;
             let item = tx.insert_message(&NewMessage {
+                meta: None,
                 project: "p".into(),
                 thread: "push:T-1".into(),
                 task: Some("T-1".into()),

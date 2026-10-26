@@ -63,6 +63,10 @@ impl World {
             .write(|tx| {
                 let seat = testing::seed_temp_seat(tx, "p", "review-1", "T-7", REV_PANE, "codex", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -119,6 +123,10 @@ impl World {
         self.store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,

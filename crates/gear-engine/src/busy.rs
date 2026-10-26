@@ -61,6 +61,7 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         }
         let Some(captain) = tx.captain_of(project)? else { continue; };
         let message = tx.insert_message(&NewMessage {
+            meta: None,
             project: project.into(), thread: format!("lane-busy:{}", seat.id),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: captain.id, kind: MsgKind::System, urgent: true,

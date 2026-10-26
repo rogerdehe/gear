@@ -87,6 +87,10 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAPTAIN_PANE, "claude", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-7".into(),
                 rank: 1,
@@ -206,6 +210,19 @@ fn exits(herdr: &FakeHerdr) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// The commands typed into a pane (the exit of a CLI that takes a command
+/// instead of a key, M4 §12 item 4).
+fn exit_prompts(herdr: &FakeHerdr) -> Vec<String> {
+    herdr
+        .calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Prompt { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
     herdr
         .calls
@@ -235,8 +252,10 @@ fn a_spent_codex_reviewer_is_restarted_on_the_review_fallback() {
     // The limit is confirmed: the Codex agent is told to exit.
     let report = tick(&mut store, &mut herdr, true, T0 + 20);
     assert!(report.events.is_empty(), "{:?}", report.events);
-    let exit_keys = gear_herdr::builtin("codex").unwrap().exit_keys;
-    assert_eq!(exits(&herdr), vec![exit_keys], "{:?}", herdr.calls);
+    let exit_command = gear_herdr::builtin("codex").unwrap().exit_command;
+    // M4 §12 item 4: codex exits with the typed `/quit`, not with keys.
+    assert_eq!(exit_prompts(&herdr), vec![exit_command.unwrap_or_default()], "{:?}", herdr.calls);
+    assert!(exits(&herdr).is_empty(), "no exit keys for codex any more");
     assert!(starts(&herdr).is_empty(), "nothing starts before the pane is a shell");
     assert!(
         gear_engine::restart::pending(&mut store, "p:r-1").unwrap().is_some(),
