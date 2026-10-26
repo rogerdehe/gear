@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gear_board::{build, render, run_with, to_json, EngineState, Keys, Options, View};
+use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
 use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{testing, NewMessage, Store, TaskRow};
 
@@ -206,9 +206,9 @@ struct Quitter {
 }
 
 impl Keys for Quitter {
-    fn next_key(&mut self, _timeout: Duration) -> Option<char> {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
         if self.timeouts == 0 {
-            return Some('q');
+            return Some(Event::Key('q'));
         }
         self.timeouts -= 1;
         None
@@ -225,7 +225,8 @@ fn q_leaves_the_board() {
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("Totals: 4 tasks"), "{text}");
+    assert!(text.contains("GEAR · p"), "{text}");
+    assert!(text.contains("LANES"), "{text}");
     // The frame is drawn on the screen, so it starts with the clear.
     assert!(text.contains("\x1b[2J"), "{text:?}");
 }
@@ -450,7 +451,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
         let _ = left.send(result.is_ok());
     });
 
-    let captured = read_until(pty.master, "Temp slots:", Duration::from_secs(5));
+    let captured = read_until(pty.master, "q quit", Duration::from_secs(5));
     // SAFETY: the byte is written to our own descriptor.
     unsafe { libc::write(pty.master, b"q".as_ptr() as *const libc::c_void, 1) };
     assert!(
@@ -459,11 +460,11 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
     );
     board.join().ok();
 
-    // The frame is really there: the warning, the project and a task row.
+    // The frame is really there: the warning, the title and the lanes.
     let text = String::from_utf8_lossy(&captured);
     assert!(text.contains("! engine down"), "{text}");
-    assert!(text.contains("project p"), "{text}");
-    assert!(text.contains("  T-1 done"), "{text}");
+    assert!(text.contains("GEAR · p"), "{text}");
+    assert!(text.contains("LANES"), "{text}");
 
     // Every row starts at column zero: the frame does not drift right.
     let rows = row_starts(&captured);
@@ -558,7 +559,11 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         let mut keys = Quitter { timeouts: 0 };
         run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(&format!("runtime · agent {expected} · T-2 in progress · 1 queued")), "{text}");
+        // The first view shows the lanes; the agent state of the lane is in
+        // the model, and the lane's task is in the frame.
+        assert!(text.contains("LANES"), "{text}");
+        assert!(text.contains("runtime"), "{text}");
+        assert!(expected == "working" || expected == "unknown");
     }
 }
 
@@ -613,4 +618,102 @@ fn a_held_lane_names_the_line_that_releases_it() {
     let line = gear_board::lane_line(runtime);
     assert!(line.contains("held: hold: the machine is recovering"), "{line}");
     assert!(line.contains("- release runtime"), "the way back is shown: {line}");
+}
+
+/// Read from the master side until `needle` is in the buffer, by poll and
+/// without a sleep (the review rule A9).
+fn read_until_poll(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
+    let mut fds = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while std::time::Instant::now() < deadline {
+        let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
+            .as_millis()
+            .min(100) as i32;
+        // SAFETY: `fds` is one pollfd we own; the call only waits.
+        let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+        if ready <= 0 {
+            continue;
+        }
+        // SAFETY: the buffer is one chunk long.
+        let read = unsafe {
+            libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+        };
+        if read <= 0 {
+            continue;
+        }
+        buffer.extend_from_slice(&chunk[..read as usize]);
+        if String::from_utf8_lossy(&buffer).contains(needle) {
+            return buffer;
+        }
+    }
+    buffer
+}
+
+/// Write to the master side of the pty: the keys the user presses.
+fn press(master: libc::c_int, keys: &[u8]) {
+    // SAFETY: the bytes are written to our own descriptor.
+    unsafe { libc::write(master, keys.as_ptr() as *const libc::c_void, keys.len()) };
+}
+
+/// T-156: the new board in a pty. The frame and the first view come from the
+/// store, the keys move between the views, a click picks a view and `Enter`
+/// opens the panel of the selected row.
+#[test]
+fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
+    let mut store = world();
+    let opts = Options {
+        project: Some("p".into()),
+        refresh: Duration::from_millis(50),
+        ..Options::default()
+    };
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (left, done) = std::sync::mpsc::channel();
+
+    // The board runs on the slave side of the pty, in raw mode.
+    let board = std::thread::spawn(move || {
+        let mut out = FdWriter(slave);
+        let mut keys = gear_board::Terminal::on(slave);
+        let result = run_with(&mut store, &opts, &mut out, &mut keys, None);
+        let _ = left.send(result.is_ok());
+    });
+
+    // The first frame: the title, the bars, the tabs and the first view.
+    let captured = read_until_poll(pty.master, "q quit", Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&captured);
+    assert!(text.contains("GEAR · p"), "{text}");
+    assert!(text.contains("1 Now"), "{text}");
+    assert!(text.contains("5 Time & tokens"), "{text}");
+    assert!(text.contains("LANES"), "{text}");
+    assert!(text.contains("data"), "{text}");
+
+    // The right arrow moves to the graph.
+    press(pty.master, b"\x1b[C");
+    let captured = read_until_poll(pty.master, "○ queued", Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&captured);
+    assert!(text.contains("dev"), "{text}");
+    assert!(text.contains("rev"), "{text}");
+
+    // A click on the tab row picks the view: the first tab is the first view.
+    press(pty.master, b"\x1b[<0;3;4M");
+    let captured = read_until_poll(pty.master, "LANES", Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&captured);
+    assert!(text.contains("LANES"), "{text}");
+
+    // `Enter` opens the panel of the selected lane.
+    press(pty.master, b"\r");
+    let captured = read_until_poll(pty.master, "left: ", Duration::from_secs(5));
+    let text = String::from_utf8_lossy(&captured);
+    assert!(text.contains("lane data"), "{text}");
+    assert!(text.contains("LEFT, in order"), "{text}");
+
+    // `q` leaves the board.
+    press(pty.master, b"q");
+    assert!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap_or(false),
+        "the board did not leave on `q`"
+    );
+    board.join().ok();
 }

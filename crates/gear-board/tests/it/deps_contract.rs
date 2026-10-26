@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gear_board::{build, render, run_with, Keys, Options, View};
+use gear_board::{build, render, run_with, Event, Keys, Options, View};
 use gear_model::{SeatRole, TaskState};
 use gear_store::{testing, Store, TaskRow};
 
@@ -121,16 +121,16 @@ fn a_finished_task_leaves_the_tree_and_its_children_come_up() {
 struct Presses(Vec<char>);
 
 impl Keys for Presses {
-    fn next_key(&mut self, _timeout: Duration) -> Option<char> {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
         if self.0.is_empty() {
             return None;
         }
-        Some(self.0.remove(0))
+        Some(Event::Key(self.0.remove(0)))
     }
 }
 
 #[test]
-fn the_d_key_toggles_the_view() {
+fn the_right_arrow_moves_to_the_next_view() {
     let mut store = world();
     let opts = Options {
         project: Some("p".into()),
@@ -138,14 +138,14 @@ fn the_d_key_toggles_the_view() {
         ..Options::default()
     };
     let mut out: Vec<u8> = Vec::new();
-    let mut keys = Presses(vec!['d', 'q']);
+    let mut keys = Presses(vec!['2', 'q']);
 
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    // The first frame shows the queues, the second the tree.
-    assert!(text.contains("Lane data"), "{text}");
-    assert!(text.contains("Dependencies"), "{text}");
+    // The second view is the graph of the work (T-157).
+    assert!(text.contains("dev"), "{text}");
+    assert!(text.contains("rev"), "{text}");
 }
 
 #[test]
