@@ -76,7 +76,7 @@ review = [
   { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
   { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
 ]
-on_quota = { lanes = "fallback", review = "fallback" }
+on_quota = { lanes = "wait", review = "fallback" }   # M4 (user): lanes wait for the reset, no fallback
 quota_reset_h = 5
 
 # The in-place model switch (T-33): what `/model` shows in the picker and what
