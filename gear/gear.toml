@@ -26,8 +26,13 @@ profile = "opencode"
 name = "deck"
 duty = "M3.1 everything outside the engine: agent profiles (pi, Codex quota), skills and skill install, CLI, plan apply, packets, mail, docs"
 owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/", "crates/gear-herdr/", "crates/gear-cli/", "crates/gear-forge/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
-kind = "opencode"
-profile = "opencode"
+kind = "pi"
+profile = "pi"
+# M3.1 kickoff (user): after the pi support lands, deck runs on pi to compare with hull on OpenCode.
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
 
 [temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, first; then OpenCode Go deepseek-v4-pro (M3.1 kickoff)
 kind = "codex"
