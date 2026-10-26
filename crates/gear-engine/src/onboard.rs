@@ -1209,7 +1209,10 @@ repo = "web"
         ]);
         let mut cfg = cfg();
         cfg.model_list_wait_s = 5;
-        cfg.model_list_poll_ms = 10;
+        // T-127 F5: no test sleeps on the wall clock. The poll is 0, so the
+        // wait between two asks is no wait at all — the fake's next queued
+        // answer is what moves the wait forward.
+        cfg.model_list_poll_ms = 0;
 
         assert_eq!(onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap(), ["toy:heat"]);
 
