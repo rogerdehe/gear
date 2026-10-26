@@ -32,3 +32,5 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - T-69 R2 (moved at review): when review/t<n> is held by a dirty reviewer worktree, start the review in that holder's seat instead of failing three times.
 - T-94 F4 (moved at review): kickoff prints each model's derived picker/bar labels. F6: catalogue unavailable vs model absent kept apart in the label lookup.
 - Push-race retry re-runs the full gate each time while dev moves (M3: T-68, T-88 lost three races each): re-merge onto the new tip and push at once when the resulting tree equals the gated one; gate again only when it differs.
+
+- **A board a person can read (user, 2026-10-26).** Today's `gear board` pane is a text dump: every done task of every lane, retired fixture projects, every lane "agent unknown" while working, a dropped task (T-102) shown as done. The user closed it: it reads like a log for agents, not a board for a person. Design it with the user first: one screen answering what runs now, what is stuck and why, what waits for the user, how close the done sentence is; history and retired projects folded away; lane state from Herdr's real agent status.
