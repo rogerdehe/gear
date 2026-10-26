@@ -69,4 +69,4 @@ Lanes only execute; when a task comes back, ask what the task did not say. Write
 
 ## 9. Land the voyage
 
-When the engine says every task is done: write the voyage report as `# Decisions` lines (what shipped, time against eta, rework, what the `done:` sentence says — honestly, met or not), close the item with `station <id>: land`, freeze the voyage file, and ask the user once whether to reclaim the lanes. The next voyage starts with its own kickoff.
+When the engine says every task is done: write the voyage report as `# Decisions` lines (what shipped, time against eta, rework, what the `done:` sentence says — honestly, met or not), close the item with `station <id>: land`, freeze the voyage file, then **report it in chat** and ask the user once whether to reclaim the lanes — as a plain question in the conversation, never through a dialog tool (`AskUserQuestion` or the like): the user reads the voyage, and answers in their own words. The next voyage starts with its own kickoff.
