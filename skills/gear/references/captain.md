@@ -82,12 +82,12 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    ```
 
    ```bash
-   GEAR_ADMIN=1 gear admin init gear/gear.toml
+   gear admin init gear/gear.toml
    ```
 
    A repo may also carry a `[github]` mode (issues in, pull requests out): `gear --skill github`.
 
-   Run it in your own pane, from the project's repository: `init` accepts the user's shell and the project's captain, and refuses every other seat. `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model); fix the config and run it again — a second init is the config change, and it writes the next config version. The engine then starts the lanes and delivers their first tasks.
+   This is the **re-application** of a changed config, not the first registration: the user registered the project in their own shell, and `init` refuses a first registration from any agent. Run it in your own pane, from the project's repository — the `GEAR_ADMIN=1` the user exported there is their consent, and you never set it yourself. `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model); fix the config and run it again — a second init is the config change, and it writes the next config version. The engine then starts the lanes and delivers their first tasks.
 
 ## 2. The plan file
 
