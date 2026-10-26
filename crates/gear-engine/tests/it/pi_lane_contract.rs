@@ -185,12 +185,17 @@ fn agent_starts(herdr: &FakeHerdr) -> Vec<(String, String, Vec<String>)> {
         .collect()
 }
 
-/// The keys the engine sent (the exit keys of a closed agent).
-fn sent_keys(herdr: &FakeHerdr) -> Vec<Vec<String>> {
+/// The closing calls the engine sent to the pane (the profile's exit: its
+/// command or its keys). The engine closes the agent once — a second key
+/// would land in the shell.
+fn closing_calls(herdr: &FakeHerdr) -> Vec<String> {
     herdr.calls
         .iter()
         .filter_map(|call| match call {
-            Call::SendKeys { keys, .. } => Some(keys.clone()),
+            Call::Prompt { pane, text } if pane == PANE => Some(format!("command:{text}")),
+            Call::SendKeys { pane, keys } if pane == PANE => {
+                Some(format!("keys:{}", keys.join("+")))
+            }
             _ => None,
         })
         .collect()
@@ -331,16 +336,16 @@ fn a_quota_stop_restarts_pi_on_the_next_model() {
 
     // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
     assert!(tick_quota(&mut store, &mut herdr, &cfg, &profiles, T0 + 10).is_empty());
-    assert!(sent_keys(&herdr).is_empty(), "nothing sent on the first tick");
+    assert!(closing_calls(&herdr).is_empty(), "nothing sent on the first tick");
 
-    // Tick 2: the limit is confirmed — pi is closed, and nothing else happens
-    // yet.
+    // Tick 2: the limit is confirmed — pi is closed with the profile's own
+    // exit (its command or its keys), and nothing else happens yet.
     let events = tick_quota(&mut store, &mut herdr, &cfg, &profiles, T0 + 20);
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
-        sent_keys(&herdr),
-        vec![vec!["ctrl+d".to_string()]],
-        "pi is exited once: {:?}",
+        closing_calls(&herdr).len(),
+        1,
+        "pi is closed once: {:?}",
         herdr.calls
     );
     assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
