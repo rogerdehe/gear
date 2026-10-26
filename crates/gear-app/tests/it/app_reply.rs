@@ -7,7 +7,7 @@
 use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, ReplyArgs, ReplyMode, SendArgs};
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole};
+use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, SeatState};
 use gear_store::{testing, NewMessage, Store};
 
 const NOW: i64 = 1_800_000_000;
@@ -195,7 +195,171 @@ fn note_keeps_state() {
 
     assert_eq!(r.handled, vec![(id.clone(), "open".to_string())]);
     assert_eq!(state_of(&mut s, &id), MsgState::Open, "a note changes no state");
-    assert_eq!(r.replies.len(), 1, "the note is still an answer");
+    // T-103: a note is the captain's record on the item, never a message.
+    assert!(r.replies.is_empty(), "a note is sent to nobody");
+    let item = s.read(|tx| tx.get_message("p", &id)).unwrap().unwrap();
+    assert_eq!(item.result.as_deref(), Some("the answer"), "kept on the item");
+    let messages = s.read(|tx| tx.thread_messages("p", &item.thread)).unwrap();
+    assert_eq!(messages.len(), 1, "no message was written: {messages:?}");
+}
+
+#[test]
+fn a_note_reaches_no_seat() {
+    // T-103: whatever the mode, a note is not typed into anyone's inbox.
+    let mut s = world();
+    let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+    let before = s.read(|tx| tx.thread_messages("p", "T-0:1")).map(|m| m.len()).unwrap_or(0);
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Note, "r1"),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert!(r.replies.is_empty());
+    let after = s.read(|tx| tx.thread_messages("p", "T-0:1")).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(before, after, "no message anywhere");
+    // The lane's own batch shows nothing new from the captain.
+    let views = s
+        .read(|tx| mail::select_batch(tx, "p", "p:heat", NOW + 2, mail::BatchLimits::default()))
+        .unwrap();
+    assert!(
+        views.iter().all(|view| view.last_reply.is_none()),
+        "the note is not a reply: {views:?}"
+    );
+}
+
+#[test]
+fn a_resolve_to_a_released_reviewer_sends_nothing() {
+    // T-103: a released reviewer is gone; its item is resolved, and no answer
+    // is written into a seat that will never read it.
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p4", "opencode", NOW)
+    })
+    .unwrap();
+    let id = ask(&mut s, "review-1", "w1:p4", "the checkout is held", "s1", NOW);
+    s.write(|tx| {
+        tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), NOW + 1)
+    })
+    .unwrap();
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 2,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
+    assert!(r.replies.is_empty(), "a released reviewer is not answered");
+    assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
+}
+
+#[test]
+fn a_retiring_lane_still_gets_its_answer() {
+    // F1 of the T-103 review: a retiring lane finishes the attempt it holds,
+    // so the captain's answer to its question must reach it.
+    let mut s = world();
+    let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+    s.write(|tx| {
+        tx.set_seat_state("p:heat", SeatState::Retiring, Some("retiring"), NOW + 1)
+    })
+    .unwrap();
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 2,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
+    assert_eq!(r.replies.len(), 1, "a retiring lane is still live");
+    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    assert_eq!(answer.recipient, "p:heat");
+    assert_eq!(answer.body, "the answer");
+}
+
+#[test]
+fn a_reused_reviewer_gets_no_answer_to_an_earlier_jobs_item() {
+    // T-103: the same seat reused for a later job (generation 2) must not read
+    // the captain's note on the generation-1 item.
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p4", "opencode", NOW)
+    })
+    .unwrap();
+    let id = ask(&mut s, "review-1", "w1:p4", "the checkout is held", "s1", NOW);
+    s.write(|tx| {
+        tx.set_seat_state("p:review-1", SeatState::Released, Some("review done"), NOW + 1)?;
+        gear_app::seats::begin_onboard(tx, "p:review-1", "w1:p4", "opencode", NOW + 2)?;
+        Ok(())
+    })
+    .unwrap();
+    let generation = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().generation;
+    assert_eq!(generation, 2, "the seat was reused");
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 3,
+    )
+    .unwrap();
+
+    assert!(r.replies.is_empty(), "an earlier job's note stays with the job");
+    assert_eq!(state_of(&mut s, &id), MsgState::Resolved);
+}
+
+#[test]
+fn a_resolve_of_the_engines_item_sends_nothing() {
+    // T-103 (the trial): the captain's item about a re-queued review seat was
+    // written by the engine; resolving it with an instruction must not send
+    // that instruction to the engine.
+    let mut s = world();
+    let id = s
+        .write(|tx| {
+            Ok(tx
+                .insert_message(&NewMessage {
+                    project: "p".into(),
+                    thread: "review-seat:1".into(),
+                    task: None,
+                    attempt: None,
+                    sender: "engine".into(),
+                    sender_gen: 0,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::System,
+                    urgent: false,
+                    body: "the review seat was re-queued".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: NOW,
+                })?
+                .id)
+        })
+        .unwrap();
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 1,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
+    assert!(r.replies.is_empty(), "the engine has no inbox to read");
 }
 
 #[test]

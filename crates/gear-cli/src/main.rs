@@ -54,6 +54,21 @@ enum Cmd {
         #[command(subcommand)]
         op: AdminOp,
     },
+    /// Captain: the seat itself.
+    Captain {
+        #[command(subcommand)]
+        op: CaptainOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptainOp {
+    /// Rebind the captain seat to another pane (a new generation).
+    Handover {
+        /// The pane the captain's agent runs in now.
+        #[arg(long, value_name = "PANE")]
+        pane: String,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -99,12 +114,16 @@ struct ReplyCmd {
     /// Message ids to handle (M-…).
     #[arg(required = true)]
     ids: Vec<String>,
+    /// Close the item; the text is answered to its sender when that is a live seat.
     #[arg(long, conflicts_with_all = ["wait", "note"])]
     resolve: bool,
+    /// Keep the item waiting until WHO can answer; the text is answered to its
+    /// sender when that is a live seat.
     #[arg(long, value_name = "WHO")]
     wait: Option<String>,
     #[arg(long, requires = "wait")]
     until: Option<String>,
+    /// Keep the item open with the text as the captain's record on it; sent to nobody.
     #[arg(long)]
     note: bool,
     #[arg(long)]
@@ -237,6 +256,9 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
+        Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
+            cmd_captain_handover(&pane, cli.json)
+        }
     }
 }
 
@@ -251,6 +273,8 @@ fn run(cli: Cli) -> GearResult<()> {
 /// - `admin kickoff` only reads — starting the engine would open (and migrate)
 ///   the store, and a kickoff runs before the project exists (the review of
 ///   T-10). `--skill` and `--help` never get here.
+/// - `captain handover` moves a seat's binding: it must not start an engine
+///   (T-104).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     !matches!(
         cmd,
@@ -261,6 +285,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Board { .. })
             | Some(Cmd::Report { .. })
             | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
+            | Some(Cmd::Captain { .. })
     )
 }
 
@@ -376,7 +401,26 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         }
     }
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let r = gear_app::admin::init_with_home(&mut store, &env, &text, home.as_deref(), now_ts())?;
+    // T-104: a context on a registered project is the captain's claim, and it
+    // is proven against the caller's real pane before anything is written. The
+    // first registration (above) and the user's own shell need no Herdr.
+    let needs_proof = match &env.ctx {
+        Some(ctx) => store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?,
+        None => false,
+    };
+    let mut herdr = if needs_proof { Some(open_herdr()?) } else { None };
+    let ancestors = gear_app::identity::process_ancestors();
+    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> =
+        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead);
+    let r = gear_app::admin::init_checked(
+        &mut store,
+        &env,
+        &text,
+        herdr_ref,
+        &ancestors,
+        home.as_deref(),
+        now_ts(),
+    )?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
@@ -407,6 +451,18 @@ fn open_store() -> GearResult<gear_store::Store> {
 }
 
 /// [`open_store`] over an injected variable lookup (testable).
+/// The caller's identity (T-104): the library proves the whole claim — the
+/// pane the caller really runs in is the claimed one, and the seat is bound to
+/// it — and reports a refusal once to the captain.
+fn observe_identity(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+) -> GearResult<Option<gear_app::identity::Fingerprint>> {
+    let ancestors = gear_app::identity::process_ancestors();
+    gear_app::identity::prove_seat(store, env, herdr, &ancestors, now_ts())
+}
+
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
     let Some(path) = vars(gear_model::ctx::ENV_DB) else {
         // The admin target file (design/14) comes with slice 3.
@@ -483,7 +539,7 @@ fn run_show(
             format!("--show {target} is not supported: only a task id (T-n) can be shown"),
         ));
     }
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let (text, project) = store.read(|tx| {
         // The identity of the home page: a registered seat of the project.
         let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
@@ -539,7 +595,7 @@ fn run_home(
     json: bool,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
         herdr.agents().ok()
     } else { None };
@@ -628,7 +684,7 @@ fn run_report_time(
     filter: &gear_app::time::Filter,
     json: bool,
 ) -> GearResult<String> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let report = gear_app::time::build(store, env, fp.as_ref(), filter)?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
@@ -675,6 +731,44 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 ///
 /// A user command: an agent never writes into the user's home. It needs no
 /// store, so it starts no engine.
+/// `gear captain handover --pane <id>`: rebind the captain seat to another pane
+/// (T-104). Allowed from the captain's own real pane or the user's own terminal
+/// (a shell with no agent); a lane or reviewer asking is refused and the
+/// captain is told which pane asked.
+fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let ancestors = gear_app::identity::process_ancestors();
+    let cwd = std::env::current_dir().map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let result =
+        gear_app::captain::handover(&mut store, &env, &mut herdr, &ancestors, &cwd, pane, now_ts())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": result.project,
+                "captain": result.captain,
+                "from": result.from,
+                "to": result.to,
+                "generation": result.generation,
+                "kind": result.kind,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "captain of {} handed over from pane {} to pane {} (generation {}, {})",
+        result.project, result.from, result.to, result.generation, result.kind
+    );
+    Ok(())
+}
+
 fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
@@ -893,7 +987,7 @@ fn run_plan(
         )
     })?;
     let draft = gear_app::draft::parse(&text)?;
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
@@ -1010,7 +1104,7 @@ fn run_send(
         urgent: c.urgent,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
@@ -1046,7 +1140,7 @@ fn run_reply(
         downgrade: c.downgrade,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::reply(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
