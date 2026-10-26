@@ -204,6 +204,11 @@ impl OpState {
             (self, to),
             (Intended, Executing | Void)
                 | (Executing, Submitted | Failed | Unknown)
+                // T-149 (design §10.1): an op whose text was never typed — the
+                // agent had lost its name (it was renamed) or the pane could
+                // not be read — goes back to Intended: the next tick tries it
+                // again, and nothing is restarted.
+                | (Executing, Intended)
                 | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
         )
