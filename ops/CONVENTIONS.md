@@ -17,7 +17,7 @@ The whole test suite — every test of the repository together (`scripts/test.sh
 - A git or process fixture is built once per test file and kept tiny.
 - A task that adds tests keeps the total under the line; a hand-in that pushes it over fails review.
 - Run tests with `scripts/test.sh` (parallel; it prints every test's time and a warning for each test over 10 s). While working, run only the crate you change: `cargo nextest run -p <crate>`. Run the whole suite once, right before handing in. The merge gate runs `scripts/test.sh` too.
-- A test over 10 s gets a warning. The only exception is a line in `scripts/slow-tests.allow` (test, its own max, why it cannot be faster), added with the user's agreement; it is empty, and a listed test still warns past its own max.
+- A test over 10 s gets a warning. The only exception is a line in `scripts/slow-tests.allow` (test, its own max, why it cannot be faster). A lane never adds one itself: it asks the captain (`gear send --kind question`) with the reason. The captain refuses by default and makes the test faster instead; only a one-in-ten-thousand case gets in. For this project the list stays empty: nothing here needs more than 10 s. A listed test still warns past its own max.
 
 ## The last step of every voyage
 

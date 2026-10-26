@@ -17,8 +17,10 @@ command -v cargo-nextest >/dev/null 2>&1 || {
   exit 2
 }
 
-# Build first, so the times below are test time only.
+# Build first, so the build and the test time are each printed.
+build_start=$(date +%s)
 cargo nextest run --workspace --no-run "$@" || exit $?
+build_s=$(( $(date +%s) - build_start ))
 
 start=$(date +%s)
 cargo nextest run --workspace --no-fail-fast --status-level all --final-status-level none \
@@ -63,9 +65,10 @@ elif [ "$elapsed" -gt 60 ];  then verdict="below the pass mark (60 s)"
 elif [ "$elapsed" -gt 30 ];  then verdict="pass (60 s)"
 elif [ "$elapsed" -gt 10 ];  then verdict="good (30 s)"
 else verdict="excellent (10 s)"; fi
+echo "build: ${build_s} s (compiling the test binaries; not in the red line, but every lane waits for it)"
 if [ "$elapsed" -gt 60 ]; then
-  echo "warning: the whole suite took ${elapsed} s: ${verdict}" >&2
+  echo "warning: the whole suite took ${elapsed} s to run: ${verdict}" >&2
 else
-  echo "suite: ${elapsed} s: ${verdict}"
+  echo "suite: ${elapsed} s to run: ${verdict}"
 fi
 exit "$status"
