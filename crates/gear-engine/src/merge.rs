@@ -1203,20 +1203,8 @@ fn merge_one_locked(
             )))
         }
     };
-    // The refs that contain the candidate, and those whose tip it is.
-    let mut refs = Vec::new();
-    let mut tips = Vec::new();
-    for line in pushed.lines() {
-        let mut parts = line.split_whitespace();
-        let (Some(name), tip) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        refs.push(name.to_string());
-        if tip == Some(sha.as_str()) {
-            tips.push(name.to_string());
-        }
-    }
-    if refs.is_empty() {
+    let pushed = Pushed::read(&pushed, &sha);
+    if pushed.refs.is_empty() {
         // The candidate may not be pushed yet: the lane pushes it and the
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
@@ -1362,7 +1350,7 @@ fn merge_one_locked(
         // hook that rejects the push once (F1 of the T-61 review).
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
-    let (closed, left) = close_branches(dir, repo, &branch, &review, &task, remote, &refs, &tips);
+    let (closed, left) = close_branches(dir, repo, &branch, &review, &task, remote, &pushed);
 
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
@@ -1445,6 +1433,34 @@ fn git_sha(text: &str) -> Option<String> {
 /// A branch that is not this task's (a human's branch) is left alone too.
 ///
 /// Returns the branches that were closed and the ones that were left.
+/// What `for-each-ref --contains=<candidate>` answered about origin: the refs
+/// that hold the candidate, and those whose tip it is. One git process answers
+/// the "is it pushed" question and gives the branch-closing step its list
+/// (T-127).
+#[derive(Debug, Default)]
+struct Pushed {
+    refs: Vec<String>,
+    tips: Vec<String>,
+}
+
+impl Pushed {
+    /// Read the `%(refname:short) %(objectname)` lines of the listing.
+    fn read(listing: &str, candidate: &str) -> Pushed {
+        let mut pushed = Pushed::default();
+        for line in listing.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(name), Some(tip)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            pushed.refs.push(name.to_string());
+            if tip == candidate {
+                pushed.tips.push(name.to_string());
+            }
+        }
+        pushed
+    }
+}
+
 fn close_branches(
     dir: &Path,
     repo: &Repo,
@@ -1452,18 +1468,17 @@ fn close_branches(
     review: &str,
     task: &str,
     remote: &dyn Remote,
-    refs: &[String],
-    tips: &[String],
+    pushed: &Pushed,
 ) -> (Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
     let review_ref = format!("origin/{review}");
-    if refs.iter().any(|name| name == &review_ref) && delete_remote(dir, review, remote) {
+    if pushed.refs.iter().any(|name| name == &review_ref) && delete_remote(dir, review, remote) {
         closed.push(review.to_string());
     }
     // The branches whose tip is the candidate: the work the review approved.
-    for name in tips {
+    for name in &pushed.tips {
         let name = name.trim().trim_start_matches("origin/").to_string();
         if name.is_empty() || name == "HEAD" {
             continue;
@@ -1489,11 +1504,6 @@ fn is_task_branch(branch: &str, task: &str) -> bool {
     let base = task.to_lowercase().replace('-', "");
     let segment = branch.rsplit('/').next().unwrap_or(branch);
     segment == base || segment.starts_with(&format!("{base}-"))
-}
-
-/// Whether origin still has the branch.
-fn remote_branch_exists(dir: &Path, branch: &str) -> bool {
-    git(dir, &["rev-parse", "--verify", &format!("origin/{branch}")]).is_ok()
 }
 
 /// Close a branch on origin. A branch that is already gone is closed too.
