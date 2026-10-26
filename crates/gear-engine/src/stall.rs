@@ -46,7 +46,17 @@ pub fn waiting_for_provider(
 /// §10.3: a late check-in confirms the delivery and closes the stall item).
 ///
 /// Returns true when an open item was closed.
-pub fn resolve(tx: &Tx<'_>, project: &str, seat_id: &str, now: Ts) -> GearResult<bool> {
+///
+/// `before` bounds the item: one that is **newer** than it belongs to a later
+/// failure and is not closed here (an old delivery op must not close the
+/// stall of a failure that happened after it).
+pub fn resolve(
+    tx: &Tx<'_>,
+    project: &str,
+    seat_id: &str,
+    now: Ts,
+    before: Option<Ts>,
+) -> GearResult<bool> {
     let open = tx
         .thread_messages(project, &thread(seat_id))?
         .into_iter()
@@ -54,6 +64,11 @@ pub fn resolve(tx: &Tx<'_>, project: &str, seat_id: &str, now: Ts) -> GearResult
     let Some(item) = open else {
         return Ok(false);
     };
+    if let Some(before) = before {
+        if item.created > before {
+            return Ok(false);
+        }
+    }
     tx.update_message_state(
         project,
         &item.id,

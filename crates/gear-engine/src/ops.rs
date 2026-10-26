@@ -543,7 +543,11 @@ pub fn confirm_pending_with(
                         crate::delivery::clear(tx, &op.seat)?;
                         tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                         // Design/06: the confirmed delivery starts the attempt.
-                        start_confirmed_attempt(tx, project, &op, now)?;
+                        if start_confirmed_attempt(tx, project, &op, now)? {
+                            // The lane is not stuck any more (design §10.3):
+                            // its stall item closes with the confirmation.
+                            crate::stall::resolve(tx, project, &op.seat, now, None)?;
+                        }
                     }
                     confirmed.push(op.id.clone());
                     continue;
@@ -660,13 +664,24 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
                 continue;
             };
-            // The attempt is confirmed only while it waits for its first
-            // check-in (Delivered); a later state is not this op's business.
-            if !start_confirmed_attempt(tx, project, &op, now)? {
-                continue;
+            // The attempt is confirmed while it waits for its first check-in
+            // (Delivered). A later state means another op already confirmed
+            // it — a retry of this very delivery (design §10.3): the lane
+            // recovered either way, so its stall item closes as well.
+            let started_here = start_confirmed_attempt(tx, project, &op, now)?;
+            if !started_here {
+                let already = tx
+                    .get_attempt(project, task, attempt)?
+                    .map(|row| row.state == AttemptState::Started)
+                    .unwrap_or(false);
+                if !already {
+                    continue;
+                }
             }
-            // The lane is not stuck: its stall item closes.
-            crate::stall::resolve(tx, project, &op.seat, now)?;
+            // The lane is not stuck: its stall item closes. The item must
+            // predate the check-in, so a later failure of the same lane keeps
+            // its own item.
+            crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
             confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
         }
         Ok(confirmed)

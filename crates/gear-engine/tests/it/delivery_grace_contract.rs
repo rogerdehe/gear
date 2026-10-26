@@ -294,3 +294,153 @@ fn the_taskless_doorbell_text_says_so() {
         "GEAR: 2 item(s) waiting for you (1 urgent): M-12 M-13. Run `gear` now."
     );
 }
+
+/// T-150 (the review of attempt 1, F1): the full decide → intend_dispatch
+/// path for a Started attempt with a pending contract update: **no** Deliver
+/// op, and the contract change reaches the lane as a message.
+#[test]
+fn a_contract_update_for_a_started_attempt_is_no_delivery() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T0)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+        tx.insert_task(&TaskRow {
+            project: "p".into(),
+            id: "T-7".into(),
+            rank: 1,
+            state: TaskState::Running,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            updated: T0,
+        })?;
+        tx.insert_attempt(&AttemptRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            n: 1,
+            seat: LANE.into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: Some(2),
+            state: AttemptState::Started,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: T0,
+            updated: T0,
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+        })
+    })
+    .unwrap();
+
+    let seat = s.read(|tx| tx.get_seat(LANE)).unwrap().unwrap();
+    let obs = gear_engine::observe::SeatObs {
+        seat: seat.clone(),
+        presence: gear_engine::observe::Presence::Present,
+        status: Some(gear_herdr::AgentStatus::Idle),
+        flags: Default::default(),
+        idle: true,
+        screen: None,
+        session: None,
+    };
+    let view = s
+        .read(|tx| lane_view(tx, &seat, Some(obs), T0))
+        .unwrap();
+    let decision = decide(&view, &DispatchCfg::default(), T0);
+    assert!(
+        matches!(decision, gear_engine::dispatch::Action::Adopt { .. }),
+        "the contract update is the action: {decision:?}"
+    );
+
+    let ops = s
+        .write(|tx| gear_engine::dispatch::intend_dispatch(tx, "p", &[(seat, decision)], T0))
+        .unwrap();
+    assert!(
+        ops.iter().all(|op| op.kind != OpKind::Deliver),
+        "no delivery for a started attempt: {ops:?}"
+    );
+    assert!(ops.is_empty(), "no op at all: {ops:?}");
+
+    // The contract change reaches the lane as a message.
+    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-7:2")).unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert!(notices[0].body.contains("contract changed to v2"), "{:?}", notices[0].body);
+    assert_eq!(notices[0].recipient, LANE);
+    assert_eq!(notices[0].kind, gear_model::MsgKind::Instruction);
+}
+
+/// T-150 (the review of attempt 1, F2): a check-in after an unconfirmed
+/// delivery was retried closes the attempt's stall item — even when the retry
+/// confirmed the attempt first.
+#[test]
+fn a_late_check_in_closes_the_stall_after_a_retry() {
+    let (mut s, op) = world();
+    // The captain's item about the lane being stuck.
+    s.write(|tx| stall::alert(tx, LANE, T0 + 20)).unwrap();
+
+    // The window (8 s) is over: the delivery fails and the seat is flagged.
+    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, T0 + 30).unwrap();
+    assert_eq!(flagged, vec![LANE.to_string()]);
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Failed
+    );
+
+    // The agent is restarted in the same generation: the attempt goes again.
+    let retry = s
+        .write(|tx| {
+            let retry = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: LANE.into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some("T-7".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({"text": "New task T-7"}),
+                created: T0 + 40,
+            })?;
+            tx.set_op_state("p", &retry.id, OpState::Executing, None, T0 + 40)?;
+            tx.set_op_state("p", &retry.id, OpState::Submitted, None, T0 + 41)?;
+            Ok(retry.id)
+        })
+        .unwrap();
+
+    // The lane checks in: the retry confirms the attempt.
+    view(&mut s, T0 + 50, Some("T-7"), Some(1));
+    let (confirmed, _) = confirm_pending_with(&mut s, "p", 3, 8, T0 + 60).unwrap();
+    assert_eq!(confirmed, vec![retry.clone()]);
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state,
+        AttemptState::Started
+    );
+
+    // The failed original op's late check finds the attempt already started:
+    // the stall item closes anyway.
+    confirm_late_views(&mut s, "p", T0 + 60).unwrap();
+    let items = s.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(
+        items[0].state,
+        MsgState::Resolved,
+        "the lane is not stuck any more: {items:?}"
+    );
+}
