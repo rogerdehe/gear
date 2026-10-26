@@ -27,9 +27,9 @@
 use gear_app::config::{ModelEntry, ProjectConfig, QuotaPolicy};
 use gear_herdr::{HerdrAct, Profile, ScreenFlag};
 use gear_model::{
-    ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState, Ts,
+    ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, Ts,
 };
-use gear_store::{NewMessage, NewOp, SeatRow, Store};
+use gear_store::{NewMessage, NewOp, SeatRow, Store, Tx};
 
 use crate::model::model_meta_key;
 use crate::observe::SeatObs;
@@ -361,6 +361,12 @@ fn finish_switch(
     let text = continue_text(store, &seat.id)?;
     let open = open_attempt(store, &seat.id)?;
     store.write(|tx| {
+        // T-97: a delivery the lane never confirmed before the switch — the
+        // prompt the provider limit killed — is retired, not failed through
+        // its check budget: the policy is handling this seat, so the captain is
+        // not rung as for a stall, and the Continue below is its delivery
+        // again. The slot is free for it.
+        retire_unconfirmed_deliveries(tx, project, seat, now)?;
         tx.set_meta(&model_meta_key(&seat.id), model)?;
         tx.set_meta(&quota_meta_key(&seat.id), "0")?;
         tx.set_meta(&meta_key("resume", &seat.id), "")?;
@@ -396,6 +402,33 @@ fn finish_switch(
     let line = format!("{}: switched to {model} in place (provider limit)", seat.id);
     tell_captain(store, project, seat, &line, now)?;
     Ok(line)
+}
+
+/// Retire the seat's deliveries that Herdr accepted and the lane never
+/// confirmed (T-97). An in-place switch types into the agent after them, so the
+/// prompt cannot be trusted; the switch's own Continue op sends the attempt
+/// again. No flag: this is the quota policy doing its job, not a stall.
+fn retire_unconfirmed_deliveries(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<()> {
+    for state in [OpState::Submitted, OpState::Unknown] {
+        for op in tx.ops_in_state(project, state)? {
+            if op.kind != OpKind::Deliver || op.seat != seat.id || op.generation != seat.generation {
+                continue;
+            }
+            tx.set_op_state(
+                project,
+                &op.id,
+                OpState::Failed,
+                Some("the model switched before the delivery was confirmed: the switch sends it again on the new model"),
+                now,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// `Continue T-<n>: run `gear` first` for the lane's open attempt.
@@ -796,6 +829,7 @@ quota_reset_h = 5
             flags,
             idle: true,
             screen: None,
+            session: None,
         }]
     }
 
@@ -1019,6 +1053,75 @@ quota_reset_h = 5
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, true, T0 + 60);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
+    }
+
+    /// T-97: the delivery a lane never confirmed is retired by the switch (the
+    /// model change types into the agent after it), the switch's Continue is
+    /// its delivery again, and no stall item is raised — the quota policy is
+    /// handling the seat, not a human.
+    #[test]
+    fn a_switch_retires_an_unconfirmed_delivery_without_a_stall_item() {
+        let mut text = config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
+            "fallback",
+        );
+        text.push_str(
+            "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
+        );
+        let mut store = world(&text);
+        // The prompt Herdr accepted and the lane never confirmed: the quota
+        // killed the turn.
+        let op = store
+            .write(|tx| {
+                let op = tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "New task T-1" }),
+                    created: T0 + 5,
+                })?;
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0 + 5)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0 + 6)?;
+                Ok(op.id)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        herdr.set_screen(PANE, QUOTA_SCREEN);
+        herdr.screen_after = vec![
+            ("esc".into(), "  Ask anything…".into()),
+            (
+                "/model".into(),
+                "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
+            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
+        ];
+
+        // Two quota ticks start the switch; the rest confirm it.
+        for tick in 0..6 {
+            tick_quota(&mut store, &mut herdr, true, T0 + 10 + tick);
+        }
+
+        let retired = store.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
+        assert_eq!(retired.state, OpState::Failed, "{retired:?}");
+        let reason = retired.result.clone().unwrap_or_default();
+        assert!(
+            reason.contains("the model switched before the delivery was confirmed"),
+            "{reason}"
+        );
+        // The switch's Continue is the delivery again, for the same attempt.
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert!(delivered[0].contains("Continue T-1"), "{delivered:?}");
+        // No stall item: the policy handled the seat.
+        let items = store.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+        assert!(items.is_empty(), "no stall item: {items:?}");
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
     }
 
     /// T-35: the next model of the chain runs on **another CLI** — the agent

@@ -95,6 +95,15 @@ impl FakeHerdr {
         p.revision += 1;
     }
 
+    /// The agent in `pane` reports a new session: what a hand restart of the
+    /// agent looks like to the engine (T-97).
+    pub fn set_agent_session(&mut self, pane: &str, session: &str) {
+        let p = self.panes.get_mut(pane).expect("unknown pane");
+        let a = p.agent.as_mut().expect("pane has no agent");
+        a.2 = Some(session.to_string());
+        p.revision += 1;
+    }
+
     pub fn set_screen(&mut self, pane: &str, screen: &str) {
         self.panes.get_mut(pane).expect("unknown pane").screen = screen.into();
     }

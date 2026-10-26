@@ -175,7 +175,10 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
 
     assert!(text.contains("Waiting for the captain: 1 item · oldest 3m"), "{text}");
     // The project was seeded with a quota of two temp slots; one is in use.
-    assert!(text.contains("Temp slots: 1/2 in use"), "{text}");
+    assert!(
+        text.contains("Temp slots: ") && text.contains("1 of 2 in use"),
+        "the temp slots say what they are doing: {text}"
+    );
 }
 
 #[test]

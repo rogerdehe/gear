@@ -1296,7 +1296,17 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<String, String> {
     let mut command = Command::new("git");
-    command.args(args).current_dir(dir);
+    // The engine is not a seat: its git runs — and the pre-push hook a push
+    // may trigger — must not see the seat identity of whoever started the
+    // engine. A hook that resolved the push against the starter's project
+    // refused every merge when the suite ran inside a seat (T-97). The engine's
+    // own push is checked in this process (`push_allowed`) before it runs.
+    command
+        .args(args)
+        .current_dir(dir)
+        .env_remove("GEAR_CTX")
+        .env_remove("GEAR_DB")
+        .env_remove("GEAR_ADMIN");
     if let Some(lock) = lock {
         command.stdin(lock.try_clone().map_err(|error| format!("git lock: {error}"))?);
     }

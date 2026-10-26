@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, Store, Tx};
+use gear_store::{BindingStatus, SeatRow, Store, Tx};
 use gear_herdr::{AgentInfo, AgentStatus, HerdrRead};
 
 pub use deps::DepNode;
@@ -199,6 +199,12 @@ pub struct Waiting {
 pub struct Temps {
     pub in_use: usize,
     pub quota: usize,
+    /// Temp seats running a job (active, not blocked).
+    pub running: usize,
+    /// Temp seats queued or starting.
+    pub starting: usize,
+    /// Temp seats whose agent waits on a dialog (the engine's blocked timer).
+    pub blocked: usize,
 }
 
 /// Whether the engine is running: it holds its lock file while it runs.
@@ -396,12 +402,34 @@ pub fn project_with_agents(
         None => Waiting::default(),
     };
 
+    // T-69: the temp slots are shown as what they are doing — running,
+    // starting, blocked — not as one number. A temp seat is `blocked` while
+    // the engine's blocked timer for it is live (its agent waits on a dialog).
+    let temps_seats: Vec<&SeatRow> = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Temp)
+        .collect();
+    let blocked_seat = |seat: &SeatRow| {
+        tx.get_meta(&format!("seat-blocked:{}:since", seat.id))
+            .ok()
+            .flatten()
+            .is_some_and(|since| !since.is_empty())
+    };
     let temps = Temps {
-        in_use: seats
+        in_use: temps_seats
             .iter()
-            .filter(|seat| seat.role == SeatRole::Temp && holds_temp_slot(seat.state))
+            .filter(|seat| holds_temp_slot(seat.state))
             .count(),
         quota: row.quota_temps.max(0) as usize,
+        running: temps_seats
+            .iter()
+            .filter(|seat| matches!(seat.state, SeatState::Active) && !blocked_seat(seat))
+            .count(),
+        starting: temps_seats
+            .iter()
+            .filter(|seat| matches!(seat.state, SeatState::Queued | SeatState::Starting))
+            .count(),
+        blocked: temps_seats.iter().filter(|seat| blocked_seat(seat)).count(),
     };
 
     // The deliveries in flight: a Deliver op that is not settled yet.
@@ -594,8 +622,12 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
     lines.push(String::new());
     lines.push(waiting_line(&project.waiting));
     lines.push(format!(
-        "Temp slots: {}/{} in use",
-        project.temps.in_use, project.temps.quota
+        "Temp slots: {} running · {} starting · {} blocked ({} of {} in use)",
+        project.temps.running,
+        project.temps.starting,
+        project.temps.blocked,
+        project.temps.in_use,
+        project.temps.quota
     ));
     lines
 }
@@ -723,6 +755,9 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                 "temps": {
                     "in_use": project.temps.in_use,
                     "quota": project.temps.quota,
+                    "running": project.temps.running,
+                    "starting": project.temps.starting,
+                    "blocked": project.temps.blocked,
                 },
                 "unconfirmed_deliveries": project.unconfirmed_deliveries,
             })

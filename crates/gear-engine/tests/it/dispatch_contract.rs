@@ -17,7 +17,7 @@ fn seat(state: SeatState, role: SeatRole) -> SeatRow {
 fn obs(state: SeatState, idle: bool, flags: &[ScreenFlag]) -> SeatObs {
     SeatObs { seat: seat(state, SeatRole::Lane), presence: Presence::Present,
         status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
-        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle, screen: None }
+        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle, screen: None, session: None }
 }
 
 fn task(id: &str) -> TaskRow {
@@ -42,7 +42,7 @@ fn op() -> OpRow {
 fn view() -> LaneView {
     LaneView { obs: Some(obs(SeatState::Active, true, &[])), attempt: None, pending_op: None,
         last_deliver_at: Some(NOW - 1000), nudges_since_progress: 0, ready_tasks: vec![task("T-2"), task("T-3")],
-        safe_for_next: false, switch_pending: false }
+        safe_for_next: false, switch_pending: false, failed_delivery: None }
 }
 
 fn is_none(a: &Action) -> bool {
