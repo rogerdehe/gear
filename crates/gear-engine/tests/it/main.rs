@@ -40,6 +40,7 @@ mod blocked_delivery_contract;
 mod parallel_contract;
 mod multi_repo_contract;
 mod pi_lane_contract;
+mod all_tail_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about

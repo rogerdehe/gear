@@ -39,6 +39,7 @@ pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
+pub mod tailed;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -119,6 +120,9 @@ pub struct TickReport {
     /// Lane items for the captain opened, updated or closed this tick
     /// (`lane:action`), from the keep-lanes-fed watch.
     pub feed: Vec<String>,
+    /// The all-tail item opened or closed this tick (`all-tail:opened|closed`):
+    /// every lane in the tail while required work remains (B02-08).
+    pub tail: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
@@ -273,6 +277,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             feed::keep_lanes_fed(store, &project, now)?
                 .into_iter()
                 .map(|change| format!("{}:{}", change.lane, change.action)),
+        );
+
+        // 6c. every lane in the tail while required work remains: one item in
+        //     the captain's inbox, so the warnings a captain turned off do not
+        //     go forgotten (B02-08).
+        report.tail.extend(
+            tailed::watch(store, &project, now)?
+                .map(|change| format!("all-tail:{}", change.as_str())),
         );
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The
