@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS rounds (
   counted_at INTEGER,                 -- when the tokens were last read
   PRIMARY KEY (project, task, attempt, role));
 
+-- §5.4: every stretch a seat could not work (quota park, declared wait)
+CREATE TABLE IF NOT EXISTS seat_pauses (
+  project TEXT NOT NULL, seat TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- quota | wait
+  reason TEXT,                        -- provider and window, or the task waited for
+  start_at INTEGER NOT NULL, end_at INTEGER,   -- end_at NULL while it lasts
+  PRIMARY KEY (project, seat, start_at));
+
 -- §6: friction reports
 CREATE TABLE IF NOT EXISTS frictions (
   project TEXT NOT NULL, id TEXT NOT NULL,              -- F-<n>, next_id(project,'F')
@@ -321,6 +329,23 @@ gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<
 - When T-m is merged: `wait_on` is cleared and the lane gets at once `GEAR: T-<m> is merged (<commit>). Continue T-<n>.` in the same session (`keep`).
 - The captain can end a wait from the plan by editing the task (any contract change clears `wait_on`).
 - `blocked` is removed from nowhere: the help keeps listing it, now it works.
+
+### 5.4 Work time and waiting time (user, 2026-10-26)
+
+With one model and no fallback, a spent quota stops lanes for hours. The time report keeps working and waiting apart:
+
+- Every quota park opens a `seat_pauses` row (kind `quota`, reason `minimax-cn 5h`) and its end closes it (§9.2); a declared wait does the same with kind `wait` (§5.3). Round clocks use these rows for `paused_s`.
+- Per lane: **work** = the sum of its rounds' `active_s`; **quota wait** and **declared wait** = the sums of its pauses; **idle** = the rest of the voyage's elapsed time.
+- For the voyage (wall clock): **elapsed** = departure → now (or landing); **fleet stopped by quota** = the wall time during which every lane seat was in a quota pause at once (the union of the overlaps); **elapsed without quota stops** = elapsed − fleet stopped.
+
+`gear report voyage` and `gear report time --voyage` print both, e.g.:
+
+```
+Voyage M4 · elapsed 68h00m · fleet stopped by quota 20h10m (4 stops) · elapsed without quota stops 47h50m
+lane hull · work 31h20m · quota wait 20h10m · declared wait 0h40m · idle 15h50m
+```
+
+The board's title line shows the voyage line; the station items (B10) give elapsed both ways.
 
 ---
 
@@ -648,6 +673,10 @@ impl Tx<'_> {
     pub fn close_friction(&self, project: &str, id: &str, outcome: &str, at: Ts) -> GearResult<()>;
 
     pub fn insert_decision_if_new(&self, d: &NewDecision) -> GearResult<bool>; // false: key exists
+
+    pub fn open_pause(&self, project: &str, seat: &str, kind: &str, reason: &str, at: Ts) -> GearResult<()>;
+    pub fn close_pause(&self, project: &str, seat: &str, kind: &str, at: Ts) -> GearResult<()>; // closes the open one of that kind
+    pub fn pauses_of_project(&self, project: &str) -> GearResult<Vec<PauseRow>>;
 
     pub fn set_task_rework_estimate(&self, project: &str, task: &str, min: Option<i64>) -> GearResult<()>;
     pub fn set_task_wait(&self, project: &str, task: &str, on: &str, cond: &str) -> GearResult<()>;
