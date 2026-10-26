@@ -124,6 +124,7 @@ fn send(store: &mut Store, verdict: Option<Outcome>) -> mail::SendResult {
             left: None,
             blocker: None,
             on: None,
+            friction: None,
             request_id: if verdict.is_some() {
                 "review"
             } else {

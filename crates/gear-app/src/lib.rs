@@ -12,6 +12,7 @@ pub mod base;
 pub mod captain;
 pub mod config;
 pub mod draft;
+pub mod friction;
 pub mod github;
 pub mod home;
 pub mod identity;

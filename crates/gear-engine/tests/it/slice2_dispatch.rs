@@ -130,7 +130,7 @@ fn full_work_loop() {
     let args = mail::SendArgs {
         kind: MsgKind::Result, body: "Report: notes/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(1), candidate: Some("abc1234".into()), about: None, to: None, reply_to: None, urgent: false,
-        left: None, blocker: None, on: None,
+        left: None, blocker: None, on: None, friction: None,
         verdict: None, request_id: "res-1".into(),
         blocking: None,
         base: None,

@@ -51,6 +51,8 @@ enum Cmd {
     },
     /// User: run the engine loop (plugin pane entrypoint).
     Run,
+    /// Captain: the friction reports (design §6).
+    Friction(FrictionCmd),
     /// User: project/seat administration.
     Admin {
         #[command(subcommand)]
@@ -119,6 +121,10 @@ struct SendCmd {
     /// Blocked only (design §5.3): the task the lane waits for.
     #[arg(long, value_name = "T-N")]
     on: Option<String>,
+    /// Result/review only (design §6.1): what cost you time that the captain
+    /// could fix.
+    #[arg(long, value_name = "TEXT")]
+    friction: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -193,6 +199,30 @@ enum ReportOp {
         /// Only this voyage (milestone), e.g. M2.
         #[arg(long)]
         voyage: Option<String>,
+    },
+}
+
+/// `gear friction`: the friction reports of the project (design §6.3, §6.4).
+#[derive(Args, Debug)]
+struct FrictionCmd {
+    /// What the captain did about a report.
+    #[command(subcommand)]
+    op: Option<FrictionOp>,
+    /// Include the closed reports too.
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum FrictionOp {
+    /// Close a report: `gear friction close F-<n> -m "<outcome>"`.
+    Close {
+        /// The report's id (F-<n>).
+        id: String,
+        /// What the captain did: fixed (what), lesson (which), not worth it
+        /// (why).
+        #[arg(long, short)]
+        message: String,
     },
 }
 
@@ -275,6 +305,7 @@ fn run(cli: Cli) -> GearResult<()> {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
         },
         Some(Cmd::Run) => cmd_run(),
+        Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -706,6 +737,50 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     let mut out = std::io::stdout();
     gear_board::run(&mut store, &opts, &mut out,
         herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
+}
+
+/// `gear friction`: the friction reports of the project (design §6.3, §6.4) —
+/// what cost a lane or a reviewer time that the captain could fix, and what
+/// the captain did about it.
+fn cmd_friction(c: FrictionCmd, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_friction(&mut store, &env, &mut herdr, &c, now_ts())?;
+    if json {
+        println!("{}", serde_json::json!({ "friction": out }));
+        return Ok(());
+    }
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear friction` body, over injected state.
+fn run_friction(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    c: &FrictionCmd,
+    now: i64,
+) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "the friction reports are the captain's: run gear in the captain's pane",
+            )
+        })?;
+    match &c.op {
+        Some(FrictionOp::Close { id, message }) => {
+            let fp = observe_identity(store, env, herdr)?;
+            gear_app::friction::close(store, env, fp.as_ref(), &project, id, message, now)
+        }
+        None => gear_app::friction::list(store, &project, c.all),
+    }
 }
 
 /// `gear report time`: where the time went (T-38). The captain's view of the
@@ -1292,6 +1367,8 @@ fn run_send(
         blocker: c.blocker.clone(),
         // The task the lane waits for (design §5.3).
         on: c.on.clone(),
+        // What cost time that the captain could fix (design §6.1).
+        friction: c.friction.clone(),
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
@@ -2107,6 +2184,7 @@ mod tests {
             left: None,
             blocker: None,
             on: None,
+            friction: None,
             candidate: None,
             verdict: None,
             blocking: None,
@@ -3493,6 +3571,232 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("[replayed]"), "{out}");
+    }
+
+    /// §6.2: a round that passed its budget must carry a friction report.
+    #[test]
+    fn an_over_budget_hand_in_without_a_friction_report_is_refused() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+
+        // Forty minutes into a thirty minute budget (the default budget of a
+        // task without an estimate).
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 40 * 60,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::FrictionRequired,
+            "{}",
+            error.detail
+        );
+        assert!(
+            error.detail.contains("T-1 took 40 min against 30 min"),
+            "{}",
+            error.detail
+        );
+        assert!(error.detail.contains("--friction"), "{}", error.detail);
+        // Nothing was written: the attempt is not handed in.
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Started
+        );
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// §6.1: the report is stored with the round's own facts.
+    #[test]
+    fn an_over_budget_hand_in_with_a_friction_report_is_stored() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        c.friction = Some("the api test needs a fixture that is missing".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 40 * 60,
+            false,
+        )
+        .unwrap();
+
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].task, "T-1");
+        assert_eq!(reports[0].attempt, 1);
+        assert_eq!(reports[0].role, "dev");
+        assert_eq!(
+            reports[0].body,
+            "the api test needs a fixture that is missing"
+        );
+        assert!(reports[0].required, "the round passed its budget");
+    }
+
+    /// §6.2: under the budget the report is optional.
+    #[test]
+    fn a_hand_in_under_budget_needs_no_friction_report() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 10 * 60,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Submitted
+        );
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// §6.3, §6.4: the captain reads the reports and closes one.
+    #[test]
+    fn gear_friction_lists_the_reports_and_closes_one() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_friction(&gear_store::NewFriction {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                    seat: "p:heat".into(),
+                    body: "the api test needs a fixture that is missing".into(),
+                    required: true,
+                })
+            })
+            .unwrap();
+
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(false),
+            T0,
+        )
+        .unwrap();
+        assert!(out.contains("F-1"), "{out}");
+        assert!(
+            out.contains("the api test needs a fixture that is missing"),
+            "{out}"
+        );
+        assert!(out.contains("required"), "{out}");
+
+        // The captain closes it: what the captain did about it.
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_close("F-1", "fixed: the fixture is in the repo"),
+            T0 + 1,
+        )
+        .unwrap();
+        assert!(out.contains("closed F-1"), "{out}");
+
+        // The open list is empty now; `--all` still shows the report.
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(false),
+            T0 + 2,
+        )
+        .unwrap();
+        assert!(out.contains("no open friction reports"), "{out}");
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(true),
+            T0 + 3,
+        )
+        .unwrap();
+        assert!(out.contains("F-1"), "{out}");
+        assert!(out.contains("closed: fixed"), "{out}");
+    }
+
+    /// §6.4: the outcome is one of the three kinds.
+    #[test]
+    fn closing_a_friction_report_needs_a_known_outcome() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_friction(&gear_store::NewFriction {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                    seat: "p:heat".into(),
+                    body: "a permission it lacked".into(),
+                    required: false,
+                })
+            })
+            .unwrap();
+
+        let error = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_close("F-1", "we looked at it"),
+            T0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::BadFormat,
+            "{}",
+            error.detail
+        );
+        assert!(error.detail.contains("not worth it"), "{}", error.detail);
+    }
+
+    fn friction_cmd(all: bool) -> FrictionCmd {
+        FrictionCmd { op: None, all }
+    }
+
+    fn friction_close(id: &str, message: &str) -> FrictionCmd {
+        FrictionCmd {
+            op: Some(FrictionOp::Close { id: id.into(), message: message.into() }),
+            all: false,
+        }
     }
 
     #[test]

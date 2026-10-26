@@ -31,6 +31,9 @@ pub enum ErrorCode {
     Unconfirmed,
     /// Engine heartbeat stale. Informational: writes still succeed.
     EngineDown,
+    /// A round passed its budget and the hand-in carries no friction report
+    /// (design §6.2).
+    FrictionRequired,
 }
 
 impl ErrorCode {
@@ -49,6 +52,7 @@ impl ErrorCode {
             ErrorCode::Quota => "QUOTA",
             ErrorCode::Unconfirmed => "UNCONFIRMED",
             ErrorCode::EngineDown => "ENGINE_DOWN",
+            ErrorCode::FrictionRequired => "FRICTION_REQUIRED",
         }
     }
 
