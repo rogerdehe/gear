@@ -119,7 +119,7 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((a.adopted_version, a.pending_update), (1, Some(2)));
 
-    let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
+    tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
     // T-150 (design §10.3): the attempt already started, so the contract
     // change goes as an instruction message — never as a delivery.
     let delivers = s
@@ -165,7 +165,7 @@ fn two_bumps_before_the_lane_looks_give_one_delivery_with_the_latest() {
     assert_eq!(a.pending_update, Some(3));
 
     let mut herdr = idle_herdr();
-    let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
+    tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
     // One notice, with the latest version: no delivery for a started attempt.
     let delivers = s
         .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
