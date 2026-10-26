@@ -32,6 +32,12 @@ pub enum Caller {
     Anonymous,
 }
 
+/// Agents whose tools run in a shared background process outside the pane:
+/// `opencode serve`, and Codex's `codex app-server` daemon (trial, 2026-10-26).
+/// A caller in no pane keeps its claim on such an agent's pane, still checked
+/// against the seat's binding.
+const TOOLS_OUTSIDE_PANE: [&str; 2] = ["opencode", "codex"];
+
 /// Phase 1 (no transaction). Returns None when there is no GEAR_CTX or no pane.
 /// Herdr failure is returned as an error: identity cannot be confirmed.
 pub fn observe(
@@ -65,7 +71,8 @@ pub fn observe(
     })?;
     if !claims_pane(&processes, ancestors) {
         let real = real_pane(herdr, ancestors);
-        // OpenCode runs its tools in its shared service (`opencode serve`),
+        // OpenCode (`opencode serve`) and Codex in daemon mode (`codex
+        // app-server`) run their tools in a shared background process,
         // not under the agent's pane, so its ancestry reaches no pane at all.
         // Such a caller keeps the env claim for an OpenCode pane, still checked
         // against the seat's binding; a caller that runs in another pane, or
@@ -73,14 +80,14 @@ pub fn observe(
         let tools_outside_pane = occupant
             .as_ref()
             .and_then(|info| info.agent.as_deref())
-            .is_some_and(|kind| kind == "opencode");
+            .is_some_and(|kind| TOOLS_OUTSIDE_PANE.contains(&kind));
         if real.is_none() && tools_outside_pane {
             return Ok(occupant.as_ref().map(fingerprint_of));
         }
         let where_ = match real {
             Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
             Some(_) => "the pane does not list this process".to_string(),
-            None => "no pane of this session runs this process".to_string(),
+            None => "no pane of this session runs this process (its tools run outside every pane, and the pane's agent is not one GEAR knows to do that)".to_string(),
         };
         return Err(GearError::new(
             ErrorCode::NotRegistered,

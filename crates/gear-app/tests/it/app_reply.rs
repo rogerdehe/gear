@@ -65,6 +65,28 @@ fn ask(s: &mut Store, seat: &str, pane: &str, body: &str, request_id: &str, now:
     mail::send(s, &seat_env(seat, pane), Some(&fp(pane, "opencode")), &args, now).unwrap().msg_id
 }
 
+/// The captain raises an item in its own inbox (no `--to`): the captain is
+/// the default recipient of a send.
+fn raise_own(s: &mut Store, body: &str, request_id: &str, now: i64) -> String {
+    let args = SendArgs {
+        kind: MsgKind::Question,
+        body: body.into(),
+        task: None,
+        attempt: None,
+        contract: None,
+        candidate: None,
+        verdict: None,
+        blocking: None,
+        base: None,
+        about: None,
+        to: None,
+        reply_to: None,
+        urgent: false,
+        request_id: request_id.into(),
+    };
+    mail::send(s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, now).unwrap().msg_id
+}
+
 /// The captain instructs a lane.
 fn instruct(s: &mut Store, seat: &str, request_id: &str, now: i64) -> String {
     let args = SendArgs {
@@ -360,6 +382,50 @@ fn a_resolve_of_the_engines_item_sends_nothing() {
 
     assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
     assert!(r.replies.is_empty(), "the engine has no inbox to read");
+}
+
+#[test]
+fn answering_its_own_item_sends_the_captain_nothing() {
+    // T-119 (trial B02-03): the captain can raise an item in its own inbox (a
+    // question it answers itself, a self-sent wait). Answering it settles the
+    // item; a reply addressed to the captain is the same seat and no new fact,
+    // and it would ring the captain's own doorbell for nothing.
+    let mut s = world();
+    let resolved = raise_own(&mut s, "the release waits on ci", "s1", NOW);
+    let waited = raise_own(&mut s, "the schema waits on the user", "s2", NOW + 1);
+    let other = ask(&mut s, "heat", LANE_PANE, "which schema?", "s3", NOW + 2);
+
+    let mut args = reply_args(&[&resolved, &waited, &other], ReplyMode::Resolve, "r1");
+    args.wait_until = Some(NOW + 100);
+    let r = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 3)
+        .unwrap();
+
+    assert_eq!(r.handled.len(), 3, "every listed id is still handled");
+    assert_eq!(state_of(&mut s, &resolved), MsgState::Resolved);
+    assert_eq!(state_of(&mut s, &waited), MsgState::Resolved);
+    assert_eq!(r.replies.len(), 1, "only the lane is answered: {r:?}");
+    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    assert_eq!(answer.recipient, "p:heat");
+
+    // Nothing new lands in the captain's own inbox, so no doorbell follows:
+    // `messages_to_since` lists exactly the reply/instruction kinds a doorbell
+    // counts.
+    let delivered = s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap();
+    assert!(delivered.is_empty(), "no message reaches the captain: {delivered:?}");
+
+    // A wait on its own item is silent the same way.
+    let own_wait = raise_own(&mut s, "waiting on the user", "s4", NOW + 4);
+    let mut args = reply_args(&[&own_wait], ReplyMode::Wait, "r2");
+    args.wait_on = Some("user".into());
+    args.wait_until = Some(NOW + 200);
+    let r = mail::reply(&mut s, &captain_env(), Some(&fp(CAP_PANE, "codex")), &args, NOW + 5)
+        .unwrap();
+    assert_eq!(r.handled, vec![(own_wait.clone(), "waiting".to_string())]);
+    assert!(r.replies.is_empty(), "a waiting captain rings nobody: {r:?}");
+    let item = s.read(|tx| tx.get_message("p", &own_wait)).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Waiting);
+    assert_eq!(item.result.as_deref(), Some("the answer"), "the text is kept on the item");
+    assert!(s.read(|tx| tx.messages_to_since("p", "p:captain", 0)).unwrap().is_empty());
 }
 
 #[test]

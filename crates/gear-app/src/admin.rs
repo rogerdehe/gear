@@ -197,10 +197,15 @@ pub fn init_with_home(
 
     for (kind, who) in &kinds {
         let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
+            let known = crate::skill::SkillAgent::ALL
+                .iter()
+                .map(|agent| agent.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
-                    "{who} runs {kind:?}, which GEAR has no skill for: the kinds with a skill are claude, codex, opencode and grok"
+                    "{who} runs {kind:?}, which GEAR has no skill for: the kinds with a skill are {known}"
                 ),
             ));
         };

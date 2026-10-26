@@ -1,5 +1,13 @@
 # M4 backlog (ideas, not yet tasks)
 
+## First item of M4 (user, 2026-10-26): a seat follows the work (B02-01)
+
+A trial project had a lane bound to a repo whose work was a dozen lines; the voyage ran 30-40 hours, that lane stood idle 99% of the time and held its slot for good. M4 must fix it:
+- a task stores its own repo (and base, gate) when it is created, so rebinding a lane never moves an old task's review or merge target (today a task has no repo column: it is read from its lane's config);
+- the lane quota counts active seats, not configured or retired ones;
+- a supported rebind: `- rebind <lane> repo=<name> owns=[…]` (or retire + register) that waits for the lane's open tasks to land, previews the change and keeps history;
+- the captain's guide: a lane whose repo has no ready work is rebound at once, never left idle.
+
 ## Moved out of M3 (user, 2026-10-25)
 
 - **Every built-in agent fully described by its profile (data, not code).** Today only OpenCode has `quota_markers`; Claude Code, Codex and Grok have none, so the engine cannot tell their quota stop from a finished turn. Only Claude Code has a `quota_bar` (profile.rs), so captain quota protection works only for a Claude captain. Fill, for all four kinds, from real screen captures:
@@ -39,3 +47,21 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 
 
 - **A light procedure for a small task (user, 2026-10-26).** Every task costs ~10 min of fixed procedure whatever its size (reading the skill and packet, exploring, verifying from a clean clone, a report): a 3-line fixture task took 11 min. Under a loose bar and a tiny estimate, a lighter procedure (no clean-clone re-check, a one-line report).
+
+## Cut from M3.1 (station M-2234, 2026-10-26)
+
+- T-122 — `gear` knows its caller without env vars (trial B02-05; the Codex env-var friction). With T-104's real-pane proof, a call with no GEAR_CTX takes its seat from the pane it really runs in (the seat bound to that pane) and its store from GEAR_DB or the default path; GEAR_CTX and GEAR_DB stay as overrides. `gear whoami` prints the real pane, the seat bound to it, the store, and why a claim fails. The skills drop the long `GEAR_CTX=… GEAR_DB=…` prefixes where they are no longer needed. Accept: Tests: a caller in a bound pane with no GEAR_CTX is that seat; in an unbound pane it is anonymous; whoami prints pane, seat and store. `cargo test --workspace` passes.
+- T-123 — An OpenCode lane's identity is proven, not only claimed (M3 hotfix 6d82c7d lets a caller outside every pane keep its env claim for an OpenCode pane, so one OpenCode lane can pose as another). Prove it with a fact the OpenCode service carries per session: the session id GEAR created for the seat (OpenCode's API: the session of the tool call, or an env var the service sets in its tool shells — find which on opencode's current version) must match the seat's recorded session. Accept: Tests with a fake: an OpenCode caller whose session matches the seat passes; another lane's session is refused with one urgent item. `cargo test --workspace` passes.
+
+## Added 2026-10-26 (user)
+
+- Tokens per task: next to the time and decision records, record how many tokens each task cost (lane and reviewer, per attempt), so a voyage report can show it.
+- Quota reset time of connected models: with an API key OpenCode shows no reset time, and pi has the same gap. Find a way to learn when each connected model's quota resets (provider API, response headers, or the CLI). Research item; its scope in M4 is to be discussed with the user first.
+- Live Codex quota fallback: watch a reviewer hit Codex's spent weekly limit and the review finish on opencode-go/deepseek-v4-pro (M3.1 could not: the quota reset first).
+- Reviewer quota fallback in the engine (T-115 review F2): apply_quota_policy skips non-lane seats and never reads `on_quota.review`; a spent reviewer must close Codex and restart on the next `models.review` entry (opencode-go/deepseek-v4-pro) with the review delivered again. Required for M3.1 done clause (2), which was not met.
+
+## Cut from M3.1 (station M-2277, 2026-10-26)
+
+- T-120 — Plan hygiene (M3 acceptance): after a successful apply, used `# Staff` lines (`remerge`, `retry`, `retire`, `park`, `hold`) are removed like `# Verdicts`, so a stale line never fails the next apply; an empty section is removed too and a second `# Staff` section is not created by GEAR. The failed-merge item's `next:` names `- remerge T-n` under `# Staff`, not a fail verdict, while its candidate is still not merged. `gear plan apply` prints which lanes' idle warnings are off when a `- tail:` is in force (trial B02-08), and the home page shows the tail. Accept: Tests: an applied remerge line is gone from the file; a failed-merge hint names remerge; apply with a tail prints the lanes; the home shows them. `cargo test --workspace` passes.
+- T-121 — `gear admin stop` never cuts a merge (M3, T-110 review): while any merge op is intended, executing or unknown it waits (polling the store, up to 10 minutes, printing which task merges) and then stops the engine; `--now` stops at once. The v0.3.0 upgrade guide's manual merge check becomes one line pointing at this. Accept: CLI test with a store holding an executing merge: stop waits and reports the task; after the op is confirmed it stops; `--now` stops at once. `cargo test --workspace` passes.
+- Codex in app-server daemon mode (trial, 2026-10-26): the pane's Codex is a client and a shared daemon runs its tools, so the real-pane proof never reaches the pane (same shape as `opencode serve`); restarting the daemon does not help. GEAR starts Codex seats without the daemon (the no-daemon flag of the installed version) and the identity error names this case ("the tools run in a daemon outside the pane"). Pair with `gear whoami` (T-122) and the handover.

@@ -11,13 +11,16 @@
 //!   resets (`[models].quota_reset_h` hours) and resume on the first model
 //!   then.
 //!
-//! How the model changes depends on the **CLI** the next entry names (T-35):
+//! How the model changes depends on the **CLI** the next entry names (T-35)
+//! and on whether GEAR drives that CLI's model picker (T-114):
 //!
-//! - the same CLI: the model changes **in place** (T-33) — the picker, the
-//!   variant dialog and the status bar; the conversation stays.
-//! - another CLI: the agent is closed and that CLI starts in the same pane
-//!   and worktree ([`crate::restart`]) — no session crosses CLIs; the new
-//!   agent starts from the git state and the lane is told to continue.
+//! - the same CLI **with** a picker GEAR drives (OpenCode): the model changes
+//!   **in place** (T-33) — the picker, the variant dialog and the status bar;
+//!   the conversation stays.
+//! - another CLI, or a CLI without such a picker (pi): the agent is closed
+//!   and that CLI starts in the same pane and worktree ([`crate::restart`]) —
+//!   no session crosses a restart; the new agent starts from the git state and
+//!   the lane is told to continue.
 //!
 //! The engine keeps the little state this needs in the store's `meta`
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
@@ -68,7 +71,11 @@ pub fn apply_quota_policy(
 
     for obs in observed {
         let seat = &obs.seat;
-        if seat.role != SeatRole::Lane {
+        // A lane's chain is its own; a reviewer's is `[models].review` (T-115):
+        // a Codex reviewer whose limit is spent moves to the next review model
+        // (`on_quota.review`), which is what makes done clause (2) work.
+        let reviewer = seat.role == SeatRole::Temp;
+        if !reviewer && seat.role != SeatRole::Lane {
             continue;
         }
         // A restart on another CLI is on its way (T-35): the plan is durable,
@@ -100,7 +107,9 @@ pub fn apply_quota_policy(
         }
         // A seat parked on quota wakes up when the provider resets: it goes
         // back to the first model of its chain — in place when that model runs
-        // on the seat's own CLI, on another CLI when it does not (T-35).
+        // on the seat's own CLI, on another CLI when it does not (T-35). A
+        // reviewer is never parked (its role has no Parked state, T-115), so
+        // this is the lane's path.
         if seat.state == SeatState::Parked {
             if parked_until(store, &seat.id)?.is_some_and(|until| until <= now) {
                 let chain = crate::model::role_chain(&config, &seat.name);
@@ -126,11 +135,18 @@ pub fn apply_quota_policy(
             }
             continue;
         }
-        // Only a working lane gets the policy.
-        if !matches!(
-            seat.state,
-            SeatState::Active | SeatState::Standby | SeatState::Retiring
-        ) {
+        // Only a live seat gets the policy: a lane may be Standby or Retiring
+        // (it still finishes its attempt), a reviewer is Active or it is not
+        // reviewing (T-115).
+        let live = if reviewer {
+            seat.state == SeatState::Active
+        } else {
+            matches!(
+                seat.state,
+                SeatState::Active | SeatState::Standby | SeatState::Retiring
+            )
+        };
+        if !live {
             continue;
         }
         // 1. count the consecutive quota ticks. A marker left on the screen
@@ -142,10 +158,27 @@ pub fn apply_quota_policy(
         if !quota || ticks < i64::from(profile.confirm_rounds) {
             continue;
         }
-        // 2. the policy.
-        let chain = crate::model::role_chain(&config, &seat.name);
-        let current = current_model(store, &seat.id, &chain);
-        let policy = config.models.on_quota.lanes;
+        // A reviewer whose verdict is in (or whose attempt has no candidate)
+        // has no job to move for: the release step frees its seat (T-115).
+        if reviewer && crate::review::job_for_seat(store, project, seat)?.is_none() {
+            continue;
+        }
+        // 2. the policy. A reviewer's chain and policy are their own (T-115).
+        let chain: Vec<&ModelEntry> = if reviewer {
+            crate::model::review_chain(&config)
+        } else {
+            crate::model::role_chain(&config, &seat.name)
+        };
+        let current = if reviewer {
+            crate::review::seat_current_model(store, project, &config, seat)?
+        } else {
+            current_model(store, &seat.id, &chain)
+        };
+        let policy = if reviewer {
+            config.models.on_quota.review
+        } else {
+            config.models.on_quota.lanes
+        };
         let next = match policy {
             QuotaPolicy::Wait => None,
             QuotaPolicy::Fallback => next_entry(&chain, current.as_deref()),
@@ -168,6 +201,23 @@ pub fn apply_quota_policy(
             }
             // The chain is exhausted, or the policy is to wait: park until the
             // provider resets.
+            None if reviewer => {
+                // A reviewer cannot be parked (its role has no Parked state,
+                // T-115): it is flagged and the captain hears about it once,
+                // with the task whose review waits.
+                let line = format!(
+                    "{}: quota: the review chain has no next model for {} ({}) — the review of {} waits for a human",
+                    seat.id,
+                    current.as_deref().unwrap_or("no model"),
+                    match policy {
+                        QuotaPolicy::Wait => "policy wait",
+                        QuotaPolicy::Fallback => "chain exhausted",
+                    },
+                    seat.task_id.clone().unwrap_or_default(),
+                );
+                flag_and_alert(store, project, seat, &line, now)?;
+                report.events.push(line);
+            }
             None => {
                 let hours = i64::from(config.models.quota_reset_h.max(1));
                 let until = now + hours * 3600;
@@ -216,9 +266,14 @@ fn next_entry<'a>(chain: &[&'a ModelEntry], current: Option<&str>) -> Option<&'a
 /// Change the lane's model to `entry`'s.
 ///
 /// The model changes **in place** when the entry runs on the seat's own CLI
-/// (T-33): no exit, no restart, the conversation stays. The model needs
-/// **another CLI** (T-35): the agent is closed, the other CLI starts in the
-/// same pane and worktree, and the lane continues its task.
+/// **and** GEAR drives that CLI's model picker (T-33): no exit, no restart, the
+/// conversation stays. Today that is OpenCode only.
+///
+/// Every other case is a **restart** (T-35, T-114): the agent is closed, the
+/// CLI of the entry starts in the same pane and worktree, and the lane
+/// continues its task. That is the case for another CLI, and for a CLI
+/// without a picker GEAR drives (pi): the model is given at the start, so the
+/// next model needs a new session.
 fn change_model(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -242,7 +297,16 @@ fn change_model(
         (Some(target), Some(current)) => target == current,
         _ => true,
     };
-    if same_cli {
+    // T-114: the in-place switch needs a model picker GEAR drives. A CLI
+    // without one (pi) is started again on the next model instead — the same
+    // pane and worktree, the lane's task delivered again in the new session.
+    // A CLI that is not known at all keeps the old path, which flags the seat
+    // with a reason.
+    let in_place = match target_cli.as_deref() {
+        None => true,
+        Some(cli) => same_cli && crate::switch::switches_in_place(cli),
+    };
+    if in_place {
         return start_switch(store, herdr, project, config, seat, profile, obs, entry.model(), now);
     }
     let target = ModelEntry::Entry(gear_app::config::ModelSpec {
@@ -352,8 +416,7 @@ fn finish_switch(
     model: &str,
     now: Ts,
 ) -> GearResult<String> {
-    let text = continue_text(store, &seat.id)?;
-    let open = open_attempt(store, &seat.id)?;
+    let (text, open) = resume_delivery(store, project, seat)?;
     store.write(|tx| {
         // T-97: a delivery the lane never confirmed before the switch — the
         // prompt the provider limit killed — is retired, not failed through
@@ -431,6 +494,34 @@ pub(crate) fn continue_text(store: &mut Store, seat: &str) -> GearResult<String>
         Some((task, _)) => Ok(format!("Continue {task}: run `gear` first")),
         None => Ok("Continue: run `gear` first".to_string()),
     }
+}
+
+/// What a seat is told to carry on with after its model changed (T-115): a
+/// reviewer gets its review packet again, for the same task and attempt — its
+/// conversation did not cross the CLI, so the job has to be handed to it a
+/// second time; a lane gets its Continue line.
+pub(crate) fn resume_delivery(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+) -> GearResult<(String, Option<(String, i64)>)> {
+    if seat.role == SeatRole::Temp {
+        return match crate::review::job_for_seat(store, project, seat)? {
+            Some(job) => Ok((job.packet, Some((job.task, job.attempt)))),
+            // No job left (its verdict is in): a short line, no stale packet.
+            None => Ok((
+                format!(
+                    "No review is waiting for you: run `gear` first{}.",
+                    match seat.task_id.as_deref() {
+                        Some(task) => format!(" ({task}'s verdict is in)"),
+                        None => String::new(),
+                    }
+                ),
+                None,
+            )),
+        };
+    }
+    Ok((continue_text(store, &seat.id)?, open_attempt(store, &seat.id)?))
 }
 
 /// The seat's open attempt: (task, attempt).

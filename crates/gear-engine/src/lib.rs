@@ -23,6 +23,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod guardrails;
 pub mod merge;
 pub mod model;
 pub mod observe;
@@ -38,6 +39,7 @@ pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
+pub mod tailed;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -113,17 +115,25 @@ pub struct TickReport {
     pub reviewers: Vec<String>,
     /// Reviewer seats released this tick (their task left review).
     pub released: Vec<String>,
+    /// Reviewer seats released this tick because they run no reviewer
+    /// (B02-04): a dead seat that held a temp slot.
+    pub dead_temps: Vec<String>,
     /// Tasks merged into the integration branch this tick (`task @ branch`).
     pub merged: Vec<String>,
     /// Lane items for the captain opened, updated or closed this tick
     /// (`lane:action`), from the keep-lanes-fed watch.
     pub feed: Vec<String>,
+    /// The all-tail item opened or closed this tick (`all-tail:opened|closed`):
+    /// every lane in the tail while required work remains (B02-08).
+    pub tail: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
     pub blocked: Vec<String>,
+    /// Seats whose own guardrails refused one of their actions (T-113).
+    pub guardrails: Vec<String>,
     /// Seats that wait for their provider (T-75): a provider back-off is not
     /// a stall, and the home page shows it.
     pub backoff: Vec<String>,
@@ -202,6 +212,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report
             .blocked
             .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
+        // A lane refused by its own guardrails (pi: @aliou/pi-guardrails) goes
+        // on with the refusal in its transcript; the captain is told (T-113).
+        report
+            .guardrails
+            .extend(store.write(|tx| guardrails::check(tx, &project, &observed, now))?);
 
         // T-75: a seat whose provider is in a back-off waits for the provider.
         // It is not stuck, so no stall item is raised for it, and the captain's
@@ -265,6 +280,20 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             feed::keep_lanes_fed(store, &project, now)?
                 .into_iter()
                 .map(|change| format!("{}:{}", change.lane, change.action)),
+        );
+
+        // 6a. a reviewer seat that runs no reviewer frees its slot (B02-04):
+        //     a dead temp seat is released before the reviews start, so the
+        //     count of temps in use never passes the quota and the next
+        //     review can take the seat.
+        report.dead_temps.extend(release::release_dead_temps(store, herdr, &project, now)?);
+
+        // 6c. every lane in the tail while required work remains: one item in
+        //     the captain's inbox, so the warnings a captain turned off do not
+        //     go forgotten (B02-08).
+        report.tail.extend(
+            tailed::watch(store, &project, now)?
+                .map(|change| format!("all-tail:{}", change.as_str())),
         );
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The

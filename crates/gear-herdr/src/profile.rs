@@ -12,6 +12,9 @@ pub enum ScreenFlag {
     /// The provider is in a back-off: the agent waits for it (T-75). The
     /// agent is not stuck, so no stall is raised for it.
     Backoff,
+    /// The agent's own guardrails blocked a command or a path (T-113): the
+    /// agent goes on, but the captain is told what was refused.
+    Blocked,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -28,6 +31,12 @@ pub struct Profile {
     /// agent waits for the provider, so it is not stuck. Empty for the kinds
     /// whose back-off signs are not recorded yet (M4).
     pub backoff_markers: Vec<String>,
+    /// The lines that say the agent's own guardrails refused a command or a
+    /// path (pi: `@aliou/pi-guardrails`, T-113). The agent goes on after such
+    /// a refusal, so nothing else would tell the captain that the lane was
+    /// told to do something it may not do. Empty for the kinds without
+    /// guardrails.
+    pub blocked_markers: Vec<String>,
     /// Only the last `tail_lines` lines are matched.
     pub tail_lines: u32,
     /// A flag counts only after this many consecutive observations.
@@ -77,6 +86,9 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
         }
         if matches_any(&profile.backoff_markers, line) {
             flags.insert(ScreenFlag::Backoff);
+        }
+        if matches_any(&profile.blocked_markers, line) {
+            flags.insert(ScreenFlag::Blocked);
         }
     }
     flags
@@ -132,19 +144,28 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
-/// are built in: today `opencode`, `claude`, `codex` and `grok` —
+/// are built in: today `opencode`, `claude`, `codex`, `grok` and `pi` —
 /// opencode: busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
 /// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// codex: busy `esc to interrupt`; no quota/rate-limit/auth markers yet (the
-/// SOP says the limits are still to be recorded); tail 16 lines, confirm 2
+/// codex: busy `esc to interrupt`; quota `Usage limit reached` and the
+/// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
+/// warning is not one of them; no rate-limit/auth markers yet; tail 16
+/// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
 /// `-c check_for_update_on_startup=false`;
 /// session_ref true (Herdr reports the session uuid); resume
 /// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
 /// grok: busy `Ctrl+c:cancel`; unattended `--always-approve`; session_ref
 /// true; resume `["-r", "{session}"]`; exit by the `/exit` command
+/// (`exit_command`, no keys).
+/// pi: busy ` Working` (the spinner line); quota `insufficient_quota`;
+/// rate limit `rate_limit_error`; auth `No API key found for`; back-off
+/// `Retrying (`; guardrails `Command auto-denied:` and
+/// `is blocked (outside working directory)`; unattended `--approve`;
+/// session_ref true (Herdr reports the session file); resume
+/// `["--session", "{session}"]`; exit by the `/quit` command
 /// (`exit_command`, no keys).
 /// Any other kind → None.
 impl Profile {
@@ -169,6 +190,16 @@ impl Profile {
     pub fn backoff(&self, screen: &str) -> bool {
         classify_screen(self, screen).contains(&ScreenFlag::Backoff)
     }
+
+    /// Did the agent's own guardrails refuse something? (T-113)
+    ///
+    /// The refusal is a line in the transcript (`Command auto-denied: …`,
+    /// `Access to <path> is blocked (outside working directory).`). The
+    /// agent goes on, so the screen is the only place it shows. Only the
+    /// tail window counts, like every other marker.
+    pub fn blocked(&self, screen: &str) -> bool {
+        classify_screen(self, screen).contains(&ScreenFlag::Blocked)
+    }
 }
 
 /// The fields a project config may set for a profile (T-31). Every field is
@@ -188,6 +219,9 @@ pub struct ProfilePatch {
     pub auth_markers: Option<Vec<String>>,
     /// The signs on screen that the provider is in a back-off (T-75).
     pub backoff_markers: Option<Vec<String>>,
+    /// The lines that say the agent's own guardrails refused something
+    /// (T-113).
+    pub blocked_markers: Option<Vec<String>>,
     /// The keys that make the agent exit cleanly.
     pub exit_keys: Option<Vec<String>>,
     /// The args to resume a session; `{session}` is replaced.
@@ -229,6 +263,9 @@ impl Profile {
         if let Some(markers) = &patch.backoff_markers {
             profile.backoff_markers = markers.clone();
         }
+        if let Some(markers) = &patch.blocked_markers {
+            profile.blocked_markers = markers.clone();
+        }
         if let Some(keys) = &patch.exit_keys {
             profile.exit_keys = keys.clone();
         }
@@ -256,7 +293,7 @@ impl Profile {
 /// without the user configuring anything.
 pub fn builtins() -> BTreeMap<String, Profile> {
     let mut table = BTreeMap::new();
-    for kind in ["opencode", "claude", "codex", "grok"] {
+    for kind in ["opencode", "claude", "codex", "grok", "pi"] {
         if let Some(profile) = builtin(kind) {
             table.insert(kind.to_string(), profile);
         }
@@ -279,6 +316,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             quota_bar: None,
             auth_markers: vec![],
             backoff_markers: vec![],
+            blocked_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--auto".into()],
@@ -299,6 +337,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             quota_bar: Some(crate::QuotaBar::claude()),
             auth_markers: vec![],
             backoff_markers: vec![],
+            blocked_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--dangerously-skip-permissions".into()],
@@ -310,9 +349,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         }),
         // Codex (verified 2026-10-22, codex-cli 0.163.0 — the SOP
         // `gear --skill agent:codex`): busy `esc to interrupt` (the screen
-        // shows `• Working (<time> • esc to interrupt)`); no quota markers
-        // yet — the SOP says the five-hour and weekly limits are still to be
-        // recorded; unattended `--dangerously-bypass-approvals-and-sandbox`
+        // shows `• Working (<time> • esc to interrupt)`); unattended
+        // `--dangerously-bypass-approvals-and-sandbox`
         // and `-c check_for_update_on_startup=false` — without the second one
         // Codex shows its "Update available" dialog at start and the agent
         // sits blocked, unseen (2026-10-25, codex 0.163.0 → 0.164.0);
@@ -329,14 +367,46 @@ pub fn builtin(kind: &str) -> Option<Profile> {
         // The agent waits for the provider for minutes without any output:
         // that is a back-off, not a stall. The other kinds keep an empty list
         // — their back-off signs are not recorded yet (M4).
+        //
+        // T-115: the spent limit. Codex says it in its own words (the
+        // installed binary, codex-cli 0.164.0): the modal titled
+        // `Usage limit reached` over
+        // `Your included usage is exhausted. Choose an option below to
+        // continue.`, the error line `Usage limit reached. You've reached
+        // your usage limit. Increase your limits to continue using codex.`,
+        // the workspace forms `You've reached your workspace credit limit` /
+        // `Your workspace is out of credits` / `You hit your spend cap`, and
+        // the sentence the TUI prints when the plan is spent: `You’ve hit
+        // your usage limit.` — followed by an upgrade line (Plus, Pro), a
+        // credit link, a request to the workspace admin, or nothing. All of
+        // them are stops: the agent cannot work until the limit resets.
+        //
+        // The spent-limit sentence has a **curly** apostrophe in the binary
+        // (`You’ve`), so the marker starts after it (`hit your usage limit`):
+        // one marker for every form, straight or curly (T-115 review F1).
+        //
+        // The **warning** is not a stop and is not a marker: `Heads up, you
+        // have less than 5% of your weekly limit left. Run /status for a
+        // breakdown.` (read live, 2026-10-26) and the status line
+        // `⚠ weekly limit: only 3% left · resets at 3:30 AM on 1 Nov ·
+        // /status` say the limit is nearly spent; the agent still works.
         "codex" => Some(Profile {
             kind: "codex".into(),
             busy_markers: vec!["esc to interrupt".into()],
             ratelimit_markers: vec![],
-            quota_markers: vec![],
+            quota_markers: vec![
+                "Usage limit reached".into(),
+                "You've reached your usage limit".into(),
+                "hit your usage limit".into(),
+                "Your included usage is exhausted".into(),
+                "You've reached your workspace credit limit".into(),
+                "Your workspace is out of credits".into(),
+                "You hit your spend cap".into(),
+            ],
             quota_bar: None,
             auth_markers: vec![],
             backoff_markers: vec!["Reconnecting...".into()],
+            blocked_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec![
@@ -374,6 +444,7 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             quota_bar: None,
             auth_markers: vec![],
             backoff_markers: vec![],
+            blocked_markers: vec![],
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--always-approve".into()],
@@ -381,6 +452,59 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             resume_args: Some(vec!["-r".into(), "{session}".into()]),
             exit_keys: vec![],
             exit_command: Some("/exit".into()),
+            verified: true,
+        }),
+        // Pi (verified 2026-10-26, pi 1.4.0 — the SOP
+        // `gear --skill agent:pi`): busy ` Working` (the spinner line the TUI
+        // draws while a turn runs: `── ⠋ Working ────`; the spinner glyph
+        // changes, the word does not); unattended `--approve` (pi's own
+        // project-trust override — without it a lane in a fresh worktree
+        // waits on a trust prompt); Herdr reports the session **file**, so
+        // session_ref is true and the resume is `--session <file>` (pi's own
+        // hint after an exit names the session id, but `--session` takes the
+        // path too — checked live, 1.4.0). It exits on the `/quit` command
+        // (`exit_command`, no keys): the shortcut line says
+        // `escape interrupt · ctrl+c/ctrl+d clear/exit`, and ctrl+d only
+        // exits while the editor is empty.
+        //
+        // The provider signs, taken from pi's own output (1.4.0):
+        //   quota     `429: {"message":"You exceeded your current quota, …",
+        //                     "type":"insufficient_quota", …}`
+        //   rate limit `429: {"message":"Rate limit reached for …",
+        //                     "type":"rate_limit_error", …}`
+        //   auth      `Error: No API key found for anthropic.`
+        //   back-off  `── ⠙ Retrying (3/3) in 7s... (escape to cancel) ────`
+        //
+        // The guardrails of `@aliou/pi-guardrails` refuse a command or a path
+        // and the agent goes on: `Command auto-denied: <why>` (permission-gate)
+        // and `Access to <path> is blocked (outside working directory).`
+        // (path-access). The captain is told (T-113).
+        "pi" => Some(Profile {
+            kind: "pi".into(),
+            busy_markers: vec![" Working".into()],
+            ratelimit_markers: vec![
+                "rate_limit_error".into(),
+                "Rate limit reached".into(),
+                "429:".into(),
+            ],
+            quota_markers: vec![
+                "insufficient_quota".into(),
+                "exceeded your current quota".into(),
+            ],
+            quota_bar: None,
+            auth_markers: vec!["No API key found for".into()],
+            backoff_markers: vec!["Retrying (".into()],
+            blocked_markers: vec![
+                "Command auto-denied:".into(),
+                "is blocked (outside working directory)".into(),
+            ],
+            tail_lines: 16,
+            confirm_rounds: 2,
+            unattended_args: vec!["--approve".into()],
+            session_ref: true,
+            resume_args: Some(vec!["--session".into(), "{session}".into()]),
+            exit_keys: vec![],
+            exit_command: Some("/quit".into()),
             verified: true,
         }),
         // Only kinds with a verified SOP are built in (design/04).

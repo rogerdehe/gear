@@ -81,6 +81,11 @@ pub const TOPICS: &[Topic] = &[
         file: "references/agents/grok.md",
         text: include_str!("../../../skills/gear/references/agents/grok.md"),
     },
+    Topic {
+        name: "agent:pi",
+        file: "references/agents/pi.md",
+        text: include_str!("../../../skills/gear/references/agents/pi.md"),
+    },
 ];
 
 /// The templates that ship with the skill (T-85): files the captain copies into
@@ -108,11 +113,17 @@ pub enum SkillAgent {
     Codex,
     OpenCode,
     Grok,
+    Pi,
 }
 
 impl SkillAgent {
-    pub const ALL: &'static [SkillAgent] =
-        &[SkillAgent::Claude, SkillAgent::Codex, SkillAgent::OpenCode, SkillAgent::Grok];
+    pub const ALL: &'static [SkillAgent] = &[
+        SkillAgent::Claude,
+        SkillAgent::Codex,
+        SkillAgent::OpenCode,
+        SkillAgent::Grok,
+        SkillAgent::Pi,
+    ];
 
     /// The name the user writes.
     pub fn as_str(self) -> &'static str {
@@ -121,6 +132,7 @@ impl SkillAgent {
             SkillAgent::Codex => "codex",
             SkillAgent::OpenCode => "opencode",
             SkillAgent::Grok => "grok",
+            SkillAgent::Pi => "pi",
         }
     }
 
@@ -131,6 +143,7 @@ impl SkillAgent {
             "codex" => Ok(SkillAgent::Codex),
             "opencode" => Ok(SkillAgent::OpenCode),
             "grok" => Ok(SkillAgent::Grok),
+            "pi" => Ok(SkillAgent::Pi),
             other => {
                 let known = SkillAgent::ALL
                     .iter()
@@ -151,12 +164,17 @@ impl SkillAgent {
     /// `~/.claude/skills/<name>/SKILL.md`, Codex `~/.codex/skills/<name>/SKILL.md`,
     /// OpenCode `~/.config/opencode/skills/<name>/SKILL.md`, Grok
     /// `~/.grok/skills/<name>/SKILL.md` (its user-guide, `08-skills.md`).
+    /// Pi reads `<agent-dir>/skills/<name>/SKILL.md` and its agent directory
+    /// is `~/.pi/agent` (pi 1.4.0, `docs/configuration.md`: "User skills and
+    /// supporting files" live in `<agent-dir>/skills/`), so the skill goes to
+    /// `~/.pi/agent/skills/<name>/SKILL.md`.
     pub fn skills_root(self, home: &Path) -> PathBuf {
         match self {
             SkillAgent::Claude => home.join(".claude").join("skills"),
             SkillAgent::Codex => home.join(".codex").join("skills"),
             SkillAgent::OpenCode => home.join(".config").join("opencode").join("skills"),
             SkillAgent::Grok => home.join(".grok").join("skills"),
+            SkillAgent::Pi => home.join(".pi").join("agent").join("skills"),
         }
     }
 }
@@ -267,6 +285,12 @@ mod tests {
         assert_eq!(
             SkillAgent::Grok.skills_root(&home),
             home.join(".grok").join("skills")
+        );
+        // Pi's agent directory is `~/.pi/agent`; its user skills live in
+        // `<agent-dir>/skills` (pi 1.4.0, docs/configuration.md).
+        assert_eq!(
+            SkillAgent::Pi.skills_root(&home),
+            home.join(".pi").join("agent").join("skills")
         );
         std::fs::remove_dir_all(&home).ok();
     }

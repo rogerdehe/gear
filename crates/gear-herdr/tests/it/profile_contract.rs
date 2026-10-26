@@ -13,6 +13,8 @@ fn opencode() -> Profile {
         // T-75: the back-off markers of a kind whose signs are not recorded
         // yet; the codex profile is the one that has them.
         backoff_markers: vec![],
+        // T-113: the guardrails refusals of a kind without guardrails.
+        blocked_markers: vec![],
         tail_lines: 3,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],

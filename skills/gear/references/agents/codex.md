@@ -67,6 +67,19 @@ After the exit the screen shows `codex resume <uuid>` and the shell prompt. Afte
 
 The status bar carries the limits (`5h …`, `weekly N% left`). A stop on a limit or a server error ("model at capacity") looks like a finished turn: read the screen before treating a stop as completion.
 
+**The spent limit** (codex-cli 0.164.0's own words, taken from the installed binary):
+
+| On screen | What it is |
+|---|---|
+| `Usage limit reached` over `Your included usage is exhausted. Choose an option below to continue.` | the modal the consumer plan shows when the limit is spent |
+| `Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.` | the same stop as an error line |
+| `You’ve hit your usage limit.` (curly apostrophe), followed by an upgrade line, a credits link, a request to the workspace admin, or nothing | the sentence the TUI prints when the plan is spent — every form carries the marker `hit your usage limit` |
+| `You've reached your workspace credit limit`, `Your workspace is out of credits`, `You hit your spend cap` | the workspace (enterprise) forms of the same stop |
+
+**The warning is not a stop**: `Heads up, you have less than 5% of your weekly limit left. Run /status for a breakdown.` and the status line `⚠ weekly limit: only 3% left · resets at 3:30 AM on 1 Nov · /status` say the limit is nearly spent — the agent still works. GEAR reads the stops as a quota stop; it does not treat the warning as one.
+
+What GEAR does with a stop: on a lane it applies `[models].on_quota.lanes` to the lane's chain — the model changes in place on the same CLI, or the CLI is closed and the next entry's CLI starts (T-35). On a reviewer it applies `[models].on_quota.review` to `[models].review` (T-115): the Codex agent is closed, the fallback entry's CLI starts in the same pane, and the reviewer is handed the **same task and attempt** again as a full review packet. A reviewer whose review chain has no next model (or `on_quota.review = "wait"`) is marked for a human — its role has no parked state.
+
 A provider back-off is different: after a 429, Codex retries on its own and shows no output for minutes while the screen still says it is working. GEAR reads the back-off signs and shows the seat as a provider back-off — it is not a stall, do not kill it, and do not spend a switch on it.
 
 ## Pitfalls

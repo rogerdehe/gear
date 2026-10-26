@@ -20,7 +20,7 @@
 use gear_app::config::ModelEntry;
 use gear_herdr::{AgentStatus, HerdrAct, Outcome, Profile};
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatState, Ts};
 use gear_store::{BindingRow, BindingStatus, SeatRow, Store};
 
 use crate::model::{model_meta_key, model_start, start_args};
@@ -238,7 +238,7 @@ pub(crate) fn advance(
                 }
             }
             Phase::Finish => {
-                return finish(store, herdr, profiles, project, seat, &mut plan, now);
+                return finish(store, herdr, profiles, project, seat, &plan, now);
             }
         }
     }
@@ -369,20 +369,20 @@ fn exit(
             plan.phase = Phase::Start;
             plan.waited = 0;
             set_pending(store, &seat.id, plan)?;
-            return Ok(true);
+            Ok(true)
         }
         Ok(Some(_)) => {
             // The old agent is still there: the next tick looks again.
-            return wait(store, seat, plan, now, "the agent is still in the pane");
+            wait(store, seat, plan, now, "the agent is still in the pane")
         }
         Err(error) => {
-            return wait(
+            wait(
                 store,
                 seat,
                 plan,
                 now,
                 &format!("the pane could not be read: {}", error.0),
-            );
+            )
         }
     }
 }
@@ -595,8 +595,9 @@ fn finish(
             }
         }
     }
-    let text = crate::quota::continue_text(store, &seat.id)?;
-    let open = crate::quota::open_attempt(store, &seat.id)?;
+    // What the seat carries on with: a lane its Continue line, a reviewer its
+    // review packet again (T-115).
+    let (text, open) = crate::quota::resume_delivery(store, project, seat)?;
     store.write(|tx| {
         // The new binding must be there: the seat was reserved before the
         // agent started.
@@ -623,7 +624,7 @@ fn finish(
             .get_seat(&seat.id)?
             .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
         require_transition(
-            SeatState::can_transition(SeatRole::Lane, row.state, SeatState::Active),
+            SeatState::can_transition(row.role, row.state, SeatState::Active),
             "seat",
             row.state.as_str(),
             SeatState::Active.as_str(),
@@ -677,7 +678,7 @@ fn leave_reachable(store: &mut Store, seat: &SeatRow, plan: &Plan, now: Ts) -> G
             return Ok(());
         }
         require_transition(
-            SeatState::can_transition(SeatRole::Lane, row.state, SeatState::Missing),
+            SeatState::can_transition(row.role, row.state, SeatState::Missing),
             "seat",
             row.state.as_str(),
             SeatState::Missing.as_str(),
@@ -720,7 +721,7 @@ fn reserve(
             SeatState::Active | SeatState::Standby | SeatState::Retiring | SeatState::Parked
         ) {
             require_transition(
-                SeatState::can_transition(SeatRole::Lane, state, SeatState::Missing),
+                SeatState::can_transition(row.role, state, SeatState::Missing),
                 "seat",
                 state.as_str(),
                 SeatState::Missing.as_str(),
@@ -730,7 +731,7 @@ fn reserve(
         }
         if state == SeatState::Missing {
             require_transition(
-                SeatState::can_transition(SeatRole::Lane, SeatState::Missing, SeatState::Starting),
+                SeatState::can_transition(row.role, SeatState::Missing, SeatState::Starting),
                 "seat",
                 SeatState::Missing.as_str(),
                 SeatState::Starting.as_str(),
