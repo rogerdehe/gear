@@ -87,3 +87,4 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
 - A light procedure for small tasks, decided from M4's per-round token and time data.
 - OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
+- Cut from M4 at station M-2503 (pace 1.66x): T-180 admin stop waits for merges (T-121), T-181 acknowledged instructions and the config drift warning, T-182 a push race does not re-run the gate, T-183 T-134 F2/F3 names. Their goals are in gear/voyages/M4.md.

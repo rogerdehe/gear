@@ -47,7 +47,10 @@ fn fp(pane: &str, kind: &str) -> Fingerprint {
 fn review(outcome: Outcome, findings: &str, rid: &str) -> SendArgs {
     SendArgs { kind: MsgKind::Review, body: findings.into(), task: Some("T-1".into()), attempt: Some(1),
         contract: None, candidate: None, verdict: Some(outcome), blocking: None, base: None, about: None, to: None, reply_to: None,
-        urgent: false, request_id: rid.into() }
+        urgent: false,
+        left: None,
+        blocker: None,
+        on: None, request_id: rid.into() }
 }
 
 #[test]

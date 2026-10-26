@@ -125,8 +125,11 @@ fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
     let first = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
     let ops = w.doorbell_ops();
     assert_eq!(ops.len(), 1, "{ops:?}");
-    assert_eq!(ops[0].state, OpState::Failed, "Herdr refused: nothing was typed");
-    assert!(first.executed.iter().any(|(_, state)| state == "failed"), "{first:?}");
+    // T-149 (design §10.1): the refusal is recovered — the agent of the seat
+    // is there, so it is named again and the same op types the doorbell on the
+    // next tick.
+    assert_eq!(ops[0].state, OpState::Intended, "the op waits: {ops:?}");
+    assert!(first.executed.iter().any(|(_, state)| state == "intended"), "{first:?}");
 
     // Herdr is healthy again; the message was never typed, so it is rung now.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 21).unwrap();
@@ -135,8 +138,8 @@ fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
     assert_eq!(said.len(), 2, "the refused attempt, then the real doorbell: {said:?}");
     assert!(said[1].contains(&id), "{said:?}");
     let ops = w.doorbell_ops();
-    assert_eq!(ops.len(), 2, "{ops:?}");
-    assert_eq!(ops[1].state, OpState::Submitted);
+    assert_eq!(ops.len(), 1, "the same op, typed again: {ops:?}");
+    assert_eq!(ops[0].state, OpState::Submitted);
 }
 
 #[test]

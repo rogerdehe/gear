@@ -438,7 +438,12 @@ fn onboard_seat(
             .map(|(_, profile)| profile)
             .unwrap_or(profile);
         if let Some(command) = exit_profile.exit_command.as_deref() {
-            let _ = herdr.prompt(&pane, command);
+            // Design §10.1: the command goes to the agent's name, never to the
+            // pane id — an agent that exited leaves a shell behind, and the
+            // command would be typed into it.
+            if let Some(name) = crate::names::live_name(herdr, &pane) {
+                let _ = herdr.prompt(&name, command);
+            }
         } else if !exit_profile.exit_keys.is_empty() {
             let _ = herdr.send_keys(&pane, &exit_profile.exit_keys);
         }

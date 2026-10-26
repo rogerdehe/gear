@@ -480,7 +480,7 @@ One function in gear-app, used by the board, `gear queue` and §8.4: `idle_reaso
 | `Quota { until }` | the seat is quota-parked | `quota until 15:12` |
 | `Parked { until }`, `Held { reason }` | seat state | `parked until …` / `held: …` |
 | `Waiting { on }` | a declared wait (§5.3) | `waiting for T-m (lane, stage)` |
-| `DepWait { task, on }` | the lane's next queued task has a dep not Done | `next T-x waits for T-y (lane, stage)` |
+| `DepWait { task, on }` | the lane's next queued task (tasks in review or Done are skipped) has a dep not Done | `next T-x waits for T-y (lane, stage)` |
 | `Undelivered { task }` | the next task is ready and not delivered | `next T-x is ready but not delivered` |
 | `NoWork` | nothing left in its queue | `nothing left planned` |
 
@@ -682,6 +682,7 @@ impl Tx<'_> {
     pub fn close_pause(&self, project: &str, seat: &str, kind: &str, at: Ts) -> GearResult<()>; // closes the open one of that kind
     pub fn pauses_of_project(&self, project: &str) -> GearResult<Vec<PauseRow>>;
 
+    pub fn clear_seat_task(&self, seat_id: &str) -> GearResult<()>;          // §3.6: a Standby reviewer has no job (added by hull in T-143)
     pub fn set_task_rework_estimate(&self, project: &str, task: &str, min: Option<i64>) -> GearResult<()>;
     pub fn set_task_wait(&self, project: &str, task: &str, on: &str, cond: &str) -> GearResult<()>;
     pub fn clear_task_wait(&self, project: &str, task: &str) -> GearResult<()>;
