@@ -814,8 +814,7 @@ fn integration_worktree(
         other => return Err(step_failure("worktree_open", &other)),
     };
     // The engine's own push obeys the same allow-list as a lane's (T-72): the
-    // hook covers it too, and the in-process check below runs first.
-    crate::hooks::install(std::path::Path::new(&worktree.path))?;
+    // in-process check in `push_allowed` runs before it.
     Ok(worktree)
 }
 
@@ -1287,11 +1286,10 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 fn git_with_lock(dir: &Path, args: &[&str], lock: Option<&File>) -> Result<String, String> {
     let mut command = Command::new("git");
-    // The engine is not a seat: its git runs — and the pre-push hook a push
-    // may trigger — must not see the seat identity of whoever started the
-    // engine. A hook that resolved the push against the starter's project
-    // refused every merge when the suite ran inside a seat (T-97). The engine's
-    // own push is checked in this process (`push_allowed`) before it runs.
+    // The engine is not a seat: its git runs — and any hook a repository
+    // brings — must not see the seat identity of whoever started the engine
+    // (T-97). The engine's own push is checked in this process (`push_allowed`)
+    // before it runs.
     command
         .args(args)
         .current_dir(dir)
