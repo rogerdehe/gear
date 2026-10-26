@@ -45,6 +45,19 @@ commit() {
     git_ -C "$1" commit -qm "$2"
 }
 
+# Give `bare` the branches of `work` and make it the work repository's origin.
+# A fixture never pushes: a unit-test run must not (T-106), so the bare is
+# seeded by fetching into it, and the origin is wired up afterwards.
+seed_origin() {
+    bare=$1
+    work=$2
+    git_ -C "$bare" fetch -q "$work" '+refs/heads/*:refs/heads/*'
+    git_ -C "$work" remote add origin "$bare"
+    git_ -C "$work" fetch -q origin
+    branch=$(git_ -C "$work" rev-parse --abbrev-ref HEAD)
+    git_ -C "$work" branch -q --set-upstream-to="origin/$branch" "$branch"
+}
+
 # ---------------------------------------------------------------- multi
 #
 # A parent repo with two child repositories below it. Each of the three has its
@@ -55,8 +68,8 @@ commit() {
 for name in parent web api; do
     git_ init -q --bare -b dev "$target/origins/$name.git"
 done
-# The project that already runs has its own origin too: a GEAR project's push
-# allow-list needs a registered destination (T-98).
+# The project that already runs has its own origin too (T-98): a project has a
+# remote, as any project does.
 git_ init -q --bare -b main "$target/origins/running.git"
 # The children's integration branch is their own (T-53): their origins start on
 # `feat`, so a clone of one is on it.
@@ -64,8 +77,7 @@ for name in web api; do
     git_ -C "$target/origins/$name.git" symbolic-ref HEAD refs/heads/feat
 done
 
-# A clone of an empty bare repository warns; the next commit is the real test.
-git_ clone -q "$target/origins/parent.git" "$target/multi" 2>/dev/null
+git_ init -q -b dev "$target/multi"
 parent="$target/multi"
 
 cat > "$parent/README.md" <<'EOF'
@@ -102,15 +114,14 @@ grep -q "fixture: multi" README.md
 EOF
 chmod +x "$parent/gate.sh" "$parent/main.sh"
 
-git_ -C "$parent" switch -q -c dev
 commit "$parent" "fixture: the multi parent (dev)"
-git_ -C "$parent" push -q -u origin dev
+seed_origin "$target/origins/parent.git" "$parent"
 # A release branch, so a landing at the end of a voyage has one to ask about.
 git_ -C "$parent" branch main dev
 
 # The children: cloned into the gitignored paths of the parent, on `feat`.
 for name in web api; do
-    git_ clone -q "$target/origins/$name.git" "$parent/$name" 2>/dev/null
+    git_ init -q -b feat "$parent/$name"
     child="$parent/$name"
     cat > "$child/README.md" <<EOF
 # fixture: $name
@@ -134,9 +145,8 @@ test -f README.md
 [ "\$(sh $name.sh)" = "$name" ]
 EOF
     chmod +x "$child/gate.sh" "$child/$name.sh"
-    git_ -C "$child" switch -q -c feat
     commit "$child" "fixture: the $name child (feat)"
-    git_ -C "$child" push -q -u origin feat
+    seed_origin "$target/origins/$name.git" "$child"
     git_ -C "$child" branch main feat
 done
 
@@ -289,9 +299,8 @@ check:
 	sh gate.sh
 EOF
 
-git_ -C "$running" remote add origin "$target/origins/running.git"
 commit "$running" "running: the project as it is today"
-git_ -C "$running" push -q -u origin main
+seed_origin "$target/origins/running.git" "$running"
 
 # ---------------------------------------------------------------- notes
 
@@ -340,9 +349,8 @@ A project that already runs: `.github/workflows/ci.yml`, a `CLAUDE.md` and an
 three stale docs under `docs/`, and `src/bad.py` beside the exemplar
 `src/good.py`. Its gate is `sh gate.sh` (the same thing `make check` runs).
 
-It has its own local bare `origin` too — `origins/running.git`, on `main` — so a
-GEAR project registered on it has a destination for the push allow-list; the
-adoption run used to need one made by hand.
+It has its own local bare `origin` too — `origins/running.git`, on `main` — as a
+project that already runs would; a voyage registered on it has a remote.
 
 Use it for the adoption voyage: `gear --skill adopt` (T-85) before the kickoff.
 
