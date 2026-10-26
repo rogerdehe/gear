@@ -445,6 +445,12 @@ fn start_reviewer(
                         }
                     }
                 }
+                // The answer could not be read: a detached checkout (its HEAD
+                // is kept, the branch let go of — T-69) answers without a
+                // branch, and the worktree may well be open. The seat waits:
+                // it is not parked, so it holds no temp slot, and the next
+                // tick opens the worktree again.
+                Outcome::Uncertain { .. } => return Ok(Started::NotYet),
                 other => {
                     park(store, &seat.id, &step_failure("worktree_open", &other), now)?;
                     return Ok(Started::NotYet);
