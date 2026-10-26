@@ -60,7 +60,8 @@ quota_reset_h = 5
 [profiles.pi]
 kind = "pi"
 unattended_args = ["--approve"]
-exit_keys = ["ctrl+c"]
+# pi exits on ctrl+d; ctrl+c only clears its input (checked live, pi 1.4.0).
+exit_keys = ["ctrl+d"]
 quota_markers = ["usage limit reached"]
 busy_markers = ["esc to interrupt"]
 "#
@@ -336,7 +337,7 @@ fn a_quota_stop_restarts_pi_on_the_next_model() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         sent_keys(&herdr),
-        vec![vec!["ctrl+c".to_string()]],
+        vec![vec!["ctrl+d".to_string()]],
         "pi is exited once: {:?}",
         herdr.calls
     );
