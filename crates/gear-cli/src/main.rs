@@ -965,6 +965,12 @@ fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
     for settled in &result.settled {
         lines.push(format!("settled {settled}"));
     }
+    for id in &result.cancelled {
+        lines.push(format!("cancelled {id}"));
+    }
+    for id in &result.resolved {
+        lines.push(format!("resolved {id}"));
+    }
     lines.join("\n")
 }
 
