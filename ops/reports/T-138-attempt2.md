@@ -21,6 +21,7 @@ curl -sS --max-time 15 -w '\n%{http_code}' -H @- <url>
 
 The status is the last line of the answer (`-w` writes it there, after a
 newline and without one of its own). The reader splits it off:
+
 - a status of **400 or more** is an error before the body is parsed:
   `Err("<reader>: HTTP <status>: <the first 200 characters of the body>")` —
   the reader's name, the status and what the provider said;
@@ -35,6 +36,7 @@ line.
 
 The fake curl now prints the answer **as real curl does**: the body and the
 status on its last line. On top of that:
+
 - `an_http_error_gives_the_status_and_the_body` — a 401, a 429 and a 500 with
   the body of the provider: each ends in an `Err` that names the status, the
   reader and the body;
