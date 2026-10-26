@@ -11,15 +11,65 @@ const RECOVERED_REASON: &str = "engine restarted before the call finished";
 /// Result stored on a doorbell typed by the sender itself (T-130).
 const SENT_BY_SENDER: &str = "typed by the sender";
 
+/// Whether a doorbell op still covers the messages it named (T-130 review F2).
+///
+/// `Void` never reached the pane, and a definitely `Failed` one was refused by
+/// Herdr before it typed anything — so both leave their messages free to be
+/// rung again. Everything else (on its way, typed, or possibly typed) covers
+/// them: a message is never rung twice, and an uncertain doorbell is never
+/// resent.
+pub fn doorbell_covers(op: &OpRow) -> bool {
+    !matches!(op.state, OpState::Void | OpState::Failed)
+}
+
+/// The message ids a seat's doorbell ops still cover, one doorbell per message.
+pub(crate) fn covered_messages(
+    tx: &Tx<'_>,
+    seat: &str,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    let mut ids = std::collections::BTreeSet::new();
+    for op in tx.ops_of_seat_kind(seat, OpKind::Doorbell)? {
+        if !doorbell_covers(&op) {
+            continue;
+        }
+        for id in op
+            .payload
+            .get("covers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            ids.insert(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
 /// Type one doorbell into its pane now, from a caller outside the tick
 /// (`gear send`, T-130), and record it so the engine never rings the message
 /// again.
 ///
 /// The seat and its active binding are re-read here, as the tick does: a stale
-/// generation, an unreachable seat or a closed pane is never typed into. The
-/// op is written **only when Herdr took the text**; a refused or uncertain
-/// prompt leaves nothing behind, so the engine rings the message on its next
-/// tick. Returns the pane the text went to.
+/// generation, an unreachable seat or a closed pane is never typed into.
+///
+/// **The message is claimed before Herdr is called** (T-130 review F1): the
+/// doorbell op is written — covering the message, holding the seat's slot — in
+/// one write transaction that first checks whether any doorbell of this seat
+/// that still covers its message (`covered_messages`) already names it. An
+/// engine tick that has already intended its doorbell for the message wins:
+/// the sender skips, and the engine types it. When the sender claims first, the
+/// tick's own coverage read (and the slot this claim holds) keeps it from ringing
+/// the same message again. Only a tick that read its coverage before this claim
+/// was written and writes its intent after it can still double-ring, a window of
+/// pure computation inside one tick — closing that is the claim protocol the
+/// review deferred, and the report names it.
+///
+/// A prompt Herdr refuses records the op as **Failed**, which covers nothing
+/// (F2), so the engine rings the message on its next tick; an uncertain prompt
+/// records it as Unknown and is never resent (design/07). Returns the pane the
+/// text went to; `None` = skipped (another doorbell covers the message, or the
+/// seat cannot be reached) or refused.
 pub fn deliver_doorbell_now(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -36,7 +86,9 @@ pub fn deliver_doorbell_now(
         at_once: true,
     }];
     let text = crate::doorbell::text(&items);
-    let pane = store.read(|tx| {
+    // One write transaction: check the seat, the binding and the coverage, and
+    // claim the message with this path's own doorbell op before Herdr runs.
+    let claimed = store.write(|tx| {
         let Some(row) = tx.get_seat(seat)? else { return Ok(None) };
         if row.generation != generation || !crate::observe::reachable(row.state) {
             return Ok(None);
@@ -45,30 +97,14 @@ pub fn deliver_doorbell_now(
         if binding.status != BindingStatus::Active {
             return Ok(None);
         }
-        Ok(Some((
-            binding.pane_id,
-            crate::names::desired(&row),
-        )))
-    })?;
-    let Some((pane_id, agent_name)) = pane else { return Ok(None) };
-    // Outside any transaction: call Herdr. T-134: Herdr refuses a prompt to an
-    // agent whose name it cleared, so make sure of the name first.
-    crate::names::ensure(herdr, &pane_id, &agent_name);
-    if !matches!(herdr.prompt(&pane_id, &text), Outcome::Ok(())) {
-        return Ok(None);
-    }
-    // Herdr took it: record the doorbell, so the next tick does not ring the
-    // same message again (T-130).
-    let action = crate::doorbell::DoorbellAction {
-        project: project.to_string(),
-        seat: seat.to_string(),
-        generation,
-        pane_id: pane_id.clone(),
-        text: text.clone(),
-        covers: vec![message.to_string()],
-    };
-    store.write(|tx| {
-        crate::attention::record(tx, &action, now)?;
+        // F1: another path (the engine's tick, or an earlier send) already
+        // covers this message — it types it, this call does not.
+        if covered_messages(tx, seat)?.contains(message) {
+            return Ok(None);
+        }
+        // T-134: the name this seat's agent must carry before the prompt —
+        // a reviewer keeps the task-based name its review started with.
+        let agent_name = crate::names::desired(&row);
         let op = tx.insert_op(&NewOp {
             project: project.to_string(),
             seat: seat.to_string(),
@@ -78,15 +114,49 @@ pub fn deliver_doorbell_now(
             attempt: None,
             ref_msg: None,
             plan_version: None,
-            payload: serde_json::json!({ "text": text, "covers": action.covers }),
+            payload: serde_json::json!({ "text": text, "covers": [message] }),
             created: now,
         })?;
-        // The text is already in the pane: the op of the tick's own path —
-        // Intended → Executing → Submitted — recorded in one transaction.
+        // Executing is the claim: the tick's `execute_intended` only drains
+        // Intended ops, so nobody else types this one, and the seat's slot is
+        // held from here on.
         tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
-        tx.set_op_state(project, &op.id, OpState::Submitted, Some(SENT_BY_SENDER), now)
+        Ok(Some((op.id, binding.pane_id, agent_name)))
     })?;
-    Ok(Some(pane_id))
+    let Some((op_id, pane_id, agent_name)) = claimed else { return Ok(None) };
+    // Outside any transaction: call Herdr. T-134: Herdr refuses a prompt to an
+    // agent whose name it cleared, so make sure of the name first.
+    crate::names::ensure(herdr, &pane_id, &agent_name);
+    let outcome = herdr.prompt(&pane_id, &text);
+    let state = match &outcome {
+        Outcome::Ok(()) => OpState::Submitted,
+        // A refusal proves nothing was typed: the engine rings it again (F2).
+        Outcome::Refused { .. } => OpState::Failed,
+        // The text may be in the pane: never resent (design/07).
+        Outcome::Uncertain { .. } => OpState::Unknown,
+    };
+    let result = match &outcome {
+        Outcome::Ok(()) => SENT_BY_SENDER.to_string(),
+        Outcome::Refused { code, message } => format!("{code}: {message}"),
+        Outcome::Uncertain { reason } => reason.clone(),
+    };
+    store.write(|tx| {
+        if state == OpState::Submitted {
+            // The doorbell reached the pane: count it for the captain's
+            // reminder clock, exactly as the tick's own path does.
+            let action = crate::doorbell::DoorbellAction {
+                project: project.to_string(),
+                seat: seat.to_string(),
+                generation,
+                pane_id: pane_id.clone(),
+                text: text.clone(),
+                covers: vec![message.to_string()],
+            };
+            crate::attention::record(tx, &action, now)?;
+        }
+        tx.set_op_state(project, &op_id, state, Some(&result), now)
+    })?;
+    Ok((state == OpState::Submitted).then_some(pane_id))
 }
 
 /// Write Intended ops for the doorbell actions (one transaction). Each op
