@@ -23,6 +23,10 @@ fn a_checkpoint_rings_in_the_same_tick_and_survives_reopening_the_store() {
         })?;
         for n in 1..=2 {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Ready,
                 priority: "must".into(), lane: Some("heat".into()), milestone: Some("M2".into()),
                 required: false, contract_version: 1, deps: vec![], followup_of: None, wait_on: None,

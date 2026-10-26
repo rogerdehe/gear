@@ -69,7 +69,7 @@ fn delivery_is_intended_then_executed() {
     assert_eq!((op.kind, op.state, op.task.as_deref(), op.attempt), (OpKind::Deliver, OpState::Intended, Some("T-1"), Some(2)));
     assert_eq!(op.payload["text"], text.as_str());
     // the attempt the delivery is for exists and is the seat's open attempt (T-44, T-47)
-    s.write(|tx| tx.insert_attempt(&gear_store::AttemptRow { project: "p".into(), task: "T-1".into(), n: 2, seat: "p:heat".into(),
+    s.write(|tx| tx.insert_attempt(&gear_store::AttemptRow { session_ref: None, session_cli: None, session_action: None, sent_at: None, project: "p".into(), task: "T-1".into(), n: 2, seat: "p:heat".into(),
         generation: 1, contract_version: 1, adopted_version: 1, pending_update: None, state: gear_model::AttemptState::Delivered,
         candidate: None, report: None, safe_point: None, started: T0, updated: T0 })).unwrap();
     let mut herdr = FakeHerdr::new();

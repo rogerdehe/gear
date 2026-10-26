@@ -14,6 +14,7 @@ const CAPTAIN: &str = "p:captain";
 
 fn msg(thread: &str, sender: &str, kind: MsgKind, created: Ts, urgent: bool) -> NewMessage {
     NewMessage {
+        meta: None,
         project: "p".into(),
         thread: thread.into(),
         task: None,

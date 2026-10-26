@@ -149,6 +149,7 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
             action = "updated";
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(), thread: thread(&seat.name),
             task: None, attempt: None, sender: "engine".to_string(), sender_gen: 0,
             recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,

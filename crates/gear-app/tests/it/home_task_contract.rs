@@ -21,7 +21,7 @@ fn world(with_attempt: bool) -> Store {
         testing::seed_project(tx, "p", "sess", T0)?;
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
-        tx.insert_task(&TaskRow { project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
+        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),

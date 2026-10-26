@@ -27,6 +27,10 @@ fn world() -> Store {
                 ("T-4", 4, "runtime", TaskState::Ready),
             ] {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: id.into(),
                     rank,
@@ -152,6 +156,7 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
             testing::seed_active_seat(tx, "p", "R-4", SeatRole::Temp, "w1:p4", "opencode", T0)?;
             // One item waiting for the captain, three minutes old.
             tx.insert_message(&NewMessage {
+                meta: None,
                 project: "p".into(),
                 thread: "T-2:1".into(),
                 task: Some("T-2".into()),
@@ -231,6 +236,10 @@ fn a_task_in_review_is_shown_as_in_review() {
     store
         .write(|tx| {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-5".into(),
                 rank: 5,

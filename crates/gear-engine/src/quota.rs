@@ -667,6 +667,7 @@ pub(crate) fn tell_captain(
             .unwrap_or(seat.generation);
         let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("{}:{seq}", seat.name),
             task: None,
@@ -727,6 +728,7 @@ fn insert_alert(
         format!("{prefix}{line}")
     };
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread: format!("{}:{seq}", seat.name),
         task: None,
@@ -852,6 +854,10 @@ quota_reset_h = 5
                 testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
                 tx.set_binding_session_ref("p:heat", 1, "ses_lane")?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,

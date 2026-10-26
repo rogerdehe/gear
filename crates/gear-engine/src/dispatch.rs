@@ -492,6 +492,10 @@ mod tests {
 
     fn attempt(state: AttemptState) -> AttemptRow {
         AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(),
             task: "T-1".into(),
             n: 1,
@@ -518,6 +522,10 @@ mod tests {
             last_deliver_at: Some(NOW - 1000),
             nudges_since_progress: 0,
             ready_tasks: vec![TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-2".into(),
                 rank: 1,

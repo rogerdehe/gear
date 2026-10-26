@@ -50,6 +50,10 @@ fn finish(store: &mut Store, n: i64) {
         task.state = TaskState::Done;
         tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: id.clone(), n: 1, seat: "p:heat".into(), generation: 1,
             contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Accepted, candidate: None, report: None, safe_point: None,
@@ -192,6 +196,7 @@ fn invalid_station_decisions_and_mixed_replies_are_atomic() {
         assert_eq!(item(&mut store, &id).state, MsgState::Open);
     }
     let ordinary = store.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "ordinary".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Question, urgent: false, body: "question".into(), reply_to: None,

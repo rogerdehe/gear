@@ -768,6 +768,7 @@ fn tell_captain_failed(
             return Ok(());
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread,
             task: Some(task.clone()),
@@ -1596,6 +1597,7 @@ fn tell_captain(
             )
         })?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("merge:{}", now),
             task: task.map(|(task, _)| task.to_string()),
@@ -1685,6 +1687,7 @@ fn tell_captain_waiting(
             return Ok(());
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread,
             task: Some(task.clone()),
@@ -2178,6 +2181,10 @@ mod tests {
                     [("T-1", 1, candidate_a), ("T-2", 2, candidate_b)]
                 {
                     tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
                         project: "p".into(),
                         id: id.into(),
                         rank,
@@ -2544,6 +2551,10 @@ mod tests {
                 for (index, candidate) in candidates.iter().enumerate() {
                     let id = format!("T-{}", index + 1);
                     tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
                         project: "p".into(),
                         id: id.clone(),
                         rank: index as i64 + 1,
@@ -2869,6 +2880,10 @@ gate = "{gate}"
                 gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
                 gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
                 tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-5".into(),
                     rank: 1,
@@ -3553,6 +3568,7 @@ gate = "{project_gate}"
                     created: 0,
                 })?;
                 tx.insert_message(&NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "question:1".into(),
                     task: None,

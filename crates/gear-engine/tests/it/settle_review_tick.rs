@@ -24,6 +24,10 @@ fn world_verdict(passed: bool) -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -65,6 +69,7 @@ fn world_verdict(passed: bool) -> Store {
             created: T0 + 2,
         })?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "T-1:1".into(),
             task: Some("T-1".into()),
@@ -163,6 +168,10 @@ fn world_with_ready_work() -> Store {
         testing::seed_active_seat(tx, "p", "board", SeatRole::Lane, BOARD_PANE, "opencode", T0)?;
         for (id, lane, rank) in [("T-2", "heat", 2), ("T-3", "board", 3)] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: id.into(),
                 rank,
