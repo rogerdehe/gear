@@ -47,6 +47,10 @@ fn world() -> (Store, String) {
                 rework_note: None,
                 estimate_min: None,
                 issue: None,
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
@@ -201,6 +205,10 @@ fn a_started_attempt_never_gets_a_second_deliver() {
             rework_note: None,
             estimate_min: None,
             issue: None,
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             updated: T0,
         })?;
         tx.insert_attempt(&AttemptRow {
@@ -218,6 +226,10 @@ fn a_started_attempt_never_gets_a_second_deliver() {
             safe_point: None,
             started: T0,
             updated: T0,
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
         })
     })
     .unwrap();
