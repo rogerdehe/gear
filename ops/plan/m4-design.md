@@ -38,7 +38,7 @@ One migration, v5 → v6 (`crates/gear-store/src/migrate.rs`, `SCHEMA_VERSION = 
 -- §3: which session each attempt ran in, and what the engine did before the packet
 ALTER TABLE attempts ADD COLUMN session_ref TEXT;      -- Herdr session at check-in, updated at hand-in
 ALTER TABLE attempts ADD COLUMN session_cli TEXT;      -- the agent kind that ran it (pi, codex, ...)
-ALTER TABLE attempts ADD COLUMN session_action TEXT;   -- keep | new | compact | resume | fresh
+ALTER TABLE attempts ADD COLUMN session_action TEXT;   -- keep | new | compact | resume | fresh | new-unconfirmed | compact-fallback | resume-fallback
 ALTER TABLE attempts ADD COLUMN sent_at INTEGER;       -- when the packet was actually sent through Herdr
 
 -- §1.1: a task keeps its repo, base and gate (B02-01)
@@ -147,11 +147,11 @@ Before the engine sends a round's packet, it picks one **session action** by the
 
 "Current" = the seat's `bindings.session_ref` now. "Fresh" = the agent was started by this dispatch (its session has no earlier work). Rules are checked top to bottom; the first match wins.
 
-**Lane round (task T, attempt n):**
+**Lane round (task T, attempt n).** "Fresh" applies only after the rule is chosen: a `new` on a just-started agent is `fresh`; a `resume` is never replaced by `fresh`.
 
 | # | Case | Action |
 |---|---|---|
-| L1 | the agent is fresh | `fresh` (nothing to do) |
+| L1 | — | (rules L2-L7 first decide what the round needs; when the seat has no live agent, the dispatch starts it: with `resume_args` when the rule says `resume`, else plainly and the action becomes `fresh`) |
 | L2 | n ≥ 2 (rework) and attempt n−1 ran on this seat with the same CLI, and its `session_ref` = current | `keep` |
 | L3 | n ≥ 2 and attempt n−1 ran on this seat with the same CLI, `session_ref` ≠ current | `resume` (attempt n−1's session) |
 | L4 | n ≥ 2, any other case (another seat, another CLI, no session recorded) | `new` |
@@ -189,9 +189,9 @@ All waits are bounded; every timeout has the fallback written here.
 
 - **keep**: nothing; go to the packet.
 - **fresh**: nothing; go to the packet.
-- **new**: type `new_session` + enter. Wait until Herdr reports the agent ready again **and** the binding's `session_ref` changed, at most 30 s. If the id did not change in 30 s, record `session_action = 'new?'`, continue to the packet, and add one info item for the captain (`session:<seat>`): "`/new` did not change the session id of <seat>; check the profile". (Live check in the profile task: does Herdr report a new `agent_session` after `/new`, and does the agent keep its Herdr name? If Herdr keeps the old id, the profile task adds a fallback: the newest session file for the pane's cwd.)
-- **compact**: type `compact` + enter. Wait for Herdr `working`, then ready, at most 5 min. On timeout: run **new** instead and record `session_action = 'compact→new'`.
-- **resume S**: send `exit_keys`; wait until the pane shows no agent (Herdr `agent_get` → none), at most 30 s; start the agent in the same pane and cwd with its normal start args plus `resume_args` (`{session}` = S) — the same path as onboarding, `naming.rs` gives it its name; wait for ready, at most 60 s. On any failure: start it without `resume_args` and record `session_action = 'resume→new'`.
+- **new**: type `new_session` + enter. Wait until Herdr reports the agent ready again **and** the binding's `session_ref` changed, at most 30 s. If the id did not change in 30 s, record `session_action = 'new-unconfirmed'`, continue to the packet, and add one info item for the captain (`session:<seat>`): "`/new` did not change the session id of <seat>; check the profile". (Live check in the profile task: does Herdr report a new `agent_session` after `/new`, and does the agent keep its Herdr name? If Herdr keeps the old id, the profile task adds a fallback: the newest session file for the pane's cwd.)
+- **compact**: note the time T0, type `compact` + enter. It has finished when Herdr reports the agent ready **and** either Herdr reported `done` after T0 or the session log (§4.3) has a compaction or assistant record after T0 (a compaction can start and end between two 4 s ticks, so `working` may never be seen). Wait at most 5 min. On timeout: go on with the packet in the same session (keep the context, never lose it) and record `session_action = 'compact-fallback'`.
+- **resume S**: send `exit_keys`; wait until the pane shows no agent (Herdr `agent_get` → none), at most 30 s; start the agent in the same pane and cwd with its normal start args plus `resume_args` (`{session}` = S) — the same path as onboarding, `naming.rs` gives it its name; wait for ready, at most 60 s. On any failure: start it without `resume_args` and record `session_action = 'resume-fallback'`.
 
 ### 3.5 "The context is large"
 
@@ -280,19 +280,19 @@ Each round has a budget:
 | rework (attempt n ≥ 2) | max(10, ⌈estimate_min / 2⌉) |
 | review | `timing.review_budget_min`, default 20 |
 
-`active_s` = now − the round's check-in time (`started_at`; for a review, its delivery confirmation) − `paused_s`. The clock pauses (adds to `paused_s`) while the seat is quota-parked (§9) or the task is in a declared wait (§5.3).
+`active_s` = (now, or the round's hand-in time once handed in; for a review, its verdict time) − the round's check-in time (`started_at`; for a review, its delivery confirmation) − `paused_s`. The clock pauses (adds to `paused_s`) while the seat is quota-parked (§9) or the task is in a declared wait (§5.3).
 
 ### 5.2 The overrun question
 
-When `active_s` reaches the budget, the engine sends the seat an at-once message (it interrupts a working agent, as urgent messages do today) with exactly this text:
+Only while the attempt is `Started` or `Stopped` (or the review round has no verdict): when `active_s` reaches the budget, the engine sends the seat an at-once message (it interrupts a working agent, as urgent messages do today) with exactly this text:
 
 ```
 GEAR: T-<n> has reached its estimate (<budget> min; <active> min so far).
 Answer with one command, then keep working:
-gear send --kind progress --task T-<n> --left <minutes> --blocker "<what stops you, or none>" "<done so far; what is left>"
+gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done so far; what is left>"
 ```
 
-`gear send --kind progress` gets two flags: `--left <minutes>` (integer) and `--blocker <text>`. The reply becomes one captain item on thread `overrun:T-<n>` (one per task, updated, never duplicated): urgent when `--blocker` is not `none`, else normal. The item's text shows budget, active time, the answer, and the lane's `--left`.
+The engine fills `<a>` and `<c>` with the open attempt's numbers, so the lane copies the line as it is. `gear send --kind progress` gets two flags: `--left <minutes>` (integer) and `--blocker <text>`. The reply becomes one captain item on thread `overrun:T-<n>` (one per task, updated, never duplicated): urgent when `--blocker` is not `none`, else normal. The item's text shows budget, active time, the answer, and the lane's `--left`.
 
 - The next question comes at `active_s ≥ budget + max(10, left)` minutes, with the same text.
 - No answer within 10 min → the item becomes urgent with "no answer"; the next question comes 15 min later.
@@ -344,6 +344,7 @@ Each report is stored with `required`, and the board and `gear friction` show it
 ### 6.4 The captain
 
 - **When**: the captain is idle = it has no actionable item (`actionable_for` empty). When it is idle and unread (`closed_at IS NULL`) reports exist, the engine rings once with one item on thread `friction` listing them ("3 friction reports: F-4 F-5 F-7. Run gear friction."). It rings again only when a new report arrives and the captain is idle again; never more than once per 30 min.
+- The `friction` item closes itself when every report it lists is closed; a new report while it is open updates its list.
 - **Reading**: `gear friction` lists open reports with their facts; `gear friction --all` includes closed ones.
 - **Closing**: `gear friction close F-<n> -m "<outcome>"`, outcome one of: fixed (what), lesson (which), not worth it (why). The landing review (§7.5) lists all reports with their outcomes; open ones are marked.
 
@@ -469,7 +470,7 @@ The screen is not the source of quota facts. Each provider's quota is read from 
 provider = "minimax-cn"            # the provider part of model ids
 reader = "minimax"                 # minimax | opencode-go | codex
 key_file = "~/.pi/agent/auth.json" # a JSON file holding the API key
-key_path = "minimax-cn.key"        # dotted path inside it
+key_path = "minimax-cn.key"        # dotted path inside it (pi's auth.json holds {"<provider>": {"type", "key"}})
 ```
 
 | reader | Request | Facts |
@@ -498,11 +499,11 @@ The board's quota block and `gear queue` show the last readings.
 
 - `HerdrAct::prompt` targets the live **agent name**, never the pane id: Herdr then refuses when no agent of that name runs (`agent_not_ready`), instead of a race typing into a shell.
 - `pane_run` (shell commands, today only before an agent start) runs only after `agent_get(pane)` reports no agent. With §3.7 the reviewer checkout no longer types into a pane at all.
-- A delivery whose prompt was refused for a gone agent is `agent-gone`, not "submitted": the op fails at once with that reason, and the seat goes to the restart path (§3.3 S1).
+- When Herdr refuses a prompt by name, the engine calls `agent_get(pane)`: an agent of the seat's kind is there → it lost its name (M3.1); `naming.rs` renames it and the prompt is retried next tick, nothing is restarted. No agent in the pane → the op fails at once as `agent-gone` (not "submitted") and the seat goes to the restart path (§3.3 S1).
 
 ### 10.2 Busy is Herdr's state (pi `Working` in prose)
 
-Whether an agent is busy is Herdr's state (`working`) only. Screen text never makes an agent busy. `profile.rs` `classify` keeps quota, blocked-dialog and error markers; the `busy` class is removed from it, and every caller that treated "busy marker" as busy reads Herdr's state instead.
+Whether an agent is busy is Herdr's state (`working`) only. Only `idle` and `done` are ready: `working`, `blocked` and `unknown` are never ready — the engine never delivers, types a command or sends a session action to an agent in those states (`unknown` is common for pi while it works). Screen text never makes an agent busy. `profile.rs` `classify` keeps quota, blocked-dialog and error markers; the `busy` class is removed from it, and every caller that treated "busy marker" as busy reads Herdr's state instead.
 
 ### 10.3 Delivery confirmation (late views, results from Delivered)
 
