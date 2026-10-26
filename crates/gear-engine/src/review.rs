@@ -3072,17 +3072,18 @@ review = [
             .unwrap();
         herdr.exit_agent("wt1:p1");
 
-        // Attempt 2 of the same task is handed in.
+        // Attempt 2 of the same task is handed in — with a new candidate
+        // (T-118: the candidate that already failed is refused).
         store
             .write(|tx| {
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 25)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 25)?;
-                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "abc1234", "ops/reports/T-1.md", T0 + 25)
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "ops/reports/T-1.md", T0 + 25)
             })
             .unwrap();
 
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "abc1234", "review/t1");
+        confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "def5678", "review/t1");
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()]);

@@ -198,6 +198,25 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
             ),
         ));
     }
+    // The candidate must be a new one (T-118): a candidate that already failed
+    // is not a rework. A lane that hands the same one in again reads its first
+    // report, finds nothing to fix and loops (trial B02-06). The refusal names
+    // the attempt that failed on it.
+    for failed in tx.attempts_of_task(project, task)? {
+        if failed.state != AttemptState::Rejected {
+            continue;
+        }
+        if failed.candidate.as_deref() != Some(candidate) {
+            continue;
+        }
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task}: candidate {candidate} already failed on attempt {}: rework it and hand in a different candidate",
+                failed.n
+            ),
+        ));
+    }
     require_transition(
         AttemptState::can_transition(attempt.state, AttemptState::Submitted),
         "attempt",

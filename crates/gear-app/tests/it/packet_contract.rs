@@ -1,11 +1,17 @@
-//! Contract for gear_app::plan::render_task_packet (T-53).
+//! Contract for gear_app::plan::render_task_packet (T-53) and the rework
+//! round of a packet (T-118).
 
 use gear_app::plan::render_task_packet;
-use gear_app::tasks::start_attempt;
+use gear_app::tasks::{on_delivery_confirmed, settle_review, start_attempt, submit_result};
 use gear_model::{ErrorCode, SeatRole, TaskState};
-use gear_store::{testing, ContractRow, Store, TaskRow};
+use gear_store::{testing, ContractRow, ReviewVerdictRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
+/// The candidate of the first round — the one that failed.
+const CANDIDATE: &str = "aaa1111";
+/// The findings of the failed review, with the ids the reviewer named as
+/// blocking (T-23).
+const FINDINGS: &str = "F1: the rework is missing\nF2: the wording of a comment";
 
 fn world(attempt: bool) -> Store {
     let mut s = Store::open_in_memory().unwrap();
@@ -55,4 +61,99 @@ fn pending_update_and_missing_task() {
     assert_eq!(s.read(|tx| render_task_packet(tx, "p", "T-9")).unwrap_err().code, ErrorCode::NoTarget);
     let mut s = world(false);
     assert!(s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap().contains("--attempt <n>"));
+}
+
+/// The world of a rework round (T-118): T-7 was handed in as `CANDIDATE`, the
+/// review failed on the blocking finding F1, and the lane started attempt 2.
+fn rework_world() -> Store {
+    let mut s = world(false);
+    s.write(|tx| {
+        start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
+        on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
+        submit_result(tx, "p", "T-7", 1, 1, CANDIDATE, "Report: ops/reports/T-7.md", T0 + 1)?;
+        tx.insert_review_verdict(&ReviewVerdictRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            attempt: 1,
+            passed: false,
+            findings: FINDINGS.into(),
+            by_seat: "p:r-1".into(),
+            created: T0 + 2,
+        })?;
+        tx.set_review_blocking("p", "T-7", 1, "F1", T0 + 2)?;
+        settle_review(tx, "p", "T-7", 1, T0 + 3)?;
+        // The lane works on the rework: attempt 2 is open.
+        start_attempt(tx, "p", "T-7", "p:heat", 1, T0 + 4)?;
+        Ok(())
+    })
+    .unwrap();
+    s
+}
+
+/// T-118: the packet of a rework round leads with the captain's rework text
+/// and demotes the older report to history. A lane that read the first
+/// round's report, found nothing to fix and handed the same candidate in
+/// again (trial B02-06) never got this far.
+#[test]
+fn a_rework_packet_leads_with_the_rework_and_keeps_the_old_review_as_history() {
+    let mut s = rework_world();
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+
+    // The rework comes first, before the contract.
+    let rework_at = text.find("## Rework (attempt 2, from the review of attempt 1)")
+        .unwrap_or_else(|| panic!("no rework section:\n{text}"));
+    let goal_at = text.find("## Goal").expect("a goal section");
+    assert!(rework_at < goal_at, "the rework leads:\n{text}");
+    // The captain's rework text is in it: only the blocking finding.
+    let rework = &text[rework_at..goal_at];
+    assert!(rework.contains("F1: the rework is missing"), "{rework}");
+    assert!(!rework.contains("F2"), "the logged finding is not a rework: {rework}");
+
+    // The older report is history, under its own heading.
+    assert!(text.contains("## Earlier reviews (history)"), "{text}");
+    assert!(!text.contains("\n## Review\n"), "the old heading is gone:\n{text}");
+    let history_at = text.find("## Earlier reviews (history)").unwrap();
+    assert!(history_at > rework_at, "the history follows the rework:\n{text}");
+    assert!(text[history_at..].contains("attempt 1 · fail · p:r-1"), "{text}");
+
+    // The hand-in command names the attempt of this round.
+    assert!(
+        text.contains("gear send --kind result --task T-7 --attempt 2 --contract 1 --candidate <commit>"),
+        "{text}"
+    );
+}
+
+/// A first hand-in is not a rework: the packet keeps the plain review
+/// heading (T-118).
+#[test]
+fn a_first_round_packet_has_no_rework_section() {
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("## Rework"), "{text}");
+    assert!(!text.contains("## Earlier reviews (history)"), "{text}");
+}
+
+/// A finished task is not in a rework round any more: once a later attempt
+/// passed, the packet keeps the plain review history (T-118).
+#[test]
+fn a_finished_task_has_no_rework_section() {
+    let mut s = rework_world();
+    s.write(|tx| {
+        on_delivery_confirmed(tx, "p", "T-7", 2, T0 + 5)?;
+        submit_result(tx, "p", "T-7", 2, 1, "bbb2222", "Report: ops/reports/T-7.md", T0 + 5)?;
+        tx.insert_review_verdict(&ReviewVerdictRow {
+            project: "p".into(),
+            task: "T-7".into(),
+            attempt: 2,
+            passed: true,
+            findings: "the rework is there".into(),
+            by_seat: "p:r-1".into(),
+            created: T0 + 6,
+        })?;
+        settle_review(tx, "p", "T-7", 2, T0 + 7)
+    })
+    .unwrap();
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("## Rework"), "{text}");
+    assert!(text.contains("## Review"), "the plain review history stays:\n{text}");
 }
