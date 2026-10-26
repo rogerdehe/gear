@@ -1786,6 +1786,19 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         )
     }
 
+    /// Move `work`'s HEAD onto `branch` in its origin, from the origin's own
+    /// side (T-107): the engine's tests never run `git push`.
+    fn publish(work: &std::path::Path, branch: &str) {
+        sh(
+            work,
+            &format!(
+                "origin=$(git remote get-url origin); \
+                 git -C \"$origin\" fetch -q \"$(pwd)\" +HEAD:refs/heads/{branch} && \
+                 git fetch -q origin"
+            ),
+        );
+    }
+
     fn sh(dir: &std::path::Path, command: &str) -> String {
         let out = std::process::Command::new("sh")
             .arg("-c")
@@ -1884,9 +1897,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let work = root.join("work");
         std::fs::write(work.join("README.md"), "dev\n").unwrap();
         sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-        sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+        sh(&work, "git remote add origin ../origin.git");
+        publish(&work, "dev");
         sh(&work, "git switch -qc review/t1 && echo one > one.txt && git add -A \
-                   && git -c user.email=a@b -c user.name=a commit -qm one && git push -q origin review/t1");
+                   && git -c user.email=a@b -c user.name=a commit -qm one");
+        publish(&work, "review/t1");
         let candidate = sh(&work, "git rev-parse review/t1");
         sh(&work, "git switch -q dev");
         // The previous reviewer's worktree holds the branch; the new seat's is
@@ -1947,9 +1962,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let work = root.join("work");
         std::fs::write(work.join("README.md"), "dev\n").unwrap();
         sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-        sh(&work, "git remote add origin ../origin.git && git push -q origin dev");
+        sh(&work, "git remote add origin ../origin.git");
+        publish(&work, "dev");
         sh(&work, "git switch -qc review/t1 && echo one > one.txt && git add -A \
-                   && git -c user.email=a@b -c user.name=a commit -qm one && git push -q origin review/t1");
+                   && git -c user.email=a@b -c user.name=a commit -qm one");
+        publish(&work, "review/t1");
         let candidate = sh(&work, "git rev-parse review/t1");
         sh(&work, "git switch -q dev");
         let old = root.join("old-seat");
