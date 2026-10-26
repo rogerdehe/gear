@@ -284,6 +284,34 @@ fn a_pi_lane_starts_with_its_model() {
     assert_eq!(model, FIRST);
 }
 
+/// T-114: the chain entry's own arguments follow the model flag — pi's
+/// `--thinking` is the entry's, never a constant in the code (T-35).
+#[test]
+fn a_pi_lane_starts_with_the_arguments_of_its_chain_entry() {
+    let text = config(&format!(
+        r#"{{ model = "{FIRST}", cli = "pi", args = ["--thinking", "high"] }}"#
+    ));
+    let (cfg, _profiles) = cfg(&text);
+    let mut store = queued_world(&text);
+    let mut herdr = FakeHerdr::new();
+
+    gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+    let starts = agent_starts(&herdr);
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    assert_eq!(
+        starts[0].2,
+        vec![
+            "--approve".to_string(),
+            "--model".to_string(),
+            FIRST.to_string(),
+            "--thinking".to_string(),
+            "high".to_string(),
+        ],
+        "the entry's arguments follow the model flag"
+    );
+}
+
 /// T-114: a quota stop on pi moves to the next chain entry by exiting pi and
 /// starting it again on the next model — the same pane, the same worktree —
 /// and the lane's task is delivered again in the new session.
