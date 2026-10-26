@@ -19,6 +19,7 @@ pub mod captain_quota;
 mod attention;
 pub mod blocked;
 pub mod busy;
+pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -187,6 +188,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        // A hand restart of an agent is a new session in the same generation
+        // (T-97): the binding follows what the pane reports, so a delivery that
+        // was never confirmed can be sent again without a store edit.
+        observe::record_sessions(store, &observed)?;
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.

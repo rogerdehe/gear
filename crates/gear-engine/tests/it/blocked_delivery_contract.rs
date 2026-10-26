@@ -8,7 +8,7 @@
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
 use gear_model::{MsgState, OpKind, OpState, SeatRole, SeatState, TaskState};
-use gear_store::{testing, ContractRow, OpRow, Store, TaskRow};
+use gear_store::{testing, ContractRow, OpRow, Store, TaskRow, ViewRecord};
 
 const T0: i64 = 1_800_000_000;
 const CAP: &str = "w1:p1";
@@ -118,11 +118,31 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
 
     // The dialog is dismissed: the lane is idle, and the pending delivery goes.
     w.herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
-    ticks(&mut w, 10, 14);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 41).unwrap();
+    // The lane reads it (T-97: a delivery nobody confirms fails after its
+    // budget; a view is what confirms it).
+    w.store
+        .write(|tx| {
+            tx.insert_view(&ViewRecord {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                ts: T0 + 42,
+                shown_msgs: vec![],
+                shown_ops: vec![],
+                shown_task: Some("T-1".into()),
+                shown_attempt: Some(1),
+                shown_contract: Some(1),
+            })
+        })
+        .unwrap();
+    for n in 11..14 {
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + n * 4 + 1).unwrap();
+    }
 
     let ops = deliveries(&mut w);
     assert_eq!(ops.len(), 1, "one delivery, never a second op: {ops:?}");
-    assert_eq!(ops[0].state, OpState::Submitted, "{ops:?}");
+    assert_eq!(ops[0].state, OpState::Confirmed, "{ops:?}");
     assert_eq!(w.herdr.prompts_to(LANE).len(), 1, "delivered once");
     assert!(
         w.herdr.prompts_to(LANE)[0].contains("New task T-1"),
@@ -164,13 +184,37 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
     assert_eq!(alerts.len(), 1, "the blocked alert: {alerts:?}");
     assert_eq!(alerts[0].state, MsgState::Open);
 
-    // The dialog is dismissed: one delivery, once.
+    // The dialog is dismissed: one delivery, once, and the lane reads it.
     w.herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
-    for n in 10..14 {
-        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
-    }
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 165).unwrap();
+    w.store
+        .write(|tx| {
+            tx.insert_view(&ViewRecord {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                ts: T0 + 166,
+                shown_msgs: vec![],
+                shown_ops: vec![],
+                shown_task: Some("T-1".into()),
+                shown_attempt: Some(1),
+                shown_contract: Some(1),
+            })
+        })
+        .unwrap();
+    // The next tick confirms it. (A later Continue is the normal nudge of a
+    // lane that never worked; the assignment itself went once.)
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 180).unwrap();
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "{ops:?}");
-    assert_eq!(ops[0].state, OpState::Submitted, "{ops:?}");
-    assert_eq!(w.herdr.prompts_to(LANE).len(), 1, "delivered once");
+    let assignment = ops
+        .iter()
+        .find(|op| op.payload.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.starts_with("New task T-1")))
+        .expect("the task was delivered");
+    assert_eq!(assignment.state, OpState::Confirmed, "{ops:?}");
+    assert_eq!(
+        w.herdr.prompts_to(LANE).iter().filter(|prompt| prompt.contains("New task T-1")).count(),
+        1,
+        "the assignment went once: {:?}",
+        w.herdr.prompts_to(LANE)
+    );
 }
