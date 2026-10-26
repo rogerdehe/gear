@@ -13,10 +13,11 @@
 //! the `seats.slot` of the skeleton) and the stamp never told the difference.
 //! **v2** is the canonical shape: a store stamped 2 was normalized by a binary
 //! that rebuilt every drifted table and kept its rows.
-//! **v3** adds the `push_destinations` of T-73 (the places a repo of the
-//! project may be pushed to). It is a table of its own, so the step only
-//! creates it; nothing else changes.
+//! **v3** added the `push_destinations` of T-73 (the places a repo of the
+//! project may be pushed to); **v5** drops it again — the push allow-list is
+//! gone (T-108), and the step only drops the table.
 //! **v4** adds `tasks.issue` (the GitHub issue a task came from, T-79).
+//! **v5** drops `push_destinations` (T-108: no push allow-list).
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -24,7 +25,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -44,6 +45,7 @@ pub const STEPS: &[Step] = &[
     Step { from: 1, apply: step_1_to_2 },
     Step { from: 2, apply: step_2_to_3 },
     Step { from: 3, apply: step_3_to_4 },
+    Step { from: 4, apply: step_4_to_5 },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -128,6 +130,14 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
 /// `IF NOT EXISTS`), so a store that already has the table keeps it.
 fn step_2_to_3(tx: &Transaction<'_>) -> GearResult<()> {
     tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
+    Ok(())
+}
+
+/// v4 → v5: the push allow-list is gone (T-108). The destinations table is
+/// dropped; nothing else changes, and a store without the table is unchanged.
+fn step_4_to_5(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch("DROP TABLE IF EXISTS push_destinations")
+        .map_err(map_sqlite)?;
     Ok(())
 }
 

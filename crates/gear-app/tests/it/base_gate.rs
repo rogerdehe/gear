@@ -75,6 +75,8 @@ impl Drop for Scratch {
 /// A bare origin with two commits on `dev`, and a clone for the lane.
 struct Repos {
     _root: Scratch,
+    /// The bare repository every clone calls `origin`.
+    origin: PathBuf,
     /// The repo that pushes to the bare origin (the "captain's" side).
     seed: PathBuf,
     lane: PathBuf,
@@ -82,43 +84,54 @@ struct Repos {
     older: String,
 }
 
+/// Publish `branch` of `source` in the bare origin's refs, the way the remote
+/// would learn it: the origin fetches the objects and the ref is set — nothing
+/// here pushes (T-108).
+fn publish(origin: &Path, source: &Path, from: &str, branch: &str) {
+    let sha = git(source, &["rev-parse", from]);
+    git(origin, &["fetch", "-q", source.to_str().unwrap(), from]);
+    git(origin, &["update-ref", &format!("refs/heads/{branch}"), sha.trim()]);
+}
+
+/// Delete `branch` in the bare origin's refs (a ref update, not a push).
+fn unpublish(origin: &Path, branch: &str) {
+    git(origin, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
+}
+
 fn repos() -> Repos {
     let root = Scratch::new("gate");
     let origin = root.path.join("origin.git");
     std::fs::create_dir(&origin).unwrap();
     git(&origin, &["init", "-q", "--bare", "--initial-branch=dev"]);
-    // Let a test delete dev on the remote (the bare clone's HEAD would forbid it).
-    git(&origin, &["config", "receive.denyDeleteCurrent", "ignore"]);
-
     let seed = root.path.join("seed");
     std::fs::create_dir(&seed).unwrap();
     git(&seed, &["init", "-q", "--initial-branch=dev"]);
     let older = commit(&seed, "a.txt", "one");
     commit(&seed, "b.txt", "two");
     git(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
-    git(&seed, &["push", "-q", "origin", "dev"]);
+    publish(&origin, &seed, "refs/heads/dev", "dev");
 
     let lane = root.path.join("lane");
     git(&root.path, &["clone", "-q", origin.to_str().unwrap(), lane.to_str().unwrap()]);
-    Repos { _root: root, seed, lane, older }
+    Repos { _root: root, origin, seed, lane, older }
 }
 
 impl Repos {
-    /// A candidate commit on a new branch, based on `from`.
-    /// A candidate on `branch`, pushed: a hand-in must be on
-    /// `origin/<lane>/t<n>` (T-83), so every fixture hands in a pushed one.
+    /// A candidate on `branch`, published in the origin: a hand-in must be on
+    /// `origin/<lane>/t<n>` (T-83), so every fixture hands in a published one.
+    /// The origin fetches it from the lane — the fixtures never push (T-108).
     fn candidate(&self, branch: &str, from: &str, text: &str) -> String {
         git(&self.lane, &["switch", "-q", "-c", branch, from]);
         let commit = commit(&self.lane, &format!("{}.txt", branch.replace('/', "-")), text);
-        git(&self.lane, &["push", "-q", "origin", &format!("{branch}:{branch}")]);
+        publish(&self.origin, &self.lane, &format!("refs/heads/{branch}"), branch);
         commit
     }
 
-    /// Advance `dev` on the remote (a commit pushed from the seed clone).
+    /// Advance `dev` on the remote (a commit the origin fetches from the seed).
     fn advance_dev(&self, text: &str) {
         git(&self.seed, &["switch", "-q", "dev"]);
         commit(&self.seed, &format!("{}.txt", text.replace(' ', "-")), text);
-        git(&self.seed, &["push", "-q", "origin", "dev"]);
+        publish(&self.origin, &self.seed, "refs/heads/dev", "dev");
     }
 }
 
@@ -278,10 +291,11 @@ fn an_unpushed_candidate_is_refused() {
 
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
-    assert!(err.detail.contains("git push origin heat/t1"), "{}", err.detail);
+    assert!(err.detail.contains("push the task branch first"), "{}", err.detail);
+    assert!(err.detail.contains("heat/t1"), "{}", err.detail);
     // A candidate that is not on a branch that *does* exist is the other
     // refusal: the branch is there, this commit is not on it.
-    git(&r.lane, &["push", "-q", "origin", "origin/dev:refs/heads/heat/t1"]);
+    publish(&r.origin, &r.lane, "refs/remotes/origin/dev", "heat/t1");
     let other = commit(&r.lane, "other.txt", "somewhere else");
     let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
     let err = mail::send(&mut s, &env, Some(&fp), &result(&other, gate), T0 + 5).unwrap_err();
@@ -320,7 +334,7 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
     let stale = r.candidate("data/stale", &cached, "old work");
     // The remote advances on dev and carries another branch the lane fetches.
     r.advance_dev("new work");
-    git(&r.seed, &["push", "-q", "origin", "dev:other"]);
+    publish(&r.origin, &r.seed, "refs/heads/dev", "other");
     git(
         &r.lane,
         &["config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"],
@@ -337,7 +351,7 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
 fn a_deleted_remote_integration_branch_is_refused() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
-    git(&r.seed, &["push", "-q", "origin", "--delete", "dev"]);
+    unpublish(&r.origin, "dev");
 
     let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
@@ -533,7 +547,7 @@ fn a_branch_deleted_on_the_remote_is_refused() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     git(&r.lane, &["fetch", "-q", "origin"]);
-    git(&r.seed, &["push", "-q", "origin", "--delete", "heat/t1"]);
+    unpublish(&r.origin, "heat/t1");
     let mut s = world();
     let (env, fp) = lane();
     let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
@@ -542,7 +556,8 @@ fn a_branch_deleted_on_the_remote_is_refused() {
 
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/heat/t1"), "{}", err.detail);
-    assert!(err.detail.contains("git push origin heat/t1"), "{}", err.detail);
+    assert!(err.detail.contains("push the task branch first"), "{}", err.detail);
+    assert!(err.detail.contains("heat/t1"), "{}", err.detail);
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
 }
