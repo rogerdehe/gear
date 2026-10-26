@@ -3206,8 +3206,15 @@ review = [
             .unwrap();
         herdr.exit_agent("wt1:p1");
 
-        // Attempt 2 of the same task is handed in — with a new candidate
-        // (T-118: the candidate that already failed is refused).
+        // Attempt 2 of the same task is handed in — with a **new** candidate.
+        // Not a style choice: `submit_result` refuses a candidate that already
+        // failed on an earlier attempt of the task (T-118), so reusing
+        // "abc1234" fails here with `candidate abc1234 already failed on
+        // attempt 1` (T-124: that rule, not a race, was the one failure seen
+        // — it reproduces 3 of 3 runs, alone or under load).
+        // Nothing else in this test can vary: its store is in memory, its
+        // Herdr is the fake, and every timestamp is given (T0 + n) — no clock,
+        // no sleep, no temp path, no global.
         store
             .write(|tx| {
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 25)?;
