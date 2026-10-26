@@ -75,3 +75,5 @@ variant = "high"
 [conventions]
 integration = "dev"
 release = "main"
+# The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
+gate = "cargo build --workspace --all-targets && scripts/test.sh"
