@@ -81,11 +81,15 @@ pub struct EngineCfg {
     /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
     /// moves the refs from the remote's own side, so no test runs `git push`.
     pub remote: std::sync::Arc<dyn merge::Remote>,
+    /// The wait between two attempts of a merge that failed for a reason that
+    /// can clear: the engine sleeps, doubling from 2 s up to 30 s (T-61). A
+    /// field so a test injects a hook that never touches the clock (T-127).
+    pub merge_retry_wait: merge::RetryWait,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote) }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
     }
 }
 

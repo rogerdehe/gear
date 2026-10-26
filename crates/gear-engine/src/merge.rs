@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use gear_app::config::{ProjectConfig, Repo};
@@ -70,7 +70,44 @@ pub struct Merged {
 /// Runtime owned by the engine configuration and shared by its clones. Workers
 /// own only git inputs; SQLite and Herdr remain on the tick thread.
 #[derive(Debug, Clone, Default)]
-pub struct MergeWorkers(Arc<Mutex<BTreeMap<String, Worker>>>);
+pub struct MergeWorkers {
+    /// The one worker per repo, keyed by project and repo.
+    workers: Arc<Mutex<BTreeMap<String, Worker>>>,
+    /// Bumped whenever the merge step moves: a worker reports its result, and
+    /// the tick collects one. A caller that must know whether a step did
+    /// anything waits on this instead of polling the clock (T-127).
+    progress: Arc<(Mutex<u64>, Condvar)>,
+}
+
+impl MergeWorkers {
+    /// How many steps were taken so far: the token
+    /// [`MergeWorkers::wait_progress`] waits past.
+    pub fn progress(&self) -> u64 {
+        *self.progress.0.lock().unwrap()
+    }
+
+    /// Block until the merge step moves after this many steps. `false` means
+    /// the wait timed out. A tick never waits here; a test (or a one-shot
+    /// merge) does, and never sleeps on the wall clock.
+    pub fn wait_progress(&self, seen: u64, timeout: std::time::Duration) -> bool {
+        let (count, signal) = &*self.progress;
+        let guard = count.lock().unwrap();
+        let (guard, _) = signal
+            .wait_timeout_while(guard, timeout, |count| *count == seen)
+            .unwrap();
+        *guard != seen
+    }
+
+    /// Whether a merge of this project is running in any of its repos.
+    pub fn running(&self, project: &str) -> bool {
+        let prefix = format!("{project}\u{1f}");
+        self.workers
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|key| key.starts_with(&prefix))
+    }
+}
 
 #[derive(Debug)]
 struct Worker {
@@ -161,7 +198,7 @@ pub fn merge_passed(
     // never join a running thread. One worker per repo (T-53): the workers of
     // the repos of a project are collected one after the other.
     let mut workers =
-        cfg.merges.0.lock().map_err(|_| {
+        cfg.merges.workers.lock().map_err(|_| {
             GearError::new(ErrorCode::BadTransition, "merge worker registry poisoned")
         })?;
     let finished_keys: Vec<String> = workers
@@ -225,6 +262,9 @@ pub fn merge_passed(
         // Keep the completion until its database write succeeded: a transient
         // store error must not lose the result or launch a second worker.
         workers.remove(key);
+        // The collection is a step of its own: a waiter must not miss it.
+        *cfg.merges.progress.0.lock().unwrap() += 1;
+        cfg.merges.progress.1.notify_all();
         return Ok(merged);
     }
 
@@ -268,6 +308,8 @@ pub fn merge_passed(
         let job = op.clone();
         let repo = repo.clone();
         let remote = cfg.remote.clone();
+        let job_wait = cfg.merge_retry_wait.clone();
+        let progress = cfg.merges.progress.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
@@ -277,7 +319,15 @@ pub fn merge_passed(
                         Ok(None) => return Report::Busy,
                         Err(reason) => return Report::Failed(Failed::clear(reason)),
                     };
-                    match merge_with_retries(&worktree, &repo, &job, &lock, &others, remote.as_ref()) {
+                    match merge_with_retries(
+                        &worktree,
+                        &repo,
+                        &job,
+                        &lock,
+                        &others,
+                        remote.as_ref(),
+                        &job_wait,
+                    ) {
                         Step::Merged(lines) => Report::Merged(lines),
                         Step::Waiting(tasks) => Report::Waiting(tasks),
                         Step::Failed(failed) => Report::Failed(failed),
@@ -288,6 +338,9 @@ pub fn merge_passed(
                     result,
                     at: wall_time(),
                 });
+                // A waiter sleeps on this, not on the clock (T-127).
+                *progress.0.lock().unwrap() += 1;
+                progress.1.notify_all();
             });
         match spawned {
             Ok(_) => {
@@ -377,7 +430,8 @@ const RACE: &str = "push race: ";
 /// How many times a merge that failed for a reason that can clear is retried
 /// before it fails (T-61).
 const MERGE_RETRIES: u32 = 3;
-/// The wait before the first retry. It doubles after every attempt.
+/// The wait before the first retry. It doubles after every attempt; the
+/// engine's [`RetryWait`] is what sleeps it (T-127).
 const RETRY_BACKOFF_S: u64 = 2;
 /// The longest wait between two attempts.
 const RETRY_BACKOFF_MAX_S: u64 = 30;
@@ -435,6 +489,7 @@ fn merge_with_retries(
     lock: &File,
     others: &[(String, String, bool)],
     remote: &dyn Remote,
+    wait: &RetryWait,
 ) -> Step {
     let mut attempt = 0;
     loop {
@@ -452,13 +507,17 @@ fn merge_with_retries(
                     return Step::Failed(failed);
                 }
                 attempt += 1;
-                std::thread::sleep(backoff(attempt));
+                // The wait is the config's: the engine sleeps on the clock,
+                // the tests' hook does not (T-127).
+                wait.wait(attempt);
             }
         }
     }
 }
 
-/// The wait before the next attempt: it doubles after every attempt.
+/// The wait before the next attempt: `RETRY_BACKOFF_S` doubled after every
+/// attempt, up to 30 s. Only [`RetryWait::backoff`] uses it: the tests never
+/// sleep (T-127).
 fn backoff(attempt: u32) -> std::time::Duration {
     let shift = attempt.saturating_sub(1).min(6);
     let seconds = RETRY_BACKOFF_S.saturating_mul(1u64 << shift);
@@ -490,6 +549,51 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// Delete `branch` on `dir`'s origin; a branch already gone counts as
     /// deleted.
     fn delete(&self, dir: &Path, branch: &str) -> bool;
+}
+
+/// The wait between two attempts of a merge that failed for a reason that can
+/// clear (T-61). Time is injected (T-127): the engine's own wait sleeps,
+/// doubling from 2 s up to 30 s; the engine's tests hand in a hook that never
+/// sleeps on the clock — it can also do something instead, such as the lane's
+/// push that arrives between two attempts.
+#[derive(Clone)]
+pub struct RetryWait(std::sync::Arc<dyn Fn(u32) + Send + Sync>);
+
+impl RetryWait {
+    /// The engine's wait: `attempt` 1 waits `RETRY_BACKOFF_S`, every later
+    /// attempt twice as long, up to 30 s.
+    pub fn backoff() -> RetryWait {
+        RetryWait(std::sync::Arc::new(|attempt| {
+            std::thread::sleep(backoff(attempt))
+        }))
+    }
+
+    /// No wait at all: what a test's config uses.
+    pub fn immediate() -> RetryWait {
+        RetryWait(std::sync::Arc::new(|_| ()))
+    }
+
+    /// Do `then` instead of waiting, with the attempt about to run.
+    pub fn instead(then: impl Fn(u32) + Send + Sync + 'static) -> RetryWait {
+        RetryWait(std::sync::Arc::new(then))
+    }
+
+    /// Wait before attempt `attempt` (1 for the first retry).
+    pub fn wait(&self, attempt: u32) {
+        (self.0)(attempt)
+    }
+}
+
+impl std::fmt::Debug for RetryWait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RetryWait")
+    }
+}
+
+impl Default for RetryWait {
+    fn default() -> Self {
+        RetryWait::backoff()
+    }
 }
 
 /// The production runner: `git push`, exactly as the merge always did.
@@ -1530,7 +1634,13 @@ mod tests {
     /// The engine's config with the tests' remote runner (T-107): a merge
     /// moves refs from origin's own side, so no engine test runs `git push`.
     fn test_cfg() -> EngineCfg {
-        EngineCfg { remote: std::sync::Arc::new(FetchRemote), ..Default::default() }
+        EngineCfg {
+            remote: std::sync::Arc::new(FetchRemote),
+            // A merge that retries does not wait on the clock in a test
+            // (T-127).
+            merge_retry_wait: RetryWait::immediate(),
+            ..Default::default()
+        }
     }
 
     /// Move the worktree's HEAD onto `branch` in its origin, from the origin's
@@ -1546,6 +1656,184 @@ mod tests {
         );
     }
 
+    /// The shape of a fixture repo: its branches and the commits they hold.
+    /// Every shape is built once per test process and copied per test
+    /// (conventions "Test time": a git fixture is built once, and a copy
+    /// costs a copy instead of twenty git calls).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Shape {
+        /// `dev`, then `heat/t5` (appends to README) and `review/t5`.
+        Task,
+        /// Two tasks where `heat/t2` is cut from `heat/t1`: T-2's candidate
+        /// carries T-1's work.
+        PairOn,
+        /// Two tasks both cut from `dev`: neither carries the other.
+        PairFlat,
+        /// Two tasks in a chain: T-2 carries T-1.
+        Chain2,
+        /// Three tasks in a chain.
+        Chain3,
+        /// A second repo of a project (T-53), named `web`, on `web-dev`.
+        ChildWeb,
+    }
+
+    impl Shape {
+        /// A branch of the shape: the task, the branch it is cut from, the
+        /// file its work commit adds, that commit's subject, and the subject of
+        /// its review commit (which adds `<review>.txt`).
+        fn branches(self) -> Vec<Branch> {
+            let chain = |n: &'static str, base: &'static str| Branch {
+                task: n,
+                base,
+                file: match n {
+                    "t1" => "t1.txt",
+                    "t2" => "t2.txt",
+                    _ => "t3.txt",
+                },
+                subject: n,
+                review: match n {
+                    "t1" => "r1",
+                    "t2" => "r2",
+                    _ => "r3",
+                },
+            };
+            match self {
+                // The one task of a single-task repo: it appends to the
+                // README, so two such branches conflict (the merge's conflict
+                // fixture needs that).
+                Shape::Task => vec![Branch {
+                    task: "t5",
+                    base: "dev",
+                    file: "README.md",
+                    subject: "task",
+                    review: "review",
+                }],
+                Shape::PairOn => vec![
+                    Branch { task: "t1", base: "dev", file: "a.txt", subject: "a", review: "r1" },
+                    Branch { task: "t2", base: "heat/t1", file: "b.txt", subject: "b", review: "r2" },
+                ],
+                Shape::PairFlat => vec![
+                    Branch { task: "t1", base: "dev", file: "a.txt", subject: "a", review: "r1" },
+                    Branch { task: "t2", base: "dev", file: "b.txt", subject: "b", review: "r2" },
+                ],
+                Shape::Chain2 => vec![chain("t1", "dev"), chain("t2", "heat/t1")],
+                Shape::Chain3 => vec![
+                    chain("t1", "dev"),
+                    chain("t2", "heat/t1"),
+                    chain("t3", "heat/t2"),
+                ],
+                Shape::ChildWeb => vec![Branch {
+                    task: "t5",
+                    base: "web-dev",
+                    file: "README.md",
+                    subject: "task",
+                    review: "review",
+                }],
+            }
+        }
+    }
+
+    /// One task branch of a fixture: see [`Shape::branches`].
+    struct Branch {
+        task: &'static str,
+        base: &'static str,
+        file: &'static str,
+        subject: &'static str,
+        review: &'static str,
+    }
+
+    /// The one template of a shape, built the first time a test asks for it.
+    fn template(shape: Shape) -> &'static Path {
+        static TASK: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static PAIR_ON: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static PAIR_FLAT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static CHAIN2: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static CHAIN3: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        static CHILD: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let slot = match shape {
+            Shape::Task => &TASK,
+            Shape::PairOn => &PAIR_ON,
+            Shape::PairFlat => &PAIR_FLAT,
+            Shape::Chain2 => &CHAIN2,
+            Shape::Chain3 => &CHAIN3,
+            Shape::ChildWeb => &CHILD,
+        };
+        slot.get_or_init(|| build_template(shape)).path()
+    }
+
+    /// Build a template repo in one shell: a bare origin and a clone with the
+    /// shape's branches, every branch published to origin. A child repo's
+    /// origin and work are named after it, so a copy keeps its relative remote.
+    fn build_template(shape: Shape) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (name, integration) = match shape {
+            Shape::ChildWeb => ("web", "web-dev"),
+            _ => ("", "dev"),
+        };
+        let origin = if name.is_empty() {
+            "origin.git".to_string()
+        } else {
+            format!("{name}-origin.git")
+        };
+        let work = if name.is_empty() {
+            "work".to_string()
+        } else {
+            name.to_string()
+        };
+        let mut script = format!(
+            "set -e\n\
+             publish() {{ origin=$(git remote get-url origin); git -C \"$origin\" fetch -q \"$(pwd)\" +HEAD:refs/heads/$1 && git fetch -q origin; }}\n\
+             git init -q --bare '{origin}'\n\
+             git init -q -b {integration} '{work}'\n\
+             cd '{work}'\n\
+             echo dev > README.md\n\
+             git add -A\n\
+             git -c user.email=a@b -c user.name=a commit -qm dev\n\
+             git remote add origin ../{origin}\n\
+             publish {integration}\n"
+        );
+        for branch in shape.branches() {
+            let Branch { task, base, file, subject, review } = branch;
+            // A branch on the README appends (the conflict fixture needs two
+            // branches that touch the same line); every other branch writes
+            // its own file.
+            let write = if file == "README.md" {
+                format!("echo {subject} >> {file}")
+            } else {
+                format!("echo {subject} > {file}")
+            };
+            script.push_str(&format!(
+                "git switch -qc heat/{task} {base}\n{write}\ngit add -A\n\
+                 git -c user.email=a@b -c user.name=a commit -qm {subject}\n\
+                 publish heat/{task}\n\
+                 git switch -qc review/{task}\n\
+                 echo {review} > {review}.txt\ngit add -A\n\
+                 git -c user.email=a@b -c user.name=a commit -qm {review}\n\
+                 publish review/{task}\n"
+            ));
+        }
+        sh(root, &script);
+        dir
+    }
+
+    /// The scratch directory of one test: its own copy of the shape's
+    /// template, on a path no other test uses.
+    fn scratch_root(name: &str, shape: Shape) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "gear-merge-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        sh(&root, &format!("cp -R '{}'/. .", template(shape).display()));
+        root
+    }
+
     /// A scratch repo with a bare origin: `dev` plus one commit each on
     /// `heat/t5` and `review/t5`.
     struct Scratch {
@@ -1555,36 +1843,8 @@ mod tests {
 
     impl Scratch {
         fn new(name: &str) -> Scratch {
-            let root = std::env::temp_dir().join(format!(
-                "gear-merge-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .subsec_nanos()
-            ));
-            let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(&root).unwrap();
-            let origin = root.join("origin.git");
+            let root = scratch_root(name, Shape::Task);
             let work = root.join("work");
-            sh(&root, &format!("git init -q --bare {}", origin.display()));
-            sh(&root, &format!("git init -q -b dev {}", work.display()));
-            fs::write(work.join("README.md"), "dev\n").unwrap();
-            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git");
-            publish(&work, "dev");
-            sh(
-                &work,
-                "git switch -qc heat/t5 && echo task >> README.md && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm task",
-            );
-            publish(&work, "heat/t5");
-            sh(
-                &work,
-                "git switch -qc review/t5 && echo review > review.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm review",
-            );
-            publish(&work, "review/t5");
             Scratch { root, work }
         }
 
@@ -1652,53 +1912,9 @@ mod tests {
 
     impl Pair {
         fn new(name: &str, built_on: bool) -> Pair {
-            let root = std::env::temp_dir().join(format!(
-                "gear-merge-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .subsec_nanos()
-            ));
-            let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(&root).unwrap();
-            let origin = root.join("origin.git");
+            let shape = if built_on { Shape::PairOn } else { Shape::PairFlat };
+            let root = scratch_root(name, shape);
             let work = root.join("work");
-            sh(&root, &format!("git init -q --bare {}", origin.display()));
-            sh(&root, &format!("git init -q -b dev {}", work.display()));
-            fs::write(work.join("README.md"), "dev\n").unwrap();
-            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git");
-            publish(&work, "dev");
-            // T-1: its branch, then its review branch.
-            sh(
-                &work,
-                "git switch -qc heat/t1 && echo a > a.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm a",
-            );
-            publish(&work, "heat/t1");
-            sh(
-                &work,
-                "git switch -qc review/t1 && echo r1 > r1.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm r1",
-            );
-            publish(&work, "review/t1");
-            // T-2: cut from T-1's branch (it carries T-1's work) or from dev.
-            let base = if built_on { "heat/t1" } else { "dev" };
-            sh(
-                &work,
-                &format!(
-                    "git switch -qc heat/t2 {base} && echo b > b.txt && git add -A \
-                     && git -c user.email=a@b -c user.name=a commit -qm b"
-                ),
-            );
-            publish(&work, "heat/t2");
-            sh(
-                &work,
-                "git switch -qc review/t2 && echo r2 > r2.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm r2",
-            );
-            publish(&work, "review/t2");
             let a = sh(&root, "git -C origin.git rev-parse heat/t1");
             let b = sh(&root, "git -C origin.git rev-parse heat/t2");
             Pair { root, work, a, b }
@@ -2082,36 +2298,16 @@ mod tests {
 
     impl Chain {
         fn new(name: &str, tasks: usize) -> Chain {
-            let root = scratch_root(name);
-            let origin = root.join("origin.git");
+            let shape = match tasks {
+                2 => Shape::Chain2,
+                3 => Shape::Chain3,
+                other => panic!("the chain fixture has no shape of {other} tasks"),
+            };
+            let root = scratch_root(name, shape);
             let work = root.join("work");
-            sh(&root, &format!("git init -q --bare {}", origin.display()));
-            sh(&root, &format!("git init -q -b dev {}", work.display()));
-            fs::write(work.join("README.md"), "dev\n").unwrap();
-            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(&work, "git remote add origin ../origin.git");
-            publish(&work, "dev");
-            let mut candidates = Vec::new();
-            for n in 1..=tasks {
-                let base = if n == 1 { "dev".to_string() } else { format!("heat/t{}", n - 1) };
-                sh(
-                    &work,
-                    &format!(
-                        "git switch -qc heat/t{n} {base} && echo t{n} > t{n}.txt && git add -A \
-                         && git -c user.email=a@b -c user.name=a commit -qm t{n}"
-                    ),
-                );
-                publish(&work, &format!("heat/t{n}"));
-                sh(
-                    &work,
-                    &format!(
-                        "git switch -qc review/t{n} && echo r{n} > r{n}.txt && git add -A \
-                         && git -c user.email=a@b -c user.name=a commit -qm r{n}"
-                    ),
-                );
-                publish(&work, &format!("review/t{n}"));
-                candidates.push(sh(&root, &format!("git -C origin.git rev-parse heat/t{n}")));
-            }
+            let candidates = (1..=tasks)
+                .map(|n| sh(&root, &format!("git -C origin.git rev-parse heat/t{n}")))
+                .collect();
             Chain { root, work, candidates }
         }
 
@@ -2142,21 +2338,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
-    }
-
-    /// The scratch directory of a fixture.
-    fn scratch_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "gear-merge-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        root
     }
 
     /// A project with `candidates.len()` tasks, T-1..T-n, each handed in on
@@ -2359,30 +2540,15 @@ mod tests {
 
     impl Child {
         fn new(root: &Path, name: &str, integration: &str) -> Child {
-            let origin = root.join(format!("{name}-origin.git"));
-            let work = root.join(name);
-            sh(root, &format!("git init -q --bare {}", origin.display()));
-            sh(root, &format!("git init -q -b {integration} {}", work.display()));
-            fs::write(work.join("README.md"), "dev\n").unwrap();
-            sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-            sh(
-                &work,
-                &format!("git remote add origin ../{name}-origin.git"),
-            );
-            publish(&work, integration);
-            sh(
-                &work,
-                "git switch -qc heat/t5 && echo task >> README.md && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm task",
-            );
-            publish(&work, "heat/t5");
-            sh(
-                &work,
-                "git switch -qc review/t5 && echo review > review.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm review",
-            );
-            publish(&work, "review/t5");
-            Child { root: root.to_path_buf(), work, origin }
+            // The fixture has one shape (T-53's child repo `web` on `web-dev`);
+            // its copy carries the same relative remote as the template.
+            assert_eq!((name, integration), ("web", "web-dev"), "the child fixture's one shape");
+            sh(root, &format!("cp -R '{}'/. .", template(Shape::ChildWeb).display()));
+            Child {
+                root: root.to_path_buf(),
+                work: root.join("web"),
+                origin: root.join("web-origin.git"),
+            }
         }
 
         /// The merge worktree of this repo: `home/merge`, cut from its
@@ -2654,16 +2820,39 @@ gate = "{gate}"
         (store, herdr, cfg)
     }
 
+    /// How long a test waits for a merge worker before it calls the step hung.
+    /// Nothing waits on a clock otherwise: the tick collects a finished
+    /// worker, and a test waits on the worker's own report (T-127).
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+    /// One merge step, then a wait for the worker it launched (or for the one
+    /// it did not collect yet) to report: no test sleeps between attempts.
+    fn tick_step(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        now: Ts,
+    ) -> Vec<Merged> {
+        let seen = cfg.merges.progress();
+        let merged = merge_passed(store, herdr, cfg, "p", now).unwrap();
+        if cfg.merges.running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report within {WAIT:?}"
+            );
+        } else if cfg.merges.progress() == seen {
+            panic!("the merge step had nothing to run");
+        }
+        merged
+    }
+
     fn wait_merge(
         store: &mut Store,
         herdr: &mut gear_herdr::fake::FakeHerdr,
         cfg: &EngineCfg,
     ) -> Vec<Merged> {
-        // The deadline is generous: a merge that retries waits between its
-        // attempts (T-61).
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
-            let merged = merge_passed(store, herdr, cfg, "p", 30).unwrap();
+            let merged = tick_step(store, herdr, cfg, 30);
             let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
             if matches!(
                 op.state,
@@ -2671,33 +2860,19 @@ gate = "{gate}"
             ) {
                 return merged;
             }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "merge did not complete: {op:?}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
     /// Drive the engine's merge step until the store is in the state the test
-    /// wants (or the deadline passes).
+    /// wants.
     fn drive(
         store: &mut Store,
         herdr: &mut gear_herdr::fake::FakeHerdr,
         cfg: &EngineCfg,
         ready: impl Fn(&mut Store) -> bool,
     ) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            merge_passed(store, herdr, cfg, "p", 30).unwrap();
-            if ready(store) {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the engine did not reach the wanted state"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        while !ready(store) {
+            tick_step(store, herdr, cfg, 30);
         }
     }
 
@@ -2710,18 +2885,9 @@ gate = "{gate}"
         times: usize,
     ) {
         for _ in 0..times {
-            merge_passed(store, herdr, cfg, "p", 30).unwrap();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-            loop {
-                merge_passed(store, herdr, cfg, "p", 31).unwrap();
-                if cfg.merges.0.lock().unwrap().is_empty() {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the merge worker did not finish"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            tick_step(store, herdr, cfg, 30);
+            while cfg.merges.running("p") {
+                tick_step(store, herdr, cfg, 31);
             }
         }
     }
@@ -2743,16 +2909,51 @@ gate = "{gate}"
             .unwrap_or_default()
     }
 
-    fn wait_file(path: &Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !path.exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "missing {}",
-                path.display()
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+    /// A fifo a test and a gate it started hand a byte over (T-127): the test
+    /// blocks on the gate's own write instead of polling the clock.
+    fn fifo(root: &Path, name: &str) -> PathBuf {
+        let path = root.join(name);
+        let c_path = std::ffi::CString::new(path.display().to_string()).unwrap();
+        // SAFETY: the path lives for the call; mkfifo only creates the node.
+        assert_eq!(
+            unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
+            0,
+            "mkfifo {}",
+            path.display()
+        );
+        path
+    }
+
+    /// Block until the gate writes its byte into the fifo.
+    fn await_fifo(path: &Path) {
+        use std::io::Read;
+        let mut file = fs::File::open(path).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+    }
+
+    /// Let a gate that reads the fifo go on.
+    fn release_fifo(path: &Path) {
+        fs::write(path, "go\n").unwrap();
+    }
+
+    /// A gate that holds the first merge inside it: it says it started on
+    /// `running`, waits for the test's byte on `release`, then runs `after`.
+    /// Every later run of the gate is a no-op, so a second merge (a recovery
+    /// after a kill, a retry) never waits on a fifo the test is not feeding
+    /// (T-127).
+    fn held_gate(root: &Path, tag: &str, after: &str) -> (PathBuf, PathBuf, String) {
+        let running = fifo(root, &format!("{tag}-running"));
+        let release = fifo(root, &format!("{tag}-release"));
+        let marker = root.join(format!("{tag}-held"));
+        let gate = format!(
+            "if [ ! -e '{marker}' ]; then touch '{marker}'; echo x > '{running}'; \
+             read go < '{release}'; {after}; fi",
+            marker = marker.display(),
+            running = running.display(),
+            release = release.display(),
+        );
+        (running, release, gate)
     }
 
     /// The merge with its retries (T-61): a reason that can clear is retried a
@@ -2762,7 +2963,7 @@ gate = "{gate}"
         repo: &Repo,
         op: &OpRow,
     ) -> Result<String, Failed> {
-        merge_retried_with(worktree, repo, op, &FetchRemote)
+        merge_retried_with(worktree, repo, op, &FetchRemote, &RetryWait::immediate())
     }
 
     fn merge_retried_with(
@@ -2770,6 +2971,7 @@ gate = "{gate}"
         repo: &Repo,
         op: &OpRow,
         remote: &dyn Remote,
+        wait: &RetryWait,
     ) -> Result<String, Failed> {
         step_result(merge_with_retries(
             worktree,
@@ -2778,6 +2980,7 @@ gate = "{gate}"
             &lock_of(worktree)?,
             &[],
             remote,
+            wait,
         ))
     }
 
@@ -3113,18 +3316,15 @@ gate = "{project_gate}"
     }
 
     #[test]
-    fn dispatch_and_doorbells_continue_while_the_gate_sleeps() {
+    fn dispatch_and_doorbells_continue_while_the_gate_runs() {
         let scratch = Scratch::new("tick-gate");
-        let started = scratch.root.join("gate-started");
         let done = scratch.root.join("gate-finished");
-        let gate = format!(
-            "touch '{}'; sleep 2; touch '{}'",
-            started.display(),
-            done.display()
-        );
+        let (running, release, gate) =
+            held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
         merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
-        wait_file(&started);
+        // The worker is in the gate, which stays there until the test says go.
+        await_fifo(&running);
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);
         store
@@ -3185,6 +3385,7 @@ gate = "{project_gate}"
         let calls = herdr.calls.len();
         merge_passed(&mut store, &mut herdr, &cfg.clone(), "p", 21).unwrap();
         assert_eq!(herdr.calls.len(), calls);
+        release_fifo(&release);
         let result = wait_merge(&mut store, &mut herdr, &cfg);
         assert_eq!(result.len(), 1);
         let updated = store
@@ -3211,7 +3412,18 @@ gate = "{project_gate}"
         let scratch = Scratch::new("serial");
         sh(&scratch.root, "git -C origin.git branch heat/t6 heat/t5 && git -C origin.git branch review/t6 review/t5");
         let started = scratch.root.join("gates");
-        let gate = format!("echo gate >> '{}'; sleep 1", started.display());
+        let running = fifo(&scratch.root, "gate-running");
+        let release = fifo(&scratch.root, "gate-release");
+        // The first merge's gate stays until the test lets it go; every run
+        // adds one line to `started`.
+        let gate = format!(
+            "echo gate >> '{}'; if [ ! -e '{marker}' ]; then touch '{marker}'; \
+             echo x > '{running}'; read go < '{release}'; fi",
+            started.display(),
+            marker = scratch.root.join("gate-held").display(),
+            running = running.display(),
+            release = release.display(),
+        );
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
         store
             .write(|tx| {
@@ -3240,7 +3452,7 @@ gate = "{project_gate}"
             })
             .unwrap();
         merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
-        wait_file(&started);
+        await_fifo(&running);
         merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
         assert_eq!(
             store
@@ -3251,17 +3463,12 @@ gate = "{project_gate}"
             OpState::Intended
         );
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 1);
+        release_fifo(&release);
         assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
-            if !merged.is_empty() {
-                assert_eq!(merged[0].task, "T-6");
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // The second merge runs next, and reports its own result.
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-2") == Some(OpState::Confirmed)
+        });
         assert_eq!(fs::read_to_string(&started).unwrap().lines().count(), 2);
         assert_eq!(
             store
@@ -3278,18 +3485,11 @@ gate = "{project_gate}"
         let scratch = Scratch::new("locked");
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
         let lock = merge_lock(&scratch.root.join("merge")).unwrap().unwrap();
-        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while store
-            .read(|tx| tx.get_op("p", "O-1"))
-            .unwrap()
-            .unwrap()
-            .state
-            != OpState::Unknown
-        {
-            merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        // The worker finds the lock taken and reports Busy; the next step
+        // puts the op back in the queue.
+        tick_step(&mut store, &mut herdr, &cfg, 20);
+        while op_state(&mut store, "O-1") != Some(OpState::Unknown) {
+            tick_step(&mut store, &mut herdr, &cfg, 21);
         }
         assert_eq!(
             scratch.dev_log(),
@@ -3323,13 +3523,12 @@ gate = "{project_gate}"
     fn a_killed_worker_recovers_from_origin_without_a_half_merge() {
         let scratch = Scratch::new("killed");
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, "true");
-        let started = scratch.root.join("gate-started");
         let done = scratch.root.join("gate-finished");
-        let release = scratch.root.join("release-gate");
-        let gate = format!(
-            "touch '{}'; for i in 1 2 3 4 5 6 7 8 9 10; do [ -e '{}' ] && break; sleep 1; done; touch '{}'",
-            started.display(), release.display(), done.display()
-        );
+        // The held gate writes no fifo after the release: it must exit on its
+        // own, because it is the process that holds the merge lock and the
+        // recovery below cannot run until it does.
+        let (running, release, gate) =
+            held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
         let candidate = scratch.head_of("heat/t5");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -3344,7 +3543,7 @@ gate = "{project_gate}"
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        wait_file(&started);
+        await_fifo(&running);
         assert_eq!(
             scratch.dev_log(),
             "dev",
@@ -3354,7 +3553,7 @@ gate = "{project_gate}"
         child.wait().unwrap();
         assert!(merge_lock(&scratch.root.join("merge")).unwrap().is_none(),
             "the surviving gate must exclude recovery until it exits");
-        fs::write(&release, "release").unwrap();
+        release_fifo(&release);
         store
             .write(|tx| tx.set_op_state("p", "O-1", OpState::Executing, None, 20))
             .unwrap();
@@ -3369,37 +3568,43 @@ gate = "{project_gate}"
             "{log}"
         );
         assert!(scratch.dev_has_task_commit());
-        // The orphaned gate finishes before recovery acquires the lock.
-        // No surviving merge thread can push its half-finished tree.
-        wait_file(&done);
+        // The orphaned gate has finished — recovery needed the lock it held —
+        // and no surviving merge thread pushed its half-finished tree.
+        assert!(done.exists(), "the orphaned gate is still running");
     }
 
     #[test]
-    fn a_sleeping_gate_does_not_block_the_merge_step() {
+    fn a_gate_that_is_still_running_does_not_block_the_merge_step() {
         let scratch = Scratch::new("nonblocking");
         let done = scratch.root.join("gate-finished");
-        let gate = format!("sleep 1; touch '{}'", done.display());
+        let (running, release, gate) =
+            held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
         let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
         let launched_at = wall_time();
         let result = merge_passed(&mut store, &mut herdr, &cfg, "p", launched_at).unwrap();
-        assert!(!done.exists(), "merge_passed waited for the sleeping gate");
+        assert!(!done.exists(), "merge_passed waited for the running gate");
         assert!(result.is_empty(), "the merge is still running");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        loop {
-            let result = merge_passed(&mut store, &mut herdr, &cfg, "p", 30).unwrap();
-            if !result.is_empty() {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the merge never finished"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // The worker waits inside the gate, which the test holds open.
+        await_fifo(&running);
+        assert!(store
+            .read(|tx| tx.get_op("p", "O-1"))
+            .unwrap()
+            .unwrap()
+            .state
+            != OpState::Confirmed);
+        let released_at = wall_time();
+        release_fifo(&release);
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
         assert!(done.exists());
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Confirmed);
-        assert!(op.updated > launched_at, "merge time follows the sleeping gate");
+        // The completion time is when the gate and the push ended, not when
+        // the launching tick ran. Not `>` the launch: nothing waits a second
+        // for a clock any more (T-127).
+        assert!(
+            op.updated >= released_at.max(launched_at),
+            "merge time follows the running gate"
+        );
         assert!(op.updated <= wall_time());
         assert_eq!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged, Some(op.updated));
     }
@@ -3457,6 +3662,7 @@ gate = "{project_gate}"
             &repo("true"),
             &op(&scratch.head_of("heat/t5")),
             &remote,
+            &RetryWait::immediate(),
         )
         .unwrap();
 
@@ -3481,16 +3687,21 @@ gate = "{project_gate}"
              && git add -A && git -c user.email=a@b -c user.name=a commit -qm late",
         );
         let candidate = scratch.local_head_of("heat/t5-late");
-        // The lane pushes while the merge waits.
+        // The lane pushes while the merge waits: the first attempt does not
+        // see the candidate, and the wait before the retry is where the push
+        // lands — no test sleeps on the clock to get that order (T-127).
         let work = scratch.work.clone();
-        let pusher = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            publish(&work, "heat/t5-late");
-        });
+        let wait = RetryWait::instead(move |_| publish(&work, "heat/t5-late"));
 
-        let line = merge_retried(&worktree, &repo("true"), &op(&candidate)).unwrap();
+        let line = merge_retried_with(
+            &worktree,
+            &repo("true"),
+            &op(&candidate),
+            &FetchRemote,
+            &wait,
+        )
+        .unwrap();
 
-        pusher.join().unwrap();
         assert!(line.contains("merged T-5 into dev"), "{line}");
         assert!(scratch.dev_has_task_commit());
     }
@@ -3910,12 +4121,17 @@ gate = "{project_gate}"
             profile.confirm_rounds = 1;
             cfg.profiles.insert(kind.into(), profile);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         loop {
+            // Wait on the merge worker's own report between two ticks.
+            let seen = cfg.merges.progress();
             let report = crate::tick(&mut store, &mut herdr, &cfg, 20).unwrap();
-            if !report.merged.is_empty() { break; }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            if !report.merged.is_empty() {
+                break;
+            }
+            assert!(
+                !cfg.merges.running("p") || cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report"
+            );
         }
         assert!(store.read(|tx| tx.captain_quota_paused("p")).unwrap());
         assert!(scratch.dev_has_task_commit());
@@ -3924,3 +4140,4 @@ gate = "{project_gate}"
     }
 
 }
+
