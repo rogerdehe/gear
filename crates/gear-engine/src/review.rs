@@ -720,16 +720,12 @@ const CHECKOUT_TAIL_LINES: u32 = 24;
 /// ignored files, so `target/` and the build cache survive) — and the chain
 /// reports what it did: the commit it landed on and the branch.
 ///
-/// A branch another seat's worktree still holds (that seat reviewed the task
-/// before) must not stop the checkout: `--ignore-other-worktrees`, since a seat
-/// only ever works on the job it was handed.
-///
 /// The token is a shell variable, so the echo of the command line (which the
 /// pane shows) carries the marker text with the variable unexpanded and can
 /// never be read as the report of a finished checkout.
 fn checkout_command(path: &str, branch: &str, candidate: &str, token: &str) -> String {
     format!(
-        "T={token}; cd {path} && git fetch origin && git checkout -f --ignore-other-worktrees -B {branch} {candidate} \
+        "T={token}; cd {path} && git fetch origin && git checkout -f -B {branch} {candidate} \
          && git clean -fd && echo {ok}${{T}}_$(git rev-parse HEAD)_$(git rev-parse --abbrev-ref HEAD) \
          || echo {fail}${{T}}",
         ok = OK_MARKER,
@@ -2501,7 +2497,7 @@ review = [
             })
             .collect();
         assert_eq!(checkouts.len(), 2, "{checkouts:?}");
-        assert!(checkouts[1].contains("git checkout -f --ignore-other-worktrees -B review/t2 def5678"), "{}", checkouts[1]);
+        assert!(checkouts[1].contains("git checkout -f -B review/t2 def5678"), "{}", checkouts[1]);
         assert!(checkouts[1].contains("git clean -fd"), "the last job's leftovers go");
         assert!(!checkouts[1].contains("clean -fdx"), "the build cache stays");
         // A different task gets a new session (F3): the second reviewer starts
@@ -2726,7 +2722,7 @@ profile = "opencode"
             if repo == "/repo/web" && path == "/web-review-1" && label == "p-review-1-web")), "{calls:?}");
         assert!(!calls.iter().any(|call| matches!(call, Call::WorktreeCreate { .. } | Call::WorktreeOpen { .. })), "{calls:?}");
         assert!(calls.iter().any(|call| matches!(call, Call::PaneRun { pane, command }
-            if pane == "web:p1" && command.contains("/web-review-1") && command.contains("git checkout -f --ignore-other-worktrees -B review/t3 abc1234"))), "{calls:?}");
+            if pane == "web:p1" && command.contains("/web-review-1") && command.contains("git checkout -f -B review/t3 abc1234"))), "{calls:?}");
         confirm_checkout(&mut store, &mut web, "p:review-1", 3, "abc1234", "review/t3");
         assert_eq!(start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 31)
             .unwrap().started, vec!["p:review-1"]);
