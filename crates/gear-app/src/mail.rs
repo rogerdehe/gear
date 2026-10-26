@@ -395,6 +395,7 @@ pub fn send(
                     &seat,
                     args.task.as_deref().unwrap_or_default(),
                     args.attempt.unwrap_or_default(),
+                    args.contract.unwrap_or_default(),
                     args.on.as_deref().unwrap_or_default(),
                 )?;
             }
@@ -498,7 +499,7 @@ fn stored_receipt(
 /// transaction (to replay a committed receipt) or inside it.
 fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
     format!(
-        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}",
         args.kind.as_str(),
         args.body,
         args.task,
@@ -509,7 +510,10 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> S
         args.about,
         args.to,
         args.reply_to,
-        args.urgent
+        args.urgent,
+        args.left,
+        args.blocker,
+        args.on
     )
 }
 
@@ -746,6 +750,7 @@ fn declare_wait(
     seat: &gear_store::SeatRow,
     task: &str,
     attempt: i64,
+    contract: i64,
     on: &str,
 ) -> GearResult<()> {
     let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
@@ -760,6 +765,35 @@ fn declare_wait(
             format!(
                 "attempt {attempt} of task {task} belongs to {}, not to {}",
                 attempt_row.seat, seat.id
+            ),
+        ));
+    }
+    // The contract the lane names must be the one the attempt works to and
+    // the one the task carries now — the same two checks a hand-in makes. A
+    // captain who changed the contract (and ended the wait with it) must not
+    // have the lane's old command park the task on an obsolete dependency.
+    if contract != attempt_row.adopted_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "attempt {attempt} of task {task} works to contract {}, not {contract}",
+                attempt_row.adopted_version
+            ),
+        ));
+    }
+    let task_row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+    if contract != task_row.contract_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is on contract v{}, not the v{contract} this message names: \
+                 run `gear` and `gear --show {task}` to work to v{}, then declare the wait again",
+                task_row.contract_version, task_row.contract_version
             ),
         ));
     }

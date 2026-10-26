@@ -3239,6 +3239,106 @@ mod tests {
         assert_eq!(task.wait_on, None);
     }
 
+    /// §5.3: the contract the lane names must be the one the task carries
+    /// now: a captain who changed the contract (and ended the wait with it)
+    /// must not have the lane's old command park the task on an obsolete
+    /// dependency.
+    #[test]
+    fn a_blocked_message_with_a_stale_contract_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        // The captain changed the task's contract.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1); // the contract the lane still works to
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("is on contract v2"), "{}", error.detail);
+        // Nothing was written: no wait and no message.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+        assert!(store.read(|tx| tx.get_message("p", "M-1")).unwrap().is_none());
+    }
+
+    /// The request fingerprint carries the answer's fields: a request id
+    /// reused with a changed field is a conflict, not a replay of the old
+    /// answer.
+    #[test]
+    fn a_reused_request_id_with_a_changed_field_is_a_conflict() {
+        let (mut store, mut herdr) = world();
+        let mut first = send_cmd("progress");
+        first.left = Some(30);
+        first.blocker = Some("none".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        // The same request id, another answer: a conflict, not a replay.
+        let mut changed = send_cmd("progress");
+        changed.left = Some(60);
+        changed.blocker = Some("the api is late".into());
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &changed,
+            "the parser is done".into(),
+            None,
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::RequestConflict,
+            "{}",
+            error.detail
+        );
+
+        // The same request id with the same answer: a replay.
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("[replayed]"), "{out}");
+    }
+
     #[test]
     fn wait_until_relative_and_absolute() {
         assert_eq!(parse_until("+10m", 1_000).unwrap(), 1_600);
