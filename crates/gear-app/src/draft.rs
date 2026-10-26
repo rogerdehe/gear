@@ -59,7 +59,8 @@ pub enum StaffItem {
     Retry { line: usize, lane: String },
     /// `- release heat`: a held lane goes back to Active (its agent continues)
     /// or Queued (its agent is gone, the engine onboards it again) (T-133).
-    Release { line: usize, lane: String },
+    /// `- release review-1`: a reviewer seat in Standby is released (T-140).
+    Release { line: usize, name: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
@@ -692,13 +693,13 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             Ok(StaffItem::Retry { line, lane: lane.to_string() })
         }
         "release" => {
-            let lane = tokens
+            let name = tokens
                 .next()
-                .ok_or_else(|| bad(line, "`release` needs a lane"))?;
+                .ok_or_else(|| bad(line, "`release` needs a lane or a reviewer"))?;
             if tokens.next().is_some() {
-                return Err(bad(line, "`release` takes only a lane"));
+                return Err(bad(line, "`release` takes only a lane or a reviewer"));
             }
-            Ok(StaffItem::Release { line, lane: lane.to_string() })
+            Ok(StaffItem::Release { line, name: name.to_string() })
         }
         "remerge" => {
             let task = tokens

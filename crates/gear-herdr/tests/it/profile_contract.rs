@@ -15,6 +15,10 @@ fn opencode() -> Profile {
         backoff_markers: vec![],
         // T-113: the guardrails refusals of a kind without guardrails.
         blocked_markers: vec![],
+        error_markers: vec!["overloaded_error".into()],
+        new_session: "/new".into(),
+        compact: "/compact".into(),
+        usage_log: Some("opencode-db".into()),
         tail_lines: 3,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
@@ -39,9 +43,9 @@ fn only_tail_window_is_matched() {
 fn multiple_flags() {
     let p = opencode();
     let flags = classify_screen(&p, "  esc interrupt  \ninsufficient_quota\n");
-    assert!(flags.contains(&ScreenFlag::Busy));
-    assert!(flags.contains(&ScreenFlag::Quota));
-    assert!(!flags.contains(&ScreenFlag::Auth));
+    // M4 §10.2: the screen never says that an agent is busy — Herdr's state
+    // does. The busy marker of the profile is kept, but it decides nothing.
+    assert_eq!(flags.into_iter().collect::<Vec<_>>(), vec![ScreenFlag::Quota]);
 }
 
 #[test]

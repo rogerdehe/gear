@@ -180,7 +180,9 @@ fn screen_of(
             return (BTreeSet::new(), false, None);
         };
         let flags = classify_screen(profile, &tail);
-        let idle = !flags.contains(&ScreenFlag::Busy);
+        // M4 §10.2: whether an agent is busy is Herdr's state, never the text
+        // on its screen. An idle or done agent is idle.
+        let idle = idle_or_done;
         return (flags, idle, Some(tail));
     }
     if blocked {

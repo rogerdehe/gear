@@ -289,12 +289,9 @@ pub fn switch_in_place(
             SwitchOutcome::Already
         });
     }
-    // An agent that is busy on screen is never typed into, whatever its status.
-    if gear_herdr::classify_screen(profile, &screen)
-        .contains(&gear_herdr::ScreenFlag::Busy)
-    {
-        return Ok(SwitchOutcome::Waiting);
-    }
+    // M4 §10.2: the screen never says that an agent is busy — Herdr's state
+    // does, and it was read above (idle or done). Nothing on the screen may
+    // keep the switch from typing into an agent Herdr says is ready.
 
     // 6. one submission of the plan this tick. T-134: the switch types keys and
     //    text into the agent's pane, so give the agent its seat name first —
@@ -520,11 +517,10 @@ pub fn switch_model(
         Ok(_) => return wait_for_agent(store, seat_id, &mut plan),
         Err(_) => return Ok(SwitchOutcome::Waiting),
     }
-    // Screen busy wins over a stale idle classification, even for API calls.
+    // M4 §10.2: the screen never says that an agent is busy — Herdr's state
+    // does, and it was read above (idle or done). The screen is still read
+    // for the confirmation of the switch.
     let Ok(screen) = herdr.read_screen(&binding.pane_id) else { return Ok(SwitchOutcome::Waiting) };
-    if gear_herdr::classify_screen(profile, &screen).contains(&gear_herdr::ScreenFlag::Busy) {
-        return Ok(SwitchOutcome::Waiting);
-    }
     let directory = meta_get(store, &crate::onboard::worktree_path_key(seat_id))?;
     let target = match crate::opencode::target(herdr, model, labels.variant.as_deref(), directory.as_deref()) {
         crate::opencode::Lookup::Target(target) => target,
