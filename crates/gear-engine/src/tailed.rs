@@ -19,6 +19,14 @@ fn thread() -> &'static str {
     "all-tail"
 }
 
+/// The project's all-tail **state** marker: "1" while the state has been
+/// announced. It outlives the message: a captain who resolves the item has
+/// acknowledged it, not ended the state (F1 of the T-116 review — resolving
+/// used to bring a fresh item on the next tick).
+fn active_key(project: &str) -> String {
+    format!("all-tail-active:{project}")
+}
+
 /// What the step did in one tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
@@ -58,9 +66,18 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     let all_tailed = !lanes.is_empty() && tailed.len() == lanes.len();
     let required = required_work(tx, project)?;
     let open = open_item(tx, project, &captain.id)?;
+    let announced = tx
+        .get_meta(&active_key(project))?
+        .is_some_and(|value| !value.is_empty());
     if all_tailed && !required.is_empty() {
-        // One item per state: a second tick adds nothing.
-        if open.is_some() {
+        // One item per state. The marker, not the message, says whether this
+        // state was announced: a captain who resolves the item (an
+        // acknowledgement) still gets no second one, because the lanes are
+        // still tailed and the same work still waits.
+        if !announced {
+            tx.set_meta(&active_key(project), "1")?;
+        }
+        if announced || open.is_some() {
             return Ok(None);
         }
         tx.insert_message(&NewMessage {
@@ -82,6 +99,11 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
             created: now,
         })?;
         return Ok(Some(Change::Opened));
+    }
+    // The state ended: forget it, so a later one is announced again — whether
+    // or not the captain still has the item open.
+    if announced {
+        tx.set_meta(&active_key(project), "")?;
     }
     let Some(item) = open else { return Ok(None) };
     let reason = if all_tailed {
@@ -319,5 +341,42 @@ mod tests {
             .unwrap();
         assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), None);
         assert!(open_items(&mut store).is_empty());
+    }
+
+    /// F1 of the review: resolving the item is an acknowledgement, not the end
+    /// of the state — the next tick adds nothing while the lanes are still
+    /// tailed and the same work still waits. Clearing the tail ends the state;
+    /// a later one is announced again.
+    #[test]
+    fn a_resolved_item_is_not_reopened_while_the_state_lasts() {
+        let mut store = world(TaskState::Waiting);
+        tail(&mut store, &["heat", "wire"]);
+        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        let item = open_items(&mut store).remove(0);
+
+        // The captain resolves it — what `gear reply M-n --resolve` does.
+        store
+            .write(|tx| {
+                tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+            })
+            .unwrap();
+
+        // The same state: no new item, nothing reported.
+        assert_eq!(watch(&mut store, "p", T0 + 3).unwrap(), None, "the same incident");
+        let all = items(&mut store);
+        assert_eq!(all.len(), 1, "no second item: {all:?}");
+        assert_eq!(all[0].state, MsgState::Resolved);
+
+        // The tail is cleared: the state ends (nothing open to close), and a
+        // tail set again is a new state — exactly one new item.
+        store
+            .write(|tx| tx.set_meta("lane-tail:p:wire", "0"))
+            .unwrap();
+        assert_eq!(watch(&mut store, "p", T0 + 4).unwrap(), None);
+        tail(&mut store, &["wire"]);
+        assert_eq!(watch(&mut store, "p", T0 + 5).unwrap(), Some(Change::Opened));
+        let all = items(&mut store);
+        assert_eq!(all.len(), 2, "the new state is one new item: {all:?}");
+        assert_eq!(all[1].state, MsgState::Open);
     }
 }

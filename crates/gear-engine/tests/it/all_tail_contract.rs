@@ -142,10 +142,48 @@ fn a_required_task_ending_closes_the_item() {
 }
 
 #[test]
-fn one_lane_out_of_the_tail_opens_nothing() {
-    let mut w = world();
+fn one_lane_out_of_the_tail_opens_nothing() {    let mut w = world();
     tail(&mut w.store, "heat", true);
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     assert!(report.tail.is_empty(), "{report:?}");
     assert!(items(&mut w.store).is_empty());
+}
+
+/// F1 of the review: the captain resolving the item is an acknowledgement, not
+/// the end of the state — an unchanged tick adds no second item. Clearing the
+/// tail ends the state; tailing the lanes again opens exactly one new item.
+#[test]
+fn a_resolved_item_is_not_reopened_while_every_lane_stays_tailed() {
+    let mut w = world();
+    tail(&mut w.store, "heat", true);
+    tail(&mut w.store, "wire", true);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    let item = items(&mut w.store).remove(0);
+    assert_eq!(item.state, MsgState::Open);
+
+    // The captain resolves it (what `gear reply M-n --resolve` does).
+    w.store
+        .write(|tx| {
+            tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+        })
+        .unwrap();
+
+    // The state is unchanged: no new item, nothing reported.
+    let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert!(report.tail.is_empty(), "{report:?}");
+    let all = items(&mut w.store);
+    assert_eq!(all.len(), 1, "no second item: {all:?}");
+    assert_eq!(all[0].state, MsgState::Resolved);
+
+    // Clearing the tail ends the state (nothing open to close); tailing the
+    // lanes again is a new state — exactly one new item.
+    tail(&mut w.store, "wire", false);
+    let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+    assert!(report.tail.is_empty(), "{report:?}");
+    tail(&mut w.store, "wire", true);
+    let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
+    assert_eq!(report.tail, vec!["all-tail:opened".to_string()], "{report:?}");
+    let all = items(&mut w.store);
+    assert_eq!(all.len(), 2, "the new state is one new item: {all:?}");
+    assert_eq!(all[1].state, MsgState::Open);
 }
