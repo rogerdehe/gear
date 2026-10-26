@@ -291,6 +291,9 @@ fn result(candidate: &str, gate: Option<BaseGate>) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
         request_id: "r-1".into(),
     }
 }

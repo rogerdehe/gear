@@ -2,7 +2,7 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -37,6 +37,13 @@ pub struct SendArgs {
     pub to: Option<String>,
     pub reply_to: Option<String>,
     pub urgent: bool,
+    /// Progress only (design §5.2): the minutes the lane says are left.
+    pub left: Option<i64>,
+    /// Progress only (design §5.2): what stops the lane ("none" when nothing
+    /// does).
+    pub blocker: Option<String>,
+    /// Blocked only (design §5.3): the task the lane waits for.
+    pub on: Option<String>,
     pub request_id: String,
 }
 
@@ -71,8 +78,13 @@ pub struct SendResult {
 ///   in the same transaction `review::submit_review(…)` stores the verdict on
 ///   the attempt's review record — it settles nothing; the item goes to the
 ///   captain with the verdict in its first line (a fail is actionable, a pass is information).
-/// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
-///   must return BadFormat until then rather than silently storing.
+/// - Ack side effects (tasks, handover) arrive later in slice 2 and must
+///   return BadFormat until then rather than silently storing.
+/// - A progress answer (design §5.2) carries the minutes the lane says are
+///   left and what stops it, in the message's meta.
+/// - A declared wait (design §5.3) — the `blocked` kind — works: the lane
+///   names the task it waits for, the wait is written on its task and the
+///   attempt goes on.
 /// - Messages to a reviewer seat carry the task (design §3.8): a reviewer
 ///   seat is bound to a task for life, so the messages it writes carry that
 ///   task, and an instruction the captain addresses to it without `--task`
@@ -159,6 +171,20 @@ pub fn send(
                     ));
                 }
             }
+            MsgKind::Blocked => {
+                // A declared wait (design §5.3): the lane names the task it
+                // waits for, and the attempt the wait belongs to.
+                if args.task.is_none()
+                    || args.attempt.is_none()
+                    || args.contract.is_none()
+                    || args.on.is_none()
+                {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        "a blocked message needs `--task`, `--attempt`, `--contract` and `--on T-<n>`",
+                    ));
+                }
+            }
             other => {
                 return Err(GearError::new(
                     ErrorCode::BadFormat,
@@ -179,6 +205,27 @@ pub fn send(
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 "`--about` needs registered task dependencies (slice 2)",
+            ));
+        }
+        // The fields belong to their message: the minutes left and the
+        // blocker to a progress answer (§5.2), the task waited for to a
+        // declared wait (§5.3).
+        if (args.left.is_some() || args.blocker.is_some()) && args.kind != MsgKind::Progress {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--left` and `--blocker` belong to a progress message, not to {}",
+                    args.kind.as_str()
+                ),
+            ));
+        }
+        if args.on.is_some() && args.kind != MsgKind::Blocked {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--on` belongs to a blocked message, not to {}",
+                    args.kind.as_str()
+                ),
             ));
         }
         if args.to.is_some() && args.reply_to.is_some() {
@@ -263,7 +310,7 @@ pub fn send(
         };
 
         let state = match args.kind {
-            MsgKind::Progress | MsgKind::Result => MsgState::Info,
+            MsgKind::Progress | MsgKind::Result | MsgKind::Blocked => MsgState::Info,
             MsgKind::Review if args.verdict == Some(crate::review::Outcome::Pass) => MsgState::Info,
             _ => MsgState::Open,
         };
@@ -338,6 +385,21 @@ pub fn send(
                 crate::review::submit_review(tx, review, now)?;
             }
 
+            // A declared wait (design §5.3): the lane's task waits for
+            // another task to land. The attempt stays Started and the lane
+            // ends its turn; the wait itself is on the task.
+            if args.kind == MsgKind::Blocked {
+                declare_wait(
+                    tx,
+                    &ctx.project,
+                    &seat,
+                    args.task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    args.contract.unwrap_or_default(),
+                    args.on.as_deref().unwrap_or_default(),
+                )?;
+            }
+
             // The thread of a new message is numbered here, after the replay
             // check: a replay returns the stored result and numbers nothing.
             let thread = match &inherited_thread {
@@ -349,7 +411,7 @@ pub fn send(
                 }
             };
             let message = NewMessage {
-                meta: None,
+                meta: progress_meta(args.left, args.blocker.as_deref())?,
                 project: ctx.project.clone(),
                 thread: thread.clone(),
                 task: task.clone(),
@@ -437,7 +499,7 @@ fn stored_receipt(
 /// transaction (to replay a committed receipt) or inside it.
 fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
     format!(
-        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}",
         args.kind.as_str(),
         args.body,
         args.task,
@@ -448,7 +510,10 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> S
         args.about,
         args.to,
         args.reply_to,
-        args.urgent
+        args.urgent,
+        args.left,
+        args.blocker,
+        args.on
     )
 }
 
@@ -650,7 +715,114 @@ fn handlable(message: &MessageRow, mode: ReplyMode) -> bool {
     }
 }
 
-/// `gear reply` (captain only). Each id must be in this project, addressed to
+/// The structured fields of a progress answer (design §5.2): the minutes the
+/// lane says are left and what stops it. `None` when the answer carries
+/// neither.
+fn progress_meta(left: Option<i64>, blocker: Option<&str>) -> GearResult<Option<String>> {
+    if left.is_none() && blocker.is_none() {
+        return Ok(None);
+    }
+    let mut fields = serde_json::Map::new();
+    if let Some(left) = left {
+        fields.insert("left".to_string(), serde_json::Value::from(left));
+    }
+    if let Some(blocker) = blocker {
+        fields.insert(
+            "blocker".to_string(),
+            serde_json::Value::String(blocker.to_string()),
+        );
+    }
+    Ok(Some(serde_json::Value::Object(fields).to_string()))
+}
+
+/// A declared wait (design §5.3): the lane's task cannot finish until another
+/// task lands.
+///
+/// The wait is written on the task (`wait_on`, `wait_cond`); the attempt
+/// stays Started, so the lane's round goes on when the wait ends. The message
+/// itself is the captain's info item: the wait is a fact, not an action.
+///
+/// Accepted only when the task it waits for exists and is not Done: a wait
+/// for a task that is already done would never end.
+fn declare_wait(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &gear_store::SeatRow,
+    task: &str,
+    attempt: i64,
+    contract: i64,
+    on: &str,
+) -> GearResult<()> {
+    let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no attempt {attempt} of task {task} in project {project}"),
+        )
+    })?;
+    if attempt_row.seat != seat.id {
+        return Err(GearError::new(
+            ErrorCode::Forbidden,
+            format!(
+                "attempt {attempt} of task {task} belongs to {}, not to {}",
+                attempt_row.seat, seat.id
+            ),
+        ));
+    }
+    // The contract the lane names must be the one the attempt works to and
+    // the one the task carries now — the same two checks a hand-in makes. A
+    // captain who changed the contract (and ended the wait with it) must not
+    // have the lane's old command park the task on an obsolete dependency.
+    if contract != attempt_row.adopted_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "attempt {attempt} of task {task} works to contract {}, not {contract}",
+                attempt_row.adopted_version
+            ),
+        ));
+    }
+    let task_row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+    if contract != task_row.contract_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is on contract v{}, not the v{contract} this message names: \
+                 run `gear` and `gear --show {task}` to work to v{}, then declare the wait again",
+                task_row.contract_version, task_row.contract_version
+            ),
+        ));
+    }
+    if attempt_row.state != AttemptState::Started {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "attempt {attempt} of task {task} is {}, not started: a wait is declared while the work goes on",
+                attempt_row.state.as_str()
+            ),
+        ));
+    }
+    let waited = tx.get_task(project, on)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {on} in project {project} to wait for"),
+        )
+    })?;
+    if waited.state == TaskState::Done {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("{on} is done: there is nothing to wait for"),
+        ));
+    }
+    tx.set_task_wait(project, task, on, "merged")?;
+    Ok(())
+}
+
+/// `gear send` (captain only). Each id must be in this project, addressed to
 /// the captain, Open or Waiting (Info may only be resolved). Resolve → Resolved; Wait → Waiting until
 /// wait_until (required; wait_on is an optional label); Note → state unchanged,
 /// with the text kept on the item and sent to nobody (T-103: a note is the

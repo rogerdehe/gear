@@ -109,6 +109,16 @@ struct SendCmd {
     /// Review only: the ids of the findings that block (T-23), comma separated.
     #[arg(long)]
     blocking: Option<String>,
+    /// Progress only (design §5.2): the minutes the lane says are left.
+    #[arg(long, value_name = "MIN")]
+    left: Option<i64>,
+    /// Progress only (design §5.2): what stops the lane ("none" when nothing
+    /// does).
+    #[arg(long, value_name = "TEXT")]
+    blocker: Option<String>,
+    /// Blocked only (design §5.3): the task the lane waits for.
+    #[arg(long, value_name = "T-N")]
+    on: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -1252,6 +1262,11 @@ fn run_send(
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
         urgent: c.urgent,
+        // The minutes left and what stops the lane (design §5.2).
+        left: c.left,
+        blocker: c.blocker.clone(),
+        // The task the lane waits for (design §5.3).
+        on: c.on.clone(),
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
@@ -1434,11 +1449,12 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Question
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Instruction
-        | gear_model::MsgKind::Review => Ok(kind),
+        | gear_model::MsgKind::Review
+        | gear_model::MsgKind::Blocked => Ok(kind),
         _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
-                "--kind {text} is not a `gear send` kind: progress, question, result, instruction or review"
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review or blocked"
             ),
         )),
     }
@@ -2063,6 +2079,9 @@ mod tests {
             to: None,
             reply_to: None,
             urgent: false,
+            left: None,
+            blocker: None,
+            on: None,
             candidate: None,
             verdict: None,
             blocking: None,
@@ -3068,6 +3087,260 @@ mod tests {
             ),
             "{out}"
         );
+    }
+
+    /// A lane working on T-1 (its attempt is open) and a task T-2 it can
+    /// wait for.
+    fn world_with_a_wait() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                for (id, state, lane) in [
+                    ("T-1", gear_model::TaskState::Ready, "heat"),
+                    ("T-2", gear_model::TaskState::Ready, "wire"),
+                ] {
+                    tx.insert_task(&TaskRow {
+                        project: "p".into(),
+                        id: id.into(),
+                        rank: 1,
+                        state,
+                        priority: "must".into(),
+                        lane: Some(lane.into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_contract(&ContractRow {
+                        project: "p".into(),
+                        task: id.into(),
+                        version: 1,
+                        goal: "g".into(),
+                        accept: "a".into(),
+                        evidence_files: vec![],
+                        evidence_due_min: None,
+                        body: String::new(),
+                        created: T0,
+                    })?;
+                }
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// §5.2: a progress answer carries the minutes left and what stops the
+    /// lane, in the message's meta.
+    #[test]
+    fn a_progress_answer_stores_its_meta() {
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("progress");
+        c.left = Some(30);
+        c.blocker = Some("the api is late".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser is done; the api is not".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(message.meta.as_deref().expect("the answer has a meta")).unwrap();
+        assert_eq!(meta["left"], serde_json::json!(30));
+        assert_eq!(meta["blocker"], serde_json::json!("the api is late"));
+    }
+
+    /// §5.3: a declared wait is written on the task; the attempt stays
+    /// Started, and the captain gets the info item.
+    #[test]
+    fn a_blocked_message_declares_a_wait() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap();
+
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on.as_deref(), Some("T-2"));
+        assert_eq!(task.wait_cond.as_deref(), Some("merged"));
+        // The attempt goes on: a wait is not a hand-in.
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Started
+        );
+        // The captain has the info item.
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(message.recipient, "p:captain");
+        assert_eq!(message.kind, MsgKind::Blocked);
+        assert_eq!(message.state, MsgState::Info);
+    }
+
+    /// §5.3: a wait for a task that is already done would never end.
+    #[test]
+    fn a_blocked_message_on_a_done_task_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = gear_model::TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("T-2 is done"), "{}", error.detail);
+        // Nothing was written: the task waits for nothing.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+    }
+
+    /// §5.3: the contract the lane names must be the one the task carries
+    /// now: a captain who changed the contract (and ended the wait with it)
+    /// must not have the lane's old command park the task on an obsolete
+    /// dependency.
+    #[test]
+    fn a_blocked_message_with_a_stale_contract_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        // The captain changed the task's contract.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1); // the contract the lane still works to
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("is on contract v2"), "{}", error.detail);
+        // Nothing was written: no wait and no message.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+        assert!(store.read(|tx| tx.get_message("p", "M-1")).unwrap().is_none());
+    }
+
+    /// The request fingerprint carries the answer's fields: a request id
+    /// reused with a changed field is a conflict, not a replay of the old
+    /// answer.
+    #[test]
+    fn a_reused_request_id_with_a_changed_field_is_a_conflict() {
+        let (mut store, mut herdr) = world();
+        let mut first = send_cmd("progress");
+        first.left = Some(30);
+        first.blocker = Some("none".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        // The same request id, another answer: a conflict, not a replay.
+        let mut changed = send_cmd("progress");
+        changed.left = Some(60);
+        changed.blocker = Some("the api is late".into());
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &changed,
+            "the parser is done".into(),
+            None,
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::RequestConflict,
+            "{}",
+            error.detail
+        );
+
+        // The same request id with the same answer: a replay.
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("[replayed]"), "{out}");
     }
 
     #[test]
