@@ -96,7 +96,7 @@ ALTER TABLE messages ADD COLUMN meta TEXT;
 --   wait_on = 'T-<m>', wait_cond = 'merged'
 ```
 
-The migration fills `tasks.repo/base/gate` of every existing task from its lane's current config, and leaves the new attempt columns NULL (old attempts have no session).
+The migration leaves every new column NULL (gear-store cannot read the project config). A reader of `tasks.repo/base/gate` that finds NULL falls back to the lane's current config (old tasks behave as today); tasks created from M4 on get the copy at insert (§1.1).
 
 ### 1.1 A task keeps its repo, base and gate
 
@@ -346,6 +346,8 @@ ERROR FRICTION_REQUIRED: T-<n> took <active> min against <budget> min. Add --fri
 
 The packet says so at delivery: `Budget: <budget> min. Past it, your hand-in must carry --friction "…"`.
 
+The check runs in `mail.rs` before `tasks::submit_result` is called (one place): active time = now − the attempt's `started_at` − the open round's `paused_s`, against `round_budget_min`.
+
 ### 6.3 What GEAR adds
 
 Each report is stored with `required`, and the board and `gear friction` show it next to the round's own facts: budget, active time, paused time, rounds so far, tokens (§4).
@@ -555,6 +557,7 @@ A config re-apply that changes a lane's kind or model list takes effect at the l
 | A9 | T-124 (the rereview test independent of load), T-127 F4 (bounded FIFO handshakes), F5 (no 10 ms sleep), T-128 F1 (board PTY test reads by poll). |
 | B2 (T-70) | One open item per (thread, fact); it closes itself when its cause is gone. |
 | B3 (T-66) | The run-dry warning is checked every tick, not only at apply. |
+| B10 | The captain watches the clock (user, 2026-10-26): besides the 25/50/75% stations, a course station every 60 min of voyage time, each answered like any station in `# Decisions`; its text gives elapsed / eta, time left, the per-lane projection (B4) and which lane sets it, and the tasks left; it is urgent when the projected finish is past the eta. An unanswered station is rung again after `timing.captain_item_stale_min` as today. |
 | B4 | Station projection per lane: each lane's open estimates × its own pace; the slowest lane sets the finish and is named. |
 | B5 (T-120) | Used `# Staff` lines are removed after apply; a failed merge's `next:` names `- remerge T-n`; apply prints the lanes a tail silences. |
 | B6 | `- tail: <lanes> until=T-n` / `until=<RFC3339>` ends by itself. |
@@ -645,6 +648,14 @@ impl Tx<'_> {
     pub fn close_friction(&self, project: &str, id: &str, outcome: &str, at: Ts) -> GearResult<()>;
 
     pub fn insert_decision_if_new(&self, d: &NewDecision) -> GearResult<bool>; // false: key exists
+
+    pub fn set_task_rework_estimate(&self, project: &str, task: &str, min: Option<i64>) -> GearResult<()>;
+    pub fn set_task_wait(&self, project: &str, task: &str, on: &str, cond: &str) -> GearResult<()>;
+    pub fn clear_task_wait(&self, project: &str, task: &str) -> GearResult<()>;
+    /// §5.1 in one place: the budget of a round in minutes (estimate, rework estimate,
+    /// or the measured review budget from rounds of the same model). Used by the overrun
+    /// question, the friction check and the packet's budget line.
+    pub fn round_budget_min(&self, project: &str, task: &str, attempt: i64, role: &str, model: Option<&str>) -> GearResult<i64>;
     pub fn decisions_of(&self, project: &str, voyage: &str) -> GearResult<Vec<DecisionRow>>;
 }
 pub struct RoundKey { pub project: String, pub task: String, pub attempt: i64, pub role: String }
@@ -652,6 +663,7 @@ pub struct NewRound { pub key: RoundKey, pub seat: String, pub generation: i64, 
 pub struct RoundTokens { pub input: Option<i64>, pub output: Option<i64>, pub cache_read: Option<i64>,
     pub cache_write: Option<i64>, pub reasoning: Option<i64>, pub cost_usd: Option<f64>, pub cost_source: String }
 // RoundRow, FrictionRow, DecisionRow: one field per column of §1, same names.
+// insert_task / insert_message (existing) write the new task and message columns.
 // NewFriction / NewDecision: the columns of §1 without id/seq/created.
 ```
 
@@ -690,7 +702,7 @@ pub fn prepare_review(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineC
                       task: &str, attempt: i64, now: Ts) -> GearResult<Prep>;
 ```
 
-Keel's dispatch (lanes) and hull's review start call these before the packet; on `Ready` they send it and call `store.set_attempt_sent`.
+Keel's dispatch (lanes) and hull's review start call these before the packet; on `Ready` they send it and call `store.set_attempt_sent`. When `prepare_*` inserts a seat's new round, it closes that seat's open round (`end_at` = the new `start_at`) in the same transaction, so a seat never has two open rounds.
 
 ### 13.5 Engine: rounds and waits (keel)
 
