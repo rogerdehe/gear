@@ -9,7 +9,9 @@ gear-model = { workspace = true }
 gear-store = { workspace = true }
 gear-herdr = { workspace = true }
 gear-app = { workspace = true }
+gear-board = { workspace = true }
 gear-forge = { workspace = true }
+gear-usage = { workspace = true }
 serde_json = { workspace = true }
 libc = { workspace = true }
 
