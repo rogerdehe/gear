@@ -109,12 +109,16 @@ struct ReplyCmd {
     /// Message ids to handle (M-…).
     #[arg(required = true)]
     ids: Vec<String>,
+    /// Close the item; the text is answered to its sender when that is a live seat.
     #[arg(long, conflicts_with_all = ["wait", "note"])]
     resolve: bool,
+    /// Keep the item waiting until WHO can answer; the text is answered to its
+    /// sender when that is a live seat.
     #[arg(long, value_name = "WHO")]
     wait: Option<String>,
     #[arg(long, requires = "wait")]
     until: Option<String>,
+    /// Keep the item open with the text as the captain's record on it; sent to nobody.
     #[arg(long)]
     note: bool,
     #[arg(long)]
