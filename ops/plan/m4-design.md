@@ -183,6 +183,10 @@ A review never keeps or resumes another task's session, so its judgment is indep
 
 `followup-of` becomes live: plan apply sets it on existing tasks too (today only NEW), and the field is checked to name an existing task.
 
+**Who decides "related".** Only the captain, once, when it writes the task: the parsed field `followup-of: T-F` in the task's block. The engine never reads the goal text, never matches keywords, never guesses. No field = unrelated = `new` (the safe default: at worst the lane re-reads code; it never carries unrelated context). Rework and re-review need no field: the attempt number says it. Everything after the field (which seat and session ran F, whether it is current, how large the context is) is a fact the engine reads from the store.
+
+The captain's guide says when to write it, in one line: the task changes the code the earlier task just wrote and needs that task's reasoning, not only its result. A task that only uses an earlier task's result (calls its API) is not a follow-up. `followup-of` is not `deps`: `deps` orders tasks, `followup-of` carries a session.
+
 ### 3.4 How each action runs
 
 All waits are bounded; every timeout has the fallback written here.
