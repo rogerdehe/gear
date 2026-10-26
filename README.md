@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.3.0, an early release for trial use — what changed: [docs/releases/v0.3.0.md](docs/releases/v0.3.0.md). Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.3.1, an early release for trial use — what changed: [docs/releases/v0.3.1.md](docs/releases/v0.3.1.md). Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.3.0
+   herdr plugin install rogerdehe/gear --ref v0.3.1
    ```
 
    Add `--yes` in a non-interactive shell.
@@ -30,7 +30,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    export PATH="$(herdr plugin list --json | sed -n 's/.*"plugin_id":"herdr-gear","plugin_root":"\([^"]*\)".*/\1/p')/bin:$PATH"
    ```
 
-   Check: `gear --version` prints `gear 0.3.0`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
+   Check: `gear --version` prints `gear 0.3.1`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
 
 3. **A key for the plan board**, in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
@@ -49,7 +49,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    gear admin install-skill --agent opencode    # once per CLI the project runs
    ```
 
-**Upgrading from 0.2.x?** The [v0.3.0 upgrade guide](docs/releases/v0.3.0.md#upgrading) has the three cases — a fresh install, an upgrade with no voyage running, an upgrade during a voyage — with the commands to copy.
+**Upgrading from 0.2.x or 0.3.0?** The [v0.3.0 upgrade guide](docs/releases/v0.3.0.md#upgrading) has the three cases — a fresh install, an upgrade with no voyage running, an upgrade during a voyage — with the commands to copy.
 
 ## Start a project
 
