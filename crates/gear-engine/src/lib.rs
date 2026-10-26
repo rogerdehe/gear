@@ -55,6 +55,11 @@ pub struct EngineCfg {
     /// Ticks a Submitted/Unknown doorbell may wait for evidence before the seat
     /// is flagged "needs check" (no resend either way).
     pub doorbell_check_budget: i64,
+    /// How long a delivery waits for the lane's check-in, in wall-clock
+    /// seconds (design §10.3: `timing.delivery_grace_s`, default 180). The
+    /// window is not a number of checks: a lane that reads its packet after a
+    /// minute still confirms it.
+    pub delivery_grace_s: i64,
     /// Observation profiles by name (seat.profile). Unknown profile name ⇒ the
     /// seat is not observed as idle (fail closed) and is flagged.
     pub profiles: std::collections::BTreeMap<String, gear_herdr::Profile>,
@@ -90,7 +95,7 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, delivery_grace_s: 180, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
     }
 }
 
@@ -104,6 +109,9 @@ pub struct TickReport {
     pub executed: Vec<(String, String)>,
     /// Op ids confirmed by evidence this tick.
     pub confirmed: Vec<String>,
+    /// Attempts confirmed by a **late** check-in (design §10.3): the delivery
+    /// op had already failed, and the view that showed the attempt came after.
+    pub late_confirmed: Vec<String>,
     /// Seats flagged for attention (e.g. doorbell evidence budget exhausted).
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
@@ -283,9 +291,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let (confirmed, flagged) =
-            ops::confirm_pending(store, &project, cfg.doorbell_check_budget, now)?;
+            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, cfg.delivery_grace_s, now)?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
+
+        // 2b. a late check-in (design §10.3): a view that shows the attempt
+        //     after its delivery op failed confirms the attempt anyway and
+        //     closes the stall item.
+        report.late_confirmed.extend(ops::confirm_late_views(store, &project, now)?);
 
         attention::promote(store, &project, now)?;
 
@@ -421,6 +434,18 @@ fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<St
     Ok((settled, failed))
 }
 
+/// Does this seat have no open attempt? (design §10.4: a lane with no open
+/// attempt gets the doorbell text that tells it to stop.)
+///
+/// Only a **lane** counts: the captain and the reviewers have no attempt of
+/// their own by design, and their doorbell keeps its usual text.
+pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+    if seat.role != gear_model::SeatRole::Lane {
+        return Ok(false);
+    }
+    Ok(tx.open_attempts_of_seat(&seat.id)?.is_empty())
+}
+
 /// What the doorbell decision needs to know about one seat (design/07).
 fn doorbell_inputs(
     tx: &gear_store::Tx<'_>,
@@ -540,6 +565,9 @@ fn doorbell_inputs(
             idle: seat_obs.idle && observe::reachable(seat.state),
             slot_busy,
             last_settled_at,
+            // Design §10.4: a lane with no open attempt gets the text that
+            // tells it to stop working on earlier things.
+            no_task: no_task_of(tx, seat)?,
             waiting,
         });
     }
