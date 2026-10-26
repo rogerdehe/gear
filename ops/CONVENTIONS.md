@@ -16,6 +16,7 @@ also available as `gear --skill conventions`. Review guidance is `gear --skill r
 - No real network, no real `git push`, no stress loops (`for i in $(seq 20)`), no `--test-threads` tuning in an acceptance.
 - A git or process fixture is built once per test file and kept tiny.
 - A task that adds tests keeps the total under the line; a hand-in that pushes it over fails review.
+- Run tests with `scripts/test.sh` (parallel; it prints every test's time and a warning for each test over 10 s). While working, run only the crate you change: `cargo nextest run -p <crate>`. Run the whole suite once, right before handing in. The merge gate runs `scripts/test.sh` too.
 
 ## The last step of every voyage
 
