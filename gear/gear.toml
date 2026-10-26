@@ -19,8 +19,13 @@ profile = "claude"
 name = "hull"
 duty = "M3.1 engine: starting and switching a pi lane, a dead temp seat freeing its slot, admin stop waiting for merges, the engine side of the trial's batch-2 fixes"
 owns = ["crates/gear-engine/"]
-kind = "opencode"
-profile = "opencode"
+kind = "pi"
+profile = "pi"
+# User 2026-10-26: every lane on pi.
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
 
 [[lanes]]
 name = "deck"
@@ -75,3 +80,5 @@ variant = "high"
 [conventions]
 integration = "dev"
 release = "main"
+# The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
+gate = "cargo build --workspace --all-targets && scripts/test.sh"

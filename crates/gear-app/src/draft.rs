@@ -296,13 +296,12 @@ fn parse_header(line: &str) -> Option<(String, i64)> {
                 return None;
             }
             project = Some(value.to_string());
-        } else if let Some(value) = token.strip_prefix("base=") {
+        } else {
+            let value = token.strip_prefix("base=")?;
             if base.is_some() {
                 return None;
             }
             base = Some(value.parse::<i64>().ok()?);
-        } else {
-            return None;
         }
     }
     Some((project?, base?))

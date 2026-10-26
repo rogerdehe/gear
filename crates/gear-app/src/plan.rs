@@ -1500,9 +1500,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         let seat_id = format!("{project}:{lane}");
         if let Some(open) = tx
             .open_attempts_of_seat(&seat_id)?
-            .into_iter()
-            .filter(|candidate| candidate.task == task)
-            .last()
+            .into_iter().rfind(|candidate| candidate.task == task)
         {
             adopted = open.adopted_version;
             attempt_arg = open.n.to_string();

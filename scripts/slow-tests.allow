@@ -1,0 +1,9 @@
+# Tests allowed to run longer than 10 s (scripts/test.sh).
+#
+# Empty on purpose: no test of this project needs more than 10 s. Only the
+# captain adds a line, after a lane asked with its reason; the captain refuses by
+# default (make the test faster), a line is a one-in-ten-thousand exception.
+#
+# One test per line:  <full test name as nextest prints it> <max seconds> <why it cannot be faster>
+# Example:  gear-engine merge::tests::some_test 15 real git over a slow fixture that cannot be shared
+# A listed test still gets the warning when it runs past its own max.
