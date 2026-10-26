@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScreenFlag {
-    /// Still running a turn/tool despite an idle/done status.
-    Busy,
     RateLimit,
     Quota,
     Auth,
+    /// The provider answered with an error (M4 §12 item 6): the seat waits
+    /// for the provider, and the engine reads the quota source to tell a
+    /// spent quota from a provider error (§9.2).
+    Error,
     /// The provider is in a back-off: the agent waits for it (T-75). The
     /// agent is not stuck, so no stall is raised for it.
     Backoff,
@@ -21,6 +23,8 @@ pub enum ScreenFlag {
 pub struct Profile {
     /// Herdr agent kind: `opencode`, `claude`, `codex`, `pi`…
     pub kind: String,
+    /// Kept so that an old config still loads; it decides nothing any more
+    /// (§10.2: whether an agent is busy is Herdr's state, never the screen).
     pub busy_markers: Vec<String>,
     pub ratelimit_markers: Vec<String>,
     pub quota_markers: Vec<String>,
@@ -37,6 +41,19 @@ pub struct Profile {
     /// told to do something it may not do. Empty for the kinds without
     /// guardrails.
     pub blocked_markers: Vec<String>,
+    /// The signs on screen that the provider answered with an error (§12 item
+    /// 6): the agent cannot go on, and the engine reads the quota source to
+    /// tell a spent quota from a provider error (§9.2).
+    pub error_markers: Vec<String>,
+    /// The slash command that starts a new session in this CLI, typed into
+    /// the pane (§2, §3.4). Empty = the CLI has none.
+    pub new_session: String,
+    /// The slash command that compacts the session, typed into the pane
+    /// (§2, §3.4). Empty = the CLI has none.
+    pub compact: String,
+    /// Which reader of §4.3 reads this CLI's records: `pi-jsonl`,
+    /// `codex-rollout`, `claude-jsonl`, `opencode-db`. None = unknown.
+    pub usage_log: Option<String>,
     /// Only the last `tail_lines` lines are matched.
     pub tail_lines: u32,
     /// A flag counts only after this many consecutive observations.
@@ -65,6 +82,9 @@ pub struct Profile {
 ///
 /// Only the tail window is inspected: an error that scrolled out of it is not
 /// a current fact. Empty markers are ignored (they would match every line).
+///
+/// There is no busy class (§10.2): whether an agent is busy is Herdr's
+/// state, never the text on its screen.
 pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
     let lines: Vec<&str> = tail.lines().collect();
     let start = lines.len().saturating_sub(profile.tail_lines as usize);
@@ -72,9 +92,6 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
 
     let mut flags = BTreeSet::new();
     for line in window {
-        if matches_any(&profile.busy_markers, line) {
-            flags.insert(ScreenFlag::Busy);
-        }
         if matches_any(&profile.ratelimit_markers, line) {
             flags.insert(ScreenFlag::RateLimit);
         }
@@ -83,6 +100,9 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
         }
         if matches_any(&profile.auth_markers, line) {
             flags.insert(ScreenFlag::Auth);
+        }
+        if matches_any(&profile.error_markers, line) {
+            flags.insert(ScreenFlag::Error);
         }
         if matches_any(&profile.backoff_markers, line) {
             flags.insert(ScreenFlag::Backoff);
@@ -117,12 +137,15 @@ pub fn render_args(args: &[String], repo_root: &str) -> Vec<String> {
 /// Reject a prompt template that contains any marker of `profile`
 /// (old keeper incident: the nudge text tripped its own rate-limit detector).
 /// Returns the offending marker in the error.
+///
+/// The busy markers are not among them any more: they decide nothing
+/// (§10.2), so a template that holds one is harmless.
 pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String> {
     let lists = [
-        ("busy", &profile.busy_markers),
         ("ratelimit", &profile.ratelimit_markers),
         ("quota", &profile.quota_markers),
         ("auth", &profile.auth_markers),
+        ("error", &profile.error_markers),
     ];
     for (kind, markers) in lists {
         for marker in markers {
@@ -145,28 +168,37 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
 /// are built in: today `opencode`, `claude`, `codex`, `grok` and `pi` —
-/// opencode: busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
+/// opencode: quota `Session failed`, `Token Plan`, `(2056)`,
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
-/// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// codex: busy `esc to interrupt`; quota `Usage limit reached` and the
+/// `["-s", "{session}"]`; exit `["ctrl+c"]`; new session `/new`; compact
+/// `/compact`; usage log `opencode-db`; verified.
+/// codex: quota `Usage limit reached` and the
 /// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
 /// `-c check_for_update_on_startup=false`;
 /// session_ref true (Herdr reports the session uuid); resume
-/// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// grok: busy `Ctrl+c:cancel`; unattended `--always-approve`; session_ref
+/// `["resume", "{session}"]`; exit by the typed `/quit` command
+/// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
+/// `/compact`; usage log `codex-rollout`; verified.
+/// grok: unattended `--always-approve`; session_ref
 /// true; resume `["-r", "{session}"]`; exit by the `/exit` command
-/// (`exit_command`, no keys).
-/// pi: busy ` Working` (the spinner line); quota `insufficient_quota`;
+/// (`exit_command`, no keys). The session fields are empty: grok is not one
+/// of the kinds of §2 and its live checks were never run (M4).
+/// pi: quota `insufficient_quota`;
 /// rate limit `rate_limit_error`; auth `No API key found for`; back-off
-/// `Retrying (`; guardrails `Command auto-denied:` and
+/// `Retrying (`; provider error `overloaded_error` and `Retry failed after`
+/// (§12 item 6); guardrails `Command auto-denied:` and
 /// `is blocked (outside working directory)`; unattended `--approve`;
 /// session_ref true (Herdr reports the session file); resume
 /// `["--session", "{session}"]`; exit by the `/quit` command
-/// (`exit_command`, no keys).
+/// (`exit_command`, no keys); new session `/new`; compact `/compact`;
+/// usage log `pi-jsonl`.
+///
+/// The busy markers of the older profiles are still there, so that an old
+/// config loads; they decide nothing (§10.2).
 /// Any other kind → None.
 impl Profile {
     /// The starting point for a profile the config defines (T-31): the screen
@@ -222,6 +254,16 @@ pub struct ProfilePatch {
     /// The lines that say the agent's own guardrails refused something
     /// (T-113).
     pub blocked_markers: Option<Vec<String>>,
+    /// The signs on screen that the provider answered with an error (§12
+    /// item 6).
+    pub error_markers: Option<Vec<String>>,
+    /// The slash command that starts a new session (§2).
+    pub new_session: Option<String>,
+    /// The slash command that compacts the session (§2); empty = none.
+    pub compact: Option<String>,
+    /// Which reader of §4.3 reads this CLI's records (§2): `pi-jsonl`,
+    /// `codex-rollout`, `claude-jsonl`, `opencode-db`.
+    pub usage_log: Option<String>,
     /// The keys that make the agent exit cleanly.
     pub exit_keys: Option<Vec<String>>,
     /// The args to resume a session; `{session}` is replaced.
@@ -265,6 +307,18 @@ impl Profile {
         }
         if let Some(markers) = &patch.blocked_markers {
             profile.blocked_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.error_markers {
+            profile.error_markers = markers.clone();
+        }
+        if let Some(command) = &patch.new_session {
+            profile.new_session = command.clone();
+        }
+        if let Some(command) = &patch.compact {
+            profile.compact = command.clone();
+        }
+        if let Some(log) = &patch.usage_log {
+            profile.usage_log = Some(log.clone());
         }
         if let Some(keys) = &patch.exit_keys {
             profile.exit_keys = keys.clone();
@@ -317,6 +371,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("opencode-db".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--auto".into()],
@@ -338,6 +396,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/clear".into(),
+            compact: "/compact".into(),
+            usage_log: Some("claude-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--dangerously-skip-permissions".into()],
@@ -407,6 +469,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec!["Reconnecting...".into()],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("codex-rollout".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec![
@@ -424,10 +490,12 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             ],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
-            // Two: after a turn the first ctrl+c only interrupts ("Conversation
-            // interrupted"); the second exits (seen 2026-10-23, L-63).
-            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
-            exit_command: None,
+            // M4 §12 item 4: the typed command `/quit` exits Codex, and
+            // ctrl+c twice is not safe (the second one reached the shell
+            // after Codex had gone and broke the next typed start). The
+            // exit is a command now, not keys.
+            exit_keys: vec![],
+            exit_command: Some("/quit".into()),
             verified: true,
         }),
         // Grok (verified 2026-10-23, grok 1.0.62 — the SOP
@@ -445,6 +513,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: String::new(),
+            compact: String::new(),
+            usage_log: None,
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--always-approve".into()],
@@ -498,6 +570,15 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "Command auto-denied:".into(),
                 "is blocked (outside working directory)".into(),
             ],
+            // M4 §12 item 6: the provider answered with an overload error
+            // (`529 … overloaded_error`) and pi gave up after three tries
+            // (`Error: Retry failed after 3 attempts: 529`). That is a
+            // provider error, not a spent quota: §9.2 reads the quota source
+            // to tell the two apart.
+            error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("pi-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--approve".into()],

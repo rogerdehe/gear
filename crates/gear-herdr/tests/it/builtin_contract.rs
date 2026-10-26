@@ -13,7 +13,9 @@ fn opencode_is_built_in_and_verified() {
     let quota = classify_screen(&p, "  Error: ... Token Plan ... (2056)\n  Session failed");
     assert!(quota.contains(&ScreenFlag::Quota));
     assert!(classify_screen(&p, "Free usage limit reached. Connect a provider").contains(&ScreenFlag::Quota));
-    assert!(classify_screen(&p, "   ■■⬝⬝ esc interrupt").contains(&ScreenFlag::Busy));
+    // M4 §10.2: the screen never says that an agent is busy — Herdr's state
+    // does. The busy marker of the profile is kept, but it decides nothing.
+    assert!(classify_screen(&p, "   ■■⬝⬝ esc interrupt").is_empty());
 }
 
 #[test]
@@ -28,8 +30,8 @@ fn grok_is_built_in_and_verified() {
     // It exits on `/exit`, not on a key.
     assert_eq!(p.exit_keys, Vec::<String>::new());
     assert_eq!(p.exit_command.as_deref(), Some("/exit"));
-    // Its busy sign is the shortcut line of a running turn.
-    assert!(classify_screen(&p, "  status  │  Ctrl+c:cancel  │").contains(&ScreenFlag::Busy));
+    // M4 §10.2: its busy sign is no sign at all — Herdr's state decides.
+    assert!(classify_screen(&p, "  status  │  Ctrl+c:cancel  │").is_empty());
 }
 
 #[test]
@@ -160,15 +162,22 @@ fn pi_is_built_in_and_verified() {
     assert_eq!(p.exit_command.as_deref(), Some("/quit"));
 }
 
-/// The busy sign of pi: the spinner line of a running turn. The glyph
-/// changes, the word does not.
+/// M4 §10.2: the screen never says that an agent is busy. Herdr's state
+/// does — and the screen of an agent that is busy often says something else
+/// entirely (`Working tree clean` holds pi's old busy sign).
 #[test]
-fn the_pi_busy_sign_is_the_working_line() {
-    let p = builtin("pi").unwrap();
-    assert!(classify_screen(&p, "── ⠋ Working ─────────────────────────").contains(&ScreenFlag::Busy));
-    assert!(classify_screen(&p, "── ⠧ Working ─────────────────────────").contains(&ScreenFlag::Busy));
-    // The idle screen has no working line.
-    assert!(!classify_screen(&p, "LSP Inactive").contains(&ScreenFlag::Busy));
+fn the_screen_never_says_that_an_agent_is_busy() {
+    for kind in ["pi", "codex", "claude", "opencode", "grok"] {
+        let p = builtin(kind).unwrap();
+        assert!(classify_screen(&p, "── ⠋ Working ─────────────────────────").is_empty(), "{kind}");
+        assert!(classify_screen(&p, "── ⠧ Working ─────────────────────────").is_empty(), "{kind}");
+        // The line that holds pi's old busy sign in the middle of a word.
+        assert!(classify_screen(&p, "Working tree clean").is_empty(), "{kind}");
+        // Codex's own busy sign.
+        assert!(classify_screen(&p, "• Working (12s • esc to interrupt)").is_empty(), "{kind}");
+        // The idle screen says nothing either.
+        assert!(classify_screen(&p, "LSP Inactive").is_empty(), "{kind}");
+    }
 }
 
 /// The provider signs of pi, taken from its own output (1.4.0).
