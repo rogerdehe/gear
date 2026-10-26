@@ -3090,7 +3090,9 @@ mod tests {
         let said = herdr.prompts_to(LANE_PANE);
         assert_eq!(said.len(), 1, "typed inside gear send: {said:?}");
         assert!(said[0].contains("M-1"), "the doorbell names the message: {said:?}");
-        assert!(said[0].contains("Run `gear` now."), "{said:?}");
+        // T-150 (design §10.4): the lane has no open attempt, so the doorbell
+        // says so and tells it to stop working on earlier things.
+        assert!(said[0].contains("You have no task now"), "{said:?}");
         assert!(out.contains("doorbell typed into"), "{out}");
 
         // The next tick sees the message covered: no second doorbell.

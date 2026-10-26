@@ -43,6 +43,7 @@ mod multi_repo_contract;
 mod reviewer_quota_contract;
 mod pi_lane_contract;
 mod agent_names_contract;
+mod delivery_grace_contract;
 mod targeting_contract;
 mod all_tail_contract;
 mod dead_temp_slot_contract;
