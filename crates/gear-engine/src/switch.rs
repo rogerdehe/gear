@@ -15,7 +15,9 @@
 //!
 //! Only the OpenCode protocol is implemented: it is the one the SOP
 //! (`gear --skill agent:opencode`, ops/bin/switch-model.sh) verifies, and
-//! guessing another CLI's picker is worse than flagging the seat (P2).
+//! guessing another CLI's picker is worse than flagging the seat (P2). A CLI
+//! without a picker GEAR drives (pi) is not switched here at all: the caller
+//! starts it again on the next model ([`crate::restart`]).
 
 use gear_app::config::ModelSwitch;
 use gear_herdr::{HerdrAct, Outcome, Profile};
@@ -56,6 +58,17 @@ pub enum SwitchOutcome {
     Failed,
 }
 
+/// Can GEAR change this CLI's model **in place** (T-33)? Only OpenCode's
+/// protocol is driven today: the picker, the variant dialog and the status
+/// bar (SOP `gear --skill agent:opencode`).
+///
+/// A CLI without a picker GEAR drives (pi) is **not** switched in place: it is
+/// closed and started again on the next model ([`crate::restart`]), the same
+/// pane and worktree, the lane's task delivered again in the new session.
+pub fn switches_in_place(kind: &str) -> bool {
+    kind == "opencode"
+}
+
 /// The keys and texts the switch sends, from the config and the profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwitchSteps {
@@ -69,9 +82,10 @@ pub struct SwitchSteps {
 
 impl SwitchSteps {
     /// The steps of one CLI kind. Only OpenCode's protocol is verified; any
-    /// other kind is not switched in place (the caller flags the seat).
+    /// other kind is not switched in place (the caller starts the agent again
+    /// on the next model, or flags the seat when it cannot).
     pub fn for_kind(kind: &str, labels: &ModelSwitch) -> Option<SwitchSteps> {
-        if kind != "opencode" {
+        if !switches_in_place(kind) {
             return None;
         }
         Some(SwitchSteps {
@@ -633,6 +647,20 @@ mod tests {
     use gear_model::SeatRole;
     use gear_store::testing;
     use std::collections::BTreeSet;
+
+    /// T-114: only OpenCode's picker is driven, so only OpenCode is switched
+    /// in place. A CLI without one (pi) is started again on the next model.
+    #[test]
+    fn only_opencode_is_switched_in_place() {
+        assert!(switches_in_place("opencode"));
+        for kind in ["pi", "codex", "claude", "grok"] {
+            assert!(!switches_in_place(kind), "{kind} has no picker GEAR drives");
+            assert!(
+                SwitchSteps::for_kind(kind, &labels()).is_none(),
+                "{kind} has no switch steps"
+            );
+        }
+    }
 
     const T0: i64 = 1_800_000_000;
     const PANE: &str = "w1:p1";
