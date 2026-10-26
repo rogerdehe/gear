@@ -171,6 +171,7 @@ pub fn take(
     herdr: &mut dyn HerdrRead,
     ancestors: &[u32],
     cwd: &Path,
+    named: Option<&str>,
     now: Ts,
 ) -> GearResult<Taken> {
     // 1. The pane: the caller's own, else the one unbound daemon pane.
@@ -182,8 +183,30 @@ pub fn take(
                 "`gear captain take` cannot tell which pane this is: run it from the agent's own pane, or from an agent whose CLI runs its tools in a daemon (codex, opencode) with exactly one such pane bound to no seat",
             )
         })?;
-    // 2. The project: the caller's own, else the checkout holding the cwd.
-    let project = project_of(store, env, cwd)?;
+    // 2. The project: the one named, else the checkout holding the cwd, else
+    //    the only registered one; with several, the list to ask the user from.
+    let project = match named {
+        Some(name) => {
+            if store.read(|tx| tx.get_project(name))?.is_none() {
+                return Err(GearError::new(ErrorCode::NoTarget, format!("no project {name:?}: {}", project_list(store, herdr)?)));
+            }
+            name.to_string()
+        }
+        None => match project_of(store, env, cwd) {
+            Ok(project) => project,
+            Err(_) => {
+                let ids = store.read(|tx| tx.project_ids())?;
+                if ids.len() == 1 {
+                    ids[0].clone()
+                } else {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!("which project? Ask the user, then run `gear captain take <project>`. {}", project_list(store, herdr)?),
+                    ));
+                }
+            }
+        },
+    };
     let captain = format!("{project}:captain");
     let seat = store
         .read(|tx| tx.get_seat(&captain))?
@@ -366,4 +389,26 @@ fn refused_item(
         })?;
         Ok(true)
     })
+}
+
+/// The registered projects with their captain's pane and whether an agent
+/// still runs there, for the user to choose from.
+fn project_list(store: &mut Store, herdr: &mut dyn HerdrRead) -> GearResult<String> {
+    let mut lines = Vec::new();
+    for id in store.read(|tx| tx.project_ids())? {
+        let captain = format!("{id}:captain");
+        let pane = store.read(|tx| {
+            let Some(seat) = tx.get_seat(&captain)? else { return Ok(None) };
+            Ok(tx.get_binding(&captain, seat.generation)?.map(|b| b.pane_id))
+        })?;
+        let state = match &pane {
+            Some(pane) => match herdr.agent_get(pane) {
+                Ok(Some(_)) => format!("captain in pane {pane}, running"),
+                _ => format!("captain's pane {pane} is gone"),
+            },
+            None => "no captain".to_string(),
+        };
+        lines.push(format!("{id} ({state})"));
+    }
+    Ok(format!("Projects: {}", lines.join("; ")))
 }

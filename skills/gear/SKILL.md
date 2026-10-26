@@ -1,6 +1,6 @@
 ---
 name: gear
-description: Work inside a GEAR-managed agent team (captain, lane or reviewer). Use when GEAR_CTX is set or the user mentions GEAR.
+description: Work inside a GEAR-managed agent team (captain, lane or reviewer). Use when GEAR_CTX is set, the user mentions GEAR, or the user asks you to take over a project's captain.
 ---
 
 # GEAR
@@ -32,7 +32,7 @@ A temp reviewer judges one task and hands in with `gear send --kind review --tas
 
 ## 5. Captain
 
-To become a project's captain, start your CLI in any pane, `cd` to the project and run `gear captain take`. It needs no `GEAR_CTX` and no pane id: the pane you run in becomes the captain seat at a new generation, and `gear` there is the captain's home page.
+To become a project's captain, run `gear captain take` in the project's root (with several projects it lists them: ask the user which). It needs no `GEAR_CTX` and no pane id: the pane you run in becomes the captain seat at a new generation, and `gear` there is the captain's home page.
 
 The captain's guide: `gear --skill captain`. Holding the course: `gear --skill course`. Cutting work into tasks: `gear --skill decompose`.
 

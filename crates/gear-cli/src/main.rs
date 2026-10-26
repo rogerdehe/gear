@@ -69,10 +69,14 @@ enum CaptainOp {
         #[arg(long, value_name = "PANE")]
         pane: String,
     },
-    /// Become the project's captain from the agent in this pane (T-126): no
-    /// GEAR_CTX, no pane id — start your CLI anywhere, cd to the project and
-    /// run it.
-    Take,
+    /// Become a project's captain from the agent in this pane: no GEAR_CTX,
+    /// no pane id. The project is the one named, else the one whose checkout
+    /// holds the working directory, else the only registered one; with several,
+    /// it lists them so you can ask the user which.
+    Take {
+        /// The project to captain (see the list `gear captain take` prints).
+        project: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -263,7 +267,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
             cmd_captain_handover(&pane, cli.json)
         }
-        Some(Cmd::Captain { op: CaptainOp::Take }) => cmd_captain_take(cli.json),
+        Some(Cmd::Captain { op: CaptainOp::Take { project } }) => cmd_captain_take(project.as_deref(), cli.json),
     }
 }
 
@@ -800,10 +804,15 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
     Ok(())
 }
 
-fn cmd_captain_take(json: bool) -> GearResult<()> {
+fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let mut herdr = open_herdr()?;
+    let mut herdr = match project.and_then(session_socket_of) {
+        Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
+            GearError::new(gear_model::ErrorCode::NotRegistered, format!("cannot reach herdr at {}: {}", path.display(), e.0))
+        })?,
+        None => open_herdr()?,
+    };
     let ancestors = gear_app::identity::process_ancestors();
     let cwd = std::env::current_dir().map_err(|e| {
         GearError::new(
@@ -812,7 +821,7 @@ fn cmd_captain_take(json: bool) -> GearResult<()> {
         )
     })?;
     let result =
-        gear_app::captain::take(&mut store, &env, &mut herdr, &ancestors, &cwd, now_ts())?;
+        gear_app::captain::take(&mut store, &env, &mut herdr, &ancestors, &cwd, project, now_ts())?;
     if json {
         println!(
             "{}",
@@ -1336,8 +1345,11 @@ fn read_stdin() -> GearResult<String> {
 /// The Herdr client for this process: `HERDR_SOCKET_PATH`, else the default
 /// session socket (design/04).
 fn open_herdr() -> GearResult<gear_herdr::SocketHerdr> {
-    let path = match std::env::var_os("HERDR_SOCKET_PATH") {
-        Some(path) => std::path::PathBuf::from(path),
+    // The project's own Herdr session first: an agent whose tools run in a
+    // shared daemon (Codex's app-server) inherits HERDR_SOCKET_PATH from
+    // wherever that daemon was started, which may be another session.
+    let path = match project_session_socket().or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(std::path::PathBuf::from)) {
+        Some(path) => path,
         None => {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
             home.join(".config/herdr/herdr.sock")
@@ -1348,6 +1360,50 @@ fn open_herdr() -> GearResult<gear_herdr::SocketHerdr> {
             gear_model::ErrorCode::NotRegistered,
             format!("cannot reach herdr at {}: {}", path.display(), e.0),
         )
+    })
+}
+
+/// The socket of the Herdr session of the project whose checkout holds the
+/// working directory (`[project].herdr_session`), when that session's socket
+/// exists. None outside a registered project.
+fn project_session_socket() -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let mut store = open_store().ok()?;
+    let projects = store.read(|tx| tx.project_ids()).ok()?;
+    for id in projects {
+        let Ok(config) = gear_app::config::latest(&mut store, &id) else {
+            continue;
+        };
+        let holds = config.repos().iter().any(|repo| {
+            let path = std::path::PathBuf::from(&repo.path);
+            let path = path.canonicalize().unwrap_or(path);
+            cwd.starts_with(&path)
+        }) || worktree_of_project(&cwd, &id);
+        if !holds {
+            continue;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+        let socket = home.join(".config/herdr/sessions").join(&config.project.herdr_session).join("herdr.sock");
+        return socket.exists().then_some(socket);
+    }
+    None
+}
+
+/// The socket of `project`'s Herdr session, when it exists.
+fn session_socket_of(project: &str) -> Option<std::path::PathBuf> {
+    let mut store = open_store().ok()?;
+    let config = gear_app::config::latest(&mut store, project).ok()?;
+    let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+    let socket = home.join(".config/herdr/sessions").join(&config.project.herdr_session).join("herdr.sock");
+    socket.exists().then_some(socket)
+}
+
+/// Whether `cwd` is inside one of the project's Herdr worktrees
+/// (`<herdr worktrees>/<project>/…`), where its lanes and reviewers run.
+fn worktree_of_project(cwd: &std::path::Path, project: &str) -> bool {
+    cwd.components().collect::<Vec<_>>().windows(2).any(|pair| {
+        pair[0].as_os_str().to_string_lossy().ends_with("herdr-worktrees") && pair[1].as_os_str() == project
     })
 }
 

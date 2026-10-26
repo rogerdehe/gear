@@ -350,24 +350,40 @@ pub fn caller_pane(
     ancestors: &[u32],
     env_pane: Option<&str>,
 ) -> Option<String> {
-    real_pane(herdr, ancestors).or_else(|| env_pane.map(str::to_string))
+    if let Some(pane) = real_pane(herdr, ancestors) {
+        return Some(pane);
+    }
+    // A caller in no pane runs its tools in a daemon, and the daemon's
+    // HERDR_PANE_ID is the pane (or even the Herdr session) it was started
+    // from, not the caller's: trust it only when that pane hosts a daemon agent.
+    env_pane
+        .filter(|pane| {
+            matches!(herdr.agent_get(pane), Ok(Some(info)) if info.agent.as_deref().is_some_and(is_daemon_kind))
+        })
+        .map(str::to_string)
 }
+
 
 /// The seat whose **active** binding is on `pane` (T-126): the pane a caller
 /// runs in, and the store's answer to which seat that is. `None` when no seat
 /// is bound there (an unmanaged agent, the user's own shell).
 pub fn seat_bound_to(tx: &Tx<'_>, pane: &str) -> GearResult<Option<SeatRow>> {
+    // A pane can carry an old binding of another project (a fixture whose
+    // captain once ran here): the newest active binding is the pane's seat.
+    let mut best: Option<(i64, SeatRow)> = None;
     for project in tx.project_ids()? {
         for seat in tx.seats_of_project(&project)? {
             let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
                 continue;
             };
             if binding.status == BindingStatus::Active && binding.pane_id == pane {
-                return Ok(Some(seat));
+                if best.as_ref().is_none_or(|(created, _)| binding.created > *created) {
+                    best = Some((binding.created, seat));
+                }
             }
         }
     }
-    Ok(None)
+    Ok(best.map(|(_, seat)| seat))
 }
 
 /// The **one** pane of the session that hosts an agent of a daemon kind and is

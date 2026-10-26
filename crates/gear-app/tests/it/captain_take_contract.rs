@@ -100,7 +100,7 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), NOW).unwrap();
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
     assert_eq!(taken.to, NEW_PANE);
     assert_eq!(taken.from.as_deref(), Some(CAP_PANE));
     assert_eq!(taken.generation, 2);
@@ -148,7 +148,7 @@ fn take_from_a_lanes_pane_is_refused() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let error = take(&mut s, &bare(), &mut herdr, &LANE_CALLER, root.path(), NOW).unwrap_err();
+    let error = take(&mut s, &bare(), &mut herdr, &LANE_CALLER, root.path(), None, NOW).unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
     assert!(error.detail.contains(LANE_PANE), "{}", error.detail);
 
@@ -167,7 +167,7 @@ fn take_works_when_the_old_captains_pane_is_gone() {
     // The old captain's pane was closed with its agent.
     herdr.exit_agent(CAP_PANE);
 
-    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), NOW).unwrap();
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
     assert_eq!((taken.from.as_deref(), taken.to.as_str(), taken.generation), (Some(CAP_PANE), NEW_PANE, 2));
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
     assert_eq!(seat.generation, 2);
@@ -181,7 +181,7 @@ fn take_needs_an_agent_in_the_pane() {
     let mut s = world(root.path());
     let mut herdr = herdr();
 
-    let error = take(&mut s, &bare(), &mut herdr, &USER_CALLER, root.path(), NOW).unwrap_err();
+    let error = take(&mut s, &bare(), &mut herdr, &USER_CALLER, root.path(), None, NOW).unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
     assert!(error.detail.contains("hosts no agent"), "{}", error.detail);
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
@@ -200,7 +200,7 @@ fn a_daemon_caller_in_no_pane_takes_the_one_unbound_daemon_pane() {
     herdr.add_agent("w1:p5", "codex", AgentStatus::Idle);
     herdr.set_pane_processes("w1:p5", Some(1_000_001), &[]);
 
-    let taken = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), NOW).unwrap();
+    let taken = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), None, NOW).unwrap();
     assert_eq!(taken.to, "w1:p5", "the one daemon pane with no seat");
     assert_eq!(taken.kind, "codex");
     let new = s.read(|tx| tx.get_binding("p:captain", 2)).unwrap().unwrap();
@@ -216,7 +216,21 @@ fn take_from_nowhere_names_what_it_needs() {
     let mut herdr = herdr();
     // No ancestry and no HERDR_PANE_ID, and no unbound daemon pane (the one
     // free pane hosts `claude`).
-    let error = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), NOW).unwrap_err();
+    let error = take(&mut s, &bare(), &mut herdr, &SERVICE, root.path(), None, NOW).unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden, "{}", error.detail);
     assert!(error.detail.contains("captain take"), "{}", error.detail);
+}
+
+/// Outside every project's checkout, with one registered project, `take` needs
+/// no name; a named project that does not exist is refused with the list.
+#[test]
+fn take_outside_the_checkout_finds_the_only_project_and_refuses_an_unknown_name() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, elsewhere.path(), None, NOW).unwrap();
+    assert_eq!(taken.project, "p");
+    let error = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), Some("nope"), NOW + 1).unwrap_err();
+    assert!(error.detail.contains("Projects: p"), "{}", error.detail);
 }
