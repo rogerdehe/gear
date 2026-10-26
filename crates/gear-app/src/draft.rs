@@ -38,6 +38,8 @@ pub struct QueueItem {
     pub state: Option<String>,
     pub followup_of: Option<String>,
     pub reopen: Option<String>,
+    /// The GitHub issue a task came from (T-79): `issue: #12`.
+    pub issue: Option<u64>,
 }
 
 /// One `# Staff` line.
@@ -51,6 +53,11 @@ pub enum StaffItem {
     Hold { line: usize, lane: String, reason: String },
     /// `- retire prompts`
     Retire { line: usize, lane: String },
+    /// `- retry heat`: a parked (NeedsCheck) or lost (Unknown) lane goes back
+    /// to Queued, so the engine onboards it again (T-82).
+    Retry { line: usize, lane: String },
+    /// `- remerge T-<n>`: retry the task's failed merge (T-92).
+    Remerge { line: usize, task: String },
 }
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
@@ -356,6 +363,49 @@ fn parse_priority(token: &str) -> Option<Priority> {
     }
 }
 
+/// An issue number as `#<n>`: ASCII digits, positive, and small enough for
+/// the store's integer (T-79). `#0`, `#+12` and a number that does not fit
+/// are not issue numbers.
+fn parse_issue(value: &str) -> Option<u64> {
+    let digits = value.strip_prefix('#')?;
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let number: u64 = digits.parse().ok()?;
+    (1..=i64::MAX as u64).contains(&number).then_some(number)
+}
+
+impl Priority {
+    /// The plan's word for a priority: `now`, `must`, …
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::Now => "now",
+            Priority::Must => "must",
+            Priority::Should => "should",
+            Priority::Could => "could",
+            Priority::Wont => "wont",
+        }
+    }
+
+    /// The priority a GitHub label names (T-79): `priority/now`,
+    /// `priority/must`, … `None` for any other label.
+    pub fn from_label(label: &str) -> Option<Priority> {
+        match label.trim().strip_prefix("priority/")? {
+            "now" => Some(Priority::Now),
+            "must" => Some(Priority::Must),
+            "should" => Some(Priority::Should),
+            "could" => Some(Priority::Could),
+            "wont" => Some(Priority::Wont),
+            _ => None,
+        }
+    }
+
+    /// The label a priority is written as (the inverse of `from_label`).
+    pub fn label(self) -> String {
+        format!("priority/{}", self.as_str())
+    }
+}
+
 fn is_task_id(token: &str) -> bool {
     match token.strip_prefix("T-") {
         Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
@@ -446,6 +496,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         state: None,
         followup_of: None,
         reopen: None,
+        issue: None,
     })
 }
 
@@ -471,6 +522,7 @@ fn parse_queue_field(
         "state" => "state",
         "followup-of" => "followup-of",
         "reopen" => "reopen",
+        "issue" => "issue",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -510,6 +562,11 @@ fn parse_queue_field(
             item.followup_of = Some(value.to_string());
         }
         "reopen" => item.reopen = Some(value.to_string()),
+        "issue" => {
+            item.issue = Some(parse_issue(value).ok_or_else(|| {
+                bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
+            })?)
+        }
         _ => unreachable!("the field was matched above"),
     }
     Ok(())
@@ -524,7 +581,7 @@ fn comma_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// `- temp …`, `- park …`, `- hold …`, `- retire …`.
+/// `- temp …`, `- park …`, `- hold …`, `- retire …`, `- remerge T-<n>`.
 fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
     let rest = text
         .strip_prefix("- ")
@@ -622,9 +679,30 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Retire { line, lane: lane.to_string() })
         }
+        "retry" => {
+            let lane = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`retry` needs a lane"))?;
+            if tokens.next().is_some() {
+                return Err(bad(line, "`retry` takes only a lane"));
+            }
+            Ok(StaffItem::Retry { line, lane: lane.to_string() })
+        }
+        "remerge" => {
+            let task = tokens
+                .next()
+                .ok_or_else(|| bad(line, "`remerge` needs a task id"))?;
+            if !is_task_id(task) {
+                return Err(bad(line, format!("`remerge` needs a task id, got {task:?}")));
+            }
+            if tokens.next().is_some() {
+                return Err(bad(line, "`remerge` takes only a task id"));
+            }
+            Ok(StaffItem::Remerge { line, task: task.to_string() })
+        }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold or retire"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, retire, retry or remerge"),
         )),
     }
 }

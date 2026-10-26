@@ -9,7 +9,7 @@ const T0: i64 = 1_800_000_000;
 fn task(id: &str, state: TaskState, deps: &[&str]) -> TaskRow {
     TaskRow { project: "p".into(), id: id.into(), rank: 1, state, priority: "must".into(), lane: Some("heat".into()),
         milestone: None, required: false, contract_version: 1, deps: deps.iter().map(|d| d.to_string()).collect(),
-        followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None, updated: T0 }
+        followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 }
 }
 
 fn world(tasks: &[TaskRow]) -> Store {
@@ -81,12 +81,26 @@ fn pass_and_fail_settle() {
     assert_eq!((task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 1)), (TaskState::Done, AttemptState::Accepted));
     s.write(|tx| settle(tx, &verdict(true), T0 + 4)).unwrap();
     assert_eq!(s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(), 1, "same verdict again writes nothing");
-    assert_eq!(s.write(|tx| settle(tx, &verdict(false), T0 + 5)).unwrap_err().code, ErrorCode::BadTransition);
+    // A pass then a fail on the same attempt: the captain reopens the task
+    // (T-90 — its merge failed). The accepted attempt keeps its state, the
+    // task goes back for a rework.
+    s.write(|tx| settle(tx, &verdict(false), T0 + 5)).unwrap();
+    assert_eq!(
+        (task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 1)),
+        (TaskState::Ready, AttemptState::Accepted)
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.as_deref(),
+        Some("edge cases")
+    );
 
     let mut s = submitted();
     s.write(|tx| settle(tx, &verdict(false), T0 + 3)).unwrap();
     assert_eq!((task_state(&mut s, "T-1"), attempt_state(&mut s, "T-1", 1)), (TaskState::Ready, AttemptState::Rejected));
     assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().rework_note.as_deref(), Some("edge cases"));
+    // A fail then a pass on one attempt is still a conflict: the rework is a
+    // new attempt, never a second verdict on the settled one.
+    assert_eq!(s.write(|tx| settle(tx, &verdict(true), T0 + 4)).unwrap_err().code, ErrorCode::BadTransition);
 }
 
 #[test]

@@ -17,13 +17,13 @@ fn seat(state: SeatState, role: SeatRole) -> SeatRow {
 fn obs(state: SeatState, idle: bool, flags: &[ScreenFlag]) -> SeatObs {
     SeatObs { seat: seat(state, SeatRole::Lane), presence: Presence::Present,
         status: Some(if idle { AgentStatus::Idle } else { AgentStatus::Working }),
-        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle, screen: None }
+        flags: flags.iter().copied().collect::<BTreeSet<_>>(), idle, screen: None, session: None }
 }
 
 fn task(id: &str) -> TaskRow {
     TaskRow { project: "p".into(), id: id.into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
         lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![],
-        followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None, updated: NOW }
+        followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: NOW }
 }
 
 fn attempt(task: &str, state: AttemptState) -> AttemptRow {
@@ -42,7 +42,7 @@ fn op() -> OpRow {
 fn view() -> LaneView {
     LaneView { obs: Some(obs(SeatState::Active, true, &[])), attempt: None, pending_op: None,
         last_deliver_at: Some(NOW - 1000), nudges_since_progress: 0, ready_tasks: vec![task("T-2"), task("T-3")],
-        safe_for_next: false, switch_pending: false }
+        safe_for_next: false, switch_pending: false, failed_delivery: None }
 }
 
 fn is_none(a: &Action) -> bool {

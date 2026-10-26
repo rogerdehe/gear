@@ -72,6 +72,9 @@ string_enum!(OpKind {
     Release => "release", Title => "title", Notify => "notify",
     // Merge a passed task's branches into the integration branch (T-12/T-13).
     Merge => "merge",
+    // One call to the project's forge (T-91): the claim, a comment, a merge, a
+    // close. The engine's, not a seat's: the payload says which call.
+    Forge => "forge",
 });
 
 string_enum!(OpState {
@@ -112,6 +115,9 @@ impl AttemptState {
             (Submitted, Accepted | Rejected) => true,
             // UNKNOWN only leaves via evidence to a proven state; never straight to Abandoned.
             (Unknown, Started | Stopped | Submitted) => true,
+            // A task cancelled from the plan (T-93) closes its open attempt: a
+            // delivered prompt and a handed-in result are abandoned directly.
+            (Delivered | Submitted, Abandoned) => true,
             _ => false,
         }
     }
@@ -154,7 +160,9 @@ impl SeatState {
                     | (Retiring, Retired | Missing)
                     | (Retired, Queued) // registered again: a new voyage reuses the name (T-54)
                     | (Missing, Starting | NeedsCheck | Retired)
-                    | (NeedsCheck, Active | Starting | Retired)
+                    // Retried by the captain (T-82): the engine onboards it again.
+                    | (NeedsCheck, Queued | Active | Starting | Retired)
+                    | (Unknown, Queued)
             ),
             SeatRole::Temp => matches!(
                 (from, to),
@@ -165,7 +173,9 @@ impl SeatState {
                     | (Releasing, Released | Unknown)
                     | (Released, Starting | Retired)
                     | (Missing, Starting | NeedsCheck | Retired)
-                    | (NeedsCheck, Active | Starting | Retired)
+                    // Retried by the captain (T-82): the engine onboards it again.
+                    | (NeedsCheck, Queued | Active | Starting | Retired)
+                    | (Unknown, Queued)
             ),
         }
     }
@@ -191,7 +201,7 @@ impl OpState {
             (self, to),
             (Intended, Executing | Void)
                 | (Executing, Submitted | Failed | Unknown)
-                | (Submitted, Confirmed)
+                | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
         )
     }
@@ -272,6 +282,11 @@ mod tests {
         assert!(OpState::Submitted.holds_delivery_slot());
         assert!(OpState::Unknown.holds_delivery_slot());
         assert!(!OpState::Confirmed.holds_delivery_slot());
-        assert!(!OpState::Submitted.can_transition(OpState::Failed));
+        assert!(!OpState::Confirmed.can_transition(OpState::Failed), "a settled op stays settled");
+        // T-97: a delivery that is never confirmed fails past its check
+        // budget, which frees the seat's slot — the one way a submitted op
+        // ends without being confirmed.
+        assert!(OpState::Submitted.can_transition(OpState::Failed));
+        assert!(!OpState::Failed.holds_delivery_slot());
     }
 }

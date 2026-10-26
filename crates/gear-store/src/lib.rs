@@ -186,6 +186,8 @@ pub struct TaskRow {
     /// The planned time of the task in minutes (T-38): the plan's `estimate:`
     /// field. None for a task that has none.
     pub estimate_min: Option<i64>,
+    /// The GitHub issue the task came from (T-79): the plan's `issue: #<n>`.
+    pub issue: Option<i64>,
     pub updated: Ts,
 }
 
@@ -1221,6 +1223,30 @@ impl<'s> Tx<'s> {
         Ok(self.captain_quota(project)?.is_some_and(|state| !state.resumed))
     }
 
+    /// The seats of the project that wait for their provider (T-75): their
+    /// screen shows a provider back-off. Kept in meta, so it survives a
+    /// restart and needs no migration.
+    pub fn seats_in_backoff(&self, project: &str) -> GearResult<Vec<String>> {
+        let raw = self.get_meta(&format!("engine.backoff.{project}"))?;
+        match raw.filter(|raw| !raw.is_empty()) {
+            Some(raw) => serde_json::from_str(&raw).map_err(|error| {
+                GearError::new(ErrorCode::BadFormat, format!("the back-off seats: {error}"))
+            }),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Keep the seats that wait for their provider (T-75). Nothing is written
+    /// when the set is the same as the stored one.
+    pub fn set_seats_in_backoff(&self, project: &str, seats: &[String]) -> GearResult<()> {
+        if self.seats_in_backoff(project)? == seats {
+            return Ok(());
+        }
+        let raw = serde_json::to_string(seats)
+            .map_err(|error| GearError::new(ErrorCode::BadFormat, error.to_string()))?;
+        self.set_meta(&format!("engine.backoff.{project}"), &raw)
+    }
+
     // ---- views
 
     pub fn insert_view(&self, v: &ViewRecord) -> GearResult<()> {
@@ -1496,8 +1522,8 @@ impl<'s> Tx<'s> {
             .execute(
                 "INSERT INTO tasks
                    (project, id, rank, state, priority, lane, milestone, required, contract_version,
-                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     row.project,
                     row.id,
@@ -1514,6 +1540,7 @@ impl<'s> Tx<'s> {
                     row.wait_cond,
                     row.rework_note,
                     row.estimate_min,
+                    row.issue,
                     row.updated,
                 ],
             )
@@ -1559,7 +1586,7 @@ impl<'s> Tx<'s> {
                 "UPDATE tasks
                  SET rank=?3, state=?4, priority=?5, lane=?6, milestone=?7, required=?8,
                      contract_version=?9, deps=?10, followup_of=?11, wait_on=?12, wait_cond=?13,
-                     rework_note=?14, estimate_min=?15, updated=?16
+                     rework_note=?14, estimate_min=?15, issue=?16, updated=?17
                  WHERE project=?1 AND id=?2",
                 params![
                     row.project,
@@ -1577,6 +1604,7 @@ impl<'s> Tx<'s> {
                     row.wait_cond,
                     row.rework_note,
                     row.estimate_min,
+                    row.issue,
                     row.updated,
                 ],
             )
@@ -2367,7 +2395,7 @@ fn op_select(tail: &str) -> String {
 fn task_select(tail: &str) -> String {
     format!(
         "SELECT project, id, rank, state, priority, lane, milestone, required, contract_version,
-                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, updated
+                deps, followup_of, wait_on, wait_cond, rework_note, estimate_min, issue, updated
          FROM tasks{tail}"
     )
 }
@@ -2410,7 +2438,8 @@ fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
         wait_cond: row.get(12)?,
         rework_note: row.get(13)?,
         estimate_min: row.get(14)?,
-        updated: row.get(15)?,
+        issue: row.get(15)?,
+        updated: row.get(16)?,
     })
 }
 

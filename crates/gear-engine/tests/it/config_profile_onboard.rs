@@ -52,8 +52,16 @@ fn cfg() -> EngineCfg {
 
 #[test]
 fn a_configured_profile_onboards_its_lane() {
+    // A grok lane writes its trust file under HOME: keep it out of the
+    // user's own home, and out of another test's window (HOME is
+    // process-wide).
+    let home = tempfile::tempdir().unwrap();
+    let _home = crate::HOME_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let previous = std::env::var("HOME").ok();
+    std::env::set_var("HOME", home.path());
+
     let mut s = Store::open_in_memory().unwrap();
-    admin::init(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG, T0).unwrap();
+    admin::init_with_home(&mut s, &Env { ctx: None, pane_id: None, admin: true }, CONFIG,Some(crate::skill_home()), T0).unwrap();
     let mut herdr = FakeHerdr::new();
 
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 1).unwrap();
@@ -75,4 +83,9 @@ fn a_configured_profile_onboards_its_lane() {
     // The seat is active and bound, as for any lane.
     let seat = s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
     assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
+
+    match previous {
+        Some(value) => std::env::set_var("HOME", value),
+        None => std::env::remove_var("HOME"),
+    }
 }

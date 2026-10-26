@@ -37,6 +37,18 @@ fn sh(dir: &Path, command: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// Move `dir`'s HEAD onto `branch` in its origin, from the origin's own side
+/// (T-107): the engine's tests never run `git push`.
+fn publish(dir: &Path, branch: &str) {
+    sh(
+        dir,
+        &format!(
+            "origin=$(git remote get-url origin); \
+             git -C \"$origin\" fetch -q \"$(pwd)\" +HEAD:refs/heads/{branch}"
+        ),
+    );
+}
+
 /// The real Git world of the test: a parent repo (a bare `origin`, the branch
 /// `dev`) and a child repo cloned into a gitignored `child/` path of it (its
 /// own bare `origin`, the branch `feat`).
@@ -62,20 +74,16 @@ impl World {
         fs::write(parent.join(".gitignore"), "child/\n").unwrap();
         fs::write(parent.join("README.md"), "parent\n").unwrap();
         sh(&parent, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(
-            &parent,
-            &format!("git remote add origin {} && git push -q origin dev", parent_origin.display()),
-        );
+        sh(&parent, &format!("git remote add origin {}", parent_origin.display()));
+        publish(&parent, "dev");
 
         // The child: its own bare origin and its own branch `feat`.
         sh(root.path(), &format!("git init -q --bare -b feat {}", child_origin.display()));
         sh(root.path(), &format!("git init -q -b feat {}", seed.display()));
         fs::write(seed.join("README.md"), "child\n").unwrap();
         sh(&seed, "git add -A && git -c user.email=a@b -c user.name=a commit -qm base");
-        sh(
-            &seed,
-            &format!("git remote add origin {} && git push -q origin feat", child_origin.display()),
-        );
+        sh(&seed, &format!("git remote add origin {}", child_origin.display()));
+        publish(&seed, "feat");
 
         // … cloned into the parent's gitignored path: the parent never sees
         // the child's files.
@@ -97,10 +105,10 @@ impl World {
             &self.child,
             &format!(
                 "git switch -qc {branch} feat && echo work >> work.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm work \
-                 && git push -q origin {branch}"
+                 && git -c user.email=a@b -c user.name=a commit -qm work"
             ),
         );
+        publish(&self.child, branch);
         sh(&self.child, &format!("git rev-parse {branch}"))
     }
 
@@ -111,10 +119,10 @@ impl World {
             &self.child,
             &format!(
                 "git switch -qc {branch} feat && echo review > review.txt && git add -A \
-                 && git -c user.email=a@b -c user.name=a commit -qm review \
-                 && git push -q origin {branch}"
+                 && git -c user.email=a@b -c user.name=a commit -qm review"
             ),
         );
+        publish(&self.child, branch);
     }
 
     /// The engine's integration worktree of the child repo: `home/merge`,
@@ -176,7 +184,13 @@ profile = "claude"
 
 /// The engine knows the profiles the project uses.
 fn cfg() -> EngineCfg {
-    let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut cfg = EngineCfg {
+        db_path: "/state/gear.db".into(),
+        // T-107: the merge's remote runner moves refs from origin's side; no
+        // engine test runs `git push`.
+        remote: std::sync::Arc::new(gear_engine::merge::FetchRemote),
+        ..Default::default()
+    };
     for kind in ["opencode", "claude"] {
         cfg.profiles.insert(kind.into(), builtin(kind).unwrap());
     }
@@ -271,10 +285,11 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
         marker = marker.display()
     );
     let mut store = Store::open_in_memory().unwrap();
-    admin::init(
+    admin::init_with_home(
         &mut store,
         &Env { ctx: None, pane_id: None, admin: true },
         &world.config(&gate),
+        Some(crate::skill_home()),
         T0,
     )
     .unwrap();
@@ -312,7 +327,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),

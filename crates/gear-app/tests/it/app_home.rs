@@ -325,7 +325,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: NOW,
+                 issue: None,updated: NOW,
             })?;
         }
         Ok(())
@@ -356,7 +356,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
     assert!(home.text.contains("heat · agent working · T-1 in progress · 1 queued"), "{}", home.text);
     assert!(home.text.contains("runtime · agent idle · no current task · 2 queued"), "{}", home.text);
     assert!(
-        home.text.contains("deliveries not confirmed: 0 · temps 0/2"),
+        home.text.contains("deliveries not confirmed: 0 · temps 0 running · 0 starting · 0 blocked (0 of 2)"),
         "{}",
         home.text
     );

@@ -42,7 +42,7 @@ fn world() -> Store {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
             }
             Ok(())
@@ -175,7 +175,10 @@ fn the_board_shows_the_captains_inbox_and_the_temp_slots() {
 
     assert!(text.contains("Waiting for the captain: 1 item · oldest 3m"), "{text}");
     // The project was seeded with a quota of two temp slots; one is in use.
-    assert!(text.contains("Temp slots: 1/2 in use"), "{text}");
+    assert!(
+        text.contains("Temp slots: ") && text.contains("1 of 2 in use"),
+        "the temp slots say what they are doing: {text}"
+    );
 }
 
 #[test]
@@ -243,7 +246,7 @@ fn a_task_in_review_is_shown_as_in_review() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                updated: T0,
+                 issue: None,updated: T0,
             })?;
             Ok(())
         })
@@ -548,4 +551,35 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&format!("runtime · agent {expected} · T-2 in progress · 1 queued")), "{text}");
     }
+}
+
+/// T-82 (trial G02, G04): a seat that is not running says what it is, why, and
+/// the plan line that gets it back — never a bare "agent unknown".
+#[test]
+fn a_needs_check_lane_says_why_and_how_to_retry_it() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.set_seat_state(
+                "p:runtime",
+                gear_model::SeatState::NeedsCheck,
+                Some("agent_start: refused (agent_pane_busy)"),
+                T0 + 1,
+            )
+        })
+        .unwrap();
+
+    let board = store.read(|tx| gear_board::project(tx, "p", T0 + 2)).unwrap();
+    let runtime = board.lanes.iter().find(|lane| lane.lane == "runtime").unwrap();
+    let line = gear_board::lane_line(runtime);
+    assert!(line.starts_with("runtime · needs check: "), "{line}");
+    assert!(line.contains("agent_pane_busy"), "the reason is shown: {line}");
+    assert!(line.contains("- retry runtime"), "the way back is shown: {line}");
+    assert!(!line.contains("agent unknown"), "{line}");
+
+    // A running lane keeps its agent state and gains no action.
+    let data = board.lanes.iter().find(|lane| lane.lane == "data").unwrap();
+    let line = gear_board::lane_line(data);
+    assert!(line.contains("agent "), "{line}");
+    assert!(!line.contains("- retry"), "{line}");
 }

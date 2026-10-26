@@ -21,8 +21,37 @@ pub use quota_bar::{QuotaBar, QuotaReading};
 use serde_json::{json, Value};
 
 pub use board_herdr::{AgentInfo, AgentSession, AgentStatus};
+
+/// The processes of a pane, as Herdr reports them (T-104): its shell, the
+/// foreground process group, and the terminal (`/dev/ttys…`). The one pane
+/// fact a shell cannot set with an environment variable — an identity check
+/// that trusts `GEAR_CTX`/`HERDR_PANE_ID` alone can be claimed by any agent.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+pub struct PaneProcessInfo {
+    pub pane_id: String,
+    #[serde(default)]
+    pub shell_pid: Option<u32>,
+    /// The pane's terminal, when Herdr knows it.
+    #[serde(default)]
+    pub tty: Option<String>,
+    #[serde(default)]
+    pub foreground_process_group_id: Option<u32>,
+    #[serde(default)]
+    pub foreground_processes: Vec<PaneProcess>,
+}
+
+/// One process running in a pane (T-104).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+pub struct PaneProcess {
+    pub pid: u32,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub cmdline: Option<String>,
+}
 pub use profile::{
-    builtin, builtins, classify_screen, validate_template, Profile, ProfilePatch, ScreenFlag,
+    builtin, builtins, classify_screen, render_args, validate_template, Profile, ProfilePatch,
+    ScreenFlag,
 };
 
 /// Reading Herdr failed. Callers must treat this as "observation failed",
@@ -65,6 +94,13 @@ pub trait HerdrRead {
     /// the "Select variant" dialog and the status bar are drawn in the visible
     /// pane, and a dialog can sit far above the last 16 lines.
     fn read_screen(&mut self, pane_id: &str) -> Result<String, ObserveError>;
+    /// The pane's shell and foreground processes (T-104): an identity check
+    /// proves the caller runs in the pane it claims with them.
+    fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError>;
+    /// Every pane of the session, agents and shells alike (T-104): the pane a
+    /// caller really runs in may be a shell with no agent (the user's own
+    /// terminal).
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError>;
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -143,6 +179,24 @@ impl HerdrRead for SocketHerdr {
             Err(board_herdr::HerdrError::Protocol { code, .. }) if is_missing(&code) => Ok(None),
             Err(e) => Err(ObserveError(format!("agent.get failed: {e}"))),
         }
+    }
+
+    fn panes(&mut self) -> Result<Vec<String>, ObserveError> {
+        let panes = self
+            .client
+            .pane_list(None)
+            .map_err(|e| ObserveError(format!("pane.list failed: {e}")))?;
+        Ok(panes.into_iter().map(|pane| pane.pane_id).collect())
+    }
+
+    fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
+        let value = self
+            .client
+            .call("pane.process_info", serde_json::json!({ "pane_id": pane_id }))
+            .map_err(|e| ObserveError(format!("pane.process_info failed: {e}")))?;
+        let info = value.get("process_info").cloned().unwrap_or(serde_json::Value::Null);
+        serde_json::from_value(info)
+            .map_err(|e| ObserveError(format!("pane.process_info: {e}")))
     }
 
     fn read_tail(&mut self, pane_id: &str, lines: u32) -> Result<String, ObserveError> {

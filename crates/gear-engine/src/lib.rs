@@ -19,6 +19,7 @@ pub mod captain_quota;
 mod attention;
 pub mod blocked;
 pub mod busy;
+pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
@@ -33,6 +34,7 @@ pub mod quota;
 pub mod release;
 pub mod restart;
 pub mod review;
+pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
@@ -63,11 +65,25 @@ pub struct EngineCfg {
     pub auto_settle: bool,
     /// Background merge jobs shared across ticks and configuration clones.
     pub merges: merge::MergeWorkers,
+    /// How many ticks a start refused with `agent_pane_busy` may wait for its
+    /// shell before the seat parks (T-95). One tick is one attempt: a slow
+    /// shell is retried once per tick on the same binding and never holds the
+    /// tick, so a busy pane no longer delays the lanes queued behind it.
+    pub pane_busy_ticks: i64,
+    /// How long an OpenCode lane waits for its directory's model list to load
+    /// before it parks (T-67), and how long between two looks.
+    pub model_list_wait_s: u64,
+    pub model_list_poll_ms: u64,
+    /// The one runner the merge uses to touch the remote (T-107): the push of
+    /// the integration branch and the branch deletes. Production is
+    /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
+    /// moves the refs from the remote's own side, so no test runs `git push`.
+    pub remote: std::sync::Arc<dyn merge::Remote>,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote) }
     }
 }
 
@@ -108,6 +124,9 @@ pub struct TickReport {
     pub busy_lanes: Vec<String>,
     /// Seats rung for being blocked by a dialog for too long (lesson 7b).
     pub blocked: Vec<String>,
+    /// Seats that wait for their provider (T-75): a provider back-off is not
+    /// a stall, and the home page shows it.
+    pub backoff: Vec<String>,
     /// Parallel-change warning message ids (`project:M-n`).
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
@@ -139,6 +158,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.parallel.extend(checked.opened.into_iter().map(|id| format!("{project}:{id}")));
         report.parallel_failed.extend(checked.problems.into_iter().map(|error| format!("{project}: {error}")));
     }
+    // The GitHub side of a project in GitHub mode (T-91): every call is an op,
+    // so an outage queues them and never stops the tick.
+    for project in &projects {
+        gear_forge::sync(store, project, now)?;
+    }
     // Station facts need no Herdr observation. Enqueue them before deciding
     // doorbells, including when a previous outage delayed a checkpoint.
     for project in &projects {
@@ -168,12 +192,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        // A hand restart of an agent is a new session in the same generation
+        // (T-97): the binding follows what the pane reports, so a delivery that
+        // was never confirmed can be sent again without a store edit.
+        observe::record_sessions(store, &observed)?;
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
         report
             .blocked
             .extend(store.write(|tx| blocked::check(tx, &project, &observed, now))?);
+
+        // T-75: a seat whose provider is in a back-off waits for the provider.
+        // It is not stuck, so no stall item is raised for it, and the captain's
+        // home page shows it as a back-off.
+        let waiting = stall::waiting_for_provider(&profiles, &observed);
+        store.write(|tx| tx.set_seats_in_backoff(&project, &waiting))?;
+        report.backoff.extend(waiting);
 
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
 
@@ -204,15 +239,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         attention::promote(store, &project, now)?;
 
-        // 3. decide (pure): who should be rung now.
-        let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
-        let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
-
-        // 4. intend: fix the doorbell actions as Intended ops in one transaction.
-        let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
-        report.intended.extend(intended.into_iter().map(|op| op.id));
-
-        // 5. dispatch: per lane seat a view and a decision, read-only with this
+        // 3. dispatch: per lane seat a view and a decision, read-only with this
         //    tick's observations …
         let dispatch_cfg = dispatch::DispatchCfg {
             cooldown_s: cfg.cooldown_s,
@@ -259,10 +286,33 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let releases = release::release_finished_reviews(store, herdr, &project, now)?;
         report.released.extend(releases.released);
 
-        // 7. execute: re-check each op, call Herdr, record the outcome.
+        // 8a. retire: a Retiring lane that is idle at a safe point says
+        //     goodbye, closes its pane and becomes Retired (T-65).
+        report.released.extend(release::retire_finished_lanes(
+            store,
+            herdr,
+            &project,
+            &observed,
+            &profiles,
+            now,
+        )?);
+
+        // 9. decide (pure): who should be rung now. This comes after every
+        //    delivery of the tick: a seat that is being handed work is not
+        //    rung in the same tick (T-71) — on T-61 both went into the
+        //    reviewer's pane in one second and the packet was swallowed. The
+        //    delivery holds the seat's slot, so the doorbell waits.
+        let inputs = store.read(|tx| doorbell_inputs(tx, &project, &observed, now))?;
+        let actions = doorbell::decide(&inputs, cfg.cooldown_s, now);
+
+        // 10. intend: fix the doorbell actions as Intended ops in one transaction.
+        let intended = store.write(|tx| ops::intend_doorbells(tx, &actions, now))?;
+        report.intended.extend(intended.into_iter().map(|op| op.id));
+
+        // 11. execute: re-check each op, call Herdr, record the outcome.
         report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
 
-        // 7c. merge: collect a finished background merge or launch the next
+        // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
@@ -340,13 +390,23 @@ fn doorbell_inputs(
             .into_iter()
             .flat_map(|view| view.shown_msgs)
             .collect();
+        // Only this generation's messages may ring the seat (T-71): a warm
+        // temp seat keeps its id across jobs and a re-registered lane keeps
+        // its name, so an earlier job's or voyage's items would otherwise be
+        // counted as unshown for ever. A temp seat's messages must also be
+        // about the task it reviews now (F1 of the T-71 review).
+        let since = gear_app::seats::generation_since(tx, &seat.id, seat.generation)?;
         let period = attention::period(tx, project)?;
         let mut actionable = Vec::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
+                // The captain's open items are the engine's business: they
+                // ring until they are answered, whatever generation took the
+                // seat over (F2 of the T-71 review).
                 attention::should_show(tx, &message, shown.contains(&message.id), period, now)?
             } else {
-                !shown.contains(&message.id)
+                gear_app::seats::message_belongs(seat, &message, since)
+                    && !shown.contains(&message.id)
             };
             if include { actionable.push(message); }
         }
@@ -355,9 +415,9 @@ fn doorbell_inputs(
 
         // Reply/Instruction messages this generation has not shown yet.
         let unshown: Vec<String> = tx
-            .messages_to_since(project, &seat.id, 0)?
+            .messages_to_since(project, &seat.id, since)?
             .into_iter()
-            .filter(|m| !shown.contains(&m.id))
+            .filter(|m| !shown.contains(&m.id) && gear_app::seats::message_belongs(seat, m, since))
             .map(|m| m.id)
             .collect();
 

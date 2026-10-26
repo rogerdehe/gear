@@ -121,11 +121,18 @@ pub fn build_with_agents(
 
         // The replies and instructions the seat has not seen yet. A message
         // the batch above already printed is not printed again.
+        // Only this job's messages count (T-71): a warm seat keeps its id
+        // across jobs, so another task's answers must not read as
+        // instructions for this one — even when they were written after this
+        // job started (F1 of the T-71 review).
+        let since = crate::seats::generation_since(tx, &seat_id, ctx.generation)?;
         let unshown: Vec<_> = tx
-            .messages_to_since(&ctx.project, &seat_id, 0)?
+            .messages_to_since(&ctx.project, &seat_id, since)?
             .into_iter()
             .filter(|message| {
-                !already_shown.contains(&message.id) && !shown_msgs.contains(&message.id)
+                !already_shown.contains(&message.id)
+                    && !shown_msgs.contains(&message.id)
+                    && crate::seats::message_belongs(&seat, message, since)
             })
             .collect();
         if !unshown.is_empty() {
@@ -146,7 +153,13 @@ pub fn build_with_agents(
                         let milestone = message.thread.trim_start_matches("station:");
                         format!("next: gear plan apply gear/voyages/{milestone}.md (# Decisions: station {first}: keep course|time-box|cut|move)")
                     }
-                    _ => format!("next: gear reply {first} --resolve"),
+                    // A review fail (or a failed merge) is settled where it
+                    // can be: by a `# Verdicts` line, not by a reply (T-90).
+                    Some(message) => match crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
+                        Some(hint) => format!("next: {}", verdict_command(&hint)),
+                        None => format!("next: gear reply {first} --resolve"),
+                    },
+                    None => format!("next: gear reply {first} --resolve"),
                 },
                 None => "next: gear".to_string(),
             },
@@ -189,6 +202,16 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
     })
 }
 
+/// The command that settles an item with a `# Verdicts` line (T-90): the
+/// voyage file of the task's milestone, then the line with the real values.
+pub fn verdict_command(hint: &crate::tasks::VerdictHint) -> String {
+    let path = match &hint.milestone {
+        Some(milestone) => format!("gear/voyages/{milestone}.md"),
+        None => "gear/voyages/<M>.md".to_string(),
+    };
+    format!("gear plan apply {path} (# Verdicts: {})", hint.line)
+}
+
 /// The most lanes the snapshot lists; the rest is one line of count, so the
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
@@ -214,8 +237,13 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         lines.push(format!("+{} more lanes", plan.lanes.len() - SNAPSHOT_LANES));
     }
     lines.push(format!(
-        "deliveries not confirmed: {} · temps {}/{}",
-        plan.unconfirmed_deliveries, plan.temps.in_use, plan.temps.quota
+        "deliveries not confirmed: {} · temps {} running · {} starting · {} blocked ({} of {})",
+        plan.unconfirmed_deliveries,
+        plan.temps.running,
+        plan.temps.starting,
+        plan.temps.blocked,
+        plan.temps.in_use,
+        plan.temps.quota
     ));
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
     // planned landing, so the captain sees the bar before the inbox. The

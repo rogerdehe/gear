@@ -15,16 +15,10 @@ use gear_model::{GearError, GearResult};
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Expand an item: message/thread id, task id, `queue`, `draft`.
+    /// Expand a task id (T-n): its packet.
     #[arg(long, global = false)]
     show: Option<String>,
-    /// With --show <task>: diff since the last work check.
-    #[arg(long)]
-    diff: bool,
-    /// User only: read-only overview of every project.
-    #[arg(long)]
-    all: bool,
-    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | agent:opencode | agent:codex | agent:claude | agent:grok.
+    /// Print the version-matched skill: (none)=SKILL.md | conventions | captain | course | decompose | review | adopt | github | agent:opencode | agent:codex | agent:claude | agent:grok.
     #[arg(long, num_args = 0..=1, default_missing_value = "main")]
     skill: Option<String>,
     #[arg(long, global = true)]
@@ -33,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Report: progress | question | blocked | result | ack | instruction | review.
+    /// Report: progress | question | result | instruction | review.
     Send(SendCmd),
     /// Captain: handle exact message ids.
     Reply(ReplyCmd),
@@ -59,6 +53,21 @@ enum Cmd {
     Admin {
         #[command(subcommand)]
         op: AdminOp,
+    },
+    /// Captain: the seat itself.
+    Captain {
+        #[command(subcommand)]
+        op: CaptainOp,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CaptainOp {
+    /// Rebind the captain seat to another pane (a new generation).
+    Handover {
+        /// The pane the captain's agent runs in now.
+        #[arg(long, value_name = "PANE")]
+        pane: String,
     },
 }
 
@@ -105,18 +114,20 @@ struct ReplyCmd {
     /// Message ids to handle (M-…).
     #[arg(required = true)]
     ids: Vec<String>,
+    /// Close the item; the text is answered to its sender when that is a live seat.
     #[arg(long, conflicts_with_all = ["wait", "note"])]
     resolve: bool,
+    /// Keep the item waiting until WHO can answer; the text is answered to its
+    /// sender when that is a live seat.
     #[arg(long, value_name = "WHO")]
     wait: Option<String>,
     #[arg(long, requires = "wait")]
     until: Option<String>,
+    /// Keep the item open with the text as the captain's record on it; sent to nobody.
     #[arg(long)]
     note: bool,
     #[arg(long)]
     downgrade: bool,
-    #[arg(long = "next-check")]
-    next_check: Option<String>,
     #[arg(long = "request-id")]
     request_id: Option<String>,
     #[arg(long, short)]
@@ -134,6 +145,14 @@ enum PlanOp {
         next: Option<String>,
         #[arg(long = "request-id")]
         request_id: Option<String>,
+    },
+    /// Print `## NEW` blocks for the open issues the plan does not carry yet.
+    ImportIssues {
+        /// The voyage file to check against; default: the plan the store holds.
+        path: Option<std::path::PathBuf>,
+        /// Only issues carrying this label; repeatable (the config's own labels apply too).
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
     },
 }
 
@@ -154,6 +173,7 @@ enum ReportOp {
 
 #[derive(Subcommand, Debug)]
 enum AdminOp {
+    /// Register a project, or apply a changed config to a registered one.
     Init { config: std::path::PathBuf },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -165,34 +185,6 @@ enum AdminOp {
     },
     /// Stop the background engine (it starts again on the next `gear` call).
     Stop,
-    Seat {
-        #[command(subcommand)]
-        op: SeatOp,
-    },
-    Captain {
-        #[command(subcommand)]
-        op: CaptainOp,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum SeatOp {
-    Confirm { seat: String },
-    Remove { seat: String },
-}
-
-#[derive(Subcommand, Debug)]
-enum CaptainOp {
-    Replace {
-        #[arg(long)]
-        project: String,
-        #[arg(long)]
-        pane: String,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        resume: Option<String>,
-    },
 }
 
 fn main() {
@@ -242,12 +234,15 @@ fn run(cli: Cli) -> GearResult<()> {
         ensure_engine();
     }
     match cli.cmd {
-        None => cmd_home(cli.show.as_deref(), cli.diff, cli.all, cli.json),
+        None => cmd_home(cli.show.as_deref(), cli.json),
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
         Some(Cmd::Plan { op }) => match op {
             PlanOp::Apply { path, keep, next, request_id } => {
                 cmd_plan(path, keep, next, request_id, cli.json)
+            }
+            PlanOp::ImportIssues { path, label } => {
+                cmd_import_issues(path, label, cli.json)
             }
         },
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
@@ -261,7 +256,9 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
-        Some(Cmd::Admin { .. }) => Err(not_yet("admin seat/captain (after the walking skeleton)")),
+        Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
+            cmd_captain_handover(&pane, cli.json)
+        }
     }
 }
 
@@ -276,6 +273,8 @@ fn run(cli: Cli) -> GearResult<()> {
 /// - `admin kickoff` only reads — starting the engine would open (and migrate)
 ///   the store, and a kickoff runs before the project exists (the review of
 ///   T-10). `--skill` and `--help` never get here.
+/// - `captain handover` moves a seat's binding: it must not start an engine
+///   (T-104).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     !matches!(
         cmd,
@@ -285,24 +284,24 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
             | Some(Cmd::Board { .. })
             | Some(Cmd::Report { .. })
+            | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
+            | Some(Cmd::Captain { .. })
     )
-}
-
-fn not_yet(what: &str) -> GearError {
-    GearError::new(gear_model::ErrorCode::Forbidden, format!("{what} is not implemented yet"))
 }
 
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
 ///
 /// An absent `GEAR_CTX` means an anonymous caller (the user's own shell or an
-/// unmanaged agent); a malformed one is an error, never a silent `None`.
+/// unmanaged agent), and so does an empty one; a malformed one is an error.
 fn env_from_process() -> GearResult<gear_app::Env> {
     env_from(|name| std::env::var(name).ok())
 }
 
 /// [`env_from_process`] over an injected variable lookup (testable).
 fn env_from(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_app::Env> {
-    let ctx = match vars(gear_model::ctx::ENV_CTX) {
+    // An empty GEAR_CTX is no seat: the tests blank it (.cargo/config.toml) so
+    // a test run in a lane's shell never acts as that lane.
+    let ctx = match vars(gear_model::ctx::ENV_CTX).filter(|raw| !raw.is_empty()) {
         None => None,
         Some(raw) => Some(gear_model::GearCtx::parse(&raw)?),
     };
@@ -327,22 +326,101 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
     Ok(())
 }
 
-/// `gear admin init <config>`: the user registers a project (design/01). The
-/// caller check comes first, so an agent or a shell without `GEAR_ADMIN=1`
-/// is refused before anything is read. The store is `GEAR_DB`.
-fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
-    let env = env_from_process()?;
-    if env.ctx.is_some() || !env.admin {
+/// Refuse a **first** registration that is not the user's own (T-100).
+///
+/// An agent must not act as the user: a project that is not registered yet is
+/// created only from the user's own shell — no `GEAR_CTX` of any project, and no
+/// Herdr agent in the pane — whatever `GEAR_ADMIN=1` says. Re-applying the
+/// config of an already-registered project from its captain's pane stays allowed
+/// (T-86), and that is the only `init` an agent may run.
+fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> {
+    if let Some(ctx) = &env.ctx {
         return Err(GearError::new(
             gear_model::ErrorCode::Forbidden,
-            "`gear admin init` runs in the user's own shell with GEAR_ADMIN=1, never in an agent",
+            format!(
+                "a project is registered from the user's own shell, never from an agent: this is seat {} of project {} (a config change for a registered project may be re-applied from its captain's pane)",
+                ctx.seat_id(),
+                ctx.project
+            ),
+        ));
+    }
+    // A shell left in a Herdr pane is still the user; a pane hosting an agent is
+    // not. When the pane cannot be read, the answer is no.
+    if let Some(pane) = env.pane_id.as_deref() {
+        let mut herdr = open_herdr().map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("a project is registered from the user's own shell: cannot reach Herdr to read pane {pane} ({})", e.detail),
+            )
+        })?;
+        use gear_herdr::HerdrRead as _;
+        let occupant = herdr.agent_get(pane).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("a project is registered from the user's own shell: cannot read pane {pane} ({})", e.0),
+            )
+        })?;
+        if let Some(agent) = occupant {
+            return Err(GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!(
+                    "a project is registered from the user's own shell, never from an agent: pane {pane} hosts {} — run `gear admin init` from a plain terminal",
+                    agent.agent.as_deref().unwrap_or("an agent")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `gear admin init <config>`: register a project — from the user's own shell
+/// or from the captain's pane (T-86). `GEAR_ADMIN=1` is the user's consent and
+/// is checked before anything is read; which seat may act on it is decided by
+/// `gear_app::admin::init`, against the project the config names. The store is
+/// `GEAR_DB`.
+fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    if !env.admin {
+        return Err(GearError::new(
+            gear_model::ErrorCode::Forbidden,
+            "`gear admin init` needs GEAR_ADMIN=1: the user's own shell, or the captain's pane",
         ));
     }
     let text = std::fs::read_to_string(config).map_err(|e| {
         GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
     })?;
     let mut store = open_store()?;
-    let r = gear_app::admin::init(&mut store, &env, &text, now_ts())?;
+    // A project that is not registered yet is the user's own act (T-100): an
+    // agent may re-apply the config of its own project (T-86), never create
+    // one. Refused before anything is written, and it rings nobody.
+    if let Ok(parsed) = gear_app::config::parse(&text) {
+        let registered =
+            store.read(|tx| Ok(tx.get_project(&parsed.project.id)?.is_some()))?;
+        if !registered {
+            refuse_first_registration_by_an_agent(&env)?;
+        }
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    // T-104: a context on a registered project is the captain's claim, and it
+    // is proven against the caller's real pane before anything is written. The
+    // first registration (above) and the user's own shell need no Herdr.
+    let needs_proof = match &env.ctx {
+        Some(ctx) => store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?,
+        None => false,
+    };
+    let mut herdr = if needs_proof { Some(open_herdr()?) } else { None };
+    let ancestors = gear_app::identity::process_ancestors();
+    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> =
+        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead);
+    let r = gear_app::admin::init_checked(
+        &mut store,
+        &env,
+        &text,
+        herdr_ref,
+        &ancestors,
+        home.as_deref(),
+        now_ts(),
+    )?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
@@ -373,6 +451,18 @@ fn open_store() -> GearResult<gear_store::Store> {
 }
 
 /// [`open_store`] over an injected variable lookup (testable).
+/// The caller's identity (T-104): the library proves the whole claim — the
+/// pane the caller really runs in is the claimed one, and the seat is bound to
+/// it — and reports a refusal once to the captain.
+fn observe_identity(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+) -> GearResult<Option<gear_app::identity::Fingerprint>> {
+    let ancestors = gear_app::identity::process_ancestors();
+    gear_app::identity::prove_seat(store, env, herdr, &ancestors, now_ts())
+}
+
 fn open_store_at(vars: impl Fn(&str) -> Option<String>) -> GearResult<gear_store::Store> {
     let Some(path) = vars(gear_model::ctx::ENV_DB) else {
         // The admin target file (design/14) comes with slice 3.
@@ -419,10 +509,7 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
     format!("r-{ms}-{pid}")
 }
 
-fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult<()> {
-    // `--diff`/`--all` are views that are not implemented yet: reject them by
-    // name instead of printing a page that silently ignores them.
-    reject_slice2(diff, all)?;
+fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
     if let Some(target) = show {
         let env = env_from_process()?;
         let mut store = open_store()?;
@@ -435,20 +522,6 @@ fn cmd_home(show: Option<&str>, diff: bool, all: bool, json: bool) -> GearResult
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     run_home(&mut store, &env, &mut herdr, now_ts(), json, &mut std::io::stdout())
-}
-
-/// The `--diff`/`--all` views are slice 2: reject them by name instead of
-/// printing a page that silently ignores them.
-fn reject_slice2(diff: bool, all: bool) -> GearResult<()> {
-    for (flag, given) in [("--diff", diff), ("--all", all)] {
-        if given {
-            return Err(GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!("{flag} is not supported in slice 1"),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// `gear --show <target>` over injected state: the task packet of a task id.
@@ -466,16 +539,41 @@ fn run_show(
             format!("--show {target} is not supported: only a task id (T-n) can be shown"),
         ));
     }
-    let fp = gear_app::identity::observe(env, herdr)?;
-    let text = store.read(|tx| {
+    let fp = observe_identity(store, env, herdr)?;
+    let (text, project) = store.read(|tx| {
         // The identity of the home page: a registered seat of the project.
         let (ctx, _seat) = gear_app::identity::require_seat(tx, env, fp.as_ref(), None, None)?;
-        gear_app::plan::render_task_packet(tx, &ctx.project, target)
+        let text = gear_app::plan::render_task_packet(tx, &ctx.project, target)?;
+        Ok((text, ctx.project.clone()))
     })?;
+    // The project's own standard travels with its task packets (T-85).
+    let mut text = text;
+    if let Some(standard) = project_standard(store, &project) {
+        text.push_str("\n## Project standard (`gear/standard.md`)\n\n");
+        text.push_str(&standard);
+        text.push('\n');
+    }
     if json {
         return serde_json::to_string(&text).map_err(json_error);
     }
     Ok(text)
+}
+
+/// The project's own standard (T-85): `gear/standard.md` in its checkout, when
+/// it keeps one, so every lane reads the rules of *this* project and not only
+/// GEAR's. A project without one — every project that has not adopted — is
+/// unchanged.
+fn project_standard(store: &mut gear_store::Store, project: &str) -> Option<String> {
+    let config = gear_app::config::latest(store, project).ok()?;
+    let path = std::path::Path::new(&config.project.repo)
+        .join("gear")
+        .join("standard.md");
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_string())
 }
 
 /// A task id is `T-<n>`; every other `--show` target is rejected by name.
@@ -497,7 +595,7 @@ fn run_home(
     json: bool,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
         herdr.agents().ok()
     } else { None };
@@ -586,7 +684,7 @@ fn run_report_time(
     filter: &gear_app::time::Filter,
     json: bool,
 ) -> GearResult<String> {
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let report = gear_app::time::build(store, env, fp.as_ref(), filter)?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
@@ -633,6 +731,44 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
 ///
 /// A user command: an agent never writes into the user's home. It needs no
 /// store, so it starts no engine.
+/// `gear captain handover --pane <id>`: rebind the captain seat to another pane
+/// (T-104). Allowed from the captain's own real pane or the user's own terminal
+/// (a shell with no agent); a lane or reviewer asking is refused and the
+/// captain is told which pane asked.
+fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let ancestors = gear_app::identity::process_ancestors();
+    let cwd = std::env::current_dir().map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the working directory: {e}"),
+        )
+    })?;
+    let result =
+        gear_app::captain::handover(&mut store, &env, &mut herdr, &ancestors, &cwd, pane, now_ts())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "project": result.project,
+                "captain": result.captain,
+                "from": result.from,
+                "to": result.to,
+                "generation": result.generation,
+                "kind": result.kind,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "captain of {} handed over from pane {} to pane {} (generation {}, {})",
+        result.project, result.from, result.to, result.generation, result.kind
+    );
+    Ok(())
+}
+
 fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
@@ -694,6 +830,131 @@ fn cmd_plan(
     Ok(())
 }
 
+/// `gear plan import-issues`: the open issues a GitHub-mode project has not
+/// turned into tasks yet, as `## NEW` blocks (T-81).
+///
+/// Read-only: it reads the project's `[github]` mode and its issues through the
+/// forge, drops the ones the plan already names, and prints a block per issue
+/// for the captain to paste into the voyage file, edit (lane, milestone,
+/// estimate) and apply. It starts no engine: nothing is written.
+fn cmd_import_issues(
+    path: Option<std::path::PathBuf>,
+    labels: Vec<String>,
+    json: bool,
+) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let blocks = run_import_issues(&mut store, &env, path.as_deref(), &labels)?;
+    if json {
+        println!("{}", serde_json::to_string(&blocks).map_err(json_error)?);
+    } else {
+        for block in &blocks {
+            println!("{block}");
+        }
+    }
+    Ok(())
+}
+
+/// `gear plan import-issues` body, over injected state.
+///
+/// Read-only, so it asks for the captain's seat in the store (no Herdr
+/// fingerprint): the blocks are for the captain's plan, and nothing is written.
+fn run_import_issues(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    path: Option<&std::path::Path>,
+    labels: &[String],
+) -> GearResult<Vec<String>> {
+    let (project, _seat) = store.read(|tx| {
+        let ctx = env.ctx.as_ref().ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment: `gear plan import-issues` runs in the captain's pane",
+            )
+        })?;
+        let seat = tx.get_seat(&ctx.seat_id())?.ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                format!("seat {} is not registered", ctx.seat_id()),
+            )
+        })?;
+        if seat.role != gear_model::SeatRole::Captain {
+            return Err(GearError::new(
+                gear_model::ErrorCode::Forbidden,
+                format!("seat {} has role {}: `gear plan import-issues` is the captain's", seat.id, seat.role.as_str()),
+            ));
+        }
+        Ok((ctx.project.clone(), seat))
+    })?;
+    let config = gear_app::config::latest(store, &project)?;
+    let Some(github) = config.github.as_ref().and_then(|section| section.resolved()) else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!(
+                "project {project} is not in GitHub mode: `[github]` with a `repo` is what its issues come from"
+            ),
+        ));
+    };
+    let mut filter = gear_forge::Filter {
+        labels: github.issues_labels.clone(),
+        // Every open issue, not `gh`'s default first 30: an issue older than the
+        // newest page is exactly the one a long-lived plan is missing (T-81,
+        // F1). One bounded call still returns it all.
+        limit: u32::MAX,
+    };
+    filter.labels.extend(labels.iter().cloned());
+    let forge = gear_forge::GitHub::new();
+    use gear_forge::Forge as _;
+    let issues = forge.issues(&github.repo, &filter).map_err(|why| {
+        // No error code fits an unreachable forge; this one carries the detail
+        // the captain needs (auth, quota, offline) and exits 1.
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read the issues of {}: {why}", github.repo),
+        )
+    })?;
+    let planned = planned_issues(store, &project, path)?;
+    Ok(issues
+        .into_iter()
+        .filter(|issue| !planned.contains(&issue.number))
+        .map(|issue| gear_app::github::issue_block(&issue))
+        .collect())
+}
+
+/// The issues the plan already names: the voyage file's own `issue: #<n>`
+/// lines when a file is given, else the tasks the store holds (the applied
+/// plan).
+fn planned_issues(
+    store: &mut gear_store::Store,
+    project: &str,
+    path: Option<&std::path::Path>,
+) -> GearResult<std::collections::BTreeSet<u64>> {
+    let mut planned = std::collections::BTreeSet::new();
+    if let Some(path) = path {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot read {}: {e}", path.display()),
+            )
+        })?;
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("issue:") else {
+                continue;
+            };
+            if let Ok(number) = rest.trim().trim_start_matches('#').parse::<u64>() {
+                planned.insert(number);
+            }
+        }
+        return Ok(planned);
+    }
+    for task in store.read(|tx| tx.tasks_of_project(project))? {
+        if let Some(issue) = task.issue.and_then(|n| u64::try_from(n).ok()) {
+            planned.insert(issue);
+        }
+    }
+    Ok(planned)
+}
+
 /// `gear plan apply` body, over injected state: read the draft, parse it and
 /// apply it as the captain (design/05).
 fn run_plan(
@@ -726,7 +987,7 @@ fn run_plan(
         )
     })?;
     let draft = gear_app::draft::parse(&text)?;
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::plan::apply(store, env, fp.as_ref(), &draft, &text, request_id, now)?;
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
@@ -798,6 +1059,12 @@ fn render_apply(result: &gear_app::plan::ApplyResult) -> String {
     for settled in &result.settled {
         lines.push(format!("settled {settled}"));
     }
+    for id in &result.cancelled {
+        lines.push(format!("cancelled {id}"));
+    }
+    for id in &result.resolved {
+        lines.push(format!("resolved {id}"));
+    }
     lines.join("\n")
 }
 
@@ -843,7 +1110,7 @@ fn run_send(
         urgent: c.urgent,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
@@ -869,7 +1136,6 @@ fn run_reply(
     now: i64,
     json: bool,
 ) -> GearResult<String> {
-    reject_unsupported(&[("--next-check", c.next_check.is_some())])?;
     let (mode, wait_on, wait_until) = reply_mode(c, now)?;
     let args = gear_app::mail::ReplyArgs {
         ids: c.ids.clone(),
@@ -880,7 +1146,7 @@ fn run_reply(
         downgrade: c.downgrade,
         request_id: require_request_id(&c.request_id)?,
     };
-    let fp = gear_app::identity::observe(env, herdr)?;
+    let fp = observe_identity(store, env, herdr)?;
     let result = gear_app::mail::reply(store, env, fp.as_ref(), &args, now)?;
     if json {
         return serde_json::to_string(&result).map_err(json_error);
@@ -928,14 +1194,14 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
     match kind {
         gear_model::MsgKind::Progress
         | gear_model::MsgKind::Question
-        | gear_model::MsgKind::Blocked
         | gear_model::MsgKind::Result
-        | gear_model::MsgKind::Ack
         | gear_model::MsgKind::Instruction
         | gear_model::MsgKind::Review => Ok(kind),
-        gear_model::MsgKind::Reply | gear_model::MsgKind::System => Err(GearError::new(
+        _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
-            format!("--kind {text} is not a `gear send` kind"),
+            format!(
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction or review"
+            ),
         )),
     }
 }
@@ -1430,7 +1696,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })
             })
             .unwrap();
@@ -1476,7 +1742,6 @@ mod tests {
             until: None,
             note: false,
             downgrade: false,
-            next_check: None,
             request_id: Some("r-2".into()),
             message: "Use v2".into(),
         }
@@ -1702,7 +1967,7 @@ mod tests {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-            updated: T0,
+             issue: None,updated: T0,
         }
     }
 
@@ -1873,7 +2138,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: Some(60),
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
                     project: "p".into(),
@@ -1966,7 +2231,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -2022,7 +2287,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -2282,6 +2547,9 @@ mod tests {
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
+                // T-76: the folder the agent runs in is trusted.
+                "-c".to_string(),
+                "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".to_string(),
             ]
         );
     }
@@ -2511,7 +2779,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),
@@ -2541,6 +2809,47 @@ mod tests {
         assert!(out.contains("## Goal"), "{out}");
         assert!(out.contains("## Acceptance"), "{out}");
         assert!(out.contains("gear send --kind result --task T-1"), "{out}");
+    }
+
+    /// T-85: a project that keeps a standard (`gear/standard.md`) has it in
+    /// every task packet; a project without one is unchanged (the test above).
+    #[test]
+    fn show_carries_the_projects_standard() {
+        let (mut store, mut herdr) = world();
+        seed_task(&mut store, "T-1", Some("heat"));
+        let dir = std::env::temp_dir().join(format!("gear-standard-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("gear")).expect("the checkout");
+        std::fs::write(
+            dir.join("gear/standard.md"),
+            "# Project standard\n\nNew code meets the standard even if its neighbours do not.\n",
+        )
+        .expect("the standard");
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {:?}\n\
+                     \n[quota]\nlanes = 1\ntemps = 0\n\
+                     \n[captain]\npane = \"{CAP_PANE}\"\nkind = \"codex\"\nprofile = \"codex\"\n",
+                    dir.to_string_lossy()
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", false).unwrap();
+        assert!(out.contains("# T-1 — Ship the thing"), "{out}");
+        assert!(out.contains("## Project standard (`gear/standard.md`)"), "{out}");
+        assert!(
+            out.contains("New code meets the standard even if its neighbours do not."),
+            "{out}"
+        );
+        // The section is an appendix: the packet's own parts come first.
+        assert!(
+            out.find("## Project standard").unwrap() > out.find("## Report").unwrap(),
+            "{out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -2574,19 +2883,6 @@ mod tests {
     }
 
     #[test]
-    fn slice2_flags_are_bad_format() {
-        for (flag, rejected) in [
-            ("--diff", reject_slice2(true, false)),
-            ("--all", reject_slice2(false, true)),
-        ] {
-            let err = rejected.unwrap_err();
-            assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
-            assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
-        }
-        assert!(reject_slice2(false, false).is_ok());
-    }
-
-    #[test]
     fn given_request_id_is_kept() {
         assert_eq!(announce_request_id(Some("r-abc".into())), "r-abc");
     }
@@ -2599,4 +2895,5 @@ mod tests {
         assert!(a.starts_with("r-"), "{a}");
         assert!(b.starts_with("r-"), "{b}");
     }
+
 }

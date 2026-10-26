@@ -9,6 +9,22 @@ pub(crate) fn data(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
 }
 
+/// What a `model.list` lookup found (T-67).
+pub(crate) enum Lookup {
+    /// The model (and its variant, when asked for) is in the catalogue.
+    Target(Value),
+    /// The directory's catalogue is empty: OpenCode has not loaded it yet.
+    /// That is "not yet", never an invalid model.
+    NotLoaded,
+    /// The catalogue is there and does not hold the model or its variant: a
+    /// configuration fault, not permission to pick another model.
+    Invalid(String),
+    /// The service could not answer (an older session, a transport error):
+    /// the typed-key path's job. The reason is not needed by either caller,
+    /// and neither may pick another model on it.
+    Unavailable,
+}
+
 /// Invalid model/variant is a configuration fault, not permission to silently
 /// select another model or let the TUI discard an unknown variant.
 pub(crate) fn target(
@@ -16,29 +32,38 @@ pub(crate) fn target(
     model: &str,
     variant: Option<&str>,
     directory: Option<&str>,
-) -> Result<Value, String> {
-    let (provider, id) = model
-        .split_once('/')
-        .ok_or("invalid OpenCode model: needs provider/id")?;
+) -> Lookup {
+    let Some((provider, id)) = model.split_once('/') else {
+        return Lookup::Invalid("invalid OpenCode model: needs provider/id".into());
+    };
     let mut args = vec!["model.list".into()];
     if let Some(directory) = directory {
         args.extend(["--param".into(), format!("location[directory]={directory}")]);
     }
-    let catalog = herdr.opencode_api(&args)?;
-    let info = data(&catalog)
-        .as_array()
-        .and_then(|models| {
-            models
-                .iter()
-                .find(|m| m["providerID"] == provider && m["id"] == id)
-        })
-        .ok_or_else(|| format!("invalid OpenCode model {model}: absent from model.list"))?;
+    let catalog = match herdr.opencode_api(&args) {
+        Ok(catalog) => catalog,
+        Err(_) => return Lookup::Unavailable,
+    };
+    let Some(models) = data(&catalog).as_array() else {
+        return Lookup::Unavailable;
+    };
+    // An empty catalogue for a directory is "not loaded yet" (T-67): OpenCode
+    // lists a directory's models once its service has read them.
+    if models.is_empty() {
+        return Lookup::NotLoaded;
+    }
+    let Some(info) = models
+        .iter()
+        .find(|m| m["providerID"] == provider && m["id"] == id)
+    else {
+        return Lookup::Invalid(format!("invalid OpenCode model {model}: absent from model.list"));
+    };
     if let Some(variant) = variant {
         if !info["variants"]
             .as_array()
             .is_some_and(|variants| variants.iter().any(|v| v["id"] == variant))
         {
-            return Err(format!(
+            return Lookup::Invalid(format!(
                 "invalid OpenCode variant {variant} for {model}: absent from model.list"
             ));
         }
@@ -47,7 +72,61 @@ pub(crate) fn target(
     if let Some(variant) = variant {
         target["variant"] = variant.into();
     }
-    Ok(target)
+    Lookup::Target(target)
+}
+
+/// The labels a model switch needs, derived from OpenCode's own catalogue
+/// (T-94): the status bar and the picker both show `<model name> <provider
+/// name>` as OpenCode renders them. `variant` is the chain's, when it names
+/// one. `None` when the catalogue does not hold the model at all (the caller
+/// keeps its own "no labels" refusal).
+pub(crate) fn derived_labels(
+    herdr: &mut dyn HerdrAct,
+    model: &str,
+    variant: Option<&str>,
+    directory: Option<&str>,
+) -> Option<gear_app::config::ModelSwitch> {
+    let (provider, id) = model.split_once('/')?;
+    let mut args = vec!["model.list".into()];
+    if let Some(directory) = directory {
+        args.extend(["--param".into(), format!("location[directory]={directory}")]);
+    }
+    let catalog = herdr.opencode_api(&args).ok()?;
+    let models = data(&catalog).as_array()?;
+    let info = models
+        .iter()
+        .find(|m| m["providerID"] == provider && m["id"] == id)?;
+    let model_name = info["name"].as_str().unwrap_or(id);
+    // The display name as OpenCode renders it in the status bar: the provider's
+    // own name from `provider.list` (F1 of the T-94 review), e.g. "MiniMax
+    // (minimax.cn)" or "OpenCode Go", not its id.
+    let provider_name = provider_display_name(herdr, provider, directory).unwrap_or_else(|| provider.to_string());
+    let text = format!("{model_name} {provider_name}");
+    Some(gear_app::config::ModelSwitch {
+        picker: text.clone(),
+        bar: text,
+        variant: variant.map(str::to_string),
+    })
+}
+
+/// The provider's display name from OpenCode's `provider.list` (F1 of the
+/// T-94 review), for the directory when one is known. The model list carries
+/// only the provider id.
+fn provider_display_name(
+    herdr: &mut dyn HerdrAct,
+    provider: &str,
+    directory: Option<&str>,
+) -> Option<String> {
+    let mut args = vec!["provider.list".into()];
+    if let Some(directory) = directory {
+        args.extend(["--param".into(), format!("location[directory]={directory}")]);
+    }
+    let catalog = herdr.opencode_api(&args).ok()?;
+    let providers = data(&catalog).as_array()?;
+    providers
+        .iter()
+        .find(|p| p["id"] == provider)
+        .and_then(|p| p["name"].as_str().map(str::to_string))
 }
 
 pub(crate) fn matches(session: &Value, target: &Value) -> bool {
@@ -68,6 +147,8 @@ pub(crate) fn start_args(
     directory: &str,
     config: &ProjectConfig,
     model: &str,
+    model_list_wait_s: u64,
+    model_list_poll_ms: u64,
 ) -> Result<Vec<String>, String> {
     let binding = store
         .read(|tx| tx.get_binding(seat, generation))
@@ -81,10 +162,27 @@ pub(crate) fn start_args(
         .switch
         .get(model)
         .and_then(|labels| labels.variant.as_deref());
-    let target = match target(herdr, model, variant, Some(directory)) {
-        Ok(target) => target,
-        Err(error) if error.starts_with("invalid OpenCode") => return Err(error),
-        Err(_) => return Ok(Vec::new()),
+    // An empty catalogue for this directory means OpenCode has not loaded it
+    // yet (trial G01): wait for it, bounded, and never pick another model or
+    // provider meanwhile. A catalogue that is there without the model is a
+    // config fault; the seat parks with that reason.
+    let began = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(model_list_wait_s);
+    let target = loop {
+        match target(herdr, model, variant, Some(directory)) {
+            Lookup::Target(target) => break target,
+            Lookup::Invalid(error) => return Err(error),
+            Lookup::Unavailable => return Ok(Vec::new()),
+            Lookup::NotLoaded if began.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(model_list_poll_ms));
+            }
+            Lookup::NotLoaded => {
+                return Err(format!(
+                    "the OpenCode model list is not loaded for {directory} after {}s: the model {model} is neither valid nor invalid yet, start the lane again when OpenCode has listed it",
+                    model_list_wait_s
+                ));
+            }
+        }
     };
     let body = json!({"location": {"directory": directory}, "agent": "build", "model": target});
     let response =
@@ -168,7 +266,9 @@ variant = "max"
                     1,
                     "/repo/worktree",
                     &config(),
-                    "opencode-go/deepseek-v4.1-flash"
+                    "opencode-go/deepseek-v4.1-flash",
+                    0,
+                    0,
                 )
                 .unwrap(),
                 ["--session", "ses_created"]
@@ -206,7 +306,9 @@ variant = "max"
             1,
             "/repo/worktree",
             &config,
-            "opencode-go/deepseek-v4.1-flash"
+            "opencode-go/deepseek-v4.1-flash",
+            0,
+            0,
         )
         .unwrap_err()
         .contains("variant bogus"));
@@ -233,7 +335,9 @@ variant = "max"
             1,
             "/repo/worktree",
             &config(),
-            "opencode-go/deepseek-v4.1-flash"
+            "opencode-go/deepseek-v4.1-flash",
+            0,
+            0,
         )
         .unwrap()
         .is_empty());
@@ -243,5 +347,42 @@ variant = "max"
             .unwrap()
             .session_ref
             .is_none());
+    }
+    /// T-94: a model without `[models.switch]` labels takes them from
+    /// OpenCode's catalogue: `<model name> <provider name>` for both the bar
+    /// and the picker, and no variant unless one is given.
+    #[test]
+    fn a_model_without_labels_takes_them_from_the_catalogue() {
+        let mut herdr = FakeHerdr::new();
+        herdr.api_replies.push_back(Ok(json!({"data": [{
+            "providerID": "minimax-cn",
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax-M3.1-Flash"
+        }]})));
+        // The display name is the provider's own, from provider.list (F1).
+        herdr.api_replies.push_back(Ok(json!({"data": [
+            {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"},
+            {"id": "opencode-go", "name": "OpenCode Go"}
+        ]})));
+        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
+            .expect("the catalogue holds it");
+        assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
+        assert_eq!(labels.picker, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
+        assert_eq!(labels.variant, None);
+
+        // A model the catalogue does not hold has no labels to derive.
+        herdr.api_replies.push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
+        assert!(derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")).is_none());
+
+        // The chain's variant rides along when it names one.
+        herdr.api_replies.push_back(Ok(json!({"data": [{
+            "providerID": "minimax-cn",
+            "id": "MiniMax-M3.1-Flash",
+            "name": "MiniMax-M3.1-Flash"
+        }]})));
+        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]})));
+        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
+            .expect("the catalogue holds it");
+        assert_eq!(labels.variant.as_deref(), Some("max"));
     }
 }

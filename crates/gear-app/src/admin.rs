@@ -1,6 +1,9 @@
-//! `gear admin …` (design/01 registration, /13 ops commands). User only:
-//! `Env.admin` must be true and `Env.ctx` None (an agent never runs these),
-//! else `Forbidden`.
+//! `gear admin …` (design/01 registration, /13 ops commands).
+//!
+//! `init` may be run by the user's own shell and, since T-86, by the project's
+//! own captain: `GEAR_ADMIN=1` is the user's consent in both cases (the
+//! confirmed kickoff sheet is the captain's). Any other seat is `Forbidden`.
+//! Every other `admin` command stays user-only.
 
 use crate::config;
 use crate::Env;
@@ -18,12 +21,17 @@ pub struct InitResult {
     pub seats: Vec<String>,
 }
 
+/// The seat that may register a project: the user's own shell (no ctx), or
+/// the project's captain (T-86).
+const CAPTAIN: &str = "captain";
+
 /// `gear admin init <config>` — register the project, or apply a changed
 /// config to a project that is registered already (T-6).
 ///
-/// 1. caller check (see module doc);
+/// 1. `GEAR_ADMIN=1` (the user's consent);
 /// 2. `config::parse` (errors as is) and `config::validate` — any issue →
-///    `BadFormat` whose detail lists every `field: problem`;
+///    `BadFormat` whose detail lists every `field: problem`; then the caller:
+///    the user's shell, or the captain of the project the config names;
 /// 3. one transaction, one of two ways:
 ///    - **first registration**: `insert_project` (config text verbatim,
 ///      config_version 1, quotas from `[quota]`, plan_version 0) and one seat
@@ -36,12 +44,32 @@ pub struct InitResult {
 ///      the next config version (see [`re_register`]).
 /// Checks that need Herdr or git (session, repo, branch) are not part of this
 /// cut.
-pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
-    // 1. only the user runs this: an agent never does.
-    if env.ctx.is_some() || !env.admin {
+pub fn init(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    now: Ts,
+) -> GearResult<InitResult> {
+    init_with_home(store, env, config_text, None, now)
+}
+
+/// `gear admin init` with an explicit home for the skill check (T-83): the CLI
+/// passes the user's `HOME`; a test passes a scratch home with the skills
+/// installed. `None` means the process's `HOME`.
+pub fn init_with_home(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    home: Option<&std::path::Path>,
+    now: Ts,
+) -> GearResult<InitResult> {
+    // 1. `GEAR_ADMIN=1` is the user's consent, and only the user's own shell
+    //    or the project's captain may act on it (T-86). Which project is
+    //    checked once its config is parsed, below.
+    if !env.admin {
         return Err(GearError::new(
             ErrorCode::Forbidden,
-            "`gear admin init` runs in the user's own shell with GEAR_ADMIN=1, never in an agent",
+            "`gear admin init` needs GEAR_ADMIN=1: it runs in the user's own shell, or in the captain's pane",
         ));
     }
 
@@ -62,6 +90,36 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
 
     let project_id = config.project.id.clone();
 
+    // 2b. A caller with a context may only be this project's captain: the
+    //     seat's name, the project the context names, and — when the seat is
+    //     registered already — its role and generation. A first registration
+    //     has no seat yet, so the name and the project are what can be asked.
+    if let Some(ctx) = &env.ctx {
+        if ctx.seat != CAPTAIN || ctx.project != project_id {
+            return Err(GearError::new(
+                ErrorCode::Forbidden,
+                format!(
+                    "`gear admin init` in an agent runs only in the captain's pane of {project_id}, at generation 1; {} carries {}",
+                    ctx.seat_id(),
+                    ctx.generation
+                ),
+            ));
+        }
+        if let Some(seat) = store.read(|tx| tx.get_seat(&ctx.seat_id()))? {
+            if seat.role != SeatRole::Captain || seat.generation != ctx.generation {
+                return Err(GearError::new(
+                    ErrorCode::Forbidden,
+                    format!(
+                        "`gear admin init` runs in the captain's pane: {} is {}, generation {}",
+                        seat.id,
+                        seat.role.as_str(),
+                        seat.generation
+                    ),
+                ));
+            }
+        }
+    }
+
     // Every seat's profile must resolve against the table (built-ins + the
     // project's own) and must be able to run unattended (T-31): an agent that
     // stops on a permission dialog cannot be driven by GEAR.
@@ -75,8 +133,8 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
                 .map(|temps| ("temps", temps.profile.as_str())),
         )
         .collect();
-    for (name, profile_name) in seats_to_check {
-        let Some(profile) = table.get(profile_name) else {
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
@@ -94,6 +152,69 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
         }
     }
 
+    // Every kind the project can start must have the GEAR skill installed
+    // (T-83, trial G06): an agent that never read it does not know how to work
+    // as a seat, and the voyage would need the captain's hands. The kinds are
+    // every seat's resolved profile **and** every CLI an effective model chain
+    // names (T-35): an entry may run its model on another CLI than its seat's
+    // kind, and a chain's fallback may name a third, so the profile alone does
+    // not say what an unattended run will start. The home is the caller's (the
+    // CLI's user); an unset one is the process's. GEAR never installs a skill
+    // behind the user's back — it names the command.
+    let home = match home {
+        Some(home) => home.to_path_buf(),
+        None => match std::env::var_os("HOME") {
+            Some(home) => std::path::PathBuf::from(home),
+            None => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
+                ))
+            }
+        },
+    };
+    let mut kinds: Vec<(String, String)> = Vec::new();
+    for (name, profile_name) in &seats_to_check {
+        let Some(profile) = table.get(*profile_name) else {
+            continue; // reported above
+        };
+        let who = match *name {
+            "captain" => "the captain".to_string(),
+            "temps" => "the reviewer".to_string(),
+            lane => format!("lane {lane}"),
+        };
+        note_kind(&mut kinds, &profile.kind, &who);
+    }
+    for lane in &config.lanes {
+        note_chain(
+            &mut kinds,
+            config::lane_chain(&config, lane),
+            &format!("the model chain of lane {}", lane.name),
+        );
+    }
+    note_chain(&mut kinds, &config.models.review, "the reviewers' model chain");
+    note_chain(&mut kinds, &config.models.captain, "the captain's model chain");
+
+    for (kind, who) in &kinds {
+        let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{who} runs {kind:?}, which GEAR has no skill for: the kinds with a skill are claude, codex, opencode and grok"
+                ),
+            ));
+        };
+        if !crate::skill::installed(agent, &home) {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{who} runs {kind}, whose GEAR skill is not installed in {}: run `gear admin install-skill --agent {kind}` and init again",
+                    home.display()
+                ),
+            ));
+        }
+    }
+
     store.write(|tx| {
         match tx.get_project(&project_id)? {
             // The project is registered: the config changes.
@@ -102,6 +223,75 @@ pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearRes
             None => register(tx, &config, config_text, now),
         }
     })
+}
+
+/// `gear admin init` behind the seat proof (T-104).
+///
+/// A context on an **already registered** project is the captain's seat claim:
+/// only a caller that really runs in the captain's bound pane may change the
+/// configuration, and a claim from anywhere else is refused with the same one
+/// urgent item the other seat writes raise. The first registration (no seats
+/// yet) and the user's own shell (no context) keep their flow; `herdr` is only
+/// needed when there is a claim to prove.
+pub fn init_checked(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    herdr: Option<&mut dyn gear_herdr::HerdrRead>,
+    ancestors: &[u32],
+    home: Option<&std::path::Path>,
+    now: Ts,
+) -> GearResult<InitResult> {
+    if let Some(ctx) = env.ctx.clone() {
+        let registered = store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?;
+        if registered {
+            let Some(herdr) = herdr else {
+                return Err(GearError::new(
+                    ErrorCode::NotRegistered,
+                    format!(
+                        "a registered project's `gear admin init` runs in the captain's pane, which cannot be read: Herdr is unreachable for {}",
+                        ctx.project
+                    ),
+                ));
+            };
+            prove_captain(store, env, herdr, ancestors, &ctx.project, now)?;
+        }
+    }
+    init_with_home(store, env, config_text, home, now)
+}
+
+/// Prove that the caller is the captain of `project` in its own bound pane
+/// (T-104): the real pane is the seat's pane. A refusal is reported once to the
+/// captain — the same item every seat write raises.
+fn prove_captain(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    ancestors: &[u32],
+    project: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let result = (|| -> GearResult<()> {
+        let Some(fp) = crate::identity::observe(env, herdr, ancestors)? else {
+            return Err(GearError::new(
+                ErrorCode::NotRegistered,
+                format!(
+                    "the captain's pane hosts no agent, so the caller cannot be the captain of {project}"
+                ),
+            ));
+        };
+        store
+            .read(|tx| {
+                crate::identity::require_seat(tx, env, Some(&fp), Some(&[SeatRole::Captain]), None)
+            })
+            .map(|_| ())
+    })();
+    if let Err(error) = &result {
+        if error.code == ErrorCode::NotRegistered {
+            let _ = crate::identity::report_claim(store, env, herdr, error, ancestors, now);
+        }
+    }
+    result
 }
 
 /// First registration: the project row and one seat per role. The captain is
@@ -173,7 +363,11 @@ fn register(
         created: now,
     })?;
 
-    Ok(InitResult { project: project_id, config_version: 1, seats })
+    Ok(InitResult {
+        project: project_id,
+        config_version: 1,
+        seats,
+    })
 }
 
 /// Apply a changed config to a registered project (T-6, design/01 "repeated
@@ -330,5 +524,30 @@ fn re_register(
         }
     }
 
-    Ok(InitResult { project: project_id, config_version: version, seats })
+    Ok(InitResult {
+        project: project_id,
+        config_version: version,
+        seats,
+    })
+}
+
+/// Note that `who` may start the CLI `kind` (T-83): once per kind, the first
+/// seat that names it.
+fn note_kind(kinds: &mut Vec<(String, String)>, kind: &str, who: &str) {
+    let kind = kind.trim();
+    if kind.is_empty() || kinds.iter().any(|(seen, _)| seen == kind) {
+        return;
+    }
+    kinds.push((kind.to_string(), who.to_string()));
+}
+
+/// Note every CLI a chain may start (T-83, T-35): the entry form of a model
+/// names the CLI that runs it, and a fallback may name another one — each of
+/// them must have the GEAR skill too.
+fn note_chain(kinds: &mut Vec<(String, String)>, chain: &[config::ModelEntry], who: &str) {
+    for entry in chain {
+        if let Some(cli) = entry.cli() {
+            note_kind(kinds, cli, who);
+        }
+    }
 }

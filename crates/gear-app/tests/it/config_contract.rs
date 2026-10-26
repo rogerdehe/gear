@@ -369,6 +369,7 @@ fn a_project_without_repos_has_only_the_root_repo() {
             integration: "dev".into(),
             release: "main".into(),
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
+            github: None,
         }
     );
     assert_eq!(validate(&cfg), vec![]);

@@ -8,7 +8,7 @@ use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::tasks::{adopt_contract, on_delivery_confirmed, start_attempt, submit_result};
 use gear_app::Env;
-use gear_model::{AttemptState, GearCtx, SeatRole, TaskState};
+use gear_model::{AttemptState, ErrorCode, GearCtx, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
@@ -37,7 +37,7 @@ fn world() -> Store {
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-            updated: NOW,
+             issue: None,updated: NOW,
         })?;
         tx.insert_contract(&ContractRow {
             project: "p".into(),
@@ -187,44 +187,66 @@ fn a_page_adopts_only_the_version_it_showed() {
     assert_eq!((a.adopted_version, a.pending_update), (3, None));
 }
 
-/// R2 (review): a handed-in attempt keeps the contract it was submitted under,
+/// R2 (review), T-63: a hand-in names the task's *current* contract. A lane
+/// that has not read the update yet is refused with the line that tells it to
+/// read the task again; once it adopts v2 and hands in, the attempt keeps v2
 /// whatever the home page does afterwards.
 #[test]
 fn a_handed_in_attempt_keeps_its_submitted_contract() {
     let mut s = working();
     bump(&mut s, "r1").unwrap();
-    // The lane hands in under v1 before it reads the update (the submission is
-    // valid: v1 is what the attempt worked to).
-    s.write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 15))
+    // The lane hands in under v1 before it reads the update: refused, with the
+    // line that reads the task again.
+    let error = s
+        .write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 15))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("on contract v2"), "{error:?}");
+    assert!(error.detail.contains("`gear --show T-1`"), "{error:?}");
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(a.state, AttemptState::Started, "nothing was written");
+
+    // It reads the page (adopting v2) and hands in under v2.
+    let (env, fp) = lane();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 16).unwrap();
+    home::record_view(&mut s, &page.view).unwrap();
+    s.write(|tx| submit_result(tx, "p", "T-1", 1, 2, "abc1234", "Report: r", NOW + 17))
         .unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Submitted, 1, None));
+    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Submitted, 2, None));
 
     let (env, fp) = lane();
     let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
-    assert_eq!(page.view.shown_contract, Some(1), "the page shows the submitted contract");
+    assert_eq!(page.view.shown_contract, Some(2), "the page shows the submitted contract");
     home::record_view(&mut s, &page.view).unwrap();
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!((a.adopted_version, a.pending_update), (1, None), "the candidate stays bound to v1");
+    assert_eq!((a.adopted_version, a.pending_update), (2, None), "the candidate stays bound to v2");
 }
 
-/// R2 (review): a page built before the hand-in and recorded after it adopts
-/// nothing either.
+/// T-63: a page built before the hand-in, and a hand-in that names the old
+/// contract: the hand-in is refused and freezes nothing, so recording the page
+/// then adopts v2 and the hand-in works.
 #[test]
-fn a_page_built_before_the_hand_in_adopts_nothing_after_it() {
+fn a_page_built_before_the_hand_in_adopts_after_a_refused_hand_in() {
     let mut s = working();
     bump(&mut s, "r1").unwrap();
     let (env, fp) = lane();
     let page = home::build(&mut s, &env, Some(&fp), NOW + 20).unwrap();
     assert_eq!(page.view.shown_contract, Some(2));
 
-    s.write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 21))
-        .unwrap();
-    home::record_view(&mut s, &page.view).unwrap();
-
+    let error = s
+        .write(|tx| submit_result(tx, "p", "T-1", 1, 1, "abc1234", "Report: r", NOW + 21))
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("on contract v2"), "{error:?}");
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
-    assert_eq!(
-        (a.state, a.adopted_version, a.pending_update),
-        (AttemptState::Submitted, 1, None)
-    );
+    assert_eq!((a.state, a.adopted_version), (AttemptState::Started, 1), "nothing was written");
+
+    home::record_view(&mut s, &page.view).unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!((a.state, a.adopted_version, a.pending_update), (AttemptState::Started, 2, None));
+    s.write(|tx| submit_result(tx, "p", "T-1", 1, 2, "abc1234", "Report: r", NOW + 22))
+        .unwrap();
+    let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(a.state, AttemptState::Submitted);
 }

@@ -19,6 +19,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         quota_markers: vec![],
         quota_bar: None,
         auth_markers: vec![],
+        backoff_markers: vec![],
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
@@ -79,7 +80,7 @@ fn task(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<
         wait_cond: None,
         rework_note: None,
         estimate_min: None,
-        updated: T0,
+         issue: None,updated: T0,
     })
 }
 

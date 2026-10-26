@@ -36,7 +36,7 @@ fn task(id: &str, rank: i64, state: TaskState) -> TaskRow {
         wait_cond: None,
         rework_note: None,
         estimate_min: None,
-        updated: T0,
+         issue: None,updated: T0,
     }
 }
 

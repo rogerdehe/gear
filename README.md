@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.2.4, an early release for trial use. Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.3.0, an early release for trial use — what changed: [docs/releases/v0.3.0.md](docs/releases/v0.3.0.md). Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.2.4
+   herdr plugin install rogerdehe/gear --ref v0.3.0
    ```
 
    Add `--yes` in a non-interactive shell.
@@ -30,7 +30,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    export PATH="$(herdr plugin list --json | sed -n 's/.*"plugin_id":"herdr-gear","plugin_root":"\([^"]*\)".*/\1/p')/bin:$PATH"
    ```
 
-   Check: `gear --version` prints `gear 0.2.4`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
+   Check: `gear --version` prints `gear 0.3.0`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
 
 3. **A key for the plan board**, in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
@@ -42,18 +42,22 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    description = "GEAR plan board"
    ```
 
-4. **The GEAR skill for your captain's CLI:**
+4. **The GEAR skill for every CLI your project uses** — the captain's, and every lane's and reviewer's: an agent without the skill does not know the loop (trial G06).
 
    ```bash
    gear admin install-skill --agent claude      # or codex, opencode, grok
+   gear admin install-skill --agent opencode    # once per CLI the project runs
    ```
+
+**Upgrading from 0.2.x?** The [v0.3.0 upgrade guide](docs/releases/v0.3.0.md#upgrading) has the three cases — a fresh install, an upgrade with no voyage running, an upgrade during a voyage — with the commands to copy.
 
 ## Start a project
 
-1. **Pick a short project name** (`[a-z][a-z0-9-]*`, e.g. `acme`). In a Herdr pane, in your project's repository, start the agent that will be your captain with GEAR's context:
+1. **Pick a short project name** (`[a-z][a-z0-9-]*`, e.g. `acme`). In a Herdr pane, in your project's repository, start the agent that will be your captain with GEAR's context and your consent:
 
    ```bash
    export GEAR_CTX=acme:captain:1
+   export GEAR_ADMIN=1                          # lets the captain re-apply a config change
    claude                                       # or codex, opencode, grok
    ```
 
@@ -63,13 +67,13 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1.md`.
 
-3. **Register the project** — in your own shell (not inside an agent), in the repository:
+3. **Register the project — in your own shell** (not inside an agent), in the repository:
 
    ```bash
    GEAR_ADMIN=1 gear admin init gear/gear.toml
    ```
 
-   `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge).
+   Creating a project is your act: `init` refuses an agent that tries, whatever `GEAR_ADMIN` says. After this, the captain re-applies the config itself whenever it changes (that is the one `init` an agent may run). `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge) — fix it and run it again.
 
 4. **Tell the captain to apply the plan.** The engine starts in the background, brings up the lanes in their own Herdr worktrees and delivers their first tasks. From here on nobody asks you anything until the voyage lands.
 
@@ -78,6 +82,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 - `prefix+g` opens the plan board; `q` closes it.
 - The captain is rung when something needs it; the lanes, reviews and merges run by themselves.
 - When a voyage lands, the captain reports it and asks whether to reclaim the lanes. Merging into your release branch is always your decision.
+- If the work lives on GitHub, the captain adds a `[github]` mode to the project: issues become tasks (`gear plan import-issues`), and each task's claim, hand-in, verdict and landing are commented on its pull request. Agents never write with `gh`; the engine does. `gear --skill github` has the details — landing *through* a pull request is not in this release.
 - Stop the engine (upgrade, uninstall): `gear admin stop`. Any later `gear` call starts it again.
 - The engine's log: `~/.local/state/gear/engine.log`.
 
@@ -89,6 +94,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 | `gear send` | lanes, reviewers | report progress, a question, a result, a review |
 | `gear reply` | captain | answer an item |
 | `gear plan apply` | captain | apply the voyage's plan file |
+| `gear plan import-issues` | captain | print task blocks for open GitHub issues the plan does not carry yet |
 | `gear report time` | captain | where the time went, per task and per voyage |
 | `gear --skill [topic]` | everyone | the version-matched instructions |
 | `gear board` | you | the plan, full screen |
@@ -101,4 +107,25 @@ Please send one feedback file per trial, written from [`FEEDBACK.md`](FEEDBACK.m
 
 ## Developing GEAR
 
-GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The tests never touch a real remote: every remote they push to is a local bare repository in the temp dir, and `.cargo/config.toml` keeps every git they start away from your global and system git config (hooks, credentials, URL rewrites). The skill texts are in `skills/gear/`.
+GEAR is developed with GEAR. Building from source needs Rust 1.89+: `cargo build --release`, then `herdr plugin link <checkout>`. The skill texts are in `skills/gear/`.
+
+### Tests
+
+Run the whole suite with `cargo test --workspace` (or one crate: `cargo test -p gear-app`). The tests are offline and push nothing, by construction:
+
+- every repository a test uses is a local bare repository in the temp dir, and every merge a test makes moves a ref on the remote's side;
+- `.cargo/config.toml` names no `gh`: `GEAR_GH` points at a path that does not exist, so a test that forgets its fake fails with `no gh in tests` instead of calling GitHub;
+- it allows git's file transport only (`GIT_ALLOW_PROTOCOL=file`), so a clone or fetch over https or ssh is refused;
+- it keeps every git a test starts away from your global and system git config (hooks, credentials, URL rewrites), and runs with no seat identity (`GEAR_CTX` empty).
+
+To prove it, run the same suite with outbound network denied — `sandbox-exec` on macOS, `unshare -rn` on Linux:
+
+```bash
+sh scripts/test-offline.sh
+```
+
+It builds first (that step may fetch crates), then runs the suite `--offline`, and fails if any test fails or reaches out.
+
+A test that truly needs the network is `#[ignore]`d and runs only when asked: `GEAR_LIVE=1 cargo test -- --ignored`. There is none today.
+
+`.cargo/config.toml` applies to `cargo run` too, and its `GEAR_GH` cannot be overridden from the shell (it is forced). To use the workspace's binary for real work, run it directly — `target/debug/gear …` — since the file only affects the processes cargo starts.

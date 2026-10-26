@@ -9,3 +9,16 @@ GIT_AUTHOR_NAME = "gear-test"
 GIT_AUTHOR_EMAIL = "gear-test@localhost"
 GIT_COMMITTER_NAME = "gear-test"
 GIT_COMMITTER_EMAIL = "gear-test@localhost"
+# A test never runs as the seat whose shell started it: with the lane's
+# GEAR_CTX inherited, a test repo's GEAR pre-push hook (T-72) ran
+# `gear push-check` as that lane and sent urgent items to the captain (M3).
+GEAR_CTX = { value = "", force = true }
+# A test never runs the real `gh`: gear-forge runs the executable GEAR_GH
+# names, and here it names one that does not exist, so a test that forgets its
+# fake fails at once ("no gh in tests") instead of calling GitHub (T-111).
+GEAR_GH = { value = "/nonexistent/gear-test/gh", force = true }
+# A test's git never leaves the machine either: only the file transport (a
+# local path) is allowed, so a clone of an https or ssh URL is refused (T-111).
+# Production is not affected: this file is read by cargo, not by the installed
+# binary.
+GIT_ALLOW_PROTOCOL = "file"

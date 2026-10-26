@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, Store, Tx};
+use gear_store::{BindingStatus, SeatRow, Store, Tx};
 use gear_herdr::{AgentInfo, AgentStatus, HerdrRead};
 
 pub use deps::DepNode;
@@ -160,6 +160,22 @@ pub struct LaneBoard {
     pub tasks: Vec<TaskBoard>,
     /// The lane's never-stop measures.
     pub rework: Rework,
+    /// Set when the seat is not running (T-82): its state, the reason the
+    /// engine recorded and the plan line that acts on it — instead of an
+    /// `agent unknown` nobody can do anything with (trial G02, G04).
+    pub down: Option<DownSeat>,
+}
+
+/// A seat that is not running, what it said about it, and the way back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownSeat {
+    /// The seat state in words: `needs check`, `unknown`, `parked`, …
+    pub state: String,
+    /// The reason the seat recorded (the engine's step failure, a park, …).
+    pub reason: String,
+    /// The plan `# Staff` line that acts on it, when there is one:
+    /// `- retry heat`.
+    pub action: Option<String>,
 }
 
 /// One task of a lane's queue.
@@ -183,6 +199,12 @@ pub struct Waiting {
 pub struct Temps {
     pub in_use: usize,
     pub quota: usize,
+    /// Temp seats running a job (active, not blocked).
+    pub running: usize,
+    /// Temp seats queued or starting.
+    pub starting: usize,
+    /// Temp seats whose agent waits on a dialog (the engine's blocked timer).
+    pub blocked: usize,
 }
 
 /// Whether the engine is running: it holds its lock file while it runs.
@@ -259,6 +281,9 @@ pub fn project_with_agents(
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
+    // The seats whose provider is in a back-off (T-75): the engine recorded
+    // the wait, and the board says so instead of "working".
+    let backoff = tx.seats_in_backoff(project)?;
 
     // Keep active empty lanes visible, but never recreate a retired lane
     // from a historical task assignment below.
@@ -268,8 +293,11 @@ pub fn project_with_agents(
     let mut lanes = Vec::new();
     for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
         lanes.push(LaneBoard {
-            lane: seat.name.clone(), agent_state: observed_agent_state(tx, seat, agents)?,
-            tasks: Vec::new(), rework: Rework::default(),
+            lane: seat.name.clone(),
+            agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
+            tasks: Vec::new(),
+            rework: Rework::default(),
+            down: down_seat(seat),
         });
     }
 
@@ -298,6 +326,7 @@ pub fn project_with_agents(
                 agent_state: "unknown",
                 tasks: vec![line],
                 rework: Rework::default(),
+                down: None,
             }),
         }
     }
@@ -373,12 +402,34 @@ pub fn project_with_agents(
         None => Waiting::default(),
     };
 
+    // T-69: the temp slots are shown as what they are doing — running,
+    // starting, blocked — not as one number. A temp seat is `blocked` while
+    // the engine's blocked timer for it is live (its agent waits on a dialog).
+    let temps_seats: Vec<&SeatRow> = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Temp)
+        .collect();
+    let blocked_seat = |seat: &SeatRow| {
+        tx.get_meta(&format!("seat-blocked:{}:since", seat.id))
+            .ok()
+            .flatten()
+            .is_some_and(|since| !since.is_empty())
+    };
     let temps = Temps {
-        in_use: seats
+        in_use: temps_seats
             .iter()
-            .filter(|seat| seat.role == SeatRole::Temp && holds_temp_slot(seat.state))
+            .filter(|seat| holds_temp_slot(seat.state))
             .count(),
         quota: row.quota_temps.max(0) as usize,
+        running: temps_seats
+            .iter()
+            .filter(|seat| matches!(seat.state, SeatState::Active) && !blocked_seat(seat))
+            .count(),
+        starting: temps_seats
+            .iter()
+            .filter(|seat| matches!(seat.state, SeatState::Queued | SeatState::Starting))
+            .count(),
+        blocked: temps_seats.iter().filter(|seat| blocked_seat(seat)).count(),
     };
 
     // The deliveries in flight: a Deliver op that is not settled yet.
@@ -412,10 +463,38 @@ pub fn project_with_agents(
     })
 }
 
+/// The seat's own account of why it is not running (T-82): None while it runs
+/// or is about to (Active, Standby, Starting, Queued). A seat in NeedsCheck or
+/// Unknown can be retried with one plan line; the others say what they are.
+fn down_seat(seat: &gear_store::SeatRow) -> Option<DownSeat> {
+    let state = match seat.state {
+        SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Queued => {
+            return None
+        }
+        SeatState::NeedsCheck => "needs check",
+        other => other.as_str(),
+    };
+    Some(DownSeat {
+        state: state.to_string(),
+        reason: seat.state_reason.clone().unwrap_or_default(),
+        action: match seat.state {
+            // The captain's way back: the plan's `# Staff` line (T-82).
+            SeatState::NeedsCheck | SeatState::Unknown => Some(format!("- retry {}", seat.name)),
+            _ => None,
+        },
+    })
+}
+
 /// Only label the agent in this generation's active binding.
+///
+/// A seat whose provider is in a back-off says so before anything else
+/// (T-75): it waits for the provider, and that is not a stall.
 fn observed_agent_state(
-    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>,
+    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>, backoff: &[String],
 ) -> GearResult<&'static str> {
+    if backoff.iter().any(|waiting| waiting == &seat.id) {
+        return Ok("provider back-off");
+    }
     let Some(agents) = agents else { return Ok("unknown"); };
     let Some(binding) = tx.get_binding(&seat.id, seat.generation)?
         .filter(|binding| binding.status == BindingStatus::Active)
@@ -443,7 +522,23 @@ pub fn lane_line(lane: &LaneBoard) -> String {
     let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
         .unwrap_or_else(|| "no current task".into());
     let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
-    format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued)
+    match &lane.down {
+        // A seat that is not running says why, and how it gets back (T-82):
+        // the state, the reason, the plan line — never a bare "agent unknown".
+        Some(down) => {
+            let mut line = format!("{} · {}", lane.lane, down.state);
+            if !down.reason.is_empty() {
+                line.push_str(": ");
+                line.push_str(&down.reason);
+            }
+            if let Some(action) = &down.action {
+                line.push_str(" · ");
+                line.push_str(action);
+            }
+            format!("{line} · {current} · {queued} queued")
+        }
+        None => format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued),
+    }
 }
 
 /// The seat states that hold a temp slot (design/10): STARTING, ACTIVE,
@@ -527,8 +622,12 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
     lines.push(String::new());
     lines.push(waiting_line(&project.waiting));
     lines.push(format!(
-        "Temp slots: {}/{} in use",
-        project.temps.in_use, project.temps.quota
+        "Temp slots: {} running · {} starting · {} blocked ({} of {} in use)",
+        project.temps.running,
+        project.temps.starting,
+        project.temps.blocked,
+        project.temps.in_use,
+        project.temps.quota
     ));
     lines
 }
@@ -656,6 +755,9 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                 "temps": {
                     "in_use": project.temps.in_use,
                     "quota": project.temps.quota,
+                    "running": project.temps.running,
+                    "starting": project.temps.starting,
+                    "blocked": project.temps.blocked,
                 },
                 "unconfirmed_deliveries": project.unconfirmed_deliveries,
             })

@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- The planned time of the task in minutes (T-38): the plan's `estimate:`
   -- field. NULL for a task that has none (an older task may lack it).
   estimate_min INTEGER,
+  -- The GitHub issue a task came from (T-79): the plan's `issue: #<n>`. NULL
+  -- for a task with none.
+  issue INTEGER,
   updated INTEGER NOT NULL, PRIMARY KEY (project, id));
 
 CREATE TABLE IF NOT EXISTS contracts (project TEXT NOT NULL, task TEXT NOT NULL, version INTEGER NOT NULL,

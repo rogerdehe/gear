@@ -22,7 +22,7 @@ fn world_in(mut store: Store) -> World {
                 state: if n == 1 { TaskState::Verifying } else { TaskState::Ready },
                 priority: "must".into(), lane: Some("heat".into()), milestone: None,
                 required: false, contract_version: 1, deps: vec![], followup_of: None,
-                wait_on: None, wait_cond: None, rework_note: None, estimate_min: Some(30), updated: T0,
+                wait_on: None, wait_cond: None, rework_note: None, estimate_min: Some(30),  issue: None,updated: T0,
             })?;
         }
         tx.insert_attempt(&AttemptRow {

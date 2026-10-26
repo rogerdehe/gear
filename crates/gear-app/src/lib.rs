@@ -9,8 +9,10 @@
 
 pub mod admin;
 pub mod base;
+pub mod captain;
 pub mod config;
 pub mod draft;
+pub mod github;
 pub mod home;
 pub mod identity;
 pub mod kickoff;
@@ -18,6 +20,7 @@ pub mod mail;
 pub mod plan;
 pub mod review;
 pub mod seats;
+pub mod standard;
 pub mod skill;
 pub mod station;
 pub mod tasks;

@@ -7,9 +7,10 @@ use crate::draft::{Draft, Priority, QueueItem, StaffItem};
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::state::require_transition;
-use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{ContractRow, PlanRow, RequestOutcome, Store, TaskRow, Tx};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
+use gear_store::{ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx};
 use std::collections::{BTreeMap, BTreeSet};
+use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ApplyResult {
@@ -27,6 +28,14 @@ pub struct ApplyResult {
     /// Staff targets applied (T-55): `park heat`, `hold wire`, `retire prompts`, in draft order.
     #[serde(default)]
     pub staffed: Vec<String>,
+    /// Tasks cancelled by this apply (T-112): a finished task whose accepted
+    /// work was never merged.
+    #[serde(default)]
+    pub cancelled: Vec<String>,
+    /// Items closed with a cancellation (T-112): the merge and push items of a
+    /// cancelled done task, resolved "cancelled by the captain".
+    #[serde(default)]
+    pub resolved: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -51,7 +60,10 @@ pub struct ApplyResult {
 ///      and `estimate` (the planned time in minutes, T-38);
 ///    - every dep names an existing task or a task of this draft; no cycle;
 ///    - `state=` only on existing tasks: `cancelled` from any non-terminal state,
-///      `ready` only from Draft (DONE→READY with `reopen` comes with verdicts);
+///      and from Done when the task's accepted candidate is **not** on its
+///      integration branch (T-112: its merge was given up; a done task whose
+///      work is merged stays uncancellable); `ready` only from Draft (a Done
+///      task reopens by a `# Verdicts` fail, T-90, not by a queue line);
 /// 6. writes: `NEW` → `T-<n>` via `next_id`, state Ready, contract v1; an existing
 ///    task whose goal/accept/evidence differs from its current contract → new
 ///    contract version; rank = position in the draft (1, 2, …), unmentioned
@@ -71,6 +83,12 @@ pub fn apply(
     request_id: &str,
     now: Ts,
 ) -> GearResult<ApplyResult> {
+    // T-112: a Done task may be cancelled only when its accepted work is not on
+    // the integration branch. That is a git question, so it is answered here,
+    // before the write transaction (the store is never held while a subprocess
+    // runs) and only for the done tasks this draft cancels.
+    let cancellable = cancellable_done_tasks(store, draft)?;
+
     store.write(|tx| {
         // 1. identity: only the captain applies a plan.
         let (ctx, seat) = require_seat(
@@ -99,7 +117,16 @@ pub fn apply(
         let outcome = tx.run_request(request_id, &args_key, now, |tx| {
             // Steps 3 to 6 run inside the closure, so a replay returns the
             // stored result instead of meeting a moved plan version.
-            let result = apply_queue(tx, &ctx.project, &seat.id, ctx.generation, draft, text, now)?;
+            let result = apply_queue(
+                tx,
+                &ctx.project,
+                &seat.id,
+                ctx.generation,
+                draft,
+                text,
+                &cancellable,
+                now,
+            )?;
             // The milestone blocks of the draft become voyages (T-22), after the
             // queue so the task count at departure is the plan's.
             record_tail_decisions(tx, &ctx.project, draft)?;
@@ -135,6 +162,7 @@ fn apply_queue(
     by_gen: i64,
     draft: &Draft,
     text: &str,
+    cancellable: &BTreeSet<String>,
     now: Ts,
 ) -> GearResult<ApplyResult> {
     // 3. the draft must be based on the current plan version.
@@ -172,6 +200,10 @@ fn apply_queue(
         .chain(new_ids.values().cloned())
         .collect();
 
+    // What the cancellations of this apply did (T-112).
+    let mut cancelled: Vec<String> = Vec::new();
+    let mut resolved: Vec<String> = Vec::new();
+
     // 5. validation, nothing written on failure.
     let mut graph: BTreeMap<String, Vec<String>> = existing
         .iter()
@@ -186,10 +218,24 @@ fn apply_queue(
                 match item.state.as_deref() {
                     None => {}
                     Some("cancelled") => {
-                        if task.state.is_terminal() {
+                        // Cancelling a cancelled task is a no-op, not an error
+                        // (T-93: a plan keeps saying so after the cancel, and
+                        // re-applying it failed three times in M3). A finished
+                        // task is not cancelled after the fact — except a Done
+                        // task whose accepted work never reached the
+                        // integration branch (T-112): its merge was given up,
+                        // and cancelling is how the captain drops it.
+                        let done_and_unmerged = task.state == TaskState::Done
+                            && cancellable.contains(id);
+                        if !done_and_unmerged
+                            && matches!(task.state, TaskState::Done | TaskState::Failed)
+                        {
                             return Err(bad(
                                 item.line,
-                                format!("task {id} is already {}", task.state.as_str()),
+                                format!(
+                                    "task {id} is {}, it cannot be cancelled",
+                                    task.state.as_str()
+                                ),
                             ));
                         }
                     }
@@ -287,6 +333,9 @@ fn apply_queue(
                     // The planned time of the task (T-38); a NEW block must
                     // carry it (checked above).
                     estimate_min: item.estimate.map(i64::from),
+                    // The GitHub issue the task came from (T-79); the
+                    // parser keeps it inside the store's range.
+                    issue: item.issue.and_then(|number| i64::try_from(number).ok()),
                     updated: now,
                 };
                 tx.insert_task(&task)?;
@@ -321,8 +370,32 @@ fn apply_queue(
                 if let Some(estimate) = item.estimate {
                     task.estimate_min = Some(i64::from(estimate));
                 }
+                // The GitHub issue (T-79): a draft that names one sets it; a
+                // block without `issue:` keeps the issue the task came from.
+                if let Some(issue) = item.issue.and_then(|number| i64::try_from(number).ok()) {
+                    task.issue = Some(issue);
+                }
                 match item.state.as_deref() {
-                    Some("cancelled") => task.state = TaskState::Cancelled,
+                    Some("cancelled") => {
+                        // T-93: cancelling a task finishes it. Its open attempt
+                        // is abandoned — the seat is free for the next task —
+                        // and the lane is told in one line. A cancelled task
+                        // that kept a started attempt left the lane looking
+                        // busy with a full queue behind it (M3: T-80).
+                        let was = task.state;
+                        if task.state != TaskState::Cancelled {
+                            cancel_task(tx, project, &task, by_seat, by_gen, now)?;
+                        }
+                        task.state = TaskState::Cancelled;
+                        if was != TaskState::Cancelled {
+                            cancelled.push(id.clone());
+                        }
+                        // T-112: a done task's open merge items close with it —
+                        // the failed merge and the push refusal are history,
+                        // and the captain's own decision is the answer. The
+                        // failed op itself stays as history; no op is created.
+                        resolved.extend(resolve_merge_items(tx, project, id, now)?);
+                    }
                     Some("ready") => task.state = TaskState::Ready,
                     _ => {}
                 }
@@ -403,9 +476,19 @@ fn apply_queue(
     }
 
     // Staff (T-55): park/hold/retire move a lane seat of this project in this
-    // transaction; a target already reached is skipped.
+    // transaction; a target already reached is skipped. `remerge` (T-92) is
+    // not a seat: it queues a new merge op for a task whose merge failed.
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
+        if let StaffItem::Remerge { task, .. } = item {
+            remerge(tx, project, task, staff_line(item), now)?;
+            continue;
+        }
+        if let StaffItem::Retry { lane, .. } = item {
+            retry_lane(tx, project, lane, staff_line(item), now)?;
+            staffed.push(format!("retry {lane}"));
+            continue;
+        }
         let (lane, verb, target, reason) = match item {
             StaffItem::Park { lane, until, until_task, .. } => {
                 let reason = match (until, until_task) {
@@ -429,6 +512,8 @@ fn apply_queue(
             StaffItem::Temp { .. } => {
                 return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"))
             }
+            StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
+            StaffItem::Retry { .. } => unreachable!("retry is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -498,11 +583,187 @@ fn apply_queue(
         by_gen: Some(by_gen),
     })?;
 
-    Ok(ApplyResult { version, created, contract_changed, not_mentioned, settled, staffed })
+    Ok(ApplyResult {
+        version,
+        created,
+        contract_changed,
+        not_mentioned,
+        settled,
+        staffed,
+        cancelled,
+        resolved,
+    })
 }
 
 fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
     GearError::new(ErrorCode::BadFormat, format!("line {line}: {detail}"))
+}
+
+/// The done tasks this draft cancels whose accepted work is **not** on their
+/// integration branch (T-112): the only finished tasks that may be cancelled.
+///
+/// Git runs before the write transaction. A fetch comes first and any doubt —
+/// a fetch that fails, a candidate git cannot place — is an error: a
+/// cancellation is never accepted unchecked. A done task with no accepted
+/// candidate has no landed work, so it may be cancelled too.
+fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeSet<String>> {
+    let wanted: Vec<&String> = draft
+        .queue
+        .iter()
+        .filter(|item| item.state.as_deref() == Some("cancelled"))
+        .filter_map(|item| item.id.as_ref())
+        .collect();
+    if wanted.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let project = draft.project.clone();
+    // Only a done task's merge is in question (the config is not read for a
+    // running one, and a test project may have none).
+    let rows = store.read(|tx| {
+        let mut rows: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        for id in &wanted {
+            let Some(task) = tx.get_task(&project, id)? else {
+                continue; // the validation names a missing task
+            };
+            if task.state != TaskState::Done {
+                continue;
+            }
+            let candidate = tx
+                .attempts_of_task(&project, id)?
+                .into_iter()
+                .rev()
+                .find(|attempt| attempt.state == AttemptState::Accepted)
+                .and_then(|attempt| attempt.candidate);
+            rows.push((id.to_string(), task.lane.clone(), candidate));
+        }
+        Ok(rows)
+    })?;
+    if !rows.iter().any(|(_, _, candidate)| candidate.is_some()) {
+        // No candidate to look for: nothing to answer with git (and a project
+        // without a readable config is not consulted for nothing).
+        return Ok(BTreeSet::new());
+    }
+    let config = crate::config::latest(store, &project)?;
+    let mut cancellable = BTreeSet::new();
+    for (id, lane, candidate) in rows {
+        let Some(candidate) = candidate else {
+            // A done task with no accepted work has no candidate to look for;
+            // it is not the case this opens (the plan refuses it as before).
+            continue;
+        };
+        if !on_integration(&config, lane.as_deref(), &candidate)? {
+            cancellable.insert(id);
+        }
+    }
+    Ok(cancellable)
+}
+
+/// Whether `candidate` is on the repo's integration branch at origin (T-112).
+/// The branch is fetched first: a local tracking ref may be stale, and the
+/// answer must be about the remote as it is now. Anything git cannot answer is
+/// an error, never a pass.
+fn on_integration(
+    config: &crate::config::ProjectConfig,
+    lane: Option<&str>,
+    candidate: &str,
+) -> GearResult<bool> {
+    let repo = match lane {
+        Some(lane) => config.repo_of_lane(lane),
+        None => config.root_repo(),
+    };
+    let reference = format!("refs/remotes/origin/{}", repo.integration);
+    let fetched = Command::new("git")
+        .args([
+            "fetch",
+            "origin",
+            &format!("{}:{}", repo.integration, reference),
+        ])
+        .current_dir(&repo.path)
+        .output()
+        .map_err(|e| {
+            bad(
+                0,
+                format!(
+                    "cannot fetch {} in {} to tell whether {candidate} is merged: {e}",
+                    repo.integration, repo.path
+                ),
+            )
+        })?;
+    if !fetched.status.success() {
+        return Err(bad(
+            0,
+            format!(
+                "cannot fetch {} in {} to tell whether {candidate} is merged: {}",
+                repo.integration,
+                repo.path,
+                String::from_utf8_lossy(&fetched.stderr).trim()
+            ),
+        ));
+    }
+    let placed = Command::new("git")
+        .args(["merge-base", "--is-ancestor", candidate, &reference])
+        .current_dir(&repo.path)
+        .output()
+        .map_err(|e| {
+            bad(
+                0,
+                format!("cannot place {candidate} against {reference} in {}: {e}", repo.path),
+            )
+        })?;
+    match placed.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(bad(
+            0,
+            format!(
+                "cannot place {candidate} against {reference} in {}: {}",
+                repo.path,
+                String::from_utf8_lossy(&placed.stderr).trim()
+            ),
+        )),
+    }
+}
+
+/// Close the open merge items of a cancelled task (T-112): its failed merge and
+/// its push refusal are history, resolved "cancelled by the captain". Returns
+/// the message ids that were closed.
+fn resolve_merge_items(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut resolved = Vec::new();
+    for thread in [format!("merge-failed:{task}"), format!("push:{task}")] {
+        for message in tx.thread_messages(project, &thread)? {
+            if !matches!(
+                message.state,
+                gear_model::MsgState::Open | gear_model::MsgState::Waiting
+            ) {
+                continue;
+            }
+            gear_model::state::require_transition(
+                gear_model::MsgState::can_transition(
+                    message.state,
+                    gear_model::MsgState::Resolved,
+                ),
+                "message",
+                message.state.as_str(),
+                gear_model::MsgState::Resolved.as_str(),
+            )?;
+            tx.update_message_state(
+                project,
+                &message.id,
+                gear_model::MsgState::Resolved,
+                Some("cancelled by the captain"),
+                None,
+                None,
+                now,
+            )?;
+            resolved.push(message.id);
+        }
+    }
+    Ok(resolved)
 }
 
 /// Staff and reviews belong to later cuts; a draft that carries them
@@ -526,8 +787,165 @@ fn staff_line(item: &StaffItem) -> usize {
         StaffItem::Temp { line, .. }
         | StaffItem::Park { line, .. }
         | StaffItem::Hold { line, .. }
-        | StaffItem::Retire { line, .. } => *line,
+        | StaffItem::Retire { line, .. }
+        | StaffItem::Retry { line, .. }
+        | StaffItem::Remerge { line, .. } => *line,
     }
+}
+
+/// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
+/// (Unknown), goes back to Queued with the reason "retried by the captain", so
+/// the engine onboards it again — the captain's way back without an edit in
+/// the store (trial G02, G04). Any other state is a transition the seat cannot
+/// make: `BadTransition`.
+fn retry_lane(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx
+        .get_seat(&seat_id)?
+        .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
+    if seat.role != SeatRole::Lane {
+        return Err(bad(
+            line,
+            format!(
+                "seat {seat_id} is a {} seat, staff lines name lanes",
+                seat.role.as_str()
+            ),
+        ));
+    }
+    if seat.state == SeatState::Queued {
+        return Ok(()); // already there: a target, not a command
+    }
+    require_transition(
+        SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Queued),
+        "seat",
+        seat.state.as_str(),
+        SeatState::Queued.as_str(),
+    )
+    .map_err(|_| {
+        GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {seat_id} cannot go from {} to {}: only a lane in NeedsCheck or Unknown is retried",
+                seat.state.as_str(),
+                SeatState::Queued.as_str()
+            ),
+        )
+    })?;
+    tx.set_seat_state(
+        &seat_id,
+        SeatState::Queued,
+        Some("retried by the captain"),
+        now,
+    )?;
+    Ok(())
+}
+
+/// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
+/// something that can clear (a flaky test, a broken gate run). A new merge op
+/// is queued for the task's accepted attempt and candidate.
+///
+/// Only a task whose **last merge op failed** can be retried: a merge that is
+/// still in flight is not queued twice, and a task that is merged has nothing
+/// to do. Anything else is refused with the reason, like every plan line.
+fn remerge(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task_id: &str,
+    line: usize,
+    now: Ts,
+) -> GearResult<()> {
+    let task = tx.get_task(project, task_id)?.ok_or_else(|| {
+        bad(line, format!("no task {task_id} in this project"))
+    })?;
+    let latest = tx
+        .attempts_of_task(project, task_id)?
+        .into_iter()
+        .last()
+        .ok_or_else(|| bad(line, format!("{task_id} has no attempt to merge")))?;
+    if latest.state != gear_model::AttemptState::Accepted {
+        return Err(bad(
+            line,
+            format!(
+                "{task_id} attempt {} is {}, not accepted: only an accepted attempt is merged",
+                latest.n,
+                latest.state.as_str()
+            ),
+        ));
+    }
+    let candidate = latest.candidate.clone().ok_or_else(|| {
+        bad(line, format!("{task_id} attempt {} has no candidate", latest.n))
+    })?;
+    // The task's merge ops, oldest first (the store has no query by task and
+    // kind; the states are few).
+    let mut merges: Vec<gear_store::OpRow> = Vec::new();
+    for state in [
+        gear_model::OpState::Intended,
+        gear_model::OpState::Executing,
+        gear_model::OpState::Submitted,
+        gear_model::OpState::Unknown,
+        gear_model::OpState::Confirmed,
+        gear_model::OpState::Failed,
+        gear_model::OpState::Void,
+    ] {
+        for op in tx.ops_in_state(project, state)? {
+            if op.kind == gear_model::OpKind::Merge && op.task.as_deref() == Some(task_id) {
+                merges.push(op);
+            }
+        }
+    }
+    merges.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+    let Some(last) = merges.into_iter().last() else {
+        return Err(bad(
+            line,
+            format!("{task_id} has no merge to retry: the engine queues one when its review passes"),
+        ));
+    };
+    match last.state {
+        gear_model::OpState::Failed => {}
+        gear_model::OpState::Confirmed => {
+            return Err(bad(line, format!("{task_id} is already merged ({})", last.id)))
+        }
+        state => {
+            return Err(bad(
+                line,
+                format!(
+                    "a merge of {task_id} is already {} ({}), not failed: nothing to retry",
+                    state.as_str(),
+                    last.id
+                ),
+            ))
+        }
+    }
+    // The same payload the engine writes when a review passes: the lane's
+    // branch (a hint for closing it), the accepted candidate and the review
+    // branch.
+    let lane = task.lane.clone().unwrap_or_default();
+    let slug = task_id.to_lowercase().replace('-', "");
+    let branch = if lane.is_empty() { String::new() } else { format!("{lane}/{slug}") };
+    tx.insert_op(&gear_store::NewOp {
+        project: project.to_string(),
+        seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },
+        generation: 1,
+        kind: gear_model::OpKind::Merge,
+        task: Some(task_id.to_string()),
+        attempt: Some(latest.n),
+        ref_msg: None,
+        plan_version: None,
+        payload: serde_json::json!({
+            "branch": branch,
+            "candidate": candidate,
+            "review": format!("review/{slug}"),
+            "remerge": true,
+        }),
+        created: now,
+    })?;
+    Ok(())
 }
 
 fn priority_str(priority: Priority) -> &'static str {
@@ -947,6 +1365,78 @@ fn departure_from_history(
 /// the draft does not mention keeps what it has (grandfathered): the
 /// requirement applies to what the captain edits, not to old plans.
 ///
+/// Finish a task the captain cancels from the plan (T-93): every open attempt
+/// becomes Abandoned, so the lane is free for its next task, and the lane gets
+/// one line telling it to stop. The message is created once, when the task is
+/// newly cancelled.
+fn cancel_task(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &TaskRow,
+    by_seat: &str,
+    by_gen: i64,
+    now: Ts,
+) -> GearResult<()> {
+    let mut closed = false;
+    for mut attempt in tx.attempts_of_task(project, &task.id)? {
+        if attempt.state.is_terminal() {
+            continue;
+        }
+        if !AttemptState::can_transition(attempt.state, AttemptState::Abandoned) {
+            // The model keeps UNKNOWN from Abandoned directly — the engine
+            // never guesses an outcome. A cancelled task does not guess
+            // either: it stops the attempt first, then abandons it, so the
+            // lane is not left busy with a task nobody wants (T-93).
+            if attempt.state == AttemptState::Unknown
+                && AttemptState::can_transition(AttemptState::Unknown, AttemptState::Stopped)
+                && AttemptState::can_transition(AttemptState::Stopped, AttemptState::Abandoned)
+            {
+                attempt.state = AttemptState::Stopped;
+                attempt.updated = now;
+                tx.update_attempt(&attempt)?;
+            } else {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "attempt {} of task {} is {}, it cannot be abandoned",
+                        attempt.n,
+                        task.id,
+                        attempt.state.as_str()
+                    ),
+                ));
+            }
+        }
+        attempt.state = AttemptState::Abandoned;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+        closed = true;
+    }
+    // The lane that was working on it hears why, in one line.
+    let Some(lane) = task.lane.as_deref() else {
+        return Ok(());
+    };
+    let lane_seat = format!("{project}:{lane}");
+    if closed && tx.get_seat(&lane_seat)?.is_some() {
+        tx.insert_message(&NewMessage {
+            project: project.to_string(),
+            thread: format!("{}:cancel", task.id),
+            task: Some(task.id.clone()),
+            attempt: None,
+            sender: by_seat.to_string(),
+            sender_gen: by_gen,
+            recipient: lane_seat,
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body: format!("{} is cancelled; stop work on it, nothing to hand in", task.id),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+    }
+    Ok(())
+}
+
 /// The departure is fixed when the milestone gets its first task: the time of
 /// that apply (the tasks it creates are created then) and how many tasks the
 /// milestone holds. Later applies update the words but never move it.
@@ -1035,6 +1525,11 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     // The planned time of the task (T-38): the lane knows its budget.
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("Estimate: {minutes} minutes\n"));
+    }
+    // The project standard (T-84): the writer judges against it too.
+    if let Some(line) = crate::standard::line_for(tx, project)? {
+        text.push_str(&line);
+        text.push('\n');
     }
     // The voyage this task sails on (T-22): the one sentence the phase is
     // judged by, its quality bar, the planned landing and where it departed.

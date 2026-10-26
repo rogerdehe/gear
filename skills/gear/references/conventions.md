@@ -97,6 +97,8 @@ release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge
 ```
 
+A repo may also carry a `[github]` mode (issues in, pull requests out); what the engine writes there and when: `gear --skill github`.
+
 Everything else here is not overridable.
 
 ## 9. A project of several repos

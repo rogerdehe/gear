@@ -44,6 +44,7 @@ fn inventory() -> Inventory {
                 executable: PathBuf::from("/usr/local/bin/claude"),
                 models: Vec::new(),
                 note: Some("no model list from this CLI".to_string()),
+                skill: true,
             },
             Installed {
                 kind: "opencode".into(),
@@ -55,6 +56,7 @@ fn inventory() -> Inventory {
                     "minimax-cn/MiniMax-M3.1-Flash".into(),
                 ],
                 note: None,
+                skill: false,
             },
         ],
         missing: vec!["codex".into()],
@@ -102,6 +104,12 @@ fn the_report_names_the_agents_their_models_and_what_is_missing() {
     assert!(text.contains("/usr/local/bin/opencode"), "{text}");
     assert!(text.contains("4 models"), "{text}");
     assert!(text.contains("no model list from this CLI"), "{text}");
+    // T-83 (trial G06): the report says, per kind, whether the skill is there.
+    assert!(text.contains("GEAR skill installed"), "{text}");
+    assert!(
+        text.contains("GEAR skill MISSING") && text.contains("gear admin install-skill --agent opencode"),
+        "{text}"
+    );
     assert!(text.contains("Not on PATH: codex"), "{text}");
 }
 
@@ -269,4 +277,23 @@ fn a_repository_deeper_than_three_levels_is_not_listed() {
     let repos = kickoff::nested_repos(root.path());
     assert_eq!(repos.len(), 1, "{repos:?}");
     assert_eq!(repos[0].path, "a/b/c");
+}
+
+/// T-83 (trial G03): an empty list that says nothing is "not loaded yet",
+/// never "no models".
+#[test]
+fn an_empty_model_list_is_not_loaded_yet() {
+    let inventory = Inventory {
+        installed: vec![Installed {
+            kind: "opencode".into(),
+            executable: PathBuf::from("/usr/local/bin/opencode"),
+            models: Vec::new(),
+            note: None,
+            skill: true,
+        }],
+        missing: vec![],
+    };
+    let text = kickoff::report(&inventory);
+    assert!(text.contains("model list not loaded yet"), "{text}");
+    assert!(!text.contains("no models"), "{text}");
 }

@@ -55,6 +55,8 @@ fn the_new_topics_print_their_file() {
     let home = scratch::home("skill-topics");
     for (topic, rel) in [
         ("review", "references/review.md"),
+        ("adopt", "references/adopt.md"),
+        ("github", "references/github.md"),
         ("captain", "references/captain.md"),
         ("agent:claude", "references/agents/claude.md"),
         ("agent:grok", "references/agents/grok.md"),
@@ -78,6 +80,8 @@ fn no_topic_names_a_file_of_the_gear_repo() {
         "decompose",
         "review",
         "captain",
+        "adopt",
+        "github",
         "agent:opencode",
         "agent:codex",
         "agent:claude",
@@ -103,14 +107,6 @@ fn unknown_topic_is_bad_format_and_lists_topics() {
     let e = stderr(&o);
     assert!(e.starts_with("ERROR BAD_FORMAT: unknown skill topic nope; available: "), "{e}");
     assert!(e.contains("decompose") && e.contains("agent:opencode"), "{e}");
-}
-
-#[test]
-fn not_yet_commands_fail_cleanly() {
-    let home = scratch::home("skill-not-yet");
-    let o = gear(&home, &["admin", "seat", "confirm", "x"]); // after the walking skeleton
-    assert_eq!(o.status.code(), Some(1));
-    assert!(stderr(&o).starts_with("ERROR FORBIDDEN: "), "{}", stderr(&o));
 }
 
 /// T-41: a `gear` call without `GEAR_DB` opens the store under its `HOME`.

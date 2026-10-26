@@ -2,7 +2,7 @@
 
 use gear_herdr::{classify_screen, AgentInfo, AgentStatus, HerdrRead, Profile, ScreenFlag};
 use gear_model::{GearResult, SeatState};
-use gear_store::{BindingStatus, SeatRow, Tx};
+use gear_store::{BindingStatus, SeatRow, Store, Tx};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,9 +26,15 @@ pub struct SeatObs {
     pub flags: BTreeSet<ScreenFlag>,
     /// Idle/done with no Busy flag.
     pub idle: bool,
-    /// The last screen lines of an agent Herdr reports `blocked` — the dialog
-    /// it waits on. None when the screen was not read.
+    /// The last screen lines of the agent, when the screen was read: an idle
+    /// or done agent, a blocked one (the dialog it waits on) or a working
+    /// agent of a kind that shows a provider back-off (T-75). None when the
+    /// screen was not read.
     pub screen: Option<String>,
+    /// The session the agent in the pane reports (T-97). A hand restart of the
+    /// agent shows a new one: that is how a delivery that was never confirmed
+    /// gets its second chance without a store edit.
+    pub session: Option<String>,
 }
 
 /// One `agents()` call for the whole session. `Err` = observation failed:
@@ -76,6 +82,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     }
 
@@ -91,6 +98,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     };
 
@@ -104,6 +112,7 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     };
 
@@ -116,60 +125,106 @@ fn observe_seat(
             flags: BTreeSet::new(),
             idle: false,
             screen: None,
+            session: None,
         });
     }
 
-    let (flags, idle) = screen_flags(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
-    let screen = blocked_screen(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
-    Ok(SeatObs { seat, presence: Presence::Present, status: Some(agent.agent_status), flags, idle, screen })
+    let (flags, idle, screen) =
+        screen_of(herdr, &seat, &binding.pane_id, agent.agent_status, profiles);
+    Ok(SeatObs {
+        seat,
+        presence: Presence::Present,
+        status: Some(agent.agent_status),
+        flags,
+        idle,
+        screen,
+        session: agent.agent_session.as_ref().map(|session| session.value.clone()),
+    })
 }
 
-/// The screen flags of the seat's agent and whether it is idle.
+/// The screen of the seat's agent, the flags it shows and whether the agent
+/// is idle.
 ///
-/// The screen is read only for an idle/done agent, and only when the profile
-/// is known. Every other case fails closed: the seat is not idle, so no
-/// doorbell goes out on a guess.
-fn screen_flags(
+/// The screen is read for an idle or done agent (its flags say what the seat
+/// may do next) and for a blocked one (the captain's alert quotes the dialog
+/// it waits on). A **working** agent's screen is read only for a kind that
+/// shows a provider back-off (T-75): such an agent waits for the provider
+/// for minutes without any output, and that is not a stall. Every other
+/// working agent costs no read.
+///
+/// A screen that cannot be read, and a seat whose profile is unknown, fail
+/// closed: no flags and no idle.
+fn screen_of(
     herdr: &mut dyn HerdrRead,
     seat: &SeatRow,
     pane_id: &str,
     status: AgentStatus,
     profiles: &BTreeMap<String, Profile>,
-) -> (BTreeSet<ScreenFlag>, bool) {
-    if !matches!(status, AgentStatus::Idle | AgentStatus::Done) {
-        // A working agent is not idle, and its screen is not read.
-        return (BTreeSet::new(), false);
+) -> (BTreeSet<ScreenFlag>, bool, Option<String>) {
+    let profile = profiles.get(&seat.profile);
+    let idle_or_done = matches!(status, AgentStatus::Idle | AgentStatus::Done);
+    let blocked = status == AgentStatus::Blocked;
+    // A working agent is read only for a kind that shows a back-off.
+    let shows_backoff = profile.map(|profile| !profile.backoff_markers.is_empty()).unwrap_or(false);
+    if !idle_or_done && !blocked && !shows_backoff {
+        return (BTreeSet::new(), false, None);
     }
-    let Some(profile) = profiles.get(&seat.profile) else {
-        // Unknown profile: the screen cannot be read the way it must be.
-        return (BTreeSet::new(), false);
-    };
-    let Ok(tail) = herdr.read_tail(pane_id, profile.tail_lines) else {
+    let lines = profile.map(|profile| profile.tail_lines).unwrap_or(16);
+    let Ok(tail) = herdr.read_tail(pane_id, lines) else {
         // The screen could not be read: fail closed.
-        return (BTreeSet::new(), false);
+        return (BTreeSet::new(), false, None);
     };
-    let flags = classify_screen(profile, &tail);
-    let idle = !flags.contains(&ScreenFlag::Busy);
-    (flags, idle)
+    if idle_or_done {
+        let Some(profile) = profile else {
+            // Unknown profile: the screen cannot be read the way it must be.
+            return (BTreeSet::new(), false, None);
+        };
+        let flags = classify_screen(profile, &tail);
+        let idle = !flags.contains(&ScreenFlag::Busy);
+        return (flags, idle, Some(tail));
+    }
+    if blocked {
+        // A blocked agent is judged by its status, not by its flags.
+        return (BTreeSet::new(), false, Some(tail));
+    }
+    // A working agent: only a provider back-off is of interest (T-75).
+    let mut flags = BTreeSet::new();
+    if let Some(profile) = profile {
+        if profile.backoff(&tail) {
+            flags.insert(ScreenFlag::Backoff);
+        }
+    }
+    (flags, false, Some(tail))
 }
 
-/// The last screen lines of a **blocked** agent: the dialog it waits on.
+/// Keep each seat's binding session equal to the one its agent reports (T-97).
 ///
-/// Only a blocked agent is read, and only for the captain's alert — every
-/// other case is None. A screen that cannot be read is None as well: the
-/// alert says the seat is blocked, not what it waits on.
-fn blocked_screen(
-    herdr: &mut dyn HerdrRead,
-    seat: &SeatRow,
-    pane_id: &str,
-    status: AgentStatus,
-    profiles: &BTreeMap<String, Profile>,
-) -> Option<String> {
-    if status != AgentStatus::Blocked {
-        return None;
+/// An agent restarted by hand in its pane is a new session with the same
+/// generation: the store must say so, because the record of a delivery that was
+/// never confirmed is compared with the session it was sent into. Only a
+/// present agent with a session value updates the binding; a kind that reports
+/// none leaves it as it is.
+pub fn record_sessions(store: &mut Store, observed: &[SeatObs]) -> GearResult<()> {
+    let updates: Vec<(String, i64, String)> = observed
+        .iter()
+        .filter(|obs| obs.presence == Presence::Present)
+        .filter_map(|obs| {
+            let session = obs.session.as_ref().filter(|session| !session.is_empty())?;
+            Some((obs.seat.id.clone(), obs.seat.generation, session.clone()))
+        })
+        .collect();
+    if updates.is_empty() {
+        return Ok(());
     }
-    let lines = profiles.get(&seat.profile).map(|p| p.tail_lines).unwrap_or(16);
-    herdr.read_tail(pane_id, lines).ok()
+    store.write(|tx| {
+        for (seat, generation, session) in updates {
+            let current = tx.get_binding(&seat, generation)?.and_then(|binding| binding.session_ref);
+            if current.as_deref() != Some(session.as_str()) {
+                tx.set_binding_session_ref(&seat, generation, &session)?;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// States considered "may receive a doorbell/delivery".

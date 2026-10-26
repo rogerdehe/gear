@@ -52,6 +52,16 @@ pub const TOPICS: &[Topic] = &[
         text: include_str!("../../../skills/gear/references/captain.md"),
     },
     Topic {
+        name: "adopt",
+        file: "references/adopt.md",
+        text: include_str!("../../../skills/gear/references/adopt.md"),
+    },
+    Topic {
+        name: "github",
+        file: "references/github.md",
+        text: include_str!("../../../skills/gear/references/github.md"),
+    },
+    Topic {
         name: "agent:opencode",
         file: "references/agents/opencode.md",
         text: include_str!("../../../skills/gear/references/agents/opencode.md"),
@@ -71,6 +81,20 @@ pub const TOPICS: &[Topic] = &[
         file: "references/agents/grok.md",
         text: include_str!("../../../skills/gear/references/agents/grok.md"),
     },
+];
+
+/// The templates that ship with the skill (T-85): files the captain copies into
+/// a project's `gear/` directory, installed next to the topics but not printed
+/// as a topic — `gear --skill adopt` explains them.
+pub const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "templates/adopt.md",
+        include_str!("../../../skills/gear/templates/adopt.md"),
+    ),
+    (
+        "templates/standard.md",
+        include_str!("../../../skills/gear/templates/standard.md"),
+    ),
 ];
 
 /// The name of the skill: the directory it is installed as, and the name in
@@ -137,6 +161,18 @@ impl SkillAgent {
     }
 }
 
+/// Is the GEAR skill installed for `agent` under `home` (T-83)? The CLI loads
+/// `<skills root>/gear/SKILL.md`; a missing file means the agent never learns
+/// how to work as a seat. The home is explicit: the caller knows whose home it
+/// is (the user's, for `gear admin init`).
+pub fn installed(agent: SkillAgent, home: &Path) -> bool {
+    agent
+        .skills_root(home)
+        .join(SKILL_NAME)
+        .join("SKILL.md")
+        .is_file()
+}
+
 /// Install the skill for `agent` under `home`: every topic's text as a file in
 /// `<the CLI's skills dir>/gear/`. An existing file is overwritten (the
 /// installed copy follows the binary). Returns the files written.
@@ -154,6 +190,25 @@ pub fn install(agent: SkillAgent, home: &Path) -> GearResult<Vec<PathBuf>> {
             })?;
         }
         std::fs::write(&path, topic.text).map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot write {}: {e}", path.display()),
+            )
+        })?;
+        written.push(path);
+    }
+    // The templates a captain copies into a project (T-85).
+    for (file, text) in TEMPLATES {
+        let path = dir.join(file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                GearError::new(
+                    ErrorCode::BadFormat,
+                    format!("cannot create {}: {e}", parent.display()),
+                )
+            })?;
+        }
+        std::fs::write(&path, text).map_err(|e| {
             GearError::new(
                 ErrorCode::BadFormat,
                 format!("cannot write {}: {e}", path.display()),
@@ -180,10 +235,16 @@ mod tests {
     fn every_topic_is_installed_as_a_file() {
         let home = scratch_home("install");
         let written = install(SkillAgent::Claude, &home).unwrap();
-        assert_eq!(written.len(), TOPICS.len());
+        assert_eq!(written.len(), TOPICS.len() + TEMPLATES.len());
         for topic in TOPICS {
             let path = home.join(".claude").join("skills").join("gear").join(topic.file);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), topic.text, "{}", path.display());
+        }
+        // The templates travel with the skill too (T-85): a captain copies
+        // them into a project's `gear/` directory.
+        for (file, text) in TEMPLATES {
+            let path = home.join(".claude").join("skills").join("gear").join(file);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), *text, "{}", path.display());
         }
         std::fs::remove_dir_all(&home).ok();
     }

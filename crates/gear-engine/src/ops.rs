@@ -94,7 +94,21 @@ pub fn execute_intended(
                 continue;
             }
             let item = check_op(tx, &op)?;
+            // A delivery for a seat the last tick saw blocked waits for the
+            // dialog to clear: it stays Intended, so one pending delivery is
+            // kept and no failed op is filed every tick (T-68). The
+            // blocked-seat alert carries the reason to the captain (T-57).
+            let item = match item {
+                Prepared::Run { id, .. }
+                    if op.kind == OpKind::Deliver && crate::blocked::holding(tx, &op.seat)? =>
+                {
+                    Prepared::Wait { id }
+                }
+                other => other,
+            };
             match &item {
+                // It waits: nothing is written, the op stays Intended.
+                Prepared::Wait { .. } => continue,
                 Prepared::Run { id, .. } => {
                     require_transition(
                         OpState::Intended.can_transition(OpState::Executing),
@@ -103,6 +117,15 @@ pub fn execute_intended(
                         "executing",
                     )?;
                     tx.set_op_state(project, id, OpState::Executing, None, now)?;
+                    // T-97: the session this prompt goes into is fixed now. A
+                    // hand restart later refreshes the binding, and the failure
+                    // must still name the session that received the prompt.
+                    if op.kind == OpKind::Deliver {
+                        let session = tx
+                            .get_binding(&op.seat, op.generation)?
+                            .and_then(|binding| binding.session_ref);
+                        crate::delivery::record_sent(tx, id, session.as_deref())?;
+                    }
                 }
                 Prepared::Void { id, reason } => {
                     require_transition(
@@ -124,6 +147,8 @@ pub fn execute_intended(
     for item in &prepared {
         outcomes.push(match item {
             Prepared::Run { pane_id, text, .. } => Some(herdr.prompt(pane_id, text)),
+            // Waiting ops never reach here (they are not prepared).
+            Prepared::Wait { .. } => None,
             Prepared::Void { .. } => None,
         });
     }
@@ -137,6 +162,12 @@ pub fn execute_intended(
                 (Prepared::Void { .. }, _) => {
                     results.push((item.id().to_string(), OpState::Void.as_str().to_string()));
                     continue;
+                }
+                (Prepared::Wait { .. }, _) => {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!("waiting operation {} was prepared", item.id()),
+                    ))
                 }
                 (Prepared::Run { .. }, Some(Outcome::Ok(()))) => {
                     (OpState::Submitted, None)
@@ -171,6 +202,9 @@ pub fn execute_intended(
 enum Prepared {
     /// The op may run: send `text` to `pane_id`.
     Run { id: String, pane_id: String, text: String },
+    /// The op waits: it stays Intended and the next tick looks again (a
+    /// delivery for a seat that is blocked, T-68).
+    Wait { id: String },
     /// The op must not run (stale seat, unreachable seat, no binding).
     Void { id: String, reason: String },
 }
@@ -179,6 +213,7 @@ impl Prepared {
     fn id(&self) -> &str {
         match self {
             Prepared::Run { id, .. } => id,
+            Prepared::Wait { id, .. } => id,
             Prepared::Void { id, .. } => id,
         }
     }
@@ -320,6 +355,10 @@ pub fn confirm_pending(
                     };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
                     if op.kind == OpKind::Deliver {
+                        // The delivery got through: nothing is left to send
+                        // again for this attempt (T-97).
+                        crate::delivery::clear(tx, &op.seat)?;
+                        tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                         // Design/06: the confirmed delivery starts the attempt.
                         start_confirmed_attempt(tx, project, &op, now)?;
                     }
@@ -348,9 +387,50 @@ pub fn confirm_pending(
                     continue;
                 }
                 // No evidence yet: the op waits for the next round. Its budget
-                // counts the checks; when it reaches the limit the seat needs
-                // a human check (the op is not resent).
+                // counts the checks. A delivery whose budget is spent must not
+                // hold the seat's slot forever (T-97): it fails with the
+                // reason, the captain is rung once, and the open attempt is
+                // delivered again in a new agent session (dispatch).
                 let used = tx.bump_op_check_budget(project, &op.id, now)?;
+                if op.kind == OpKind::Deliver && used >= budget {
+                    // The session the prompt was sent into, fixed when the op
+                    // was prepared (T-97): a hand restart may have refreshed
+                    // the binding since, and the retry belongs to the new
+                    // session, not to this record.
+                    let session = match crate::delivery::sent(tx, &op.id)? {
+                        Some(session) => session,
+                        None => tx
+                            .get_binding(&op.seat, op.generation)?
+                            .and_then(|binding| binding.session_ref),
+                    };
+                    tx.set_op_state(
+                        project,
+                        &op.id,
+                        OpState::Failed,
+                        Some(&format!(
+                            "delivery not confirmed after {used} checks (the lane never showed task {} attempt {}): it is delivered again in a new agent session",
+                            op.task.as_deref().unwrap_or("-"),
+                            op.attempt.unwrap_or(0)
+                        )),
+                        now,
+                    )?;
+                    tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
+                    crate::delivery::record(
+                        tx,
+                        &op.seat,
+                        &crate::delivery::FailedDelivery {
+                            task: op.task.clone().unwrap_or_default(),
+                            attempt: op.attempt.unwrap_or(0),
+                            generation: op.generation,
+                            session,
+                            retry_now: false,
+                        },
+                    )?;
+                    if !flagged.contains(&op.seat) {
+                        flagged.push(op.seat.clone());
+                    }
+                    continue;
+                }
                 if used == budget && !flagged.contains(&op.seat) {
                     flagged.push(op.seat.clone());
                 }

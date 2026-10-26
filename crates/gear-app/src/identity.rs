@@ -7,9 +7,11 @@
 //!    check generation, binding status, pane and fingerprint.
 
 use crate::Env;
-use gear_herdr::{AgentInfo, HerdrRead};
-use gear_model::{ErrorCode, GearCtx, GearError, GearResult, SeatRole, SeatState};
-use gear_store::{BindingStatus, SeatRow, Tx};
+use gear_herdr::{AgentInfo, HerdrRead, PaneProcessInfo};
+use gear_model::{
+    ErrorCode, GearCtx, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts,
+};
+use gear_store::{BindingStatus, NewMessage, SeatRow, Store, Tx};
 
 /// Occupant of the caller's pane as seen by Herdr just before the transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +34,11 @@ pub enum Caller {
 
 /// Phase 1 (no transaction). Returns None when there is no GEAR_CTX or no pane.
 /// Herdr failure is returned as an error: identity cannot be confirmed.
-pub fn observe(env: &Env, herdr: &mut dyn HerdrRead) -> GearResult<Option<Fingerprint>> {
+pub fn observe(
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+) -> GearResult<Option<Fingerprint>> {
     if env.ctx.is_none() {
         return Ok(None);
     }
@@ -46,6 +52,43 @@ pub fn observe(env: &Env, herdr: &mut dyn HerdrRead) -> GearResult<Option<Finger
             format!("cannot read the occupant of pane {pane}: {}", e.0),
         )
     })?;
+    // T-104: GEAR_CTX and HERDR_PANE_ID are environment variables, and any
+    // agent can set them in its own shell. The seat is the pane this process
+    // really runs in, found by matching the caller's process ancestry (OS
+    // parent pids) against each pane's shell and foreground pids — the fact
+    // Herdr has about the pane and a shell cannot forge.
+    let processes = herdr.pane_process_info(pane).map_err(|e| {
+        GearError::new(
+            ErrorCode::NotRegistered,
+            format!("cannot read the processes of pane {pane}: {}", e.0),
+        )
+    })?;
+    if !claims_pane(&processes, ancestors) {
+        let real = real_pane(herdr, ancestors);
+        // OpenCode runs its tools in its shared service (`opencode serve`),
+        // not under the agent's pane, so its ancestry reaches no pane at all.
+        // Such a caller keeps the env claim for an OpenCode pane, still checked
+        // against the seat's binding; a caller that runs in another pane, or
+        // that claims a pane whose agent runs its tools in the pane, is refused.
+        let tools_outside_pane = occupant
+            .as_ref()
+            .and_then(|info| info.agent.as_deref())
+            .is_some_and(|kind| kind == "opencode");
+        if real.is_none() && tools_outside_pane {
+            return Ok(occupant.as_ref().map(fingerprint_of));
+        }
+        let where_ = match real {
+            Some(real) if real.as_str() != pane.as_str() => format!("this process runs in pane {real}"),
+            Some(_) => "the pane does not list this process".to_string(),
+            None => "no pane of this session runs this process".to_string(),
+        };
+        return Err(GearError::new(
+            ErrorCode::NotRegistered,
+            format!(
+                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot"
+            ),
+        ));
+    }
     Ok(occupant.as_ref().map(fingerprint_of))
 }
 
@@ -192,4 +235,183 @@ fn role_list(roles: &[SeatRole]) -> String {
 /// States as a readable list, for error details.
 fn state_list(states: &[SeatState]) -> String {
     states.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// The process ids this caller runs under, nearest first: its own pid, then
+/// its parents (T-104). The parent chain is the OS's own answer — no
+/// environment variable can change it, and no `$PATH` either: a caller can put
+/// an executable `ps` in front of the real one, so the walk only asks `/proc`
+/// (Linux) or the system `ps` by **absolute path**.
+pub fn process_ancestors() -> Vec<u32> {
+    let mut chain = vec![std::process::id()];
+    let mut pid = std::process::id();
+    for _ in 0..64 {
+        let Some(parent) = parent_of(pid) else {
+            break;
+        };
+        if parent == 0 || chain.contains(&parent) {
+            break;
+        }
+        chain.push(parent);
+        if parent == 1 {
+            break;
+        }
+        pid = parent;
+    }
+    chain
+}
+
+/// The parent of `pid`, from the OS itself (T-104): `/proc/<pid>/stat` where the
+/// platform has it, else the system `ps` at an absolute path. Never `$PATH`: a
+/// shell that prepends a directory could print another pane's pid and fake a
+/// whole ancestry.
+fn parent_of(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    if let Some(parent) = parent_from_proc(pid) {
+        return Some(parent);
+    }
+    for ps in ["/bin/ps", "/usr/bin/ps"] {
+        let Ok(output) = std::process::Command::new(ps)
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        if let Ok(parent) = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>() {
+            return Some(parent);
+        }
+    }
+    None
+}
+
+/// The parent pid from `/proc/<pid>/stat` (Linux): the third field is the
+/// parent, after the state that follows the parenthesised command name (which
+/// may itself contain spaces and parentheses).
+#[cfg(target_os = "linux")]
+fn parent_from_proc(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.rsplit_once(')')?.1;
+    rest.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Whether the caller runs in `info`'s pane (T-104): the pane's shell or one of
+/// its foreground processes is one of the caller's ancestors. Both sides are
+/// OS facts — no environment variable can put a pid in a parent chain.
+pub fn claims_pane(info: &PaneProcessInfo, ancestors: &[u32]) -> bool {
+    let pane_pids = std::iter::once(info.shell_pid)
+        .flatten()
+        .chain(
+            info.foreground_processes
+                .iter()
+                .map(|process| Some(process.pid))
+                .flatten(),
+        );
+    pane_pids.into_iter().any(|pid| ancestors.contains(&pid))
+}
+
+/// The pane this session runs the caller in (T-104): every pane of the session
+/// (agents and the user's own shells) is asked whether its shell or a
+/// foreground process is one of the caller's ancestors.
+pub fn real_pane(herdr: &mut dyn HerdrRead, ancestors: &[u32]) -> Option<String> {
+    let panes = herdr.panes().ok()?;
+    for pane in panes {
+        if let Ok(info) = herdr.pane_process_info(&pane) {
+            if claims_pane(&info, ancestors) {
+                return Some(pane);
+            }
+        }
+    }
+    None
+}
+
+/// Observe the caller and prove its whole claim (T-104): the pane it really
+/// runs in is the claimed pane **and** the seat it claims is bound to that pane.
+/// A claim refused at either step is reported once to the captain, naming the
+/// real pane — a correct pane id with someone else's context (the captain's
+/// `GEAR_CTX`, the lane's own pane id) included. `Ok(None)` = no context to
+/// prove (the user's own shell).
+pub fn prove_seat(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[u32],
+    now: Ts,
+) -> GearResult<Option<Fingerprint>> {
+    let fp = match observe(env, herdr, ancestors) {
+        Ok(fp) => fp,
+        Err(error) => {
+            if error.code == ErrorCode::NotRegistered {
+                let _ = report_claim(store, env, herdr, &error, ancestors, now);
+            }
+            return Err(error);
+        }
+    };
+    if env.ctx.is_some() {
+        if let Some(fp) = fp.as_ref() {
+            if let Err(error) = store.read(|tx| require_seat(tx, env, Some(fp), None, None)) {
+                if error.code == ErrorCode::NotRegistered {
+                    let _ = report_claim(store, env, herdr, &error, ancestors, now);
+                }
+                return Err(error);
+            }
+        }
+    }
+    Ok(fp)
+}
+
+/// Tell the captain that a caller in `real_pane` claimed `seat` of its project
+/// (T-104): one urgent item per real pane while it is open, so a repeat claim
+/// does not pile up. Best effort by design — a refusal is still the answer when
+/// the item cannot be written.
+pub fn report_claim(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    error: &GearError,
+    ancestors: &[u32],
+    now: Ts,
+) -> GearResult<bool> {
+    let Some(ctx) = env.ctx.as_ref() else {
+        return Ok(false);
+    };
+    let real = real_pane(herdr, ancestors);
+    let claimed = env.pane_id.clone().unwrap_or_else(|| "no pane".to_string());
+    let real_label = real.clone().unwrap_or_else(|| "a pane this session does not know".to_string());
+    store.write(|tx| {
+        let Some(captain) = tx.captain_of(&ctx.project)? else {
+            return Ok(false);
+        };
+        let thread = format!("identity:{}", real.as_deref().unwrap_or("unknown"));
+        let open = tx
+            .thread_messages(&ctx.project, &thread)?
+            .into_iter()
+            .any(|message| matches!(message.state, MsgState::Open | MsgState::Waiting));
+        if open {
+            return Ok(false);
+        }
+        tx.insert_message(&NewMessage {
+            project: ctx.project.clone(),
+            thread,
+            task: None,
+            attempt: None,
+            sender: "engine".to_string(),
+            sender_gen: 0,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: true,
+            body: format!(
+                "an identity claim was refused: seat {} was claimed with the pane {claimed}, but the caller runs in {real_label}. A process may act only as the seat of the pane it runs in; ask the agent in {real_label} what it is doing — it may not set another seat's GEAR_CTX. ({})",
+                ctx.seat_id(),
+                error.detail
+            ),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(true)
+    })
 }

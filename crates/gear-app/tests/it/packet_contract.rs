@@ -14,7 +14,7 @@ fn world(attempt: bool) -> Store {
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
         tx.insert_task(&TaskRow { project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
-            wait_on: None, wait_cond: None, rework_note: None, estimate_min: None, updated: T0 })?;
+            wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
             accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0 })?;
         if attempt { start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?; }
