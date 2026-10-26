@@ -644,6 +644,9 @@ pub fn confirm_pending(
                         tx.set_meta(&crate::delivery::sent_key(&op.id), "")?;
                         // Design/06: the confirmed delivery starts the attempt.
                         start_confirmed_attempt(tx, project, &op, now)?;
+                        // §3.2 step 5: at the check-in the attempt records the
+                        // session it ran in.
+                        record_attempt_session(tx, project, &op)?;
                     }
                     confirmed.push(op.id.clone());
                     continue;
@@ -787,6 +790,21 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
             view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
         })
         .map(|view| view.ts))
+}
+
+/// The session the attempt ran in (design §3.2 step 5): at the check-in the
+/// seat's binding knows the session the agent is in.
+fn record_attempt_session(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<()> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(());
+    };
+    let Some(binding) = tx.get_binding(&op.seat, op.generation)? else {
+        return Ok(());
+    };
+    let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    tx.set_attempt_session(project, task, attempt, session, &binding.kind)
 }
 
 /// A confirmed delivery starts its attempt: `Delivered` → `Started` and the
