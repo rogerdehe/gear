@@ -21,8 +21,14 @@ static PATH_LOCK: Mutex<()> = Mutex::new(());
 const KEY: &str = "sk-secret-key";
 
 /// A fake curl that prints `body` and writes the header of the call to
-/// `headers`.
+/// `headers`. The answer carries the status on its last line, as curl writes
+/// it with `-w`.
 fn curl_script(body: &str, headers: &Path) -> String {
+    curl_script_with_status(body, headers, 200)
+}
+
+/// The same, with the HTTP status of the answer.
+fn curl_script_with_status(body: &str, headers: &Path, status: u16) -> String {
     let script = r#"#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -34,16 +40,31 @@ cat > "HEADERS"
 cat <<'JSON'
 BODY
 JSON
+printf '\n%s' "STATUS"
 "#;
     script
         .replace("ARGS", &headers.with_file_name("args.txt").display().to_string())
         .replace("HEADERS", &headers.display().to_string())
         .replace("BODY", body)
+        .replace("STATUS", &status.to_string())
 }
 
 /// A fake curl that fails with `code` and says why.
 fn failing_curl(code: i32, reason: &str) -> String {
     format!("#!/bin/sh\necho \"curl: ({code}) {reason}\" >&2\nexit {code}\n")
+}
+
+/// A fake curl that prints the body and no status line.
+fn curl_script_without_status(body: &str, headers: &Path) -> String {
+    let script = r#"#!/bin/sh
+cat > "HEADERS"
+cat <<'JSON'
+BODY
+JSON
+"#;
+    script
+        .replace("HEADERS", &headers.display().to_string())
+        .replace("BODY", body)
 }
 
 /// Put a fake curl on the PATH, run `f`, and put the PATH back.
@@ -169,7 +190,34 @@ fn the_key_never_appears_on_the_command_line() {
 }
 
 #[test]
-fn an_http_error_gives_the_reason() {
+fn an_http_error_gives_the_status_and_the_body() {
+    // Curl is happy with a 401, a 429 and a 500: the status has to be read
+    // from the answer, or the reason of the error is lost (review F1).
+    for (status, body) in [
+        (401u16, r#"{"error":"unauthorized"}"#),
+        (429, r#"{"error":"rate limited"}"#),
+        (500, r#"{"error":"the provider is down"}"#),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let headers = dir.path().join("headers.txt");
+        with_fake_curl(
+            dir.path(),
+            &curl_script_with_status(body, &headers, status),
+            |dir| {
+                let error = read_quota_in(QuotaReader::Minimax, KEY, None, T13, dir)
+                    .err()
+                    .expect("an HTTP error is an error");
+                assert!(error.contains(&format!("HTTP {status}")), "{error}");
+                assert!(error.contains("minimax"), "{error}");
+                // The body of the provider is in the reason.
+                assert!(error.contains(body), "{error}");
+            },
+        );
+    }
+}
+
+#[test]
+fn a_call_that_fails_gives_the_reason() {
     let dir = tempfile::tempdir().unwrap();
     with_fake_curl(
         dir.path(),
@@ -177,9 +225,26 @@ fn an_http_error_gives_the_reason() {
         |dir| {
             let error = read_quota_in(QuotaReader::Minimax, KEY, None, T13, dir)
                 .err()
-                .expect("an HTTP error is an error");
+                .expect("a call that fails is an error");
             assert!(error.contains("401"), "{error}");
             assert!(error.contains("curl"), "{error}");
+        },
+    );
+}
+
+#[test]
+fn an_answer_without_a_status_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let headers = dir.path().join("headers.txt");
+    // A fake that prints the body and nothing else: the status is missing.
+    with_fake_curl(
+        dir.path(),
+        &curl_script_without_status(r#"{"usage":{}}"#, &headers),
+        |dir| {
+            let error = read_quota_in(QuotaReader::OpencodeGo, KEY, None, T13, dir)
+                .err()
+                .expect("an answer without a status is an error");
+            assert!(error.contains("status"), "{error}");
         },
     );
 }

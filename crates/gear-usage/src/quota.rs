@@ -106,13 +106,18 @@ pub fn read_quota_in(
     match reader {
         QuotaReader::Minimax => {
             let body = http_get(
+                QuotaReader::Minimax.name(),
                 "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains",
                 key,
             )?;
             minimax(&body, now)
         }
         QuotaReader::OpencodeGo => {
-            let body = http_get("https://opencode.ai/zen/go/v1/usage", key)?;
+            let body = http_get(
+                QuotaReader::OpencodeGo.name(),
+                "https://opencode.ai/zen/go/v1/usage",
+                key,
+            )?;
             opencode_go(&body, now)
         }
         QuotaReader::Codex => {
@@ -126,12 +131,23 @@ pub fn read_quota_in(
 
 /// The call of §9.1: `curl -sS --max-time 15` with the key in a header that
 /// goes in through standard input, never on the command line.
-fn http_get(url: &str, key: &str) -> Result<String, String> {
+fn http_get(reader: &str, url: &str, key: &str) -> Result<String, String> {
     if key.trim().is_empty() {
         return Err("the provider needs an API key".to_string());
     }
     let mut child = Command::new("curl")
-        .args(["-sS", "--max-time", "15", "-H", "@-", url])
+        // `-w` writes the HTTP status on the last line of the answer: curl
+        // itself is happy with a 401 or a 500, so the status has to be read.
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "-w",
+            "\\n%{http_code}",
+            "-H",
+            "@-",
+            url,
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -159,8 +175,30 @@ fn http_get(url: &str, key: &str) -> Result<String, String> {
             None => format!("curl was killed: {reason}"),
         });
     }
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("the response is not text: {error}"))
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("the response is not text: {error}"))?;
+    // The last line of the answer is the HTTP status that `-w` wrote.
+    let (body, status) = match stdout.rsplit_once('\n') {
+        Some((body, status)) => (body.to_string(), status.trim().to_string()),
+        None => (stdout.clone(), String::new()),
+    };
+    let status: u16 = status.parse().map_err(|_| {
+        format!(
+            "{reader}: the answer of the provider has no HTTP status: {}",
+            head(&body)
+        )
+    })?;
+    if status >= 400 {
+        // An HTTP error is a normal thing (an expired key, a throttled
+        // request, an outage): it must say what it was.
+        return Err(format!("{reader}: HTTP {status}: {}", head(&body)));
+    }
+    Ok(body)
+}
+
+/// The first 200 characters of a body, for the reason of an error.
+fn head(body: &str) -> String {
+    body.chars().take(200).collect()
 }
 
 /// MiniMax: per entry of `model_remains` the 5 h window and the weekly one.
