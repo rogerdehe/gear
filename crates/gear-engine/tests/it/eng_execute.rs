@@ -47,7 +47,14 @@ fn insert_doorbell(tx: &Tx<'_>, project: &str, seat: &str, generation: i64, now:
 
 fn herdr_with_agent(pane: &str) -> FakeHerdr {
     let mut herdr = FakeHerdr::new();
-    herdr.add_agent(pane, "codex", AgentStatus::Idle);
+    // A real agent carries its seat name (T-134): an unnamed one refuses a
+    // prompt, and the engine would name it before prompting.
+    let name = match pane {
+        CAP_PANE => "p-captain",
+        "w1:p2" => "p-heat",
+        other => other,
+    };
+    herdr.add_agent_named(pane, "codex", AgentStatus::Idle, name);
     herdr
 }
 

@@ -832,6 +832,7 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
                 "to": result.to,
                 "generation": result.generation,
                 "kind": result.kind,
+                "named": named_line(&result.named),
             })
         );
         return Ok(());
@@ -844,8 +845,22 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
         result.kind,
         result.from.as_deref().unwrap_or("no pane recorded")
     );
+    println!("agent name: {}", named_line(&result.named));
     println!("run `gear` here: this pane is the captain, no GEAR_CTX needed");
     Ok(())
+}
+
+/// What naming the new captain's agent did, in one line (T-134).
+fn named_line(named: &gear_herdr::Ensured) -> &'static str {
+    match named {
+        gear_herdr::Ensured::Named => "already the captain's name",
+        gear_herdr::Ensured::Renamed => "given to the agent now",
+        gear_herdr::Ensured::NoAgent => "the pane hosts no agent yet",
+        gear_herdr::Ensured::Taken { .. } => {
+            "held by another pane: GEAR reports it and never steals it"
+        }
+        gear_herdr::Ensured::Failed(_) => "could not be given: the engine tries again next tick",
+    }
 }
 
 fn cmd_admin_install_skill(agent: &str, json: bool) -> GearResult<()> {

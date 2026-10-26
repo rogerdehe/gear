@@ -1081,8 +1081,9 @@ fn is_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-/// The Herdr agent name of a seat: `<project>-<seat>`.
-fn agent_name(project: &str, seat: &str) -> String {
+/// The Herdr agent name of a seat: `<project>-<seat>` (17 §2/§3). The engine
+/// gives a cleared name back with it (T-134) and `agent.start` uses it.
+pub fn agent_name(project: &str, seat: &str) -> String {
     format!("{project}-{seat}")
 }
 

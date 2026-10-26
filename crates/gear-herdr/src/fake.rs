@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 pub enum Call {
     OpenCodeApi { args: Vec<String> },
     Prompt { pane: String, text: String },
+    Rename { pane: String, name: String },
     PaneRun { pane: String, command: String },
     AgentStart { name: String, kind: String, pane: String, args: Vec<String> },
     SendKeys { pane: String, keys: Vec<String> },
@@ -36,6 +37,10 @@ pub enum Inject {
 #[derive(Debug, Clone)]
 struct FakePane {
     agent: Option<(String, AgentStatus, Option<String>)>, // (kind, status, session_ref)
+    /// The name Herdr holds for the agent (T-134). `None` = Herdr shows it
+    /// unnamed (it cleared the name when it re-detected the occupant), and
+    /// `prompt` refuses it, as the real door does.
+    name: Option<String>,
     screen: String,
     revision: u64,
 }
@@ -85,15 +90,56 @@ impl FakeHerdr {
 
     /// Add an empty shell pane (no agent).
     pub fn add_shell(&mut self, pane: &str) {
-        self.panes.insert(pane.into(), FakePane { agent: None, screen: String::new(), revision: 0 });
+        self.panes.insert(
+            pane.into(),
+            FakePane { agent: None, name: None, screen: String::new(), revision: 0 },
+        );
     }
 
     /// Add a pane hosting an agent of `kind` in `status`.
     pub fn add_agent(&mut self, pane: &str, kind: &str, status: AgentStatus) {
         self.panes.insert(
             pane.into(),
-            FakePane { agent: Some((kind.into(), status, None)), screen: String::new(), revision: 1 },
+            FakePane {
+                agent: Some((kind.into(), status, None)),
+                name: None,
+                screen: String::new(),
+                revision: 1,
+            },
         );
+    }
+
+    /// Add a pane whose agent carries `name` (T-134) — an agent Herdr still
+    /// knows by name, as opposed to [`FakeHerdr::add_agent`], whose agent has
+    /// no name (the M3.1 state after a restart).
+    pub fn add_agent_named(&mut self, pane: &str, kind: &str, status: AgentStatus, name: &str) {
+        self.add_agent(pane, kind, status);
+        self.set_agent_name(pane, Some(name));
+    }
+
+    /// Set (or clear, with `None`) the name Herdr holds for the agent in
+    /// `pane`: what a Herdr restart does to every agent it re-detects (T-134).
+    pub fn set_agent_name(&mut self, pane: &str, name: Option<&str>) {
+        let p = self.panes.get_mut(pane).expect("unknown pane");
+        assert!(p.agent.is_some(), "pane {pane} hosts no agent");
+        p.name = name.map(str::to_string);
+        p.revision += 1;
+    }
+
+    /// The name Herdr holds for the agent in `pane`.
+    pub fn agent_name(&self, pane: &str) -> Option<&str> {
+        self.panes.get(pane).and_then(|p| p.name.as_deref())
+    }
+
+    /// The panes renamed to `name`, in call order.
+    pub fn renames_to(&self, name: &str) -> Vec<&str> {
+        self.calls
+            .iter()
+            .filter_map(|c| match c {
+                Call::Rename { pane, name: n } if n == name => Some(pane.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn set_status(&mut self, pane: &str, status: AgentStatus) {
@@ -244,6 +290,18 @@ impl HerdrRead for FakeHerdr {
         Ok(self.panes.keys().cloned().collect())
     }
 
+    fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError> {
+        if self.observe_fails {
+            return Err(ObserveError("injected".into()));
+        }
+        Ok(self
+            .panes
+            .iter()
+            .filter(|(_, p)| p.agent.is_some())
+            .map(|(id, p)| (id.clone(), p.name.clone()))
+            .collect())
+    }
+
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo, ObserveError> {
         if !self.panes.contains_key(pane_id) && !self.processes.contains_key(pane_id) {
             return Err(ObserveError(format!("no pane {pane_id}")));
@@ -288,6 +346,15 @@ impl HerdrAct for FakeHerdr {
         let pane = pane_id.to_string();
         self.act(call, move |s| {
             let starts = s.prompt_starts_turn;
+            // Herdr refuses a prompt to an agent with no name (T-134):
+            // "agent <pane> is not an active named agent".
+            let unnamed = s.panes.get(&pane).is_some_and(|p| p.agent.is_some() && p.name.is_none());
+            if unnamed {
+                return Outcome::Refused {
+                    code: "agent_unnamed".into(),
+                    message: format!("agent {pane} is not an active named agent"),
+                };
+            }
             match s.panes.get_mut(&pane).and_then(|p| p.agent.as_mut()) {
                 None => Outcome::Refused { code: "not_found".into(), message: "no agent".into() },
                 Some(a) if a.1 == AgentStatus::Blocked => {
@@ -297,6 +364,34 @@ impl HerdrAct for FakeHerdr {
                     if starts {
                         a.1 = AgentStatus::Working;
                     }
+                    Outcome::Ok(())
+                }
+            }
+        })
+    }
+
+    fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
+        let call = Call::Rename { pane: pane_id.into(), name: name.into() };
+        let (pane, name) = (pane_id.to_string(), name.to_string());
+        self.act(call, move |s| {
+            // Never steal a name another pane holds (T-134).
+            if s.panes
+                .iter()
+                .any(|(id, p)| id != &pane && p.name.as_deref() == Some(name.as_str()))
+            {
+                return Outcome::Refused {
+                    code: "agent_name_taken".into(),
+                    message: format!("the name {name} is held by another pane"),
+                };
+            }
+            match s.panes.get_mut(&pane) {
+                None => Outcome::Refused { code: "not_found".into(), message: "no pane".into() },
+                Some(p) if p.agent.is_none() => {
+                    Outcome::Refused { code: "agent_not_found".into(), message: "no agent".into() }
+                }
+                Some(p) => {
+                    p.name = Some(name);
+                    p.revision += 1;
                     Outcome::Ok(())
                 }
             }
@@ -332,7 +427,20 @@ impl HerdrAct for FakeHerdr {
             self.refuse_starts = (left > 1).then(|| (code.clone(), left - 1));
             return Outcome::Refused { code, message: "refused".into() };
         }
-        self.act(call, move |s| match s.panes.get_mut(&pane) {
+        let wanted = name.to_string();
+        self.act(call, move |s| {
+            // A name another pane holds is refused before anything starts.
+            let taken = s
+                .panes
+                .iter()
+                .any(|(id, p)| id != &pane && p.name.as_deref() == Some(wanted.as_str()));
+            if taken {
+                return Outcome::Refused {
+                    code: "agent_name_taken".into(),
+                    message: "taken".into(),
+                };
+            }
+            match s.panes.get_mut(&pane) {
             None => Outcome::Refused { code: "not_found".into(), message: "no pane".into() },
             Some(p) if p.agent.is_some() => {
                 Outcome::Refused { code: "pane_not_available".into(), message: "occupied".into() }
@@ -342,13 +450,17 @@ impl HerdrAct for FakeHerdr {
                 // uuid), so the fake does too: a caller that resumes a session
                 // needs one to resume.
                 p.agent = Some((kind, AgentStatus::Idle, Some(format!("{name}:session"))));
+                // An agent Herdr started carries the name it was started with
+                // (T-134); a name another pane holds is refused first.
+                p.name = Some(wanted.clone());
                 if let Some(screen) = start_screen {
                     p.screen = screen;
                 }
                 p.revision += 1;
                 let p = p.clone();
-                s.started_agents.push(name.to_string());
+                s.started_agents.push(wanted.clone());
                 Outcome::Ok(Self::info(&pane, &p).expect("just started"))
+            }
             }
         })
     }
@@ -459,7 +571,7 @@ mod tests {
     #[test]
     fn prompt_records_and_respects_blocked_and_injection() {
         let mut h = FakeHerdr::new();
-        h.add_agent("w1:p1", "opencode", AgentStatus::Idle);
+        h.add_agent_named("w1:p1", "opencode", AgentStatus::Idle, "p-heat");
         assert_eq!(h.prompt("w1:p1", "hi"), Outcome::Ok(()));
         h.set_status("w1:p1", AgentStatus::Blocked);
         assert!(matches!(h.prompt("w1:p1", "x"), Outcome::Refused { .. }));

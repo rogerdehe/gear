@@ -140,6 +140,43 @@ fn take_from_a_fresh_pane_with_no_env_makes_it_the_captain() {
     );
 }
 
+/// T-134: the new captain's agent carries the captain's name from the moment
+/// it takes the seat — Herdr refuses a prompt to an unnamed agent, and it
+/// clears a name when it re-detects the occupant.
+#[test]
+fn take_names_the_new_captains_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr(); // every agent starts unnamed: the M3.1 state
+    assert_eq!(herdr.agent_name(NEW_PANE), None);
+
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
+
+    assert_eq!(taken.named, gear_herdr::Ensured::Renamed);
+    assert_eq!(herdr.agent_name(NEW_PANE), Some("p-captain"));
+    assert_eq!(herdr.renames_to("p-captain"), vec![NEW_PANE]);
+}
+
+/// A name another pane holds is never stolen: the take reports it and leaves
+/// the holder's name alone.
+#[test]
+fn take_never_steals_a_name_another_pane_holds() {
+    let root = tempfile::tempdir().unwrap();
+    let mut s = world(root.path());
+    let mut herdr = herdr();
+    herdr.set_agent_name(LANE_PANE, Some("p-captain"));
+
+    let taken = take(&mut s, &bare(), &mut herdr, &NEW_CALLER, root.path(), None, NOW).unwrap();
+
+    assert_eq!(
+        taken.named,
+        gear_herdr::Ensured::Taken { holder: Some(LANE_PANE.to_string()) }
+    );
+    assert_eq!(herdr.agent_name(LANE_PANE), Some("p-captain"), "the holder keeps it");
+    assert_eq!(herdr.agent_name(NEW_PANE), None, "and the new captain is not named");
+    assert!(herdr.renames_to("p-captain").is_empty(), "no rename was attempted");
+}
+
 /// A lane's pane is not a captain's (T-126): taking it is refused, nothing
 /// moves and nobody is rung.
 #[test]

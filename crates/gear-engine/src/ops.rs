@@ -45,10 +45,15 @@ pub fn deliver_doorbell_now(
         if binding.status != BindingStatus::Active {
             return Ok(None);
         }
-        Ok(Some(binding.pane_id))
+        Ok(Some((
+            binding.pane_id,
+            crate::names::agent_name(&row.project, &row.name),
+        )))
     })?;
-    let Some(pane_id) = pane else { return Ok(None) };
-    // Outside any transaction: call Herdr.
+    let Some((pane_id, agent_name)) = pane else { return Ok(None) };
+    // Outside any transaction: call Herdr. T-134: Herdr refuses a prompt to an
+    // agent whose name it cleared, so make sure of the name first.
+    crate::names::ensure(herdr, &pane_id, &agent_name);
     if !matches!(herdr.prompt(&pane_id, &text), Outcome::Ok(())) {
         return Ok(None);
     }
@@ -222,7 +227,15 @@ pub fn execute_intended(
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, .. } => Some(herdr.prompt(pane_id, text)),
+            Prepared::Run { pane_id, text, agent_name, .. } => {
+                // T-134: Herdr refuses a prompt to an agent whose name it
+                // cleared; name the agent first, then deliver in this same
+                // tick. A rename that fails (the name is held elsewhere) is
+                // reported by the tick's own name step; the prompt is tried
+                // all the same.
+                crate::names::ensure(herdr, pane_id, agent_name);
+                Some(herdr.prompt(pane_id, text))
+            }
             // Waiting ops never reach here (they are not prepared).
             Prepared::Wait { .. } => None,
             Prepared::Void { .. } => None,
@@ -276,8 +289,9 @@ pub fn execute_intended(
 
 /// What to do with one Intended op after the guard checks.
 enum Prepared {
-    /// The op may run: send `text` to `pane_id`.
-    Run { id: String, pane_id: String, text: String },
+    /// The op may run: send `text` to `pane_id`, whose agent must carry
+    /// `agent_name` first (T-134).
+    Run { id: String, pane_id: String, text: String, agent_name: String },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
     Wait { id: String },
@@ -346,6 +360,8 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
         text: text.to_string(),
+        // T-134: the name the agent in that pane must carry before the prompt.
+        agent_name: crate::names::agent_name(&seat.project, &seat.name),
     })
 }
 
