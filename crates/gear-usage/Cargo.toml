@@ -1,0 +1,15 @@
+[package]
+name = "gear-usage"
+version.workspace = true
+edition.workspace = true
+description = "GEAR: the token and cost records of an agent's session (design §4.3). No business rules."
+
+[dependencies]
+gear-model = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
