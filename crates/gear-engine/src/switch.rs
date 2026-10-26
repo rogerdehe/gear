@@ -647,6 +647,20 @@ mod tests {
     use gear_store::testing;
     use std::collections::BTreeSet;
 
+    /// T-114: only OpenCode's picker is driven, so only OpenCode is switched
+    /// in place. A CLI without one (pi) is started again on the next model.
+    #[test]
+    fn only_opencode_is_switched_in_place() {
+        assert!(switches_in_place("opencode"));
+        for kind in ["pi", "codex", "claude", "grok"] {
+            assert!(!switches_in_place(kind), "{kind} has no picker GEAR drives");
+            assert!(
+                SwitchSteps::for_kind(kind, &labels()).is_none(),
+                "{kind} has no switch steps"
+            );
+        }
+    }
+
     const T0: i64 = 1_800_000_000;
     const PANE: &str = "w1:p1";
     /// An OpenCode screen that is not on the wanted model.
