@@ -127,8 +127,23 @@ pub fn parse(line: &str) -> Decision {
         Some((date, kind)) => (date.trim().to_string(), kind.trim().to_string()),
         None => (String::new(), String::new()),
     };
-    if !KINDS.contains(&kind.as_str()) || why.is_none() {
-        // §7.1: `why:` is required and the kind must be one of §7.2's.
+    // The user's own correction at the landing (§7.1): `- <date> user: <text>`
+    // — a date and a text, no why and no warning.
+    if kind == "user" && is_date(&at) {
+        return Decision {
+            kind: "user".to_string(),
+            what,
+            why: None,
+            alt,
+            changes,
+            star,
+            at,
+            note: false,
+        };
+    }
+    if !KINDS.contains(&kind.as_str()) || why.is_none() || !is_date_time(&at) {
+        // §7.1: `why:` is required, the kind must be one of §7.2's and the
+        // date must be the shape §7.1 writes (`YYYY-MM-DD HH:MM`).
         return note(line, star);
     }
     Decision {
@@ -174,6 +189,64 @@ pub fn key_of(text: &str) -> String {
 /// space, and the ends are trimmed.
 pub fn collapsed(line: &str) -> String {
     line.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// A date as §7.1 writes it: `YYYY-MM-DD`.
+fn is_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[..4].iter().all(u8::is_ascii_digit)
+        && bytes[5..7].iter().all(u8::is_ascii_digit)
+        && bytes[8..10].iter().all(u8::is_ascii_digit)
+}
+
+/// A time as §7.1 writes it: `HH:MM`.
+fn is_time(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 5
+        && bytes[2] == b':'
+        && bytes[..2].iter().all(u8::is_ascii_digit)
+        && bytes[3..5].iter().all(u8::is_ascii_digit)
+        && (0..24).contains(&((bytes[0] - b'0') * 10 + (bytes[1] - b'0')))
+        && (0..60).contains(&((bytes[3] - b'0') * 10 + (bytes[4] - b'0')))
+}
+
+/// A date and a time as §7.1 writes it: `YYYY-MM-DD HH:MM`.
+fn is_date_time(text: &str) -> bool {
+    match text.split_once(' ') {
+        Some((date, time)) => is_date(date) && is_time(time),
+        None => false,
+    }
+}
+
+/// Whether the text names this task (a whole identifier: `T-1` does not name
+/// `T-10`).
+pub fn names_task(text: &str, task: &str) -> bool {
+    let bytes = text.as_bytes();
+    let needle = task.as_bytes();
+    if needle.is_empty() || needle.len() > bytes.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at + needle.len() <= bytes.len() {
+        if &bytes[at..at + needle.len()] == needle {
+            let before = at == 0 || !is_id_byte(bytes[at - 1]);
+            let after = at + needle.len();
+            let after = after >= bytes.len() || !is_id_byte(bytes[after]);
+            if before && after {
+                return true;
+            }
+        }
+        at += 1;
+    }
+    false
+}
+
+/// A byte that can be part of a task identifier.
+fn is_id_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
 }
 
 /// The moment an apply happened, as the log writes it (`YYYY-MM-DD HH:MM`).

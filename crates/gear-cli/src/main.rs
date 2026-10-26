@@ -1169,11 +1169,16 @@ fn run_plan(
     // stand idle (T-58, ops/lessons.md 7a) and about the lanes his own tail
     // silences (B5: a lane that gets no warning is not a mystery). Printed
     // only — the apply itself is unchanged.
-    let warnings: Vec<String> = store
-        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project, now))?
-        .iter()
-        .map(|lane| lane.warning())
-        .collect();
+    // The warnings the captain reads: the apply's own (design §7.2: a decision
+    // line that is not structured) and the lanes that would stand idle. The
+    // text and the JSON carry the same list.
+    let mut warnings: Vec<String> = result.warnings.clone();
+    warnings.extend(
+        store
+            .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project, now))?
+            .iter()
+            .map(|lane| lane.warning()),
+    );
     let (tailed, until) = store.write(|tx| {
         let lanes = gear_app::plan::tailed_lanes(tx, &draft.project, now)?;
         let until = gear_app::plan::tail_until(tx, &draft.project)?;
@@ -1186,9 +1191,8 @@ fn run_plan(
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
-    // The apply's own warnings (design §7.2: a decision line that is not
-    // structured is logged as a note).
-    for warning in result.warnings.iter().chain(warnings.iter()) {
+    // The warnings, one list for the text and the JSON.
+    for warning in &warnings {
         lines.push('\n');
         lines.push_str(warning);
     }
@@ -2428,11 +2432,13 @@ mod tests {
         assert!(summary < warning, "the warning comes after the summary: {out}");
     }
 
-    /// The JSON output carries the same warnings.
+    /// The JSON output carries the same warnings as the text: the lanes that
+    /// would stand idle and the apply's own (design §7.2: a decision line
+    /// that is not structured).
     #[test]
     fn plan_apply_json_carries_the_warnings() {
         let (mut store, mut herdr) = world_with_waiting_dep();
-        let draft = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
+        let draft = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- we talked about it\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
         let path = write_draft(draft);
 
         let out = run_plan(
@@ -2450,9 +2456,21 @@ mod tests {
 
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["version"], 1);
-        assert_eq!(
-            doc["warnings"][0],
-            "warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"
+        let warnings: Vec<String> = doc["warnings"]
+            .as_array()
+            .expect("the warnings")
+            .iter()
+            .map(|warning| warning.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            warnings.contains(&"warning: lane heat has nothing to start after now (1 queued behind deps: T-1)".to_string()),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("is not structured; logged as a note")),
+            "the apply's own warning is in the JSON too: {warnings:?}"
         );
     }
 

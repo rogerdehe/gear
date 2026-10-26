@@ -200,7 +200,7 @@ fn apply_queue(
         .iter()
         .map(|line| crate::decision::parse(line))
         .collect();
-    let voyage = voyage_of(draft);
+    let voyage = voyage_of(tx, project, draft)?;
     let applied_version = current + 1;
     let mut warnings: Vec<String> = Vec::new();
     for (index, line) in draft.decisions.iter().enumerate() {
@@ -657,6 +657,19 @@ fn apply_queue(
         }
         if seat.state == target {
             // Staff is a target, not a command: already there, nothing to do.
+            // The captain still made a decision (design §7.4), so it is
+            // logged — once.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         require_transition(
@@ -2170,13 +2183,26 @@ fn cancel_task(
 
 
 /// The voyage a plan is for: the last milestone block of the file (the
-/// current one). The decisions of the log belong to it.
-fn voyage_of(draft: &Draft) -> String {
-    draft
-        .milestones
-        .last()
-        .map(|(header, _)| crate::draft::milestone_parts(header).0.to_string())
-        .unwrap_or_default()
+/// current one). A plan with no milestone block — a decisions-only or
+/// staff-only apply — belongs to the voyage the project is in, the one that
+/// departed last (the same rule the config logging uses).
+fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
+    if let Some((header, _)) = draft.milestones.last() {
+        return Ok(crate::draft::milestone_parts(header).0.to_string());
+    }
+    current_voyage(tx, project)
+}
+
+/// The voyage the project is in: the one that departed last.
+pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
+    let mut latest: Option<(Ts, String)> = None;
+    for voyage in tx.voyages_of_project(project)? {
+        let Some(departure) = voyage.departure else { continue };
+        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
+            latest = Some((departure, voyage.milestone));
+        }
+    }
+    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
 }
 
 /// Record a decision of the captain (§7.3): the line as it was written, its
@@ -2268,10 +2294,12 @@ fn staff_text(item: &StaffItem) -> String {
 
 /// The why of the decision line that names this task (§7.4: the `cut` entry's
 /// why is the one the captain wrote, or `(no why written)`).
+///
+/// A whole identifier only: `T-1` does not name `T-10`.
 fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<String> {
     decisions
         .iter()
-        .filter(|decision| decision.what.contains(task))
+        .filter(|decision| crate::decision::names_task(&decision.what, task))
         .find_map(|decision| decision.why.clone())
 }
 

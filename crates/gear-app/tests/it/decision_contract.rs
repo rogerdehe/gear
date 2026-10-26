@@ -282,3 +282,182 @@ profile = "opencode"
     assert_eq!(logged.len(), 2, "{logged:?}");
     assert_eq!(logged[1].what, "config v3");
 }
+
+/// §7.1: the user's own correction at the landing is a `user` decision with
+/// its date — no why and no warning.
+#[test]
+fn a_user_correction_is_logged_with_its_date() {
+    let mut s = world();
+    let result = run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 user: keep the promised export\n",
+        "r1",
+    )
+    .unwrap();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+
+    let logged = decisions(&mut s);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(logged[0].kind, "user");
+    assert_eq!(logged[0].what, "keep the promised export");
+    assert_eq!(logged[0].at, "2026-10-27");
+    assert_eq!(logged[0].why, None);
+
+    // Re-applying it changes nothing.
+    run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 user: keep the promised export\n",
+        "r2",
+    )
+    .unwrap();
+    assert_eq!(decisions(&mut s).len(), 1);
+}
+
+/// §7.4: the cut entry takes the why of the decision line that names the
+/// task — a whole identifier only, so `T-1` never names `T-10`.
+#[test]
+fn a_cancelled_task_takes_the_why_of_the_line_that_names_it() {
+    /// Two tasks and the decisions that name them.
+    fn world_with_two_tasks() -> Store {
+        let mut s = world();
+        run(
+            &mut s,
+            "# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n",
+            "r1",
+        )
+        .unwrap();
+        s
+    }
+
+    // T-10 is named first; the task T-1 is cancelled.
+    let mut s = world_with_two_tasks();
+    run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 10:05 cut: T-10 is cut | why: ten reason\n- 2026-10-27 10:06 cut: T-1 is cut | why: one reason\n\n# Queue\n## T-1 [must] lane=heat\nstate: cancelled\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    let logged = decisions(&mut s);
+    let cut = logged
+        .iter()
+        .find(|decision| decision.kind == "cut" && decision.source == "gear")
+        .expect("the automatic cut");
+    assert_eq!(cut.what, "T-1 cancelled");
+    assert_eq!(cut.why.as_deref(), Some("one reason"), "T-1 does not name T-10");
+
+    // Only T-10 is named: the cut has no why of its own.
+    let mut s = world_with_two_tasks();
+    run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 10:05 cut: T-10 is cut | why: ten reason\n\n# Queue\n## T-1 [must] lane=heat\nstate: cancelled\ndeps: -\n",
+        "r2",
+    )
+    .unwrap();
+    let logged = decisions(&mut s);
+    let cut = logged
+        .iter()
+        .find(|decision| decision.kind == "cut" && decision.source == "gear")
+        .expect("the automatic cut");
+    assert_eq!(cut.why.as_deref(), Some("(no why written)"));
+
+    // The re-apply does not duplicate the automatic entry.
+    run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 10:05 cut: T-10 is cut | why: ten reason\n\n# Queue\n## T-1 [must] lane=heat\nstate: cancelled\ndeps: -\n",
+        "r3",
+    )
+    .unwrap();
+    assert_eq!(
+        decisions(&mut s)
+            .iter()
+            .filter(|decision| decision.kind == "cut" && decision.source == "gear")
+            .count(),
+        1,
+        "the automatic cut is not duplicated"
+    );
+}
+
+/// §7.4: a staff line the apply carries out is logged — also when the seat
+/// is already at its target.
+#[test]
+fn a_staff_line_is_logged_even_when_the_seat_is_already_there() {
+    let mut s = world();
+    run(&mut s, "# Staff\n- hold heat reason=first reason\n", "r1").unwrap();
+    run(&mut s, "# Staff\n- hold heat reason=second reason\n", "r2").unwrap();
+
+    let staff: Vec<String> = decisions(&mut s)
+        .iter()
+        .filter(|decision| decision.kind == "staff")
+        .map(|decision| decision.what.clone())
+        .collect();
+    assert_eq!(
+        staff,
+        vec![
+            "hold heat reason=first reason".to_string(),
+            "hold heat reason=second reason".to_string()
+        ]
+    );
+
+    // The replay of the second adds nothing.
+    run(&mut s, "# Staff\n- hold heat reason=second reason\n", "r3").unwrap();
+    assert_eq!(
+        decisions(&mut s)
+            .iter()
+            .filter(|decision| decision.kind == "staff")
+            .count(),
+        2
+    );
+}
+
+/// §7.3: a plan with no milestone block belongs to the voyage the project is
+/// in (the one that departed last).
+#[test]
+fn a_plan_without_a_milestone_logs_to_the_current_voyage() {
+    let mut s = world();
+    // A voyage that departs: a milestone block and a task on it.
+    run(
+        &mut s,
+        "# Milestone M1: the first voyage\ndone: something\nbar: a bar\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+        "r1",
+    )
+    .unwrap();
+
+    // A decisions-only apply: the line belongs to M1.
+    run(
+        &mut s,
+        "# Decisions\n- 2026-10-27 10:05 scope: T-1 moves to the api lane | why: the api owns it\n",
+        "r2",
+    )
+    .unwrap();
+    let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(logged[0].kind, "scope");
+
+    // A staff-only apply: the entry belongs to M1 too.
+    run(&mut s, "# Staff\n- hold heat reason=waiting\n", "r3").unwrap();
+    let logged = s.read(|tx| tx.decisions_of("p", "M1")).unwrap();
+    assert_eq!(
+        logged.iter().filter(|d| d.kind == "staff").count(),
+        1,
+        "{logged:?}"
+    );
+}
+
+/// §7.1: the structured form needs the date §7.1 writes; anything else is a
+/// note with the warning and without a star.
+#[test]
+fn a_malformed_date_is_a_note_with_the_warning() {
+    let mut s = world();
+    let result = run(
+        &mut s,
+        "# Decisions\n- yesterday scope: export added | why: user asked\n",
+        "r1",
+    )
+    .unwrap();
+    assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+
+    let logged = decisions(&mut s);
+    assert_eq!(logged.len(), 1, "{logged:?}");
+    assert_eq!(logged[0].kind, "note");
+    assert!(!logged[0].star);
+}

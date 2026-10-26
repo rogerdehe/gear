@@ -238,19 +238,6 @@ pub fn init_with_home(
 /// urgent item the other seat writes raise. The first registration (no seats
 /// yet) and the user's own shell (no context) keep their flow; `herdr` is only
 /// needed when there is a claim to prove.
-/// The voyage a config change belongs to (design §7.4): the one that
-/// departed last — the voyage the project is in.
-fn current_voyage(tx: &gear_store::Tx<'_>, project: &str) -> GearResult<String> {
-    let mut latest: Option<(i64, String)> = None;
-    for voyage in tx.voyages_of_project(project)? {
-        let Some(departure) = voyage.departure else { continue };
-        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
-            latest = Some((departure, voyage.milestone));
-        }
-    }
-    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
-}
-
 pub fn init_checked(
     store: &mut Store,
     env: &Env,
@@ -484,7 +471,7 @@ fn re_register(
 
     // The decision log (design §7.4): a config change is GEAR's own entry.
     {
-        let voyage = current_voyage(tx, &project_id)?;
+        let voyage = crate::plan::current_voyage(tx, &project_id)?;
         let what = format!("config v{version}");
         let text = format!("config|{what}");
         tx.insert_decision_if_new(&gear_store::NewDecision {
