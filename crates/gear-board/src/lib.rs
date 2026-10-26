@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod graph;
 pub mod idle;
 mod screen;
 pub mod voyage;
@@ -38,14 +39,16 @@ const UNASSIGNED: &str = "unassigned";
 /// The one warning line the board may print.
 const ENGINE_DOWN: &str = "! engine down — the next gear call starts it";
 
-/// What the board shows in the middle: the queues of the lanes, or the open
-/// tasks as a dependency tree (PRD §15).
+/// What the board shows in the middle: the queues of the lanes, the open
+/// tasks as a dependency tree (PRD §15), or the graph of the work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     /// One block per lane, with its queue.
     Lanes,
     /// The open tasks as a dependency tree.
     Deps,
+    /// The work as a graph: dev, the reviews and one column per lane.
+    Graph,
 }
 
 impl View {
@@ -53,7 +56,8 @@ impl View {
     pub fn toggled(self) -> View {
         match self {
             View::Lanes => View::Deps,
-            View::Deps => View::Lanes,
+            View::Deps => View::Graph,
+            View::Graph => View::Lanes,
         }
     }
 }
@@ -109,6 +113,11 @@ pub struct ProjectBoard {
     pub lanes: Vec<LaneBoard>,
     /// The open tasks as a dependency tree.
     pub deps: Vec<DepNode>,
+    /// The work as a graph: the tasks with their stage, in the order the
+    /// graph draws them (design §8.1).
+    pub graph: Vec<graph::GraphTask>,
+    /// The lanes of the graph, one column each.
+    pub graph_lanes: Vec<String>,
     /// The items waiting for the captain.
     pub waiting: Waiting,
     /// The temp slots of the project.
@@ -390,6 +399,10 @@ pub fn project_with_agents(
     // The open tasks as a dependency tree (the other view of the plan).
     let deps = deps::tree(&tasks);
 
+    // The work as a graph (design §8.1).
+    let graph = graph::tasks(tx, project, now)?;
+    let graph_lanes = graph::lanes(tx, project)?;
+
     // The captain's inbox: the items that wait for an answer.
     let waiting = match tx.captain_of(project)? {
         Some(captain) => {
@@ -458,6 +471,8 @@ pub fn project_with_agents(
         totals,
         lanes,
         deps,
+        graph,
+        graph_lanes,
         waiting,
         temps,
         unconfirmed_deliveries,
@@ -620,6 +635,10 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
                     lines.push(dep_line(node));
                 }
             }
+        }
+        View::Graph => {
+            lines.push(String::new());
+            lines.extend(graph::lines(&project.graph, &project.graph_lanes, None));
         }
     }
     lines.push(String::new());
