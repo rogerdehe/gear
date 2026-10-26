@@ -262,6 +262,33 @@ fn a_resolve_to_a_released_reviewer_sends_nothing() {
 }
 
 #[test]
+fn a_retiring_lane_still_gets_its_answer() {
+    // F1 of the T-103 review: a retiring lane finishes the attempt it holds,
+    // so the captain's answer to its question must reach it.
+    let mut s = world();
+    let id = ask(&mut s, "heat", LANE_PANE, "which schema?", "s1", NOW);
+    s.write(|tx| {
+        tx.set_seat_state("p:heat", SeatState::Retiring, Some("retiring"), NOW + 1)
+    })
+    .unwrap();
+
+    let r = mail::reply(
+        &mut s,
+        &captain_env(),
+        Some(&fp(CAP_PANE, "codex")),
+        &reply_args(&[&id], ReplyMode::Resolve, "r1"),
+        NOW + 2,
+    )
+    .unwrap();
+
+    assert_eq!(r.handled, vec![(id.clone(), "resolved".to_string())]);
+    assert_eq!(r.replies.len(), 1, "a retiring lane is still live");
+    let answer = s.read(|tx| tx.get_message("p", &r.replies[0])).unwrap().unwrap();
+    assert_eq!(answer.recipient, "p:heat");
+    assert_eq!(answer.body, "the answer");
+}
+
+#[test]
 fn a_reused_reviewer_gets_no_answer_to_an_earlier_jobs_item() {
     // T-103: the same seat reused for a later job (generation 2) must not read
     // the captain's note on the generation-1 item.

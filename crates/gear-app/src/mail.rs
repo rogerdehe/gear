@@ -760,12 +760,18 @@ pub fn reply(
 
                 // Only a live seat of the generation that asked gets the
                 // answer (T-103): never the engine, never a released or
-                // retired seat, never a seat reused for another job.
+                // retired seat, never a seat reused for another job. A
+                // Retiring lane is still live: it finishes the attempt it
+                // holds, so an answer to its question must reach it (F1 of the
+                // review).
                 let live = tx.get_seat(&original.sender)?.filter(|seat| {
                     seat.generation == original.sender_gen
                         && matches!(
                             seat.state,
-                            SeatState::Starting | SeatState::Active | SeatState::Standby
+                            SeatState::Starting
+                                | SeatState::Active
+                                | SeatState::Standby
+                                | SeatState::Retiring
                         )
                 });
                 if live.is_none() {
