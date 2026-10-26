@@ -5,6 +5,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
+| deck's old `home-deck` worktree removed by hand (`git worktree remove`) so the re-registered lane could onboard on pi | onboarding a re-registered lane creates its worktree again and fails on "already exists" | T-125 lands (onboarding reopens an existing worktree) | captain: delete this row |
 
 ## Removed
 
