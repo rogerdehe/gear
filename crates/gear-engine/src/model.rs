@@ -130,6 +130,14 @@ pub(crate) fn model_start(kind: &str, model: &str) -> Option<ModelStart> {
             env: String::new(),
             args: vec!["--model".to_string(), model.to_string()],
         }),
+        // Pi takes the model as a start flag too (`--model <provider>/<id>`;
+        // the SOP `gear --skill agent:pi`). The thinking level is a property
+        // of the chain entry (`--thinking <level>`), never a constant here
+        // (T-35): the entry's args follow the model flag.
+        "pi" => Some(ModelStart {
+            env: String::new(),
+            args: vec!["--model".to_string(), model.to_string()],
+        }),
         _ => None,
     }
 }
@@ -193,7 +201,36 @@ mod tests {
 
     #[test]
     fn a_cli_without_a_verified_way_manages_no_model() {
-        assert!(model_start("pi", "gpt-6.1-sol").is_none());
+        assert!(model_start("emacs", "gpt-6.1-sol").is_none());
+    }
+
+    #[test]
+    fn pi_takes_the_model_as_a_flag() {
+        // T-113: pi `--model <provider>/<id>`; the thinking level comes from
+        // the chain entry, not from the code.
+        let pi = model_start("pi", "opencode-go/deepseek-v4.1-flash").unwrap();
+        assert_eq!(pi.env, "", "pi needs no environment line");
+        assert_eq!(
+            pi.args,
+            vec![
+                "--model".to_string(),
+                "opencode-go/deepseek-v4.1-flash".to_string()
+            ]
+        );
+        let entry = entry(
+            "opencode-go/deepseek-v4.1-flash",
+            Some("pi"),
+            &["--thinking", "high"],
+        );
+        assert_eq!(
+            entry_args("pi", &entry).unwrap(),
+            vec![
+                "--model".to_string(),
+                "opencode-go/deepseek-v4.1-flash".to_string(),
+                "--thinking".to_string(),
+                "high".to_string(),
+            ]
+        );
     }
 
     #[test]

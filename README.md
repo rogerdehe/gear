@@ -45,7 +45,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 4. **The GEAR skill for every CLI your project uses** — the captain's, and every lane's and reviewer's: an agent without the skill does not know the loop (trial G06).
 
    ```bash
-   gear admin install-skill --agent claude      # or codex, opencode, grok
+   gear admin install-skill --agent claude      # or codex, opencode, grok, pi
    gear admin install-skill --agent opencode    # once per CLI the project runs
    ```
 
@@ -58,7 +58,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    ```bash
    export GEAR_CTX=acme:captain:1
    export GEAR_ADMIN=1                          # lets the captain re-apply a config change
-   claude                                       # or codex, opencode, grok
+   claude                                       # or codex, opencode, grok, pi
    ```
 
 2. **Ask the captain to kick off**, in your own words, for example:

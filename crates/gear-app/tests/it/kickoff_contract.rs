@@ -23,6 +23,14 @@ deepseek/deepseek-flash
   opencode-go/glm-5.3-flash
 ";
 
+/// A captured `pi --list-models` (pi 1.4.0): a table whose first two columns
+/// are the provider and the model.
+const PI_MODELS: &str = "\
+provider     model                       context  max-out  thinking  images
+minimax-cn   MiniMax-M3.1-Flash          1M       524.3K   yes       yes
+opencode-go  deepseek-v4.1-flash         1M       384K     yes       yes
+";
+
 /// A captured `~/.codex/models_cache.json`, trimmed to what the parser reads.
 const CODEX_CACHE: &str = r#"{
   "fetched_at": "2026-10-23T04:15:50.630332Z",
@@ -86,6 +94,23 @@ fn codex_models_are_the_slugs() {
     let models = kickoff::parse_codex_models(CODEX_CACHE).unwrap();
 
     assert_eq!(models, vec!["gpt-6.1-sol", "gpt-6-astra"]);
+}
+
+/// T-113: pi lists its models in a table; the id its `--model` takes is
+/// `provider/model`.
+#[test]
+fn pi_models_are_the_provider_and_the_model() {
+    let models = kickoff::parse_pi_models(PI_MODELS);
+
+    assert_eq!(
+        models,
+        vec![
+            "minimax-cn/MiniMax-M3.1-Flash",
+            "opencode-go/deepseek-v4.1-flash",
+        ],
+        "the header row is not a model"
+    );
+    assert!(kickoff::parse_pi_models("").is_empty());
 }
 
 #[test]
