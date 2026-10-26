@@ -512,11 +512,14 @@ pub fn select_batch(
         let shown: Vec<MessageRow> = messages.iter().take(SHOWN_PER_THREAD).cloned().collect();
         let more = messages.len() - shown.len();
         let urgent = messages.iter().any(|m| m.urgent);
-        // The latest reply in the thread is context, not an unhandled item.
+        // The latest reply **to this seat** is context, not an unhandled item
+        // (T-103): a reply the captain wrote to the engine, to himself or to
+        // another seat is not the recipient's business, and a lane must not
+        // read it as if it were.
         let last_reply = tx
             .thread_messages(project, thread)?
             .into_iter()
-            .filter(|m| m.kind == MsgKind::Reply)
+            .filter(|m| m.kind == MsgKind::Reply && m.recipient == recipient)
             .max_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
         views.push(ThreadView {
             thread: thread.clone(),
@@ -590,10 +593,16 @@ pub struct ReplyResult {
 
 /// `gear reply` (captain only). Each id must be in this project, addressed to
 /// the captain, Open or Waiting (Info may only be resolved). Resolve → Resolved; Wait → Waiting until
-/// wait_until (required; wait_on is an optional label); Note → state unchanged.
-/// Writes one Reply (state Info) per (original sender, thread) into that
-/// sender's inbox for actionable items. Info and Result records never send an
-/// answer to the original sender. Never changes task state.
+/// wait_until (required; wait_on is an optional label); Note → state unchanged,
+/// with the text kept on the item and sent to nobody (T-103: a note is the
+/// captain's record, not a message).
+///
+/// Resolve and Wait write one Reply (state Info) per (live sender, thread) into
+/// that sender's inbox for actionable items — only when the sender is a seat of
+/// this project that is still running **at the generation that asked**
+/// (T-103): the engine has no seat to read an answer, and a reviewer seat
+/// reused for a later job must not read the note on an earlier one. Info and
+/// Result records never send an answer. Never changes task state.
 ///
 /// Slice 1 rules:
 /// - a repeated id is handled once; `handled` lists every id once;
@@ -719,23 +728,53 @@ pub fn reply(
                         new_state.as_str(),
                     )?;
                 }
-                if args.mode != ReplyMode::Note {
-                    // A note changes nothing but the answer itself.
-                    tx.update_message_state(
-                        &ctx.project,
-                        &original.id,
-                        new_state,
-                        Some(&args.text),
-                        args.wait_on.as_deref(),
-                        args.wait_until,
-                        now,
-                    )?;
-                }
+                // The text is the item's own record. A note keeps the state
+                // and the wait fields it had; resolve and wait set their own
+                // (T-103).
+                let (wait_on, wait_until) = match args.mode {
+                    ReplyMode::Note => (original.wait_on.clone(), original.wait_until),
+                    _ => (args.wait_on.clone(), args.wait_until),
+                };
+                tx.update_message_state(
+                    &ctx.project,
+                    &original.id,
+                    new_state,
+                    Some(&args.text),
+                    wait_on.as_deref(),
+                    wait_until,
+                    now,
+                )?;
                 handled.push((original.id.clone(), new_state.as_str().to_string()));
+
+                // A note is the captain's bookkeeping: stored on the item just
+                // above, sent to nobody (T-103).
+                if args.mode == ReplyMode::Note {
+                    continue;
+                }
 
                 // Information is bookkeeping, not a conversation. Legacy
                 // open Result records must not echo resolve text either.
                 if original.state == MsgState::Info || original.kind == MsgKind::Result {
+                    continue;
+                }
+
+                // Only a live seat of the generation that asked gets the
+                // answer (T-103): never the engine, never a released or
+                // retired seat, never a seat reused for another job. A
+                // Retiring lane is still live: it finishes the attempt it
+                // holds, so an answer to its question must reach it (F1 of the
+                // review).
+                let live = tx.get_seat(&original.sender)?.filter(|seat| {
+                    seat.generation == original.sender_gen
+                        && matches!(
+                            seat.state,
+                            SeatState::Starting
+                                | SeatState::Active
+                                | SeatState::Standby
+                                | SeatState::Retiring
+                        )
+                });
+                if live.is_none() {
                     continue;
                 }
 

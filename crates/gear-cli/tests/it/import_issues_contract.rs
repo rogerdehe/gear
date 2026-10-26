@@ -105,6 +105,7 @@ fn gear(home: &Path, db: &Path, path: Option<&Path>, args: &[&str], path_env: &P
         .env("GEAR_DB", db)
         .env("GEAR_CTX", "p:captain:1")
         .env("PATH", path_env)
+        .env("GEAR_GH", path_env.join("gh"))
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_SOCKET_PATH")
         .output()
@@ -285,6 +286,7 @@ fn a_lane_runs_no_import() {
         .env("GEAR_DB", &db)
         .env("GEAR_CTX", "p:heat:1")
         .env("PATH", dir.join("bin"))
+        .env("GEAR_GH", dir.join("bin").join("gh"))
         .env_remove("HERDR_PANE_ID")
         .output()
         .expect("run gear");

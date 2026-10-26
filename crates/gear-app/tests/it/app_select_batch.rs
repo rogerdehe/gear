@@ -132,6 +132,52 @@ fn last_reply_is_newest_reply() {
 }
 
 #[test]
+fn a_reply_to_another_seat_is_not_this_seats_context() {
+    // T-103: the lane reads its own thread, so a reply the captain wrote to
+    // the engine (or to another seat) is not its context — only a reply
+    // addressed to the lane itself is.
+    let mut s = store();
+    s.write(|tx| {
+        // The lane's own open item (an instruction from the captain).
+        let mut item = msg("t1", "p:captain", MsgKind::Instruction, NOW, false);
+        item.recipient = "p:heat".into();
+        tx.insert_message(&item)?;
+        let mut to_engine = msg("t1", "p:captain", MsgKind::Reply, NOW + 1, false);
+        to_engine.recipient = "engine".into();
+        to_engine.state = MsgState::Info;
+        tx.insert_message(&to_engine)?;
+        let mut to_other = msg("t1", "p:captain", MsgKind::Reply, NOW + 2, false);
+        to_other.recipient = "p:pricing".into();
+        to_other.state = MsgState::Info;
+        tx.insert_message(&to_other)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let views = s
+        .read(|tx| select_batch(tx, "p", "p:heat", NOW + 10, BatchLimits::default()))
+        .unwrap();
+    let t1 = views.iter().find(|v| v.thread == "t1").expect("thread t1");
+    assert!(t1.last_reply.is_none(), "a reply to the engine is not mine");
+
+    // A reply to the lane itself is shown.
+    s.write(|tx| {
+        let mut to_me = msg("t1", "p:captain", MsgKind::Reply, NOW + 3, false);
+        to_me.recipient = "p:heat".into();
+        to_me.state = MsgState::Info;
+        tx.insert_message(&to_me)?;
+        Ok(())
+    })
+    .unwrap();
+    let views = s
+        .read(|tx| select_batch(tx, "p", "p:heat", NOW + 10, BatchLimits::default()))
+        .unwrap();
+    let t1 = views.iter().find(|v| v.thread == "t1").expect("thread t1");
+    let last = t1.last_reply.as_ref().expect("the lane's reply");
+    assert_eq!(last.recipient, "p:heat");
+}
+
+#[test]
 fn urgent_first_then_oldest() {
     let mut s = store();
     s.write(|tx| {

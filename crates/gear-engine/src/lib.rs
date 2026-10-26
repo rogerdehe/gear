@@ -74,11 +74,16 @@ pub struct EngineCfg {
     /// before it parks (T-67), and how long between two looks.
     pub model_list_wait_s: u64,
     pub model_list_poll_ms: u64,
+    /// The one runner the merge uses to touch the remote (T-107): the push of
+    /// the integration branch and the branch deletes. Production is
+    /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
+    /// moves the refs from the remote's own side, so no test runs `git push`.
+    pub remote: std::sync::Arc<dyn merge::Remote>,
 }
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500 }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote) }
     }
 }
 
