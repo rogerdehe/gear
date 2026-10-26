@@ -5,7 +5,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| captain's loop auto-resolving `push refused … /T/gear-merge-…/merge belongs to no repo` items (scratchpad `resolve-test-leaks.sh`) | lanes' and reviewers' branches without e5ddb14 run tests with their GEAR_CTX, so the tests' pre-push hook rings the captain per test push | every open branch includes e5ddb14 (all M3 tasks merged) | captain |
+| captain's loop auto-resolving `push refused … /T/gear-merge-…/merge belongs to no repo` items (scratchpad `resolve-test-leaks.sh`) | lanes' and reviewers' branches without e5ddb14 run tests with their GEAR_CTX, so the tests' pre-push hook rings the captain per test push | T-107 is live: no GEAR hook is left in any worktree, so no test push can ring | captain |
 
 ## Removed
 
@@ -19,4 +19,4 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 - 2026-10-23 `inbox.sh`, `board.sh`, `ops/mail`, `ops/PLAN.md`, `ops/tasks` packets: archived/removed — GEAR's store, home page and board replaced them.
 - 2026-10-23 `start-reviewer.sh`, `models.conf`, warm seats `home-review-<k>`: the engine starts reviewers (T-5) on the config's `[models].review`; warm seats return with T-18.
 - 2026-10-25 `[profiles.codex]` override in `gear/gear.toml` (update check off): T-57 put the flag in the built-in codex profile.
-| Captain watchdog (scratchpad `watchdog.sh`, background job) wakes the captain after 10 min with no lane or reviewer working | the engine retried a failing review checkout silently for an hour and nothing woke the captain | T-101 landed and the engine rings on every stall it can see | captain |
+| Captain watchdog (scratchpad `watchdog.sh`, background job) wakes the captain after 10 min with no lane or reviewer working | the engine retried a failing review checkout silently for an hour and nothing woke the captain | the engine runs T-69's code (three failed checkouts ring the captain) — at the end-of-M3 upgrade | captain |
