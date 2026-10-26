@@ -180,16 +180,14 @@ fn codex_rollout(thread: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
             continue;
         }
         let Some(info) = payload.get("info") else { continue };
+        // A count whose info is null or has no object of totals is not a
+        // count: it changes neither the totals nor the predecessor (§4.3).
         let Some(current) = CodexTokens::of(info) else { continue };
-        let delta = match previous {
-            Some(previous) => current.difference(previous),
-            // The first count of the file has no predecessor: it is the
-            // session's total, not a record of work.
-            None => {
-                previous = Some(current);
-                continue;
-            }
-        };
+        // The first valid total counts against zero: it is the work of the
+        // session so far. The predecessor moves before the window is looked
+        // at, so a count before the window still moves it.
+        let before = previous.unwrap_or_else(CodexTokens::zero);
+        let delta = current.difference(before);
         previous = Some(current);
         let Some(time) = record_time(&value, &value) else { continue };
         if time < from || time >= to {
@@ -208,6 +206,13 @@ fn codex_rollout(thread: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
 }
 
 /// Codex: the context of the last token count (§3.5).
+///
+/// The context is the input of the last assistant turn with the cached input
+/// counted once, plus what was written to the cache. Codex says it in
+/// `info.last_token_usage` (§4.3); when the line does not carry it, the
+/// difference to the count before it is used. A count that repeats the totals
+/// of the one before it adds nothing and **keeps** the context of the last
+/// turn that had one.
 fn codex_last_context(thread: &str, home: &Path) -> Option<i64> {
     let path = codex_rollout_path(home, thread)?;
     let lines = read_lines(&path)?;
@@ -223,20 +228,28 @@ fn codex_last_context(thread: &str, home: &Path) -> Option<i64> {
             continue;
         }
         let Some(info) = payload.get("info") else { continue };
+        // A count whose info is null or has no object of totals is not a
+        // count: it changes neither the context nor the predecessor (§4.3).
         let Some(current) = CodexTokens::of(info) else { continue };
-        let Some(before) = previous else {
-            previous = Some(current);
-            continue;
-        };
+        let before = previous.unwrap_or_else(CodexTokens::zero);
         let delta = current.difference(before);
         previous = Some(current);
-        // The context of the turn: its input with the cached input counted
-        // once, plus what was written to the cache.
-        context = Some(
-            (delta.input_tokens - delta.cached_input_tokens)
-                + delta.cached_input_tokens
-                + delta.cache_write_input_tokens,
-        );
+        if let Some(last) = info.get("last_token_usage").filter(|last| last.is_object()) {
+            // The context of the request itself: its input (the cached input
+            // is in it) plus what was written to the cache.
+            context = Some(number(last, "input_tokens") + number(last, "cache_write_input_tokens"));
+        } else if delta.input_tokens != 0
+            || delta.cached_input_tokens != 0
+            || delta.cache_write_input_tokens != 0
+            || delta.output_tokens != 0
+            || delta.reasoning_output_tokens != 0
+        {
+            // No `last_token_usage`: the difference to the count before it is
+            // the turn.
+            context = Some(delta.input_tokens + delta.cache_write_input_tokens);
+        }
+        // A repeated total adds nothing: the context of the last turn that
+        // had one stays.
     }
     context
 }
@@ -334,7 +347,10 @@ fn opencode_db(session: &str, from: Ts, to: Ts, home: &Path) -> Option<Usage> {
 
 /// OpenCode: the context of the last message with tokens (§3.5).
 fn opencode_last_context(session: &str, home: &Path) -> Option<i64> {
-    let rows = opencode_messages(home, session)?;
+    let mut rows = opencode_messages(home, session)?;
+    // The messages are taken in the order they were completed: the rows of
+    // the table need not be in that order.
+    rows.sort_by_key(|(_, time)| time.unwrap_or(0));
     let mut context = None;
     for (data, time) in rows {
         if time.is_none() {
@@ -363,23 +379,24 @@ fn opencode_messages(home: &Path, session: &str) -> Option<Vec<(Value, Option<Ts
     let columns = table_columns(&conn, "session_message")?;
     let session_column = pick(&columns, &["sessionID", "session_id", "session"])?;
     let data_column = pick(&columns, &["data"])?;
-    let time_column = pick(&columns, &["time_completed", "completed", "time_complete"])?;
-    let sql = format!(
-        "SELECT {data_column}, {time_column} FROM session_message WHERE {session_column} = ?1"
-    );
+    // The time of the message is in its JSON (`data.time.completed`, §4.3):
+    // the table needs no column of its own for it.
+    let sql = format!("SELECT {data_column} FROM session_message WHERE {session_column} = ?1");
     let mut stmt = conn.prepare(&sql).ok()?;
     let rows = stmt
         .query_map(rusqlite::params![session], |row| {
             let data: rusqlite::types::Value = row.get(0)?;
-            let time: rusqlite::types::Value = row.get(1)?;
-            Ok((data, time))
+            Ok(data)
         })
         .ok()?;
     let mut messages = Vec::new();
     for row in rows {
-        let (data, time) = row.ok()?;
-        let time = time_from_sql(&time);
+        let data = row.ok()?;
         let Some(data) = json_from_sql(&data) else { continue };
+        let time = data
+            .get("time")
+            .and_then(|time| time.get("completed"))
+            .and_then(timestamp);
         messages.push((data, time));
     }
     Some(messages)
@@ -390,22 +407,6 @@ fn json_from_sql(value: &rusqlite::types::Value) -> Option<Value> {
     match value {
         rusqlite::types::Value::Text(text) => serde_json::from_str(text).ok(),
         rusqlite::types::Value::Blob(bytes) => serde_json::from_slice(bytes).ok(),
-        _ => None,
-    }
-}
-
-/// The time of a column of the OpenCode database, in epoch seconds.
-fn time_from_sql(value: &rusqlite::types::Value) -> Option<Ts> {
-    match value {
-        rusqlite::types::Value::Integer(seconds) => Some(number_to_seconds(*seconds as f64)),
-        rusqlite::types::Value::Real(seconds) => Some(number_to_seconds(*seconds)),
-        rusqlite::types::Value::Text(text) => {
-            let text = text.trim();
-            if let Ok(seconds) = text.parse::<f64>() {
-                return Some(number_to_seconds(seconds));
-            }
-            rfc3339(text)
-        }
         _ => None,
     }
 }
@@ -566,8 +567,16 @@ struct CodexTokens {
 }
 
 impl CodexTokens {
+    /// The totals of a count. None when the count carries none: an `info`
+    /// that is null or that has no object of totals is not a count (§4.3).
     fn of(info: &Value) -> Option<CodexTokens> {
-        let total = info.get("total_token_usage").or(Some(info))?;
+        if !info.is_object() {
+            return None;
+        }
+        let total = info.get("total_token_usage")?;
+        if !total.is_object() {
+            return None;
+        }
         Some(CodexTokens {
             input_tokens: number(total, "input_tokens"),
             cached_input_tokens: number(total, "cached_input_tokens"),
@@ -575,6 +584,17 @@ impl CodexTokens {
             output_tokens: number(total, "output_tokens"),
             reasoning_output_tokens: number(total, "reasoning_output_tokens"),
         })
+    }
+
+    /// The totals of nothing: the predecessor of the first count of a file.
+    fn zero() -> CodexTokens {
+        CodexTokens {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+        }
     }
 
     /// The difference to the count before it: what this line added.
