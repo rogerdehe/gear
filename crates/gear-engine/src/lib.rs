@@ -131,6 +131,8 @@ pub struct TickReport {
     pub quota: Vec<String>,
     /// The lanes that were told to go on after they stopped (T-206).
     pub lane_nudged: Vec<String>,
+    /// The lanes whose plan park ended this tick (T-190), one line each.
+    pub park_ended: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -287,6 +289,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
         observe::record_sessions(store, &observed)?;
+        // A park whose time has come ends (T-190): the lane the captain
+        // parked until a time that has passed works again.
+        let ended = store.write(|tx| {
+            gear_app::plan::end_parked_lanes(tx, &project, Some(&agents), now)
+        })?;
+        report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
@@ -340,8 +348,25 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let delivery_grace = gear_app::config::latest(store, &project)
             .map(|config| i64::from(config.timing.delivery_grace_s))
             .unwrap_or(cfg.delivery_grace_s);
-        let (confirmed, flagged) =
-            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
+        // T-213: the seats whose agent Herdr reports working this tick. A
+        // doorbell that reached one of them waits behind the agent's turn:
+        // that is not a stall, so its check budget is not spent.
+        let working: Vec<String> = observed
+            .iter()
+            .filter(|obs| {
+                obs.presence == observe::Presence::Present
+                    && obs.status == Some(gear_herdr::AgentStatus::Working)
+            })
+            .map(|obs| obs.seat.id.clone())
+            .collect();
+        let (confirmed, flagged) = ops::confirm_pending_with(
+            store,
+            &project,
+            cfg.doorbell_check_budget,
+            delivery_grace,
+            &working,
+            now,
+        )?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 

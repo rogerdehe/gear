@@ -79,18 +79,21 @@ fn eta_quarters_open_once_and_keep_their_snapshots_open() {
     let first = check(&mut store, 3600);
     assert_eq!(first.len(), 1);
     let message = item(&mut store, &first[0]);
-    assert!(message.body.contains("[25% eta]"), "{}", message.body);
+    assert!(message.body.contains("25% eta"), "{}", message.body);
     assert_eq!(message.body.lines().count(), 1);
     assert_eq!(message.state, MsgState::Open);
     assert!(check(&mut store, 3601).is_empty());
     assert!(check(&mut store, 7199).is_empty());
     let second = check(&mut store, 7200);
     assert_eq!(second.len(), 1);
-    assert!(item(&mut store, &second[0]).body.contains("[50% eta]"));
+    assert!(item(&mut store, &second[0]).body.contains("50% eta"));
     let third = check(&mut store, 10800);
     assert_eq!(third.len(), 1);
-    assert!(item(&mut store, &third[0]).body.contains("[75% eta]"));
-    assert!(check(&mut store, 14400).is_empty());
+    assert!(item(&mut store, &third[0]).body.contains("75% eta"));
+    // The course station (row B10) rings every 60 min of voyage time.
+    let fourth = check(&mut store, 14400);
+    assert_eq!(fourth.len(), 1);
+    assert!(item(&mut store, &fourth[0]).body.contains("240 min"));
     assert_eq!(item(&mut store, &first[0]), message, "new stations do not mutate/close earlier snapshots");
 }
 
@@ -105,7 +108,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert_eq!(report.pace(), Some(2.0));
     assert_eq!(report.remaining_estimate_min, Some(90));
     assert_eq!(report.projected_min, Some(60 + 90*2));
-    assert_eq!(message.body, "Station M2 [3 done] · elapsed 60m / eta 8h · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · slowest lane heat 180m");
+    assert_eq!(message.body, "Station M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m");
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
@@ -139,6 +142,13 @@ fn each_third_completion_is_a_station_including_the_final_task() {
     assert!(bodies.iter().any(|b| b.contains("[6 done]")), "{bodies:?}");
     let land = ids.iter().find(|id| item(&mut store, id).body.contains("ready to land")).unwrap().clone();
     assert!(item(&mut store, &land).urgent);
+    // T-171: the landing item points at the three steps of the landing
+    // (design §7.5): the report first, the user before the lanes.
+    let land_body = item(&mut store, &land).body.clone();
+    assert!(land_body.contains("Run `gear report voyage`"), "{land_body}");
+    assert!(land_body.contains("Review it with the user first"), "{land_body}");
+    assert!(land_body.contains("Only then ask about reclaiming the lanes"), "{land_body}");
+    assert!(land_body.contains("station <id>: land"), "{land_body}");
     apply(&mut store, &format!("- station {land}: land"), "land", T0 + 7300).unwrap();
     assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
     assert!(check(&mut store, 14400).is_empty(), "landed voyages do not keep producing time stations");
@@ -210,7 +220,11 @@ fn invalid_station_decisions_and_mixed_replies_are_atomic() {
 #[test]
 fn unknown_eta_keeps_task_stations_and_unknown_measurements_honest() {
     let mut store = world("soon", 5);
-    assert!(check(&mut store, 3600).is_empty());
+    // An unknown eta rings no eta station; the course station (row B10) does
+    // not need one: the voyage time is known.
+    let ids = check(&mut store, 3600);
+    assert_eq!(ids.len(), 1);
+    assert!(!item(&mut store, &ids[0]).body.contains("% eta"), "{}", item(&mut store, &ids[0]).body);
     // Legacy completions may have no attempt timestamps.
     store.write(|tx| {
         for n in 1..=3 {
@@ -224,5 +238,48 @@ fn unknown_eta_keeps_task_stations_and_unknown_measurements_honest() {
     assert_eq!(ids.len(), 1);
     let body = item(&mut store, &ids[0]).body;
     assert!(body.contains("pace - · projected finish -"), "{body}");
-    assert!(body.contains("[3 done]"));
+    assert!(body.contains("3 done"));
+}
+
+/// Design §10.7 row B10: besides the 25/50/75% stations, a course station
+/// every 60 min of voyage time. Its text gives elapsed / eta, the time left,
+/// the per-lane projection and the lane that sets it, and the tasks left; it
+/// is urgent when the projected finish is past the eta; it is answered in
+/// `# Decisions` like any station.
+#[test]
+fn a_course_station_every_hour_answers_like_any_station() {
+    let mut store = world("12h", 5);
+    for n in 1..=2 { finish(&mut store, n); }
+    assert!(check(&mut store, 3599).is_empty(), "no station before the first hour");
+    let first = check(&mut store, 3600);
+    assert_eq!(first.len(), 1, "one station at 60 min");
+    let message = item(&mut store, &first[0]);
+    let body = message.body.clone();
+    assert!(body.contains("60 min"), "{body}");
+    assert!(body.contains("elapsed 60m / eta 12h"), "{body}");
+    assert!(body.contains("time left 660m"), "{body}");
+    assert!(body.contains("lanes heat 200m"), "{body}");
+    assert!(body.contains("slowest lane heat 200m"), "{body}");
+    assert!(body.contains("tasks left 3 (100m)"), "{body}");
+    assert!(!message.urgent, "the projection (240m) is inside the eta (12h)");
+    assert!(check(&mut store, 3601).is_empty(), "one station per hour");
+    let second = check(&mut store, 7200);
+    assert_eq!(second.len(), 1, "one station at 120 min");
+    assert!(item(&mut store, &second[0]).body.contains("120 min"));
+    // Answered in `# Decisions` like any station.
+    let decision = format!("- station {}: time-box keep the core", first[0]);
+    apply(&mut store, &decision, "course", T0 + 7201).unwrap();
+    assert_eq!(item(&mut store, &first[0]).state, MsgState::Resolved);
+    assert_eq!(item(&mut store, &second[0]).state, MsgState::Open, "names exactly one item");
+}
+
+#[test]
+fn a_course_station_is_urgent_when_the_projection_is_past_the_eta() {
+    let mut store = world("1h", 5);
+    for n in 1..=3 { finish(&mut store, n); }
+    let ids = check(&mut store, 3600);
+    assert_eq!(ids.len(), 1);
+    let message = item(&mut store, &ids[0]);
+    assert!(message.body.contains("projected finish 240m from departure"), "{}", message.body);
+    assert!(message.urgent, "the projected finish (240m) is past the eta (1h)");
 }

@@ -626,7 +626,7 @@ pub fn confirm_pending(
     budget: i64,
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
-    confirm_pending_with(store, project, budget, DEFAULT_DELIVERY_GRACE_S, now)
+    confirm_pending_with(store, project, budget, DEFAULT_DELIVERY_GRACE_S, &[], now)
 }
 
 /// Settle Submitted/Unknown doorbell ops using ViewRecords: an op is Confirmed
@@ -642,12 +642,19 @@ pub fn confirm_pending(
 /// op.attempt`; on confirmation an attempt still in Delivered goes through
 /// `gear_app::tasks::on_delivery_confirmed` in the same transaction. Budget and
 /// flagging as for doorbells.
+/// `working` names the seats whose agent Herdr reports **working** this tick
+/// (T-213): a doorbell that reached a working agent is queued behind its turn,
+/// which is not a stall — such a doorbell spends no check budget, so the
+/// budget counts only the checks made while the agent is idle or done. A
+/// delivery keeps its wall-clock window: a working seat is not spared the
+/// confirmation window.
 /// Returns (confirmed op ids, flagged seat ids).
 pub fn confirm_pending_with(
     store: &mut Store,
     project: &str,
     budget: i64,
     grace_s: i64,
+    working: &[String],
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
     // The seats whose screen shows a provider limit right now (T-15): their
@@ -743,6 +750,14 @@ pub fn confirm_pending_with(
                 // budget is not spent and it is not flagged (T-15: a quota
                 // turn is not "no progress").
                 if on_quota.contains(&op.seat) {
+                    continue;
+                }
+                // A doorbell that reached a working agent (T-213) is not a
+                // stall: the agent is in the middle of a build or a suite and
+                // the text waits in the pane behind its turn. Its check
+                // budget is not spent, so the budget counts only the checks
+                // made while the agent is idle or done.
+                if op.kind == OpKind::Doorbell && working.contains(&op.seat) {
                     continue;
                 }
                 // No evidence yet: the op waits for the next round.
