@@ -377,7 +377,7 @@ fn the_first_failure_waits_for_the_retry_with_the_default_window() {
     let mut h = FakeHerdr::new();
     h.add_agent("w1:p1", "codex", AgentStatus::Idle);
     h.add_agent(LANE, "opencode", AgentStatus::Idle);
-    let mut cfg = EngineCfg {
+    let cfg = EngineCfg {
         profiles: gear_herdr::builtins(),
         cooldown_s: 0,
         delivery_grace_s: 180,
