@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod frame;
 pub mod graph;
 pub mod idle;
 mod screen;
@@ -25,10 +26,13 @@ use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store, Tx};
+
+use crate::frame::Tab;
+use crate::idle::IdleReason;
 use gear_herdr::{AgentInfo, AgentStatus, HerdrRead};
 
 pub use deps::DepNode;
-pub use screen::{Keys, Terminal};
+pub use screen::{Event, Keys, Terminal};
 
 /// How long a frame stays on the screen before the board redraws it.
 pub const REFRESH: Duration = Duration::from_secs(2);
@@ -92,7 +96,7 @@ impl Default for Options {
 }
 
 /// The board: the plan of every project that is shown.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Board {
     /// The engine's liveness; the board warns only when it is down.
     pub engine: EngineState,
@@ -101,7 +105,7 @@ pub struct Board {
 }
 
 /// The plan of one project.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProjectBoard {
     /// The same voyage measurements shown first on the captain home page.
     pub voyages: Vec<voyage::VoyageReport>,
@@ -126,6 +130,8 @@ pub struct ProjectBoard {
     /// page shows them, because a delivery that is not confirmed is a lane
     /// that may not have started.
     pub unconfirmed_deliveries: usize,
+    /// The quota readings of the providers (§9.1).
+    pub quota: Vec<QuotaReading>,
 }
 
 /// A captain quota pause, as shown to the user.
@@ -174,6 +180,33 @@ pub struct LaneBoard {
     /// engine recorded and the plan line that acts on it — instead of an
     /// `agent unknown` nobody can do anything with (trial G02, G04).
     pub down: Option<DownSeat>,
+    /// Why the lane is idle (design §8.2); None while it works.
+    pub idle: Option<IdleReason>,
+    /// The text of the reason (§8.2).
+    pub idle_text: Option<String>,
+    /// The tasks the lane has finished.
+    pub done_count: usize,
+    /// The tasks the lane still has.
+    pub left_count: usize,
+    /// The minutes of estimate the lane has left.
+    pub left_min: i64,
+}
+
+/// A quota reading of a provider (§9.1): the windows it reports and when
+/// the reading was taken.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaReading {
+    pub provider: String,
+    pub windows: Vec<QuotaWindow>,
+    pub read_at: Ts,
+}
+
+/// One window of a provider's quota (§9.1).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaWindow {
+    pub name: String,
+    pub used_percent: f64,
+    pub resets_at: Option<Ts>,
 }
 
 /// A seat that is not running, what it said about it, and the way back.
@@ -193,6 +226,14 @@ pub struct DownSeat {
 pub struct TaskBoard {
     pub id: String,
     pub state: TaskState,
+    /// The goal of the task (its title in the frame).
+    pub title: String,
+    /// The estimate of the task in minutes.
+    pub est_min: Option<i64>,
+    /// The time the task took, in minutes.
+    pub actual_min: Option<i64>,
+    /// How many rounds the task had.
+    pub rounds: usize,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -308,6 +349,11 @@ pub fn project_with_agents(
             tasks: Vec::new(),
             rework: Rework::default(),
             down: down_seat(seat),
+            idle: None,
+            idle_text: None,
+            done_count: 0,
+            left_count: 0,
+            left_min: 0,
         });
     }
 
@@ -328,7 +374,17 @@ pub fn project_with_agents(
         if retired.contains(name.as_str()) {
             continue;
         }
-        let line = TaskBoard { id: task.id.clone(), state: task.state };
+        let line = TaskBoard {
+            id: task.id.clone(),
+            state: task.state,
+            title: tx
+                .get_contract(project, &task.id, task.contract_version)?
+                .map(|contract| contract.goal)
+                .unwrap_or_default(),
+            est_min: task.estimate_min,
+            actual_min: actual_min_of(tx, project, &task.id, now)?,
+            rounds: tx.attempts_of_task(project, &task.id)?.len(),
+        };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
             None => lanes.push(LaneBoard {
@@ -337,6 +393,11 @@ pub fn project_with_agents(
                 tasks: vec![line],
                 rework: Rework::default(),
                 down: None,
+                idle: None,
+                idle_text: None,
+                done_count: 0,
+                left_count: 0,
+                left_min: 0,
             }),
         }
     }
@@ -398,6 +459,29 @@ pub fn project_with_agents(
 
     // The open tasks as a dependency tree (the other view of the plan).
     let deps = deps::tree(&tasks);
+
+    // Why each lane is idle (design §8.2) and what it has left.
+    for lane in &mut lanes {
+        let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
+        lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
+        lane.idle = reason;
+        lane.done_count = lane
+            .tasks
+            .iter()
+            .filter(|task| task.state == TaskState::Done)
+            .count();
+        lane.left_count = lane
+            .tasks
+            .iter()
+            .filter(|task| !task.state.is_terminal())
+            .count();
+        lane.left_min = lane
+            .tasks
+            .iter()
+            .filter(|task| !task.state.is_terminal())
+            .filter_map(|task| task.est_min)
+            .sum();
+    }
 
     // The work as a graph (design §8.1).
     let graph = graph::tasks(tx, project, now)?;
@@ -473,6 +557,7 @@ pub fn project_with_agents(
         deps,
         graph,
         graph_lanes,
+        quota: quota_readings(tx)?,
         waiting,
         temps,
         unconfirmed_deliveries,
@@ -669,6 +754,66 @@ fn dep_line(node: &DepNode) -> String {
     line
 }
 
+/// The minutes a task took: from its first attempt to its merge, or until
+/// now when it is not merged yet.
+fn actual_min_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    now: Ts,
+) -> GearResult<Option<i64>> {
+    let times = tx.attempt_times_of_task(project, task)?;
+    let start = times.iter().filter_map(|(_, times)| times.started).min();
+    let merged = times.iter().filter_map(|(_, times)| times.merged).max();
+    let end = merged.or(Some(now));
+    Ok(match (start, end) {
+        (Some(start), Some(end)) if end >= start => Some((end - start) / 60),
+        _ => None,
+    })
+}
+
+/// The quota readings of the providers (§9.1): the meta keys
+/// `quota.reading.<provider>`.
+fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
+    let mut readings = Vec::new();
+    for key in tx.meta_keys_with_prefix("quota.reading.")? {
+        let Some(raw) = tx.get_meta(&key)? else { continue };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let mut windows = Vec::new();
+        for window in value
+            .get("windows")
+            .and_then(serde_json::Value::as_array)
+            .unwrap_or(&Vec::new())
+        {
+            let Some(name) = window.get("name").and_then(serde_json::Value::as_str) else { continue };
+            windows.push(QuotaWindow {
+                name: name.to_string(),
+                used_percent: window
+                    .get("used_percent")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0),
+                resets_at: window.get("resets_at").and_then(serde_json::Value::as_i64),
+            });
+        }
+        if windows.is_empty() {
+            continue;
+        }
+        readings.push(QuotaReading {
+            provider: value
+                .get("provider")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
+                .to_string(),
+            windows,
+            read_at: value
+                .get("read_at")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        });
+    }
+    Ok(readings)
+}
+
 /// The line about the captain's inbox.
 fn waiting_line(waiting: &Waiting) -> String {
     let items = match waiting.count {
@@ -811,9 +956,9 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 }
 
 /// The frames over injected keys: the board is redrawn every
-/// [`Options::refresh`], and `q` leaves it.
-/// The frames over injected keys: the board is redrawn every
-/// [`Options::refresh`], `d` toggles the view, and `q` leaves.
+/// [`Options::refresh`], `q` leaves it, the arrows and the tab key change the
+/// view, the numbers pick a view, the up and down keys move the selection and
+/// `Enter` opens the panel of the selected row.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -821,12 +966,14 @@ pub fn run_with(
     keys: &mut dyn Keys,
     mut herdr: Option<&mut dyn HerdrRead>,
 ) -> GearResult<()> {
-    let mut view = opts.view;
+    let mut tab = tab_of(opts.view);
+    let mut selected = 0usize;
+    let mut panel: Option<Vec<String>> = None;
     let mut first = true;
     loop {
         let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
-        let text = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
-            Ok(board) => render(&board, view),
+        let board = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+            Ok(board) => board,
             Err(e) => {
                 // The first frame decides whether the board can start at all.
                 if first {
@@ -834,9 +981,21 @@ pub fn run_with(
                 }
                 // A frame that cannot be read is shown as the failure it is:
                 // an observation failure is not an all-clear (17 §5).
-                format!("GEAR board\n\n! the plan could not be read: {}: {}", e.code, e.detail)
+                let text = format!(
+                    "GEAR board\n\n! the plan could not be read: {}: {}",
+                    e.code, e.detail
+                );
+                screen::draw(out, &text).map_err(write_error)?;
+                let deadline = std::time::Instant::now() + opts.refresh;
+                let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
+                continue;
             }
         };
+        // The selection never leaves the rows of the view (F4): a view that
+        // shrank, or a key pressed at its end, does not lose the selection.
+        let rows = frame::view(&board, tab, selected).rows.len();
+        selected = selected.min(rows.saturating_sub(1));
+        let text = frame::frame(&board, tab, selected, panel.as_deref(), keys.size());
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -845,25 +1004,116 @@ pub fn run_with(
             if now >= deadline {
                 break;
             }
-            if let Some(key) = keys.next_key(deadline - now) {
-                if is_quit(key) {
-                    return Ok(());
-                }
-                if key == 'd' {
-                    // The other view, drawn at once: the key does not wait
-                    // for the next tick.
-                    view = view.toggled();
+            let Some(event) = keys.next_event(deadline - now) else { continue };
+            if panel.is_some() {
+                // Any key closes the panel (the prototype): the board's own
+                // keys come after it.
+                panel = None;
+                break;
+            }
+            match event {
+                Event::Key('q') | Event::Key('Q') | Event::Key('\u{3}') => return Ok(()),
+                Event::Right => {
+                    tab = tab.next();
+                    selected = 0;
+                    panel = None;
                     break;
                 }
+                Event::Left => {
+                    tab = tab.previous();
+                    selected = 0;
+                    panel = None;
+                    break;
+                }
+                Event::Key('\t') => {
+                    tab = tab.next();
+                    selected = 0;
+                    panel = None;
+                    break;
+                }
+                Event::BackTab => {
+                    tab = tab.previous();
+                    selected = 0;
+                    panel = None;
+                    break;
+                }
+                Event::Key(character) if character.is_ascii_digit() => {
+                    if let Some(picked) = Tab::of_number(character as u8 - b'0') {
+                        tab = picked;
+                        selected = 0;
+                        panel = None;
+                        break;
+                    }
+                }
+                Event::Up | Event::Key('k') => {
+                    selected = selected.saturating_sub(1);
+                    panel = None;
+                    break;
+                }
+                Event::Down | Event::Key('j') => {
+                    selected = (selected + 1).min(rows.saturating_sub(1));
+                    panel = None;
+                    break;
+                }
+                Event::Key('\r') | Event::Key('\n') => {
+                    panel = open_panel(&board, store, tab, selected)?;
+                    break;
+                }
+                Event::Mouse { button: 0, x, y } => {
+                    // A click on the tab row picks a view; a click on a row of
+                    // the view picks that row. The rows are the ones the
+                    // frame draws: the tabs on their own row, the data below
+                    // the heading.
+                    if y == frame::TAB_ROW as u16 + 1 {
+                        if let Some(picked) = frame::tab_at(x) {
+                            tab = picked;
+                            selected = 0;
+                            panel = None;
+                            break;
+                        }
+                    } else if y > frame::FIRST_ROW as u16 {
+                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize;
+                        // A click outside the rows of the view is ignored.
+                        if index < rows {
+                            selected = index;
+                            panel = None;
+                            break;
+                        }
+                    }
+                }
+                Event::Key(_) | Event::Mouse { .. } => {}
             }
         }
     }
 }
 
-/// `q` leaves the board. Ctrl-C leaves it too: in raw mode there is no
-/// SIGINT, so the key itself has to end the view.
-fn is_quit(key: char) -> bool {
-    key == 'q' || key == 'Q' || key == '\u{3}'
+/// The tab the board starts in: the old views of the board map to the tabs of
+/// the new one (the lanes are the first view, the dependencies are the graph).
+fn tab_of(view: View) -> frame::Tab {
+    match view {
+        View::Deps | View::Graph => frame::Tab::Graph,
+        View::Lanes => frame::Tab::Now,
+    }
+}
+
+/// The panel of the selected row: the lane's work in the first view, the
+/// rounds of the task in the graph.
+fn open_panel(
+    board: &Board,
+    store: &mut Store,
+    tab: frame::Tab,
+    selected: usize,
+) -> GearResult<Option<Vec<String>>> {
+    let Some(project) = board.projects.first() else { return Ok(None) };
+    match tab {
+        frame::Tab::Now => Ok(project.lanes.get(selected).map(frame::lane_panel)),
+        frame::Tab::Graph => {
+            let Some(task) = project.graph.get(selected) else { return Ok(None) };
+            let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;
+            Ok(Some(rows))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Print the board once: the JSON or the text, depending on the options.
@@ -871,7 +1121,8 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
     if opts.json {
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
-        writeln!(out, "{}", render(board, opts.view)).map_err(write_error)?;
+        let size = (screen::DEFAULT_WIDTH, screen::DEFAULT_ROWS);
+        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }

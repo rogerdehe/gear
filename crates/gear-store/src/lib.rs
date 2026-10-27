@@ -926,6 +926,28 @@ impl<'s> Tx<'s> {
         Ok(value)
     }
 
+    /// The meta keys that start with `prefix`, in order.
+    ///
+    /// The board finds the quota readings of the providers this way (§9.1):
+    /// they live in `meta` under `quota.reading.<provider>`.
+    pub fn meta_keys_with_prefix(&self, prefix: &str) -> GearResult<Vec<String>> {
+        let mut stmt = self
+            .tx
+            .prepare("SELECT key FROM meta ORDER BY key")
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(map_sqlite)?;
+        let mut keys = Vec::new();
+        for row in rows {
+            let key = row.map_err(map_sqlite)?;
+            if key.starts_with(prefix) {
+                keys.push(key);
+            }
+        }
+        Ok(keys)
+    }
+
     pub fn set_meta(&self, key: &str, value: &str) -> GearResult<()> {
         self.tx
             .execute(

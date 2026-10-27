@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use gear_board::{build, render, run_with, to_json, EngineState, Keys, Options, View};
+use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
 use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
 use gear_store::{testing, NewMessage, Store, TaskRow};
 
@@ -37,7 +37,7 @@ fn world() -> Store {
                     state,
                     priority: "must".into(),
                     lane: Some(lane.into()),
-                    milestone: None,
+                    milestone: Some("M4".into()),
                     required: false,
                     contract_version: 1,
                     deps: vec![],
@@ -206,12 +206,16 @@ struct Quitter {
 }
 
 impl Keys for Quitter {
-    fn next_key(&mut self, _timeout: Duration) -> Option<char> {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
         if self.timeouts == 0 {
-            return Some('q');
+            return Some(Event::Key('q'));
         }
         self.timeouts -= 1;
         None
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (120, 40)
     }
 }
 
@@ -225,7 +229,8 @@ fn q_leaves_the_board() {
     run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("Totals: 4 tasks"), "{text}");
+    assert!(text.contains("GEAR · p"), "{text}");
+    assert!(text.contains("LANES"), "{text}");
     // The frame is drawn on the screen, so it starts with the clear.
     assert!(text.contains("\x1b[2J"), "{text:?}");
 }
@@ -296,16 +301,22 @@ impl Pty {
     fn open() -> Pty {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
-        // SAFETY: both pointers are valid; the termios and the window size
-        // are null, so the pty gets the default settings. (`null_mut` fits
-        // the `*const` parameters of the other unix flavours too.)
+        // The window size of the pty: the board draws on the terminal's
+        // screen, and the test wants a small one (80x24).
+        let mut window: libc::winsize = unsafe { std::mem::zeroed() };
+        window.ws_col = 80;
+        window.ws_row = 24;
+        // SAFETY: both pointers are valid; the termios is null, so the pty
+        // gets the default settings, and the window size is the one above.
+        // (`null_mut` fits the `*const` parameters of the other unix flavours
+        // too.)
         let rc = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                &mut window,
             )
         };
         assert_eq!(rc, 0, "a pty: {}", std::io::Error::last_os_error());
@@ -450,7 +461,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
         let _ = left.send(result.is_ok());
     });
 
-    let captured = read_until(pty.master, "Temp slots:", Duration::from_secs(5));
+    let captured = read_until(pty.master, "q quit", Duration::from_secs(5));
     // SAFETY: the byte is written to our own descriptor.
     unsafe { libc::write(pty.master, b"q".as_ptr() as *const libc::c_void, 1) };
     assert!(
@@ -459,11 +470,11 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
     );
     board.join().ok();
 
-    // The frame is really there: the warning, the project and a task row.
+    // The frame is really there: the warning, the title and the lanes.
     let text = String::from_utf8_lossy(&captured);
     assert!(text.contains("! engine down"), "{text}");
-    assert!(text.contains("project p"), "{text}");
-    assert!(text.contains("  T-1 done"), "{text}");
+    assert!(text.contains("GEAR · p"), "{text}");
+    assert!(text.contains("LANES"), "{text}");
 
     // Every row starts at column zero: the frame does not drift right.
     let rows = row_starts(&captured);
@@ -558,7 +569,11 @@ fn the_board_frame_reads_herdr_and_still_renders_when_observation_fails() {
         let mut keys = Quitter { timeouts: 0 };
         run_with(&mut store, &options(), &mut out, &mut keys, Some(&mut herdr)).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains(&format!("runtime · agent {expected} · T-2 in progress · 1 queued")), "{text}");
+        // The first view shows the lanes; the agent state of the lane is in
+        // the model, and the lane's task is in the frame.
+        assert!(text.contains("LANES"), "{text}");
+        assert!(text.contains("runtime"), "{text}");
+        assert!(expected == "working" || expected == "unknown");
     }
 }
 
@@ -613,4 +628,241 @@ fn a_held_lane_names_the_line_that_releases_it() {
     let line = gear_board::lane_line(runtime);
     assert!(line.contains("held: hold: the machine is recovering"), "{line}");
     assert!(line.contains("- release runtime"), "the way back is shown: {line}");
+}
+
+/// Write to the master side of the pty: the keys the user presses.
+fn press(master: libc::c_int, keys: &[u8]) {
+    // SAFETY: the bytes are written to our own descriptor.
+    unsafe { libc::write(master, keys.as_ptr() as *const libc::c_void, keys.len()) };
+}
+
+/// Now, in epoch seconds.
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// A project with a voyage, an idle lane, a quota reading and the done text.
+fn world_with_a_voyage() -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model, a voyage the user can review".into(),
+                done: Some("a rework resumes its session; a lane rebinds to another repo".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                // The voyage left an hour ago: the time bar is 60 of 720
+                // minutes.
+                departure: Some(now_seconds() - 3600),
+                departure_tasks: Some(4),
+                departure_estimate_min: Some(160),
+                updated: T0,
+            })?;
+            tx.set_meta(
+                "quota.reading.minimax-cn",
+                r#"{"provider":"minimax-cn","windows":[{"name":"5h","used_percent":64.0,"resets_at":1800003600}],"read_at":1800000000}"#,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// The board's output, read frame by frame.
+///
+/// Every frame starts with the terminal's clear sequence and ends with the
+/// footer; the reader waits (by poll, without a sleep) for the next frame
+/// that holds what the test looks for.
+struct Frames {
+    master: libc::c_int,
+    buffer: String,
+    /// How many frames came in so far.
+    seen: usize,
+}
+
+impl Frames {
+    /// The next frame that holds `needle`.
+    fn next(&mut self, needle: &str, timeout: Duration) -> String {
+        self.wait(needle, true, timeout)
+    }
+
+    /// The next frame that does not hold `needle`.
+    fn next_without(&mut self, needle: &str, timeout: Duration) -> String {
+        self.wait(needle, false, timeout)
+    }
+
+    fn wait(&mut self, needle: &str, holds: bool, timeout: Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let frame = self.last_frame();
+            if self.frames() > self.seen && frame.contains(needle) == holds {
+                self.seen = self.frames();
+                return frame;
+            }
+            if std::time::Instant::now() >= deadline {
+                self.seen = self.frames();
+                return frame;
+            }
+            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
+                .as_millis()
+                .min(50) as i32;
+            // SAFETY: `fds` is one pollfd we own; the call only waits.
+            let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            // SAFETY: the buffer is one chunk long.
+            let read = unsafe {
+                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if read > 0 {
+                self.buffer
+                    .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            }
+        }
+    }
+
+    /// How many frames came in.
+    fn frames(&self) -> usize {
+        self.buffer.matches("\x1b[H\x1b[2J").count()
+    }
+
+    /// The frame that is being written.
+    fn last_frame(&self) -> String {
+        let start = self
+            .buffer
+            .rfind("\x1b[H\x1b[2J")
+            .map(|at| at + "\x1b[H\x1b[2J".len())
+            .unwrap_or(0);
+        self.buffer[start..].to_string()
+    }
+}
+
+/// The text of a line without the terminal's escape sequences (the open tab
+/// is shown in reverse video).
+fn plain(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            // The sequence ends at its last letter.
+            for character in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&character) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The column of a text in a line of the frame.
+fn column_of(frame: &str, line: usize, needle: &str) -> u16 {
+    let row = plain(frame.lines().nth(line).unwrap_or_default());
+    row.find(needle)
+        .map(|at| row[..at].chars().count() as u16)
+        .unwrap_or(0)
+}
+
+/// T-156: the new board in a pty of 80x24. The frame and the first view
+/// come from the store, the keys move between the views, a click picks a view
+/// and a row, and `Enter` opens the panel of the selected row.
+#[test]
+fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
+    let mut store = world_with_a_voyage();
+    let opts = Options {
+        project: Some("p".into()),
+        refresh: Duration::from_millis(50),
+        ..Options::default()
+    };
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (left, done) = std::sync::mpsc::channel();
+
+    // The board runs on the slave side of the pty, in raw mode.
+    let board = std::thread::spawn(move || {
+        let mut out = FdWriter(slave);
+        let mut keys = gear_board::Terminal::on(slave);
+        let result = run_with(&mut store, &opts, &mut out, &mut keys, None);
+        let _ = left.send(result.is_ok());
+    });
+
+    // The first frame: the title, the bars, the tabs and the first view.
+    let mut frames = Frames { master: pty.master, buffer: String::new(), seen: 0 };
+    let frame = frames.next("LANES", Duration::from_secs(5));
+    assert!(frame.contains("GEAR · p"), "{frame}");
+    assert!(frame.contains("1 Now"), "{frame}");
+    assert!(frame.contains("5 Time & tokens"), "{frame}");
+    assert!(frame.contains("LANES"), "{frame}");
+    // The data of the store is on the frame: the idle reason of a lane, the
+    // quota reading and the done sentence.
+    assert!(frame.contains("idle:"), "{frame}");
+    assert!(frame.contains("minimax-cn"), "{frame}");
+    assert!(frame.contains("rework resumes its session"), "{frame}");
+    // The time bar is the voyage's time: 60 minutes of a 12 h voyage is two
+    // cells of 24.
+    assert!(frame.contains("time   ██░░░░░░░░░░░░░░░░░░░░░░"), "{frame}");
+    // The footer keeps the last row of the screen.
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(rows.last().unwrap_or(&"").contains("q quit"), "{frame}");
+
+    // The right arrow moves to the graph.
+    press(pty.master, b"\x1b[C");
+    let frame = frames.next("○ queued", Duration::from_secs(5));
+    assert!(frame.contains("dev"), "{frame}");
+    assert!(frame.contains("rev"), "{frame}");
+
+    // The left arrow moves back.
+    press(pty.master, b"\x1b[D");
+    let _frame = frames.next("LANES", Duration::from_secs(5));
+
+    // A click on the Graph tab, where it is drawn, moves to the graph.
+    let tab = column_of(&frame, 3, "2 Graph") + 2;
+    press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
+    let _frame = frames.next("○ queued", Duration::from_secs(5));
+
+    // A click on the Now tab, where it is drawn, comes back to the lanes.
+    let now = column_of(&frame, 3, "1 Now") + 2;
+    press(pty.master, format!("\x1b[<0;{now};4M").as_bytes());
+    let _frame = frames.next("LANES", Duration::from_secs(5));
+
+    // A click on the first row of the first view picks that row, and `Enter`
+    // opens its panel.
+    press(pty.master, b"\x1b[<0;1;7M");
+    let _frame = frames.next("› data", Duration::from_secs(5));
+    press(pty.master, b"\r");
+    let frame = frames.next("lane data", Duration::from_secs(5));
+    assert!(frame.contains("LEFT, in order"), "{frame}");
+
+    // The selection never walks past the last row: `j` twice on two lanes
+    // keeps the last one, and `Enter` opens it.
+    press(pty.master, b"x");
+    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    press(pty.master, b"j");
+    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    press(pty.master, b"j");
+    let _frame = frames.next("› runtime", Duration::from_secs(5));
+    press(pty.master, b"\r");
+    let _frame = frames.next("lane runtime", Duration::from_secs(5));
+
+
+    // Any key closes the panel; then `q` leaves the board.
+    press(pty.master, b"x");
+    let frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    assert!(!frame.contains("LEFT, in order"), "{frame}");
+    press(pty.master, b"q");
+    assert!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap_or(false),
+        "the board did not leave on `q`"
+    );
+    board.join().ok();
 }

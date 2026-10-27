@@ -121,7 +121,7 @@ fn add(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     Some(a? + b?)
 }
 
-fn minutes(value: Option<i64>) -> String {
+pub fn minutes(value: Option<i64>) -> String {
     value.map(|v| format!("{v}m")).unwrap_or_else(|| "-".into())
 }
 

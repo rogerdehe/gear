@@ -296,7 +296,7 @@ fn lane_and_stage(tx: &Tx<'_>, project: &str, task: &str) -> String {
 }
 
 /// The time of day, as the user's clock sees it.
-fn clock(until: Ts) -> String {
+pub fn clock(until: Ts) -> String {
     let seconds = until as libc::time_t;
     let mut parts: libc::tm = unsafe { std::mem::zeroed() };
     let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
