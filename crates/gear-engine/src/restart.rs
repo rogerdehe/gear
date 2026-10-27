@@ -870,6 +870,10 @@ fn reserve(
         })?;
         let generation = row.generation + 1;
         tx.set_seat_generation(&seat.id, generation)?;
+        // T-217: the attempt the seat is working on moves to the new
+        // generation with it, so the lane can still hand the attempt in after
+        // the restart.
+        gear_app::tasks::carry_attempt_generation(tx, &seat.id, row.generation, generation, now)?;
         tx.set_seat_profile(&seat.id, profile_name)?;
         tx.insert_binding(&BindingRow {
             seat: seat.id.clone(),
@@ -1219,6 +1223,20 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let before=herdr.calls.len();
         assert_eq!(crate::session::prepare_lane(&mut store,&mut herdr,&cfg,&seat,"T-1",1,T+3).unwrap(),crate::session::Prep::Ready);
         assert!(!herdr.calls[before..].iter().any(|c|matches!(c,Call::Prompt {..}|Call::SendKeys {..}|Call::AgentStart {..}|Call::PaneType {..})), "the completed resume is not repeated");
+    }
+    #[test]
+    fn a_restart_carries_the_attempt_to_the_new_generation() {
+        // T-217: the lane's attempt moves to the generation the restart
+        // reserves, so the lane can still hand it in.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.generation,2);
+        let attempt=store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
+        assert_eq!(attempt.generation,2,"the attempt moves with the seat");
     }
     #[test]
     fn opencode_resume_reuses_session_and_switches_its_model() {

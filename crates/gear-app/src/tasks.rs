@@ -101,6 +101,42 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
     Ok(row)
 }
 
+/// The seat's generation advances (a restart, a retry, a session step): the
+/// attempt the seat is working on — `Delivered` or `Started` — moves to the
+/// new generation with the seat, so the lane can still hand it in (T-217).
+///
+/// A lane that is restarted while its attempt waits for the lane moves on
+/// with the attempt; without this the hand-in of the new generation is
+/// refused ("not owned by this seat and generation") and the attempt is stuck
+/// until a human moves it by hand.
+///
+/// Only the seat's own attempts move, and only the ones that are open in the
+/// older generation: an attempt of another seat, or one that is already
+/// settled, is untouched.
+pub fn carry_attempt_generation(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    from_generation: i64,
+    to_generation: i64,
+    now: Ts,
+) -> GearResult<()> {
+    if from_generation == to_generation {
+        return Ok(());
+    }
+    for mut attempt in tx.in_progress_attempts_of_seat(seat_id)? {
+        if attempt.generation != from_generation {
+            continue;
+        }
+        if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started) {
+            continue;
+        }
+        attempt.generation = to_generation;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+    }
+    Ok(())
+}
+
 /// Delivery confirmed: attempt Delivered → Started, task Ready → Running.
 pub fn on_delivery_confirmed(tx: &Tx<'_>, project: &str, task: &str, n: i64, now: Ts) -> GearResult<()> {
     let mut attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| {
