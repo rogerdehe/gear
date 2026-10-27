@@ -239,6 +239,29 @@ fn intended_doorbell_rechecks_eligibility_when_status_changes() {
         gear_engine::ops::execute_intended(&mut w.store,&mut w.herdr,"p",T0+3).unwrap();
         assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),usize::from(allowed),"{status:?} urgent={urgent}");
         let ops=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
-        assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,if allowed {OpState::Submitted} else {OpState::Intended});
+        assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,if allowed {OpState::Submitted} else {OpState::Failed});
     }
+}
+
+
+#[test]
+fn refused_nonurgent_sender_doorbell_cannot_starve_a_later_urgent_one() {
+    let mut w=world(AgentStatus::Unknown);
+    w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Unknown,"p-heat");
+    w.store.write(|tx| { let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Draft; tx.update_task(&task) }).unwrap();
+    let normal=captain_message(&mut w,MsgKind::Instruction,false,T0+1);
+    assert!(gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&normal,false,T0+2).unwrap().is_none());
+    let old=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
+    assert_eq!(old.len(),1); assert_eq!(old[0].state,OpState::Failed);
+    assert!(w.store.read(|tx|tx.slot_ops("p:heat")).unwrap().is_empty());
+    let urgent=captain_message(&mut w,MsgKind::Instruction,true,T0+3);
+    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+10).unwrap();
+    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+20).unwrap();
+    let prompts=w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(),1,"{prompts:?}"); assert!(prompts[0].contains(&urgent)); assert!(!prompts[0].contains(&normal));
+    w.store.write(|tx|tx.insert_view(&gear_store::ViewRecord {project:"p".into(),seat:"p:heat".into(),generation:1,ts:T0+21,shown_msgs:vec![urgent.clone()],shown_ops:vec![],shown_task:None,shown_attempt:None,shown_contract:None})).unwrap();
+    w.herdr.set_status(LANE_PANE,AgentStatus::Done);
+    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+30).unwrap();
+    let prompts=w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(),2,"{prompts:?}"); assert!(prompts[1].contains(&normal));
 }
