@@ -195,23 +195,29 @@ fn cancel_start(
     now: Ts,
 ) -> Result<bool, String> {
     // 1. nothing goes to a reviewer that has no job: the ops of the seat that
-    //    are still live are voided.
+    //    are still live for that job are voided (the captain's decision of
+    //    M-2603: the `Intended` and the `Submitted` ones — an op in flight
+    //    ends on its own).
+    let job = seat.task_id.clone();
     let live = store
         .read(|tx| tx.slot_ops(&seat.id))
         .map_err(|e| e.detail)?;
-    if !live.is_empty() {
+    for op in live {
+        if !matches!(op.state, OpState::Intended | OpState::Submitted) {
+            continue;
+        }
+        if op.task.as_deref() != job.as_deref() {
+            continue;
+        }
         store
             .write(|tx| {
-                for op in tx.slot_ops(&seat.id)? {
-                    tx.set_op_state(
-                        project,
-                        &op.id,
-                        OpState::Void,
-                        Some("the review it was started for is gone"),
-                        now,
-                    )?;
-                }
-                Ok(())
+                tx.set_op_state(
+                    project,
+                    &op.id,
+                    OpState::Void,
+                    Some("the review it was started for is gone"),
+                    now,
+                )
             })
             .map_err(|e| e.detail)?;
     }
@@ -1288,8 +1294,35 @@ profile = "codex"
                     plan_version: None,
                     payload: serde_json::json!({ "text": "the packet" }),
                     created: T0,
-                })
+                })?;
+                // The packet of this job was sent: it must not confirm
+                // anything either.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:r-1".into(),
+                    generation: 1,
+                    kind: OpKind::Doorbell,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: T0,
+                })?;
+                Ok(())
             })
+            .unwrap();
+        // The doorbell op is sent, the deliver op is not.
+        let deliver = store
+            .read(|tx| tx.last_op("p:r-1", OpKind::Deliver))
+            .unwrap()
+            .unwrap();
+        let doorbell = store
+            .read(|tx| tx.last_op("p:r-1", OpKind::Doorbell))
+            .unwrap()
+            .unwrap();
+        store
+            .write(|tx| tx.set_op_state("p", &doorbell.id, OpState::Submitted, None, T0))
             .unwrap();
         herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
 
@@ -1300,8 +1333,10 @@ profile = "codex"
         assert_eq!(seat.state, SeatState::Released, "the seat is free");
         assert_eq!(exits(&herdr), 1, "its pane is closed");
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
-        let op = store.read(|tx| tx.last_op("p:r-1", OpKind::Deliver)).unwrap().unwrap();
+        let op = store.read(|tx| tx.get_op("p", &deliver.id)).unwrap().unwrap();
         assert_eq!(op.state, OpState::Void, "its start op is voided");
+        let op = store.read(|tx| tx.get_op("p", &doorbell.id)).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "the op it sent is voided too");
         let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
     }
