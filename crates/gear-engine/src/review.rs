@@ -441,7 +441,8 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
             let recorded = store.read(|tx| tx.get_meta(&repo_path_key(&seat.id, repo)))?;
             if !recorded.as_deref().is_some_and(|recorded| same_path(recorded, holder)) { continue }
             let job_active = store.read(|tx| {
-                Ok(match seat.task_id.as_deref() {
+                let pending = tx.get_meta(&pending_review_key(&seat.id))?;
+                Ok(match seat.task_id.as_deref().or(pending.as_deref().filter(|id| !id.is_empty())) {
                     Some(id) => {
                         let verifying = tx.get_task(project, id)?.is_some_and(|t| t.state == TaskState::Verifying);
                         let attempt = tx.attempts_of_task(project, id)?.into_iter().last();
@@ -1987,7 +1988,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate };
         store.write(|tx| {
             testing::seed_active_seat(tx, "p", "review-9", SeatRole::Temp, "w9:p9", "codex", T0)?;
-            tx.set_seat_task("p:review-9", "T-1")?;
+            tx.set_meta(&pending_review_key("p:review-9"), "T-1")?;
             tx.set_meta(&repo_path_key("p:review-9", work.to_str().unwrap()), old.to_str().unwrap())
         }).unwrap();
         herdr.add_agent("w9:p9", "codex", gear_herdr::AgentStatus::Working);
