@@ -328,8 +328,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 report.flagged.push(seat.id.clone());
             }
         }
-        // … then the attempts and their deliveries in one write transaction.
-        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
+        // Session setup may take several ticks; no packet goes before Ready.
+        dispatch::recover_open_rounds(store, herdr, cfg, &project, &observed, &planned, now)?;
+        let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
+        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
         // 6. feed: a lane running dry gets one item in the captain's inbox,
@@ -395,7 +397,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
-        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+        let executed = ops::execute_intended(store, herdr, &project, now)?;
+        store.write(|tx| {
+            for (id, state) in &executed {
+                if state != "submitted" { continue; }
+                let Some(op) = tx.get_op(&project, id)? else { continue };
+                if op.kind != gear_model::OpKind::Deliver { continue; }
+                let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+                if seat.role != gear_model::SeatRole::Lane { continue; }
+                if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                    if tx.get_attempt(&project, task, n)?.is_some_and(|a| a.sent_at.is_none()) {
+                        tx.set_attempt_sent(&project, task, n, now)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        report.executed.extend(executed);
 
         // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).
@@ -469,6 +487,30 @@ pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) ->
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
+/// Session preparation owns the pane until its current round is ready.
+fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) -> GearResult<bool> {
+    let seat = &obs.seat;
+    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(false) };
+    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    if let Some(state) = state.filter(|s| s["round"] == identity) {
+        match state["step"].as_str() {
+            Some("failed") => return Ok(false),
+            Some("done") => {},
+            _ => return Ok(true),
+        }
+    }
+    // A round can exist before the runner has written its first step (or when
+    // no profile is available); an unsent assignment still reserves the pane.
+    let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
+    if attempt.state == gear_model::AttemptState::Delivered && attempt.sent_at.is_none() { return Ok(true) }
+    if !matches!(attempt.state, gear_model::AttemptState::Delivered | gear_model::AttemptState::Started | gear_model::AttemptState::Stopped) { return Ok(false) }
+    let expected = crate::session::round_session(tx, &round)?;
+    Ok(expected.is_some_and(|session| obs.presence == observe::Presence::Missing
+        || (obs.presence == observe::Presence::Present && obs.session.as_deref().is_some_and(|current| current != session))))
+}
+
 fn doorbell_inputs(
     tx: &gear_store::Tx<'_>,
     project: &str,
@@ -586,7 +628,7 @@ fn doorbell_inputs(
         if review_question {
             waiting.retain(|item| overrun_questions.contains(&item.id));
         }
-        let slot_busy = !slot_ops.is_empty() && !review_question;
+        let slot_busy = (!slot_ops.is_empty() && !review_question) || session_preparation_pending(tx, seat_obs)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))

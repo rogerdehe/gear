@@ -3543,7 +3543,8 @@ gate = "{project_gate}"
         let done = scratch.root.join("gate-finished");
         let (running, release, gate) =
             held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
-        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, &gate);
+        cfg.profiles.get_mut("opencode").unwrap().new_session.clear();
         merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
         // The worker is in the gate, which stays there until the test says go.
         await_fifo(&running);
