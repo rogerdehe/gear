@@ -65,6 +65,25 @@ impl Repos {
         Repos { _root: root, repo, candidate }
     }
 
+    /// The integration branch moves on: a commit on top of the candidate.
+    fn advance_dev(&self) -> String {
+        git(&self.repo, &["checkout", "-q", "dev"]);
+        std::fs::write(self.repo.join("more.txt"), "more\n").unwrap();
+        git(&self.repo, &["add", "more.txt"]);
+        git(&self.repo, &["commit", "-q", "-m", "more work"]);
+        git(&self.repo, &["push", "-q", "origin", "dev"]);
+        git(&self.repo, &["rev-parse", "HEAD"])
+    }
+
+    /// A commit with the same tree as the candidate but no ancestry: it is not
+    /// the work that landed (contract v3 of T-165).
+    fn unrelated_with_the_same_tree(&self) -> String {
+        git(
+            &self.repo,
+            &["commit-tree", &format!("{}^{{tree}}", self.candidate), "-m", "unrelated"],
+        )
+    }
+
     /// A commit that is not on the integration branch: its tree is nowhere in
     /// `origin/dev`.
     fn other_candidate(&self) -> String {
@@ -168,10 +187,27 @@ fn world(repos: &Repos, candidate: &str) -> Store {
             "ops/reports/T-1.md",
             NOW,
         )?;
-        // T-2 is merged: its merge landed the work.
+        // T-2 is merged: its merge landed the work. The task is Done and its
+        // merge op is confirmed (contract v3 of T-165: both are needed).
         gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, NOW)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, NOW)?;
         gear_app::tasks::submit_result(tx, "p", "T-2", 1, 1, "c2", "ops/reports/T-2.md", NOW)?;
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.state = gear_model::TaskState::Done;
+        tx.update_task(&task)?;
+        let merge = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Merge,
+            task: Some("T-2".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({"branch": "heat/t2", "candidate": "c2"}),
+            created: NOW,
+        })?;
+        tx.set_op_state("p", &merge.id, gear_model::OpState::Confirmed, Some("merged T-2 into dev"), NOW + 10)?;
         tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, NOW + 10)
     })
     .unwrap();
@@ -310,4 +346,97 @@ fn an_attribution_added_after_the_pass_marks_the_merged_time() {
     assert_eq!(by, "T-2");
     let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
     assert_eq!(verdicts.len(), 1, "the replay writes no second verdict");
+}
+
+/// T-205 (the review of T-165, F4): a commit with the same tree as the
+/// candidate, but no ancestry, is not the work that landed: the verdict is
+/// refused.
+#[test]
+fn a_commit_with_the_same_tree_but_no_ancestry_is_refused() {
+    let repos = Repos::new();
+    let unrelated = repos.unrelated_with_the_same_tree();
+    let mut s = world(&repos, &unrelated);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={unrelated} pass evidence=ops/reports/T-1.md integrated-by=T-2\n"
+    );
+
+    let err = run(&mut s, &text, "r1").unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("not in dev"), "{}", err.detail);
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, None, "nothing was settled");
+}
+
+/// T-205 (F4): a candidate that is an ancestor of the integration branch is
+/// accepted, even when the branch has moved on since.
+#[test]
+fn a_candidate_that_is_an_ancestor_of_the_integration_branch_is_accepted() {
+    let repos = Repos::new();
+    let tip = repos.advance_dev();
+    assert_ne!(tip, repos.candidate);
+    let mut s = world(&repos, &repos.candidate);
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={} pass evidence=ops/reports/T-1.md integrated-by=T-2\n",
+        repos.candidate
+    );
+
+    run(&mut s, &text, "r1").unwrap();
+
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+}
+
+/// T-205 (the review of T-165, F5): the named task must be Done. A task
+/// whose merge is confirmed but that is not done yet has landed nothing.
+#[test]
+fn a_pass_naming_a_task_that_is_not_done_is_refused() {
+    let repos = Repos::new();
+    let mut s = world(&repos, &repos.candidate);
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-2")?.unwrap();
+        task.state = gear_model::TaskState::Verifying;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={} pass evidence=ops/reports/T-1.md integrated-by=T-2\n",
+        repos.candidate
+    );
+
+    let err = run(&mut s, &text, "r1").unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("not done"), "{}", err.detail);
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, None, "nothing was settled");
+}
+
+/// T-205 (F5): the named task must have a confirmed merge op. A merge time
+/// without one is a leftover, not a merge.
+#[test]
+fn a_pass_naming_a_done_task_without_a_confirmed_merge_is_refused() {
+    let repos = Repos::new();
+    let mut s = world(&repos, &repos.candidate);
+    // The merge op is not confirmed any more: the merge did not go through.
+    s.write(|tx| {
+        let op = tx
+            .ops_in_state("p", gear_model::OpState::Confirmed)?
+            .into_iter()
+            .find(|op| op.kind == gear_model::OpKind::Merge)
+            .expect("the merge op");
+        tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("the gate said no"), NOW + 11)
+    })
+    .unwrap();
+    let text = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={} pass evidence=ops/reports/T-1.md integrated-by=T-2\n",
+        repos.candidate
+    );
+
+    let err = run(&mut s, &text, "r1").unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("confirmed merge"), "{}", err.detail);
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, None, "nothing was settled");
 }

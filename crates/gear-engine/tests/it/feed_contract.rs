@@ -623,6 +623,25 @@ fn imbalance_world() -> World {
 }
 
 #[test]
+fn a_retired_idle_lane_does_not_open_a_balance_item() {
+    let mut w = imbalance_world();
+    w.store
+        .write(|tx| tx.set_seat_state("p:mast", SeatState::Retired, Some("retired"), T0))
+        .unwrap();
+
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+    assert!(balance_items(&mut w.store).is_empty());
+
+    w.store
+        .write(|tx| tx.set_seat_state("p:mast", SeatState::Active, None, T0 + 2))
+        .unwrap();
+    feed::keep_lanes_fed(&mut w.store, "p", T0 + 3).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
+}
+
+#[test]
 fn an_idle_lane_next_to_a_pile_of_work_gives_one_balance_item() {
     let mut w = imbalance_world();
 

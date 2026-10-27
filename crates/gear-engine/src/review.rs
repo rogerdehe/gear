@@ -2116,8 +2116,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let value = args.iter().find(|s| s.starts_with("developer_instructions=")).unwrap();
         let parsed: toml::Table = toml::from_str(value).unwrap();
         let text = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
-        assert!(text.starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
-        assert_eq!(text, std::fs::read_to_string(dir.path().join("rules/review.md")).unwrap());
+        let path = dir.path().join("rules/review.md");
+        assert!(text.contains(path.to_str().unwrap()), "{text}");
+        assert!(value.len() < 400, "the typed command must stay short: {value}");
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
     }
 
     #[test]
@@ -2347,7 +2349,7 @@ review = [
                     "-c".to_string(),
                     "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
                     "-c".to_string(),
-                    format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md")).unwrap())),
+                    gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy(), "")[0].clone(),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),

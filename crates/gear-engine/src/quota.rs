@@ -1316,10 +1316,13 @@ fn verdict_of(reading: &Reading, now: Ts, reset_h: u32) -> Verdict {
 }
 
 /// The provider part of a model id (`minimax-cn/MiniMax-M3.1-Flash` →
-/// `minimax-cn`): the part before the first slash (§9.1).
-fn provider_of(model: &str) -> Option<String> {
+/// `minimax-cn`): the part before the first slash (§9.1). Providerless
+/// model ids on the Codex CLI use the codex source.
+fn provider_of(model: &str, cli: &str) -> Option<String> {
     let model = model.trim();
-    let (provider, _) = model.split_once('/')?;
+    let Some((provider, _)) = model.split_once('/') else {
+        return (cli == "codex" && !model.is_empty()).then(|| "codex".to_string());
+    };
     let provider = provider.trim();
     if provider.is_empty() {
         None
@@ -1342,7 +1345,11 @@ fn source_of(
     let Some(model) = current_model(store, &seat.id, chain) else {
         return Ok(None);
     };
-    let Some(provider) = provider_of(&model) else {
+    let cli = store
+        .read(|tx| tx.get_binding(&seat.id, seat.generation))?
+        .map(|binding| binding.kind)
+        .unwrap_or_default();
+    let Some(provider) = provider_of(&model, &cli) else {
         return Ok(None);
     };
     Ok(sources
@@ -2284,7 +2291,7 @@ quota_reset_h = 5
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
                 "-c".to_string(),
-                format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/lane.md")).unwrap())),
+                gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/lane.md").to_string_lossy(), "")[0].clone(),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),
@@ -3267,6 +3274,36 @@ quota_reset_h = 5
         assert_eq!(api.calls(), 1, "no read before the window is over");
         tick_source(&mut store, &mut herdr, &api, false, false, T0 + 300);
         assert_eq!(api.calls(), 2, "the next window reads again");
+    }
+
+    #[test]
+    fn provider_mapping_keeps_other_models_unchanged() {
+        assert_eq!(
+            provider_of("minimax-cn/MiniMax-M3.1-Flash", "pi").as_deref(),
+            Some("minimax-cn")
+        );
+        assert_eq!(provider_of("gpt-6.1-terra", "pi"), None);
+        assert_eq!(provider_of("minimax-cn/model", "codex").as_deref(), Some("minimax-cn"));
+    }
+
+    #[test]
+    fn providerless_codex_seat_matches_its_rollout_source() {
+        let mut store = codex_world();
+        let seat = store.read(|tx| tx.get_seat("p:codex-1")).unwrap().unwrap();
+        let config = config(r#"{ model = "gpt-6.1-terra", cli = "codex" }"#, "fallback");
+        let config: ProjectConfig = toml::from_str(&config).unwrap();
+        let source = Source {
+            provider: "codex".into(),
+            reader: QuotaReader::Codex,
+            key_file: String::new(),
+            key_path: String::new(),
+        };
+        let matched = source_of(&[source], &[&config.models.lanes[0]], &mut store, &seat)
+            .unwrap()
+            .expect("codex source matches");
+        let api = FakeQuota::reading(reading_with(10.0, None));
+        read_source(&mut store, &api, &matched, T0 + 10, T0, Some("ses_codex")).unwrap();
+        assert_eq!(api.sessions(), vec![Some("ses_codex".into())]);
     }
 
     /// F4: a codex source needs no key file: the reader is given the session
