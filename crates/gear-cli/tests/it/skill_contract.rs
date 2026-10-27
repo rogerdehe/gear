@@ -79,6 +79,24 @@ fn reference_topics_print_their_file() {
     assert_eq!(stdout(&o), skill_file("references/agents/opencode.md"));
 }
 
+#[test]
+fn m4_commands_and_decision_rules_are_printed_by_the_skill() {
+    let home = scratch::home("skill-m4");
+    for (topic, expected) in [
+        ("main", &["--kind progress", "--left", "--blocker", "--kind blocked", "--on", "--friction"][..]),
+        ("captain", &["gear queue", "gear plan show", "followup-of", "- ★", "gear friction close", "- release <reviewer>"][..]),
+        ("course", &["gear report voyage", "★ decisions", "user: <text>"][..]),
+        ("decompose", &["followup-of: T-<n>", "session"][..]),
+        ("review", &["--friction", "exceeds its budget"][..]),
+    ] {
+        let args = if topic == "main" { vec!["--skill"] } else { vec!["--skill", topic] };
+        let o = gear(&home, &args);
+        assert!(o.status.success(), "{topic}: {}", stderr(&o));
+        let text = stdout(&o);
+        for needle in expected { assert!(text.contains(needle), "{topic} missing {needle}: {text}"); }
+    }
+}
+
 /// T-30: the review rules, the captain's guide and the Claude Code SOP are
 /// topics of the skill, not files of the gear repo.
 #[test]
