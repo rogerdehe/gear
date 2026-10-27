@@ -83,6 +83,7 @@ The station's "projected finish" multiplies the sum of all open estimates by the
   The session choice is a fixed rule the engine applies, never a captain call at dispatch: a review is always new, a re-review or rework resumes, a lane's next task is new unless its plan block says it continues an earlier task (then keep, compacted). The only difference between lanes and reviewers is the idle release time, a config value per role: a reviewer seat is released after a short idle spell, a lane keeps its pane, worktree and build cache.
 
 ## For M5 (user, 2026-10-26)
+- Moving a running task to another lane in the plan leaves its open attempt on the old seat (M4 20:27: T-160 keel → hull; the captain abandoned attempt 1 in the store). The plan should abandon it (the old lane told) and the new lane start a new attempt.
 - Release lanes during a long wait (user, 2026-10-26 20:06; not urgent, saves resources): a kickoff option, asked once (`on_wait = "keep" | "release"`). With `release`, a lane parked on a quota stop (or another long declared wait) is released (agent exits, pane closed, worktree and session kept) and brought back at the reset: same worktree, its session resumed. Default `keep`.
 - Cut from M4 at station M-2572: T-176 (the engine follows the project's own Herdr session, design §10.7 A1) and T-185 (three merge.rs tests over 10 s; share the git setup).
 
