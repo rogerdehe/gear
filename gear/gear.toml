@@ -19,11 +19,11 @@ profile = "claude"
 name = "hull"
 duty = "M4 engine seats and sessions: the session rule and its actions, warm reviewers, reviewer worktrees, quota from the providers, kind change and rebind; gear-app config, tasks, seats, review, identity"
 owns = ["crates/gear-engine/src/onboard.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/release.rs", "crates/gear-engine/src/review.rs", "crates/gear-engine/src/switch.rs", "crates/gear-engine/src/start.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/src/captain_quota.rs", "crates/gear-engine/src/opencode.rs", "crates/gear-engine/src/model.rs", "crates/gear-engine/src/trust.rs", "crates/gear-engine/src/guardrails.rs", "crates/gear-engine/src/attention.rs", "crates/gear-engine/src/feed.rs", "crates/gear-engine/src/tailed.rs", "crates/gear-engine/src/session.rs", "crates/gear-app/src/config.rs", "crates/gear-app/src/tasks.rs", "crates/gear-app/src/seats.rs", "crates/gear-app/src/review.rs", "crates/gear-app/src/identity.rs"]
-kind = "pi"
-profile = "pi"
-# M4 kickoff (user): MiniMax M3.1 Flash only, no fallback; a quota stop waits for the reset.
+kind = "codex"
+profile = "codex"
+# M4 2026-10-26 20:20 (user): hull switched to Codex GPT-6.1 Terra for the complex engine work; no fallback.
 models = [
-  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+  { model = "gpt-6.1-terra", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
 ]
 
 [[lanes]]

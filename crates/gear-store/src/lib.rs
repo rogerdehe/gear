@@ -1171,6 +1171,20 @@ impl<'s> Tx<'s> {
         require_written(changed, "seat", seat_id)
     }
 
+    /// End the job binding of a seat: a reviewer in `Standby` has no job
+    /// (design §3.6 — its verdict is in and it waits for the next one).
+    /// Raw write: the caller checks that the seat is a temp seat.
+    pub fn clear_seat_task(&self, seat_id: &str) -> GearResult<()> {
+        let changed = self
+            .tx
+            .execute(
+                "UPDATE seats SET task_id=NULL WHERE id=?1",
+                params![seat_id],
+            )
+            .map_err(map_sqlite)?;
+        require_written(changed, "seat", seat_id)
+    }
+
     pub fn insert_binding(&self, row: &BindingRow) -> GearResult<()> {
         self.tx
             .execute(
@@ -3788,6 +3802,44 @@ mod tests {
         let err = s
             .write(|tx| tx.set_binding_session_ref("p:heat", 2, "ses_y"))
             .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoTarget);
+    }
+
+    /// T-143 (design §3.6): a reviewer in `Standby` has no job — its task
+    /// binding is cleared and the seat keeps everything else.
+    #[test]
+    fn a_seats_job_binding_is_cleared_and_read_back() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.write(|tx| {
+            testing::seed_project(tx, "p", "sess", 0)?;
+            tx.insert_seat(&SeatRow {
+                id: "p:review-1".into(),
+                project: "p".into(),
+                role: SeatRole::Temp,
+                name: "review-1".into(),
+                profile: "codex".into(),
+                generation: 1,
+                state: SeatState::Standby,
+                state_since: 0,
+                state_reason: Some("review done".into()),
+                task_id: Some("T-1".into()),
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+        let seat = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "the seat has a job");
+
+        s.write(|tx| tx.clear_seat_task("p:review-1")).unwrap();
+
+        let seat = s.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.task_id, None, "the job binding ended");
+        assert_eq!(seat.state, SeatState::Standby, "the seat is still a standby reviewer");
+        assert_eq!(seat.generation, 1, "nothing else moved");
+
+        // A seat that does not exist is NoTarget, not a silent write.
+        let err = s.write(|tx| tx.clear_seat_task("p:ghost")).unwrap_err();
         assert_eq!(err.code, ErrorCode::NoTarget);
     }
 

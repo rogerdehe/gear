@@ -753,3 +753,14 @@ pub fn idle_reason(tx: &Tx, project: &str, lane: &str, now: Ts) -> GearResult<Op
 pub fn describe(r: &IdleReason, tx: &Tx, project: &str) -> String; // the "Shown" texts of §8.2
 ```
 gear-board is below gear-app, so the board, `gear queue` (mast) and the imbalance item (keel) all use this one function.
+
+## 14. Direction checks (user, 2026-10-26)
+
+Early review finds a misread contract while the lane is still working; the full review at hand-in stays as it is.
+
+- **When.** Each tick, for a lane attempt in `Started`: when `refs/remotes/origin/<lane>/t<n>` points to a sha not yet checked, and the diff from the merge base with the integration branch to that sha has a path outside `ops/`, and no direction check of this attempt is running, the engine starts one for that sha. Only the newest push is checked; at most one in flight per attempt.
+- **Who.** A Standby reviewer, or a new one within the temps quota. A hand-in waiting for review always goes first: when no seat is free for it, no direction check starts.
+- **Packet** (exact): `Direction check of T-<n> attempt <a> at <sha> (branch <branch>). Read the contract (gear --show T-<n>) and the diff from origin/<integration>. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task T-<n> --attempt <a> --direction "<ok, or up to three problems: the contract sentence misread and what to do instead>".`
+- **Result.** `ok`: the engine records the sha as checked, nothing else. Problems: one urgent instruction to the lane with the text, and an info line to the captain. A direction check is never a verdict and never blocks a hand-in.
+- **Store.** meta `engine.direction.<project>.<task>.<attempt>` = JSON `{checked_sha, running_seat}`; one `rounds` row per attempt with role `direction` (its sessions appended).
+- **Rules.** Both rules files (lane, review) carry the voyage's `done` and `bar` lines at the end, so the reviewer judges against the goal.
