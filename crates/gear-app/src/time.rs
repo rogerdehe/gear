@@ -185,6 +185,9 @@ pub struct Report {
     pub tasks: Vec<TaskTime>,
     /// The voyages, in milestone order.
     pub voyages: Vec<VoyageTime>,
+    /// The work and waiting time of the voyage the report is about (§5.4):
+    /// present when the report names one voyage.
+    pub work: Option<VoyageWork>,
 }
 
 /// What the report is about: one task, one voyage, or everything.
@@ -205,6 +208,7 @@ pub fn build(
     env: &Env,
     fp: Option<&Fingerprint>,
     filter: &Filter,
+    now: Ts,
 ) -> GearResult<Report> {
     store.read(|tx| {
         let (ctx, _seat) = require_seat(
@@ -214,12 +218,12 @@ pub fn build(
             Some(&[SeatRole::Captain]),
             Some(&[SeatState::Active]),
         )?;
-        report(tx, &ctx.project, filter)
+        report(tx, &ctx.project, filter, now)
     })
 }
 
 /// The report of a project, read from the store.
-pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report> {
+pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter, now: Ts) -> GearResult<Report> {
     // A task that does not exist is `NoTarget`, not an empty report: a typo
     // must not look like a project without work.
     if let Some(wanted) = &filter.task {
@@ -261,7 +265,12 @@ pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report>
     }
 
     let voyages = voyages_of(&tasks);
-    Ok(Report { project: project.to_string(), tasks, voyages })
+    // The work and waiting time of the voyage the report is about (§5.4).
+    let work = match &filter.voyage {
+        Some(voyage) => Some(work_of(tx, project, voyage, now)?),
+        None => None,
+    };
+    Ok(Report { project: project.to_string(), tasks, voyages, work })
 }
 
 /// The estimate of a task: the plan's `estimate:` field, or — for a task that
@@ -440,6 +449,170 @@ fn sum_known(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
     any.then_some(sum)
 }
 
+/// The work and waiting time of one voyage (§5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct VoyageWork {
+    /// The milestone the voyage sails on.
+    pub milestone: String,
+    /// The wall clock of the voyage: departure → now (or landing), in minutes.
+    pub elapsed_min: Option<i64>,
+    /// The wall time every lane seat was in a quota pause at once, in minutes.
+    pub fleet_stopped_min: i64,
+    /// How many quota stops stopped the whole fleet.
+    pub fleet_stops: usize,
+    /// The wall clock without the quota stops.
+    pub elapsed_without_quota_min: Option<i64>,
+    /// Per lane: the work, the quota wait, the declared wait and the idle.
+    pub lanes: Vec<LaneWork>,
+}
+
+/// The work and waiting time of one lane (§5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+pub struct LaneWork {
+    /// The lane's name.
+    pub lane: String,
+    /// The seconds its rounds were active (the work it did).
+    pub work_s: i64,
+    /// The seconds it waited for the quota.
+    pub quota_wait_s: i64,
+    /// The seconds it waited for a declared wait.
+    pub declared_wait_s: i64,
+    /// The rest of the voyage's elapsed time.
+    pub idle_s: i64,
+}
+
+/// The work and waiting time of a voyage, read from the store.
+///
+/// - **work** = the sum of the lane's rounds' `active_s`;
+/// - **quota wait** and **declared wait** = the sums of the lane's pauses
+///   (kind `quota` and kind `wait`);
+/// - **idle** = the rest of the voyage's elapsed time;
+/// - **fleet stopped by quota** = the wall time during which every lane seat
+///   was in a quota pause at once (the union of the overlaps);
+/// - **elapsed without quota stops** = elapsed − fleet stopped.
+///
+/// Read-only: nothing is written.
+pub fn work_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    now: Ts,
+) -> GearResult<VoyageWork> {
+    let voyage = tx.get_voyage(project, milestone)?;
+    let elapsed_s = voyage
+        .as_ref()
+        .and_then(|v| v.departure)
+        .map(|departure| (now - departure).max(0));
+    // The lane seats of the project: the fleet is stopped when all of them
+    // are parked at once.
+    let lanes: Vec<(String, String)> = tx
+        .seats_of_project(project)?
+        .into_iter()
+        .filter(|seat| seat.role == SeatRole::Lane)
+        .map(|seat| (seat.name, seat.id))
+        .collect();
+    // The pauses of every lane seat, per kind.
+    let pauses = tx.pauses_of_project(project)?;
+    // The rounds of every lane seat: their active time is the work.
+    let rounds = tx.rounds_of_project(project)?;
+
+    let mut work = VoyageWork {
+        milestone: milestone.to_string(),
+        elapsed_min: elapsed_s.map(|s| s / 60),
+        ..Default::default()
+    };
+    let mut quota_spans: Vec<(i64, i64)> = Vec::new();
+    for (name, seat_id) in &lanes {
+        let mut lane = LaneWork { lane: name.clone(), ..Default::default() };
+        for row in rounds.iter().filter(|row| &row.seat == seat_id) {
+            // The reviewer's round is the reviewer's work, not the lane's.
+            if row.role == "review" {
+                continue;
+            }
+            lane.work_s += row.active_s;
+        }
+        for pause in pauses.iter().filter(|pause| &pause.seat == seat_id) {
+            let Some(end) = pause.end_at else { continue };
+            let seconds = (end - pause.start_at).max(0);
+            match pause.kind.as_str() {
+                "quota" => {
+                    lane.quota_wait_s += seconds;
+                    quota_spans.push((pause.start_at, end));
+                }
+                "wait" => lane.declared_wait_s += seconds,
+                _ => {}
+            }
+        }
+        // The idle time is the rest of the voyage's elapsed time.
+        lane.idle_s = elapsed_s
+            .map(|elapsed| {
+                elapsed - lane.work_s - lane.quota_wait_s - lane.declared_wait_s
+            })
+            .unwrap_or(0)
+            .max(0);
+        work.lanes.push(lane);
+    }
+    // The fleet is stopped while every lane seat is parked at once: the
+    // overlaps of the quota pauses, unioned.
+    let (stopped, stops) = fleet_stopped(&quota_spans);
+    work.fleet_stopped_min = stopped / 60;
+    work.fleet_stops = stops;
+    work.elapsed_without_quota_min = elapsed_s.map(|elapsed| (elapsed - stopped).max(0) / 60);
+    Ok(work)
+}
+
+/// The wall time during which every lane seat was in a quota pause at once:
+/// the union of the overlaps of the quota pauses.
+///
+/// Returns the seconds and the number of stops.
+fn fleet_stopped(spans: &[(i64, i64)]) -> (i64, usize) {
+    if spans.is_empty() {
+        return (0, 0);
+    }
+    // The union of the spans: the stretches the fleet was parked in.
+    let mut sorted = spans.to_vec();
+    sorted.sort_unstable();
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (start, end) in sorted {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    let seconds: i64 = merged.iter().map(|(start, end)| end - start).sum();
+    (seconds, merged.len())
+}
+
+/// The §5.4 line of one lane: the work, the waits and the idle.
+pub fn lane_line(lane: &LaneWork) -> String {
+    format!(
+        "lane {} · work {} · quota wait {} · declared wait {} · idle {}",
+        lane.lane,
+        hours(lane.work_s),
+        hours(lane.quota_wait_s),
+        hours(lane.declared_wait_s),
+        hours(lane.idle_s)
+    )
+}
+
+/// The §5.4 line of the voyage: the wall clock, the quota stops and the rest.
+pub fn voyage_work_line(work: &VoyageWork) -> String {
+    format!(
+        "Voyage {} · elapsed {} · fleet stopped by quota {} ({}) · elapsed without quota stops {}",
+        work.milestone,
+        hours(work.elapsed_min.unwrap_or(0) * 60),
+        hours(work.fleet_stopped_min * 60),
+        if work.fleet_stops == 1 { "1 stop".to_string() } else { format!("{} stops", work.fleet_stops) },
+        hours(work.elapsed_without_quota_min.unwrap_or(0) * 60)
+    )
+}
+
+/// A duration in hours and minutes: `2h05m`.
+pub fn hours(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+}
+
 // ---------------------------------------------------------------- rendering
 
 /// The tokens and the cost of a voyage, as the report shows them.
@@ -461,6 +634,14 @@ pub fn render(report: &Report) -> String {
     lines.push(String::new());
     for voyage in &report.voyages {
         lines.push(voyage_line(voyage));
+    }
+    // The work and waiting time of the voyage the report is about (§5.4).
+    if let Some(work) = &report.work {
+        lines.push(String::new());
+        lines.push(voyage_work_line(work));
+        for lane in &work.lanes {
+            lines.push(lane_line(lane));
+        }
     }
     lines.join("\n")
 }
@@ -599,7 +780,7 @@ mod tests {
     fn the_durations_are_the_steps_between_them() {
         let mut s = world();
         let report = s
-            .read(|tx| report(tx, "p", &Filter::default()))
+            .read(|tx| report(tx, "p", &Filter::default(), T0))
             .unwrap();
         let task = &report.tasks[0];
         assert_eq!(task.dev(), Some(10));
@@ -633,7 +814,7 @@ mod tests {
         })
         .unwrap();
         let report = s
-            .read(|tx| report(tx, "p", &Filter::default()))
+            .read(|tx| report(tx, "p", &Filter::default(), T0))
             .unwrap();
         let task = &report.tasks[0];
         assert_eq!(task.rework_rounds, 1);
