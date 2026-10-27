@@ -429,7 +429,7 @@ pub fn recover_open_rounds(
 ) -> GearResult<()> {
     for obs in observed {
         let seat = &obs.seat;
-        if seat.role != SeatRole::Lane || seat.state != SeatState::Active { continue; }
+        if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Retiring) { continue; }
         if planned.iter().any(|(s, action)| s.id == seat.id && matches!(action, Action::Assign { .. } | Action::Continue { .. })) { continue; }
         let recovery = store.read(|tx| {
             if !tx.slot_ops(&seat.id)?.is_empty() { return Ok(None); }

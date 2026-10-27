@@ -150,3 +150,25 @@ fn recovering_existing_round_consumes_fresh_marker_before_unrelated_task() {
     assert_eq!(a.session_action.as_deref(),Some("new"));
     assert!(h.calls.iter().any(|x|matches!(x,Call::PaneType {pane,text} if pane==PANE && text=="/new")),"{:?}",h.calls);
 }
+
+#[test]
+fn retiring_lane_recovers_its_open_round_without_receiving_new_work() {
+    let (mut s,mut h,c)=world(false);
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
+        gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
+        let key=gear_store::RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()};
+        tx.insert_round(&gear_store::NewRound {key:key.clone(),seat:"p:heat".into(),generation:1,cli:"opencode".into(),model:None,start_at:T})?;
+        tx.add_round_session(&key,"old")?;
+        tx.set_seat_state("p:heat",gear_model::SeatState::Retiring,Some("finish current work"),T+1)?;
+        let mut task=tx.get_task("p","T-1")?.unwrap(); task.id="T-2".into(); task.state=TaskState::Ready; task.rank=2; tx.insert_task(&task)?;
+        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+        Ok(())
+    }).unwrap();
+    h.add_shell(PANE);
+    advance(&mut s,&mut h,&c,1); advance(&mut s,&mut h,&c,2);
+    assert!(h.calls.iter().any(|x|matches!(x,Call::AgentStart {pane,args,..} if pane==PANE && args.windows(2).any(|w|w==["--session","old"]))),"{:?}",h.calls);
+    h.set_agent_session(PANE,"old"); advance(&mut s,&mut h,&c,3);
+    assert!(s.read(|tx|tx.get_attempt("p","T-2",1)).unwrap().is_none());
+    assert!(h.prompts_to(PANE).iter().all(|p|!p.contains("New task T-2")));
+}
