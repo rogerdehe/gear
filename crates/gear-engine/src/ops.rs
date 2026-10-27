@@ -141,7 +141,7 @@ pub fn deliver_doorbell_now(
     // live agent **name**, never to the pane id — a pane that lost its agent
     // refuses the text instead of typing it into a shell.
     let names = crate::names::read(herdr).unwrap_or_default();
-    let outcome = aim(herdr, &names, &pane_id, &agent_name, &kind, &text);
+    let outcome = aim(herdr, &names, &pane_id, &agent_name, &kind, &text, PromptPolicy::Doorbell { working: true, unknown: urgent });
     let state = match &outcome {
         Aimed::Sent => OpState::Submitted,
         // Nothing was typed: the doorbell waits for the next tick (the agent
@@ -319,12 +319,12 @@ pub fn execute_intended(
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, agent_name, kind, .. } => {
+            Prepared::Run { pane_id, text, agent_name, kind, policy, .. } => {
                 // Design §10.1: the text goes to the live agent **name**. The
                 // agent of the pane is read first: only an agent of the
                 // seat's kind is the seat's agent, and a pane without one
                 // never receives the text.
-                Some(aim(herdr, &names, pane_id, agent_name, kind, text))
+                Some(aim(herdr, &names, pane_id, agent_name, kind, text, *policy))
             }
             // Waiting ops never reach here (they are not prepared).
             Prepared::Wait { .. } => None,
@@ -390,7 +390,7 @@ pub fn execute_intended(
 enum Prepared {
     /// The op may run: send `text` to the agent of `pane_id`, which must
     /// carry `agent_name` (T-134) and be of the seat's kind (`kind`).
-    Run { id: String, pane_id: String, text: String, agent_name: String, kind: String },
+    Run { id: String, pane_id: String, text: String, agent_name: String, kind: String, policy: PromptPolicy },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
     Wait { id: String },
@@ -455,7 +455,24 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
     };
+    let policy = if op.kind == OpKind::Deliver { PromptPolicy::Delivery } else {
+        let ids = op.payload.get("covers").and_then(|v| v.as_array());
+        let mut working = ids.is_some_and(|v| !v.is_empty());
+        let mut unknown = working;
+        let captain = tx.captain_of(&op.project)?.map(|c| c.id);
+        if let Some(ids) = ids {
+            for id in ids {
+                let message = match id.as_str() { Some(id) => tx.get_message(&op.project, id)?, None => None };
+                if let Some(message) = message {
+                    working &= crate::doorbell::reaches_while_working(&message, &seat, &binding.kind, captain.as_deref());
+                    unknown &= message.urgent;
+                } else { working = false; unknown = false; }
+            }
+        }
+        PromptPolicy::Doorbell { working, unknown }
+    };
     Ok(Prepared::Run {
+        policy,
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
         text: text.to_string(),
@@ -495,6 +512,9 @@ pub enum Aimed {
 ///
 /// The sender has no exception: an unnamed agent is named again and the text
 /// goes on the next tick, like everywhere else.
+#[derive(Clone, Copy)]
+enum PromptPolicy { Delivery, Doorbell { working: bool, unknown: bool } }
+
 fn aim(
     herdr: &mut dyn HerdrAct,
     names: &BTreeMap<String, Option<String>>,
@@ -502,9 +522,33 @@ fn aim(
     agent_name: &str,
     kind: &str,
     text: &str,
+    policy: PromptPolicy,
 ) -> Aimed {
     match crate::names::resolve_target(herdr, names, pane_id, agent_name, kind) {
-        crate::names::Target::Prompt { name } => match herdr.prompt(&name, text) {
+        crate::names::Target::Prompt { name } => {
+            // Recheck immediately before prompting: the observation used to
+            // plan an op can be stale by the time it is executed.
+            match herdr.agent_get(pane_id) {
+                Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
+                    let ready = match info.agent_status {
+                        gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done => true,
+                        gear_herdr::AgentStatus::Working => matches!(policy, PromptPolicy::Doorbell { working: true, .. }),
+                        gear_herdr::AgentStatus::Unknown => matches!(policy, PromptPolicy::Doorbell { unknown: true, .. }),
+                        gear_herdr::AgentStatus::Blocked => false,
+                    };
+                    if !ready {
+                        let reason = format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
+                        return match policy {
+                            PromptPolicy::Delivery => Aimed::Retry(reason),
+                            PromptPolicy::Doorbell { .. } => Aimed::Refused(reason),
+                        };
+                    }
+                }
+                Ok(None) => return Aimed::Gone(format!("no agent in the pane {pane_id}")),
+                Ok(Some(_)) => return Aimed::Gone(format!("the agent in {pane_id} changed kind")),
+                Err(e) => return Aimed::Retry(format!("the pane {pane_id} could not be read: {}", e.0)),
+            }
+            match herdr.prompt(&name, text) {
             Outcome::Ok(()) => Aimed::Sent,
             Outcome::Uncertain { reason } => Aimed::Uncertain(reason),
             Outcome::Refused { code, message } => {
@@ -549,7 +593,7 @@ fn aim(
                     )),
                 }
             }
-        },
+        }},
         // The agent had lost its name: it was renamed now, the text goes next
         // tick. Nothing is typed and nothing is restarted — the sender too
         // (design §10.1 has no exception for it).
@@ -557,7 +601,7 @@ fn aim(
             "the agent of {pane_id} had lost its name; it was renamed and the text goes again next tick"
         )),
         crate::names::Target::Gone(reason) => Aimed::Gone(reason),
-        crate::names::Target::Blocked(reason) => Aimed::Refused(reason),
+        crate::names::Target::Blocked(reason) => Aimed::Retry(reason),
         crate::names::Target::Unreadable(reason) => Aimed::Retry(reason),
     }
 }
@@ -648,12 +692,13 @@ pub fn confirm_pending_with(
                     // review delivery is settled by a verdict row, not by a
                     // view: say so, so the stored explanation can be traced
                     // (P3 of the T-5 review).
-                    let evidence = if op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)? {
-                        format!(
-                            "verdict {} attempt {} @ {view_ts}",
-                            op.task.as_deref().unwrap_or("-"),
-                            op.attempt.unwrap_or(0)
-                        )
+                    let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
+                    let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
+                        view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
+                    let evidence = if review_delivery {
+                        format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
+                    } else if hand_in {
+                        format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else {
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
@@ -668,9 +713,11 @@ pub fn confirm_pending_with(
                             // §3.2 step 5: at the check-in the attempt records
                             // the session it ran in.
                             record_attempt_session(tx, project, &op)?;
-                            // The lane is not stuck any more (design §10.3):
-                            // its stall item closes with the confirmation.
                             crate::stall::resolve(tx, project, &op.seat, now, None)?;
+                        } else if hand_in {
+                            // A result already started and submitted the
+                            // attempt. A newer stall belongs to later work.
+                            crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
                         }
                     }
                     confirmed.push(op.id.clone());
@@ -793,12 +840,14 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // it — a retry of this very delivery (design §10.3): the lane
             // recovered either way, so its stall item closes as well.
             let started_here = start_confirmed_attempt(tx, project, &op, now)?;
+            let mut late_hand_in_key = None;
             if !started_here {
-                let already = tx
-                    .get_attempt(project, task, attempt)?
-                    .map(|row| row.state == AttemptState::Started)
-                    .unwrap_or(false);
-                if !already {
+                let state = tx.get_attempt(project, task, attempt)?.map(|row| row.state);
+                if matches!(state, Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)) {
+                    let key = format!("engine.delivery_late_handin.{}.{}", project, op.id);
+                    if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) { continue }
+                    late_hand_in_key = Some(key);
+                } else if state != Some(AttemptState::Started) {
                     continue;
                 }
             }
@@ -806,6 +855,7 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // predate the check-in, so a later failure of the same lane keeps
             // its own item.
             crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
+            if let Some(key) = late_hand_in_key { tx.set_meta(&key, "1")?; }
             confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
         }
         Ok(confirmed)
@@ -866,12 +916,16 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         return Ok(None);
     };
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    Ok(views
-        .iter()
-        .find(|view| {
-            view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
-        })
-        .map(|view| view.ts))
+    if let Some(view) = views.iter().find(|view| view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)) {
+        return Ok(Some(view.ts));
+    }
+    // A hand-in from this seat proves it received the attempt even when no
+    // check-in view was recorded. Do not flag its delivery as unconfirmed.
+    let row = tx.get_attempt(&op.project, task, attempt)?;
+    if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
+        return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
+    }
+    Ok(None)
 }
 
 /// The session the attempt ran in (design §3.2 step 5): at the check-in the

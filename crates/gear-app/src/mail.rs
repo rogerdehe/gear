@@ -386,6 +386,12 @@ pub fn send(
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
             if args.kind == MsgKind::Result {
+                let result_task = task.as_deref().ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--task`"))?;
+                let result_attempt = args.attempt.ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--attempt`"))?;
+                let owner = tx.get_attempt(&ctx.project, result_task, result_attempt)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no attempt {result_attempt} of task {result_task}")))?;
+                if owner.seat != seat.id || (owner.state == AttemptState::Delivered && owner.generation != ctx.generation) {
+                    return Err(GearError::new(ErrorCode::Forbidden, format!("attempt {result_attempt} of task {result_task} is not owned by this seat and generation")));
+                }
                 // The friction report of the round (design §6.1): when the
                 // round passed its budget, the report is required (§6.2) and
                 // the hand-in is refused without it.
@@ -473,6 +479,7 @@ pub fn send(
                     args.attempt.unwrap_or_default(),
                     args.contract.unwrap_or_default(),
                     args.on.as_deref().unwrap_or_default(),
+                    now,
                 )?;
             }
 
@@ -917,6 +924,7 @@ fn declare_wait(
     attempt: i64,
     contract: i64,
     on: &str,
+    now: Ts,
 ) -> GearResult<()> {
     let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
         GearError::new(
@@ -984,6 +992,7 @@ fn declare_wait(
         ));
     }
     tx.set_task_wait(project, task, on, "merged")?;
+    tx.open_pause(project, &seat.id, "wait", &format!("waiting for {on}"), now)?;
     Ok(())
 }
 

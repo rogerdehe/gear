@@ -116,7 +116,7 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     }
     let waiting = state["waiting"].as_bool().unwrap_or(false);
     let asked_active = state["asked_active"].as_i64().unwrap_or(0);
-    if waiting && !state["no_answer"].as_bool().unwrap_or(false) && active >= asked_active + 600 {
+    if waiting && task.wait_on.is_none() && !state["no_answer"].as_bool().unwrap_or(false) && active >= asked_active + 600 {
         item(tx, round, &format!("{}: budget {} min; active {} min; no answer", round.task, budget, active / 60), true, now)?;
         state["no_answer"] = json!(true); state["waiting"] = json!(false); state["next_active"] = json!(active + 900);
         changed = true;

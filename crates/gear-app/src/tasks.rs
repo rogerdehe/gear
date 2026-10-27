@@ -262,6 +262,12 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
             ),
         ));
     }
+    // A result is also a check-in: the owner may finish before a delivery
+    // view is recorded. Both transitions happen in this transaction.
+    if attempt.state == AttemptState::Delivered {
+        on_delivery_confirmed(tx, project, task, n, now)?;
+        attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "attempt disappeared"))?;
+    }
     require_transition(
         AttemptState::can_transition(attempt.state, AttemptState::Submitted),
         "attempt",
@@ -303,6 +309,12 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     attempt.pending_update = None;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
+    // A restart or compaction can change the binding since check-in.
+    if let Some(seat) = tx.get_seat(&attempt.seat)? {
+        if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+            tx.refresh_attempt_session(project, task, n, binding.session_ref.as_deref().filter(|s| !s.is_empty()), &binding.kind)?;
+        }
+    }
     // The hand-in has its own time (T-38): the dev time ends here, the review
     // time begins.
     tx.set_attempt_time(project, task, n, AttemptStep::HandedIn, now)?;

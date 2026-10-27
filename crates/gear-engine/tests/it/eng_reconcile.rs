@@ -27,6 +27,7 @@ fn profile(kind: &str) -> Profile {
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
+        instructions_args: vec![],
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],

@@ -57,7 +57,7 @@ pub fn release_finished_reviews(
             continue;
         }
         let pending_key = format!("engine.review_pending.{}", seat.id);
-        let pending = store.read(|tx| tx.get_meta(&pending_key))?.filter(|task| !task.is_empty());
+        let mut pending = store.read(|tx| tx.get_meta(&pending_key))?.filter(|task| !task.is_empty());
         if seat.state != SeatState::Starting {
             if let Some(task) = pending.as_deref() {
                 if !under_review(store, project, &seat, task)? {
@@ -69,6 +69,7 @@ pub fn release_finished_reviews(
                         }
                         Ok(())
                     })?;
+                    pending = None;
                 }
             }
         }
@@ -86,7 +87,7 @@ pub fn release_finished_reviews(
             }
             // A reviewer that is up and whose job is gone: it leaves.
             SeatState::Active => {
-                let Some(task) = seat.task_id.clone() else {
+                let Some(task) = pending.clone().or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
                 // Still doing its job: nothing to release.
@@ -104,7 +105,7 @@ pub fn release_finished_reviews(
             // waits for a slot and a seat a human has to look at is left
             // alone.
             SeatState::Starting => {
-                let Some(task) = seat.task_id.clone().or(pending) else {
+                let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
                 if under_review(store, project, &seat, &task)? {
@@ -214,7 +215,7 @@ fn cancel_start(
     //    are still live for that job are voided (the captain's decision of
     //    M-2603: the `Intended` and the `Submitted` ones — an op in flight
     //    ends on its own).
-    let job = seat.task_id.clone().or(store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).map_err(|e| e.detail)?.filter(|s| !s.is_empty()));
+    let job = store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).map_err(|e| e.detail)?.filter(|s| !s.is_empty()).or_else(|| seat.task_id.clone());
     let live = store
         .read(|tx| tx.slot_ops(&seat.id))
         .map_err(|e| e.detail)?;
@@ -267,6 +268,7 @@ fn cancel_start(
                 SeatState::Starting.as_str(),
                 SeatState::Released.as_str(),
             )?;
+            tx.clear_seat_task(&seat.id)?;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -301,7 +303,8 @@ fn under_review(
             return Ok(false);
         }
         // A newer attempt handed in means this reviewer read an older one.
-        if seat.task_id.as_deref() == Some(task) {
+        let pending = tx.get_meta(&format!("engine.review_pending.{}", seat.id))?.filter(|value| !value.is_empty());
+        if pending.as_deref() != Some(task) && seat.task_id.as_deref() == Some(task) {
             if let Some(job) = tx.last_op(&seat.id, OpKind::Deliver)? {
                 if job.task.as_deref() == Some(task) && job.attempt != Some(latest.n) {
                     return Ok(false);
@@ -367,7 +370,10 @@ pub(crate) fn release_one(
         )
         .map_err(|e| e.detail)?;
         store
-            .write(|tx| tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now))
+            .write(|tx| {
+                tx.clear_seat_task(&seat.id)?;
+                tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now)
+            })
             .map_err(|e| e.detail)?;
         return Ok(false);
     }
@@ -421,6 +427,7 @@ pub(crate) fn release_one(
                     tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
                 }
             }
+            tx.clear_seat_task(&seat.id)?;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -1411,6 +1418,20 @@ profile = "codex"
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 11).unwrap();
         assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
         assert_eq!(store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state, SeatState::Released);
+    }
+
+    #[test]
+    fn invalid_pending_reservation_does_not_release_the_live_active_job() {
+        let mut store=world(TaskState::Verifying,"w2:p2","codex");
+        let mut herdr=FakeHerdr::new(); herdr.add_agent("w2:p2","codex",gear_herdr::AgentStatus::Idle);
+        store.write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {session_ref:None,session_cli:None,session_action:None,sent_at:None,project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Submitted,candidate:Some("abc1234".into()),report:None,safe_point:None,started:T0,updated:T0})?;
+            tx.set_meta("engine.review_pending.p:r-1","T-absent")
+        }).unwrap();
+        release_finished_reviews(&mut store,&mut herdr,"p",T0+10).unwrap();
+        let seat=store.read(|tx|tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Active); assert_eq!(seat.task_id.as_deref(),Some("T-1"));
+        assert_eq!(store.read(|tx|tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(),Some(""));
     }
 
     /// T-143 (design §3.6): a reviewer that is still starting and whose job

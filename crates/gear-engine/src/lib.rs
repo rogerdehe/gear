@@ -191,6 +191,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.settle_failed = settle_failed;
     }
 
+    // Reconcile waits before dispatch and stall decisions in this tick.
+    waits::tick(store, herdr, cfg, now)?;
     let projects = store.read(|tx| tx.project_ids())?;
     for project in &projects {
         let checked = parallel::check(store, project, now)?;
@@ -300,8 +302,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+        let delivery_grace = gear_app::config::latest(store, &project)
+            .map(|config| i64::from(config.timing.delivery_grace_s))
+            .unwrap_or(cfg.delivery_grace_s);
         let (confirmed, flagged) =
-            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, cfg.delivery_grace_s, now)?;
+            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 
@@ -427,8 +432,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     //     the declared waits (§5.3) tick with it; both are empty until their
     //     own tasks land.
     report.rounds = rounds::tick(store, herdr, cfg, now)?;
-    overrun::tick(store, herdr, cfg, now)?;
     waits::tick(store, herdr, cfg, now)?;
+    overrun::tick(store, herdr, cfg, now)?;
     for (project, seat) in reviewer_nudge_flags {
         if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
             && !report.flagged.contains(&seat) {
@@ -437,6 +442,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
+    let mut actionable = Vec::new();
+    for seat in &report.flagged {
+        if !store.read(|tx| waits::waiting_seat(tx, seat))? { actionable.push(seat.clone()); }
+    }
+    report.flagged = actionable;
     for seat in report.flagged.clone() {
         if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
             // One seat's alert failing never stops the tick.
@@ -494,7 +504,7 @@ fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) 
     let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
     let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    if let Some(state) = state.filter(|s| s["round"] == identity) {
+    if let Some(state) = state.filter(|s| s["round"] == identity && s["generation"].as_i64() == Some(seat.generation)) {
         match state["step"].as_str() {
             Some("failed") => return Ok(false),
             Some("done") => {},
@@ -584,8 +594,10 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let declared_wait = waits::waiting_seat(tx, &seat.id)?;
         let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
+            if declared_wait && message.thread.starts_with("overrun-question:") { continue; }
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
                 // ring until they are answered, whatever generation took the
@@ -603,6 +615,7 @@ fn doorbell_inputs(
 
         // Reply/Instruction messages this generation has not shown yet.
         for message in tx.messages_to_since(project, &seat.id, since)? {
+            if declared_wait && message.thread.starts_with("overrun-question:") { continue; }
             if shown.contains(&message.id)
                 || doorbelled.contains(&message.id)
                 || !gear_app::seats::message_belongs(seat, &message, since)
@@ -642,6 +655,7 @@ fn doorbell_inputs(
             // Only a seat that may receive work is rung, even if its agent is
             // idle (a parked/held seat must not be woken by a doorbell).
             idle: seat_obs.idle && observe::reachable(seat.state),
+            status: if observe::reachable(seat.state) { seat_obs.status } else { None },
             slot_busy,
             last_settled_at,
             // Design §10.4: a lane with no open attempt gets the text that

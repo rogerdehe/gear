@@ -4,7 +4,7 @@
 
 use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
-use gear_herdr::{AgentStatus, ScreenFlag};
+use gear_herdr::ScreenFlag;
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
 use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, Store, TaskRow, Tx};
@@ -98,12 +98,12 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     if v.switch_pending {
         return none("a model switch is under way for this seat");
     }
-    // 4. Never type into a working agent. A blocked one is not working: it
-    //    may be handed work, and the delivery waits for the dialog to clear
-    //    instead of failing every tick (T-68).
-    let blocked = obs.status == Some(AgentStatus::Blocked);
-    if !obs.idle && !blocked {
-        return none("the agent is not idle");
+    // 4. Design §10.2: only `idle` and `done` are ready. A working, blocked
+    //    or unknown agent is never ready for a delivery — the text waits for
+    //    the agent to be idle again (T-68: a seat on a dialog is not
+    //    re-delivered every tick).
+    if !obs.idle {
+        return none("the agent is not ready");
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
     if obs.flags.iter().any(|flag| {
@@ -278,6 +278,9 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
+            if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
+                return Ok(empty_view(obs));
+            }
             let continues = task
                 .map(|task| match task.state {
                     TaskState::Running | TaskState::Verifying => true,
@@ -444,7 +447,12 @@ pub fn recover_open_rounds(
             });
             let running = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .is_some_and(|s| (unsent || s["action"] == "resume") && s["step"] != "done" && s["step"] != "failed");
+                .is_some_and(|s| {
+                    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+                    s["round"] == identity && (unsent || s["action"] == "resume")
+                        && (s["generation"].as_i64() != Some(seat.generation)
+                            || (s["step"] != "done" && s["step"] != "failed"))
+                });
             Ok((mismatch || running).then_some((round.task, round.attempt)))
         })?;
         if let Some((task, attempt)) = recovery {
