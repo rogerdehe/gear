@@ -180,3 +180,12 @@ fn current_contract_mismatch_rolls_back_the_implicit_start() {
     assert_eq!(s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap().started,None);
     assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().state,TaskState::Ready);
 }
+
+#[test]
+fn hand_in_clears_a_stale_session_when_current_binding_has_none() {
+    let mut s=world(); let (env,fp)=lane();
+    s.write(|tx|tx.set_attempt_session("p","T-1",1,"old-session","pi")).unwrap();
+    mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"missing-current-session"),T0+20).unwrap();
+    let attempt=s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
+    assert_eq!(attempt.session_ref,None); assert_eq!(attempt.session_cli.as_deref(),Some("opencode"));
+}

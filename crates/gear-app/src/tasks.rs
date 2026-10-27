@@ -271,9 +271,7 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     // A restart or compaction can change the binding since check-in.
     if let Some(seat) = tx.get_seat(&attempt.seat)? {
         if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
-            if let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) {
-                tx.set_attempt_session(project, task, n, session, &binding.kind)?;
-            }
+            tx.refresh_attempt_session(project, task, n, binding.session_ref.as_deref().filter(|s| !s.is_empty()), &binding.kind)?;
         }
     }
     // The hand-in has its own time (T-38): the dev time ends here, the review

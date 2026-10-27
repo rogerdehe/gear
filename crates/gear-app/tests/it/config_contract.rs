@@ -578,5 +578,6 @@ fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
     let issues=validate(&bad); let fields=fields(&issues);
     assert!(fields.contains(&"timing.delivery_grace_s"),"{issues:?}");
     assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
+    assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
     assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
 }
