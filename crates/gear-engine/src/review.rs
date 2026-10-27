@@ -357,6 +357,75 @@ fn free_seat(store: &mut Store, project: &str, task: &str, kind: &str) -> GearRe
     })
 }
 
+/// Run git without sending shell text to a reviewer pane.
+fn review_git(path: &str, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .arg("-C").arg(path).args(args).output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Preserve uncommitted evidence and tell the captain where it went.
+fn stash_review_tree(store: &mut Store, project: &str, path: &str, task: &str, attempt: i64, now: Ts) -> GearResult<()> {
+    let git_error = |e| GearError::new(ErrorCode::BadFormat, format!("review worktree {path}: {e}"));
+    if review_git(path, &["status", "--porcelain"]).map_err(git_error)?.is_empty() {
+        return Ok(());
+    }
+    let label = format!("gear: before review of {task} attempt {attempt}");
+    review_git(path, &["stash", "push", "--include-untracked", "-m", &label]).map_err(git_error)?;
+    let stash = review_git(path, &["stash", "list", "-1", "--format=%gd %H %gs"]).map_err(git_error)?;
+    store.write(|tx| {
+        if let Some(captain) = tx.captain_of(project)? {
+            tx.insert_message(&NewMessage {
+                meta: None, project: project.into(), thread: format!("review-stash:{task}:{attempt}"),
+                task: Some(task.into()), attempt: Some(attempt), sender: "engine".into(), sender_gen: 0,
+                recipient: captain.id, kind: MsgKind::System, urgent: false,
+                body: format!("Preserved changes in {path}: {}", stash.trim()), reply_to: None,
+                needs_ack: false, state: MsgState::Open, created: now,
+            })?;
+        }
+        Ok(())
+    })
+}
+
+/// Prepare a checkout; a live reviewer on an unfinished job keeps its branch.
+fn prepare_review_tree(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+    let git_error = |e| GearError::new(ErrorCode::BadFormat, format!("review checkout {path}: {e}"));
+    let same_path = |a: &str, b: &str| std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
+    stash_review_tree(store, project, path, &task.task, task.attempt, now)?;
+    let listing = review_git(repo, &["worktree", "list", "--porcelain"]).map_err(git_error)?;
+    for entry in listing.split("\n\n") {
+        let mut lines = entry.lines();
+        let Some(holder) = lines.next().and_then(|line| line.strip_prefix("worktree ")) else { continue };
+        if same_path(holder, path) || !lines.any(|line| line == format!("branch refs/heads/{branch}")) { continue }
+        let seats = store.read(|tx| tx.seats_of_project(project))?;
+        for seat in seats.into_iter().filter(|s| s.role == SeatRole::Temp) {
+            let recorded = store.read(|tx| tx.get_meta(&repo_path_key(&seat.id, repo)))?;
+            if !recorded.as_deref().is_some_and(|recorded| same_path(recorded, holder)) { continue }
+            let job_active = store.read(|tx| {
+                Ok(match seat.task_id.as_deref() {
+                    Some(id) => tx.get_task(project, id)?.is_some_and(|t| t.state == TaskState::Verifying),
+                    None => false,
+                })
+            })?;
+            if job_active {
+                let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+                if let Some(binding) = binding {
+                    // An unreadable agent is not evidence that it is gone.
+                    if !matches!(herdr.agent_get(&binding.pane_id), Ok(None)) { return Ok(false) }
+                }
+            }
+        }
+        stash_review_tree(store, project, holder, &task.task, task.attempt, now)?;
+        review_git(holder, &["checkout", "--detach"]).map_err(git_error)?;
+    }
+    review_git(path, &["fetch", "origin"]).map_err(git_error)?;
+    review_git(path, &["checkout", "-f", "-B", branch, &task.candidate]).map_err(git_error)?;
+    Ok(true)
+}
+
 /// Whether the project may add a seat: fewer seats exist than the quota allows.
 fn seats_free_for_new(store: &mut Store, project: &str, quota: i64) -> GearResult<bool> {
     store.read(|tx| {
@@ -694,46 +763,18 @@ fn start_reviewer(
                 park(store, &seat.id, "the seat's worktree path is unknown", now)?;
                 return Ok(Started::NotYet);
             };
-            // R1 of the T-69 review: the one worktree the engine may detach —
-            // a known reviewer seat with no live agent whose recorded checkout
-            // is this branch. Every other holder is left to fail the checkout.
-            let detach = holder_to_detach(
-                store,
-                herdr,
-                &config.project.id,
-                &repo.path,
-                &seat.id,
-                &branch,
-            )?;
-            match checkout_ready(
-                store,
-                herdr,
-                &seat.id,
-                generation,
-                &pane,
-                &path,
-                &branch,
-                &task.candidate,
-                detach.as_deref(),
-                &repo.path,
-            )? {
-                Checked::Ready => {}
-                // The checkout is pending: no reviewer starts on a tree nobody
-                // checked out.
-                Checked::Waiting => return Ok(Started::NotYet),
-                Checked::Stuck(reason) => {
-                    // It keeps failing: the seat is parked for a human and the
-                    // captain gets one item, not a fight every tick (T-69).
-                    // The attempt is marked, so a seat recovered from the park
-                    // (B02-04) is not handed the same failing checkout again:
-                    // the new generation's budget would restart the loop (F2
-                    // of the T-116 review). A new attempt has a fresh budget.
+            match prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now) {
+                Ok(true) => {},
+                Ok(false) => return Ok(Started::NotYet),
+                Err(error) => {
+                    let reason = format!("review checkout: {}", error.detail);
                     park(store, &seat.id, &reason, now)?;
                     mark_checkout_stuck(store, &config.project.id, &task.task, task.attempt, &reason)?;
                     tell_captain(store, &config.project.id, task, &reason, now)?;
                     return Ok(Started::NotYet);
                 }
             }
+            store.write(|tx| tx.set_meta(&branch_key(&seat.id, &repo.path), &branch))?;
 
             // 6. the agent's args: the profile's unattended args, the model
             //    when the CLI takes one, the arguments of the chain entry and
@@ -852,14 +893,13 @@ fn env_ready(
 
 /// The key of a seat's checkout intent: the token of the checkout the engine
 /// submitted for that generation. A restart must not forget it (F1).
+#[cfg(test)]
 fn checkout_key(seat: &str, generation: i64) -> String {
     format!("engine.review_checkout.{seat}.{generation}")
 }
 
 /// The key of the counter that gives every checkout a fresh token.
-fn checkout_seq_key() -> String {
-    "engine.review_checkout_seq".to_string()
-}
+
 
 /// The key of the recorded start: the agent this engine asked Herdr to start
 /// for that generation. Only such an agent may be adopted (F5).
@@ -877,11 +917,12 @@ fn session_key(project: &str, task: &str) -> String {
 }
 
 /// The marker a finished checkout prints: `GEAR_CK_OK_<token>_<sha>_<branch>`.
+#[cfg(test)]
 const OK_MARKER: &str = "GEAR_CK_OK_";
 /// The marker a failed checkout prints: `GEAR_CK_FAIL_<token>`.
+#[cfg(test)]
 const FAIL_MARKER: &str = "GEAR_CK_FAIL_";
 /// How many lines of the pane the engine reads to see what the checkout did.
-const CHECKOUT_TAIL_LINES: u32 = 24;
 
 /// The checkout of a job: the seat's worktree switches to the job's branch at
 /// the candidate — the previous job's uncommitted changes go with it (never the
@@ -891,6 +932,7 @@ const CHECKOUT_TAIL_LINES: u32 = 24;
 /// The token is a shell variable, so the echo of the command line (which the
 /// pane shows) carries the marker text with the variable unexpanded and can
 /// never be read as the report of a finished checkout.
+#[cfg(test)]
 fn checkout_command(
     path: &str,
     branch: &str,
@@ -928,6 +970,7 @@ fn checkout_command(
 /// reviewer seat** (its worktree and the branch it took are recorded), not
 /// this seat, whose bound pane has **no live agent** in Herdr. Any other
 /// holder of the branch is left to fail the checkout.
+#[cfg(test)]
 fn holder_to_detach(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -988,74 +1031,26 @@ fn branch_key(seat: &str, repo: &str) -> String {
 }
 
 /// What the engine should do after reading the checkout's state.
-enum Checked {
-    /// The checkout is at the job's candidate: the reviewer may start.
-    Ready,
-    /// Not yet: the chain runs, or a fresh one was submitted.
-    Waiting,
-    /// It failed [`CHECKOUT_TRIES`] times: nothing starts, the captain is told.
-    Stuck(String),
-}
+
 
 /// How often a checkout is submitted before the seat is parked and the captain
 /// is rung (T-69).
-const CHECKOUT_TRIES: i64 = 3;
 
 /// What the checkout chain reported.
-enum Checkout {
-    /// The chain is still running: it has printed nothing yet.
-    Pending,
-    /// The chain finished: the checkout is at `sha` on `branch`.
-    Finished { sha: String, branch: String },
-    /// The chain failed: it printed the failure marker.
-    Failed,
-}
+
 
 /// Read the checkout's report out of the pane's tail.
 ///
 /// Only a line that *is* the report counts: the pane also shows the echo of
 /// the command line, and that echo names no commit.
-fn observe_checkout(tail: &str, token: &str) -> Checkout {
-    let ok = format!("{OK_MARKER}{token}_");
-    let fail = format!("{FAIL_MARKER}{token}");
-    let mut finished: Option<(String, String)> = None;
-    let mut failed = false;
-    for line in tail.lines() {
-        let line = line.trim();
-        if line == fail {
-            failed = true;
-            continue;
-        }
-        let Some(rest) = line.split(&ok).nth(1) else {
-            continue;
-        };
-        let Some((sha, branch)) = rest.split_once('_') else {
-            continue;
-        };
-        if !is_commit_id(sha) {
-            continue;
-        }
-        finished = Some((sha.to_string(), branch.trim().to_string()));
-    }
-    match finished {
-        Some((sha, branch)) => Checkout::Finished { sha, branch },
-        None if failed => Checkout::Failed,
-        None => Checkout::Pending,
-    }
-}
+
 
 /// Whether `text` looks like a git object id: hex, at least seven characters.
-fn is_commit_id(text: &str) -> bool {
-    text.len() >= 7 && text.chars().all(|c| c.is_ascii_hexdigit())
-}
+
 
 /// Whether the commit `sha` is the one `candidate` names (a candidate may be
 /// short: seven characters are enough to name a commit).
-fn same_commit(sha: &str, candidate: &str) -> bool {
-    let sha = sha.trim().to_lowercase();
-    let candidate = candidate.trim().to_lowercase();
-    !candidate.is_empty() && (sha == candidate || sha.starts_with(&candidate))
-}
+
 
 /// Make sure the seat's worktree is at the job's branch and candidate — and
 /// that the engine has *seen* it happen.
@@ -1064,73 +1059,10 @@ fn same_commit(sha: &str, candidate: &str) -> bool {
 /// text, it neither waits for git nor reports the exit status, so the engine
 /// reads the pane and looks for the chain's own report. A pending or a failed
 /// chain starts no reviewer (F1 of the T-18 review).
-fn checkout_ready(
-    store: &mut Store,
-    herdr: &mut dyn HerdrAct,
-    seat: &str,
-    generation: i64,
-    pane: &str,
-    path: &str,
-    branch: &str,
-    candidate: &str,
-    detach: Option<&str>,
-    repo_path: &str,
-) -> GearResult<Checked> {
-    let key = checkout_key(seat, generation);
-    let recorded = store
-        .read(|tx| tx.get_meta(&key))?
-        .filter(|token| !token.is_empty());
-    let Some(token) = recorded else {
-        // The checkout was never submitted: submit it and wait for its report.
-        submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
-        return Ok(Checked::Waiting);
-    };
-    // The chain ran on an earlier tick: read what it did.
-    let tail = herdr.read_tail(pane, CHECKOUT_TAIL_LINES).unwrap_or_default();
-    match observe_checkout(&tail, &token) {
-        Checkout::Finished { sha, branch: got } => {
-            if same_commit(&sha, candidate) && got == branch {
-                Ok(Checked::Ready)
-            } else {
-                // It landed somewhere else: check out again.
-                submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
-                Ok(Checked::Waiting)
-            }
-        }
-        Checkout::Failed => {
-            // The fetch or the checkout failed. T-69: a branch that another
-            // worktree holds with changes of its own fails every time; the
-            // engine stops after a few tries and tells the captain instead of
-            // fighting it tick after tick.
-            let used = bump_checkout_fails(store, seat, generation)?;
-            if used >= CHECKOUT_TRIES {
-                let detail = tail
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                return Ok(Checked::Stuck(format!(
-                    "the checkout of {branch} at {candidate} failed {used} times (the worktree {path}): {detail}"
-                )));
-            }
-            submit_checkout(store, herdr, seat, generation, pane, path, branch, candidate, detach, repo_path)?;
-            Ok(Checked::Waiting)
-        }
-        Checkout::Pending => Ok(Checked::Waiting),
-    }
-}
+
 
 /// Count one failed checkout for this seat generation.
-fn bump_checkout_fails(store: &mut Store, seat: &str, generation: i64) -> GearResult<i64> {
-    store.write(|tx| {
-        let key = format!("engine.review_checkout_fails.{seat}.{generation}");
-        let used = tx.get_meta(&key)?.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0) + 1;
-        tx.set_meta(&key, &used.to_string())?;
-        Ok(used)
-    })
-}
+
 
 /// The key of an attempt whose checkout already failed three times.
 fn checkout_stuck_key(project: &str, task: &str, attempt: i64) -> String {
@@ -1161,49 +1093,11 @@ fn checkout_stuck(store: &mut Store, project: &str, task: &str, attempt: i64) ->
 
 /// Submit the checkout of a job and remember its token, so that the next tick
 /// can read the chain's report.
-fn submit_checkout(
-    store: &mut Store,
-    herdr: &mut dyn HerdrAct,
-    seat: &str,
-    generation: i64,
-    pane: &str,
-    path: &str,
-    branch: &str,
-    candidate: &str,
-    detach: Option<&str>,
-    repo_path: &str,
-) -> GearResult<()> {
-    let token = next_checkout_token(store)?;
-    let command = checkout_command(path, branch, candidate, &token, detach);
-    store.write(|tx| {
-        tx.set_meta(&checkout_key(seat, generation), &token)?;
-        // The seat's recorded checkout: a later re-review on another seat reads
-        // it to find the holder of this branch (R1 of the T-69 review).
-        tx.set_meta(&branch_key(seat, repo_path), branch)
-    })?;
-    if let Outcome::Ok(()) = herdr.pane_run(pane, &command) {
-        Ok(())
-    } else {
-        // The pane refused the text: the intent is void, the next tick tries
-        // again with a fresh token.
-        store.write(|tx| tx.set_meta(&checkout_key(seat, generation), ""))?;
-        Ok(())
-    }
-}
+
 
 /// A fresh token for a checkout: every submission gets its own, so the report
 /// of an earlier attempt is never read as this one's.
-fn next_checkout_token(store: &mut Store) -> GearResult<String> {
-    store.write(|tx| {
-        let next = tx
-            .get_meta(&checkout_seq_key())?
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0)
-            + 1;
-        tx.set_meta(&checkout_seq_key(), &next.to_string())?;
-        Ok(format!("{next:x}"))
-    })
-}
+
 
 /// Whether this engine recorded the start of the agent in `pane`: an adopt is
 /// only allowed for a start GEAR itself asked for, never for an agent that
@@ -2101,6 +1995,46 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn direct_checkout_stashes_dirty_worktrees_and_reports_them() {
+        let root = std::env::temp_dir().join(format!("gear-review-direct-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("readme"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        let candidate = sh(&work, "git rev-parse HEAD");
+        sh(&work, "git branch review/t1");
+        let old = root.join("old");
+        let new = root.join("new");
+        sh(&work, &format!("git worktree add -q {} review/t1 && git worktree add -q -b home/seat {} dev", old.display(), new.display()));
+        std::fs::write(old.join("old-evidence"), "old").unwrap();
+        std::fs::write(new.join("new-evidence"), "new").unwrap();
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate };
+        store.write(|tx| {
+            testing::seed_active_seat(tx, "p", "review-9", SeatRole::Temp, "w9:p9", "codex", T0)?;
+            tx.set_seat_task("p:review-9", "T-1")?;
+            tx.set_meta(&repo_path_key("p:review-9", work.to_str().unwrap()), old.to_str().unwrap())
+        }).unwrap();
+        herdr.add_agent("w9:p9", "codex", gear_herdr::AgentStatus::Working);
+        assert!(!prepare_review_tree(&mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        herdr = FakeHerdr::new();
+        assert!(prepare_review_tree(&mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD");
+        assert_eq!(sh(&new, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        assert!(!old.join("old-evidence").exists());
+        assert!(!new.join("new-evidence").exists());
+        assert!(sh(&work, "git stash list").contains("gear: before review of T-1 attempt 1"));
+        let messages = store.read(|tx| tx.thread_messages("p", "review-stash:T-1:1")).unwrap();
+        assert_eq!(messages.iter().filter(|m| m.body.contains("Preserved changes")).count(), 2);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// R1 of the T-69 review: the engine names **one** holder to detach — a
