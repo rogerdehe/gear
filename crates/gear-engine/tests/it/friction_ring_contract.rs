@@ -21,6 +21,28 @@ struct World {
 /// empty, so it is idle (design §6.4).
 fn world() -> World {
     let mut store = Store::open_in_memory().unwrap();
+    seed(&mut store);
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    World { store, herdr, cfg }
+}
+
+/// The same project in a store of its own: the state of the ring is in the
+/// store, so a restart reads it back.
+fn world_at(path: &std::path::Path) -> World {
+    let mut store = Store::open(path).unwrap();
+    seed(&mut store);
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    World { store, herdr, cfg }
+}
+
+/// The project of a world: a captain and nothing else to do.
+fn seed(store: &mut Store) {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
@@ -28,11 +50,6 @@ fn world() -> World {
             Ok(())
         })
         .unwrap();
-    let mut herdr = FakeHerdr::new();
-    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
-    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
-    World { store, herdr, cfg }
 }
 
 /// A friction report of a lane (design §6.1).
@@ -52,9 +69,34 @@ fn report(store: &mut Store, task: &str, body: &str) -> String {
         .unwrap()
 }
 
-/// The captain's friction items, oldest first.
+/// The captain's items, oldest first.
 fn items(store: &mut Store) -> Vec<gear_store::MessageRow> {
     store.read(|tx| tx.thread_messages("p", "friction")).unwrap()
+}
+
+/// The captain's doorbell ops: one per prompt.
+fn doorbells(store: &mut Store) -> Vec<gear_store::OpRow> {
+    store.read(|tx| tx.ops_of_seat_kind("p:captain", gear_model::OpKind::Doorbell)).unwrap()
+}
+
+/// The captain's view of a message: it has seen it.
+fn seen(store: &mut Store, message: &str, at: i64) {
+    store
+        .write(|tx| {
+            let seat = tx.get_seat("p:captain")?.unwrap();
+            tx.insert_view(&gear_store::ViewRecord {
+                project: "p".into(),
+                seat: "p:captain".into(),
+                generation: seat.generation,
+                ts: at,
+                shown_msgs: vec![message.to_string()],
+                shown_ops: vec![],
+                shown_task: None,
+                shown_attempt: None,
+                shown_contract: None,
+            })
+        })
+        .unwrap();
 }
 
 /// An open item in the captain's inbox: the captain has something to do.
@@ -218,3 +260,40 @@ fn the_ring_waits_thirty_minutes_before_it_rings_again() {
     assert_eq!(all[1].state, MsgState::Open);
     assert_eq!(all[1].body, "1 friction report: F-2. Run gear friction.");
 }
+
+/// F1 of the review: the friction item is not an ordinary stale item. The
+/// generic stale reminder turned it urgent and rang the captain a second time
+/// for the same reports, 15 minutes after the first ring (design §6.4: the
+/// ring happens once, and only a new report rings again).
+#[test]
+fn the_friction_item_is_not_promoted_and_does_not_ring_the_captain_again() {
+    let mut w = world();
+    report(&mut w.store, "T-1", "the build took forever");
+
+    // The first tick: the item and the captain's first prompt.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    let item = items(&mut w.store).remove(0);
+    assert_eq!(item.state, MsgState::Open);
+    assert!(!item.urgent, "an information item");
+    let prompts = doorbells(&mut w.store).len();
+    assert_eq!(prompts, 1, "the captain is rung once: {prompts}");
+
+    // The captain reads it.
+    seen(&mut w.store, &item.id, T0 + 2);
+    // The captain is busy now, and a quarter of an hour has passed.
+    w.herdr.add_agent(CAP_PANE, "claude", AgentStatus::Working);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 901).unwrap();
+
+    // The item is still an information item, and the captain is not rung a
+    // second time for it.
+    let item = items(&mut w.store).remove(0);
+    assert_eq!(item.state, MsgState::Open, "the item waits for its reports");
+    assert!(!item.urgent, "a friction item is never promoted: {item:?}");
+    assert_eq!(doorbells(&mut w.store).len(), prompts, "no second prompt");
+
+    // A later tick with no new report rings nothing either.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
+    assert_eq!(doorbells(&mut w.store).len(), prompts, "no second prompt");
+    assert!(!items(&mut w.store)[0].urgent);
+}
+
