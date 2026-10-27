@@ -237,6 +237,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         if phase == "start_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 { return recovery_failed(store, seat, &mut state, &phase, now); }
         if occupant.is_some() { return Ok(Prep::Wait) }
         let mut args = profile.unattended_args.clone();
+        args.extend(crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, &profile)?);
         let target = str_field(&state, "target");
         if phase == "start_resume" {
             let Some(resume) = profile.resume_args.as_ref().filter(|_| !target.is_empty()) else { step(&mut state, "start_fallback", now); save(store, seat, &state)?; return Ok(Prep::Wait) };
