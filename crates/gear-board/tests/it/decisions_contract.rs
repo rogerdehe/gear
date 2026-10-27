@@ -464,3 +464,108 @@ fn the_unknown_usage_is_not_shown_as_zero() {
         "the total names what it does not know: {text}"
     );
 }
+
+/// F5 of the T-166 review: a sum that hides an unknown part is not a total.
+/// A measured dev round plus a review round that counted nothing shows `?`
+/// for the tokens and for the cost, and the footer says it is known so far.
+#[test]
+fn an_unmeasured_round_hides_no_part_of_the_sum() {
+    let mut store = world();
+    // The review round of the task: it counted nothing at all.
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            tx.insert_round(&gear_store::NewRound {
+                key: RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "review".into(),
+                },
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: departure + 44 * 60,
+            })
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(row.contains("?"), "the tokens are unknown: {row}");
+    assert!(row.contains("      ?"), "the cost is unknown: {row}");
+    assert!(
+        !row.contains("812k"),
+        "a partial sum is not shown as a total: {row}"
+    );
+    assert!(
+        !row.contains("0.31"),
+        "a partial price is not shown as a total: {row}"
+    );
+    assert!(
+        text.contains("known so far"),
+        "the total names what it does not know: {text}"
+    );
+}
+
+/// F5 of the T-166 review: a review round that counted its tokens but was
+/// never priced leaves the tokens whole and the cost unknown.
+#[test]
+fn an_unpriced_round_hides_no_part_of_the_sum() {
+    let mut store = world();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "review".into(),
+            };
+            tx.insert_round(&gear_store::NewRound {
+                key: key.clone(),
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: departure + 44 * 60,
+            })?;
+            // The tokens were counted, the price was not.
+            tx.set_round_tokens(
+                &key,
+                &RoundTokens {
+                    input: Some(20_000),
+                    output: Some(2_000),
+                    cache_read: None,
+                    cache_write: None,
+                    reasoning: None,
+                    cost_usd: None,
+                    cost_source: "none".into(),
+                },
+                departure + 50 * 60,
+            )
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(row.contains("834k"), "the tokens are whole: {row}");
+    assert!(row.contains("      ?"), "the cost is unknown: {row}");
+    assert!(
+        !row.contains("0.31"),
+        "a partial price is not shown as a total: {row}"
+    );
+    assert!(
+        text.contains("known so far"),
+        "the total names what it does not know: {text}"
+    );
+}
