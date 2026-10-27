@@ -8,6 +8,7 @@ use crate::EngineCfg;
 
 fn marker(seat: &str) -> String { format!("lane-rebind-applied:{seat}") }
 fn key(seat: &str) -> String { format!("engine.rebind.{seat}") }
+const EXIT_WAIT: i64 = 30;
 pub(crate) fn fresh_key(seat: &str) -> String { format!("engine.rebind_fresh.{seat}") }
 
 pub(crate) fn ready_to_onboard(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
@@ -60,7 +61,20 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             let Some(binding) = binding else { continue };
             let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => continue };
             if let Some(agent) = occupant {
-                if phase_name == "exiting" { continue; }
+                if phase_name == "exiting" && seat.state != SeatState::Queued {
+                    let since = match phase.as_ref().and_then(|v| v["since"].as_i64()) {
+                        Some(since) => since,
+                        None => {
+                            store.write(|tx| tx.set_meta(&key(&seat.id), &json!({"phase":"exiting","generation":old_generation,"since":now}).to_string()))?;
+                            now
+                        }
+                    };
+                    if now.saturating_sub(since) >= EXIT_WAIT {
+                        crate::quota::flag_and_alert(store, &project, &seat,
+                            "Rebind exit did not finish. Check the old agent and use `- retry <lane>` to try again.", now)?;
+                    }
+                    continue;
+                }
                 if agent.agent.as_deref() != Some(binding.kind.as_str())
                     || !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) { continue }
                 let profiles = gear_app::config::profile_table(&cfg.profiles, &current)?;
@@ -82,8 +96,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                     if current.generation != seat.generation || !tx.open_attempts_of_seat(&seat.id)?.is_empty() { return Ok(false) }
                     if matches!(current.state, SeatState::Active | SeatState::Standby) {
                         tx.set_seat_state(&seat.id, SeatState::Missing, Some("moving to the new repository"), now)?;
-                    } else if current.state != SeatState::Missing { return Ok(false) }
-                    tx.set_meta(&key(&seat.id), &json!({"phase":"exiting","generation":old_generation}).to_string())?;
+                    } else if !matches!(current.state, SeatState::Missing | SeatState::Queued) { return Ok(false) }
+                    tx.set_meta(&key(&seat.id), &json!({"phase":"exiting","generation":old_generation,"since":now}).to_string())?;
                     Ok(true)
                 })?;
                 if !reserved { continue }
@@ -117,7 +131,19 @@ fn prepare_onboard(store: &mut Store, seat: &SeatRow, generation: i64, now: Ts) 
         if let Some(binding) = tx.get_binding(&seat.id, current.generation)? {
             if binding.status != BindingStatus::Void { tx.set_binding_status(&seat.id, current.generation, BindingStatus::Void)?; }
         }
-        tx.set_meta(&crate::onboard::worktree_path_key(&seat.id), "")?;
+        let target = tx.get_meta(&marker(&seat.id))?.and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        let old_repo = target.as_ref().and_then(|v| v["old_repo"].as_str());
+        let current_path = tx.get_meta(&crate::onboard::worktree_path_key(&seat.id))?.filter(|p| !p.is_empty());
+        if let (Some(repo), Some(path)) = (old_repo, current_path) {
+            tx.set_meta(&crate::onboard::worktree_repo_path_key(&seat.id, repo), &path)?;
+        }
+        let config = tx.get_project(&seat.project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok());
+        let destination = config.map(|c| c.repo_of_lane(&seat.name).path);
+        let path = match destination {
+            Some(repo) => tx.get_meta(&crate::onboard::worktree_repo_path_key(&seat.id, &repo))?.unwrap_or_default(),
+            None => String::new(),
+        };
+        tx.set_meta(&crate::onboard::worktree_path_key(&seat.id), &path)?;
         tx.set_meta(&key(&seat.id), &json!({"phase":"ready","generation":generation}).to_string())
     })
 }
@@ -126,7 +152,7 @@ fn prepare_onboard(store: &mut Store, seat: &SeatRow, generation: i64, now: Ts) 
 mod tests {
     use super::*;
     use gear_app::{draft, identity::Fingerprint, plan, Env};
-    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::fake::{Call, FakeHerdr, Inject};
     use gear_model::{AttemptState, GearCtx, TaskState};
     use gear_store::{testing, ContractRow, TaskRow};
     const T: i64 = 1_800_000_000;
@@ -188,6 +214,64 @@ gate="new-gate"
         let fp=Fingerprint {pane_id:"w1:p1".into(),kind:Some("codex".into()),session_ref:None};
         let result=plan::apply(store,&env,Some(&fp),None,&draft::parse(text).unwrap(),text,"rebind",T+1).unwrap();
         assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+    }
+    fn staff(store: &mut Store, command: &str, now: Ts) {
+        let version = store.read(|tx| tx.plan_version("p")).unwrap();
+        let text = format!("<!-- gear-plan project=p base={version} -->\n# Staff\n- {command}\n");
+        let env=Env {ctx:Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}),pane_id:Some("w1:p1".into()),admin:false};
+        let fp=Fingerprint {pane_id:"w1:p1".into(),kind:Some("codex".into()),session_ref:None};
+        plan::apply(store,&env,Some(&fp),None,&draft::parse(&text).unwrap(),&text,command,now).unwrap();
+    }
+    fn finish_old(store: &mut Store) {
+        store.write(|tx| {
+            let mut a=tx.get_attempt("p","T-1",1)?.unwrap(); a.state=AttemptState::Accepted; tx.update_attempt(&a)?;
+            let mut t=tx.get_task("p","T-1")?.unwrap(); t.state=TaskState::Done; tx.update_task(&t)
+        }).unwrap();
+        plan::reconcile_rebinds(store,"p").unwrap();
+    }
+    #[test]
+    fn uncertain_or_reserved_exit_times_out_and_captain_retry_recovers() {
+        for reserved in [false, true] {
+            let (mut store, mut h, cfg)=world(); request(&mut store); finish_old(&mut store);
+            if reserved {
+                store.write(|tx| {
+                    tx.set_seat_state("p:heat",SeatState::Missing,Some("moving"),T+2)?;
+                    tx.set_meta(&key("p:heat"),&json!({"phase":"exiting","generation":1,"since":T+2}).to_string())
+                }).unwrap();
+            } else {
+                h.inject_next=Some(Inject::Uncertain);
+                tick(&mut store,&mut h,&cfg,T+2).unwrap();
+            }
+            tick(&mut store,&mut h,&cfg,T+2+EXIT_WAIT).unwrap();
+            let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
+            assert_eq!(seat.state,SeatState::NeedsCheck);
+            staff(&mut store,"retry heat",T+40);
+            tick(&mut store,&mut h,&cfg,T+41).unwrap();
+            h.exit_agent(PANE);
+            tick(&mut store,&mut h,&cfg,T+42).unwrap();
+            assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+43).unwrap(),["p:heat"]);
+            tick(&mut store,&mut h,&cfg,T+44).unwrap();
+            assert_eq!(store.read(|tx|tx.get_meta(&marker("p:heat"))).unwrap().as_deref(),Some(""));
+        }
+    }
+    #[test]
+    fn returning_to_old_repo_reopens_its_retained_checkout() {
+        let (mut store, mut h, cfg)=world();
+        h.add_worktree("heat/t1","/old-worktree",PANE);
+        request(&mut store); finish_old(&mut store);
+        tick(&mut store,&mut h,&cfg,T+2).unwrap(); h.exit_agent(PANE);
+        tick(&mut store,&mut h,&cfg,T+3).unwrap();
+        assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+4).unwrap(),["p:heat"]);
+        tick(&mut store,&mut h,&cfg,T+5).unwrap();
+        let pane=store.read(|tx|tx.get_binding("p:heat",2)).unwrap().unwrap().pane_id;
+        staff(&mut store,"rebind heat repo=old owns=[src/]",T+6);
+        tick(&mut store,&mut h,&cfg,T+7).unwrap(); h.exit_agent(&pane);
+        tick(&mut store,&mut h,&cfg,T+8).unwrap();
+        assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+9).unwrap(),["p:heat"]);
+        tick(&mut store,&mut h,&cfg,T+10).unwrap();
+        assert!(h.calls.iter().any(|c|matches!(c,Call::WorktreeOpenPath {repo,path,..} if repo == "/repo/old" && path == "/old-worktree")));
+        assert!(!h.calls.iter().any(|c|matches!(c,Call::WorktreeCreate {repo,..} if repo == "/repo/old")));
+        assert_eq!(store.read(|tx|tx.get_meta(&fresh_key("p:heat"))).unwrap().as_deref(),Some("3"));
     }
     #[test]
     fn rebind_waits_then_onboards_new_repo_and_starts_the_next_round_fresh() {
