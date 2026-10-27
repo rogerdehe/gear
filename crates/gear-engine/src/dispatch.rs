@@ -372,12 +372,28 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
         let obs = observed.iter().find(|o| o.seat.id == seat.id).cloned();
         let view = lane_view(tx, &seat, obs, now)?;
         let action = decide(&view, cfg, now);
+        let action = rebind_action(tx, &seat.id, action)?;
         let action = if matches!(action, Action::Assign { .. }) && tx.captain_quota_paused(project)? {
             none("captain quota: current tasks may finish; new tasks are paused")
         } else { action };
         decisions.push((seat, action));
     }
     Ok(decisions)
+}
+
+/// A pending rebind permits current work to finish, but does not start more.
+/// After config changes, nothing goes to the old worktree while it is moving.
+fn rebind_action(tx: &Tx<'_>, seat: &str, action: Action) -> GearResult<Action> {
+    let applied = tx.get_meta(&format!("lane-rebind-applied:{seat}"))?.is_some_and(|s| !s.is_empty());
+    let pending = tx.get_meta(&gear_app::plan::rebind_pending_key(seat))?.is_some_and(|s| !s.is_empty());
+    let continuing_unsent = if let Action::Assign { task } = &action {
+        tx.open_attempts_of_seat(seat)?.iter().any(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none())
+    } else { false };
+    Ok(if applied {
+        none("lane rebind is waiting for the new worktree")
+    } else if pending && matches!(action, Action::Assign { .. }) && !continuing_unsent {
+        none("lane rebind is waiting for open attempts")
+    } else { action })
 }
 
 /// Create the attempt before preparing its session. An unsent attempt is
@@ -397,16 +413,20 @@ pub fn prepare_dispatch(
             _ => { ready.push((seat.clone(), action.clone())); continue; }
         };
         let attempt = store.write(|tx| {
+            if matches!(rebind_action(tx, &seat.id, action.clone())?, Action::None { .. }) {
+                return Ok(None);
+            }
             if let Some(existing) = tx.open_attempts_of_seat(&seat.id)?.into_iter()
                 .find(|a| a.task == *task && a.state == AttemptState::Delivered) {
-                return Ok(existing);
+                return Ok(Some(existing));
             }
             if matches!(action, Action::Assign { .. }) {
-                return gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now);
+                return gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now).map(Some);
             }
             tx.open_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.task == *task)
-                .ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
+                .map(Some).ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
         })?;
+        let Some(attempt) = attempt else { continue };
         if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
             let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
                 Action::Assign { task: task.clone() }
@@ -484,7 +504,8 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
     // T-84: the project standard travels with the assignment and the continue.
     let standard = gear_app::standard::line_for(tx, project)?;
     for (seat, action) in actions {
-        match action {
+        let guarded = rebind_action(tx, &seat.id, action.clone())?;
+        match &guarded {
             Action::Assign { task } => {
                 if tx.captain_quota_paused(project)? { continue; }
                 // The attempt exists before the delivery that announces it.
@@ -734,4 +755,30 @@ mod tests {
         let action = decide(&view(Some(attempt(AttemptState::Unknown))), &DispatchCfg::default(), NOW);
         assert!(matches!(action, Action::None { .. }));
     }
+    #[test]
+    fn rebind_waits_for_existing_work_and_blocks_the_old_worktree() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            tx.set_meta(&gear_app::plan::rebind_pending_key("p:heat"), "pending")?;
+            assert!(matches!(rebind_action(tx, "p:heat", Action::Assign {task:"T-2".into()})?, Action::None {..}));
+            assert_eq!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::Continue {task:"T-1".into()});
+            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+            assert!(matches!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::None {..}));
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn planned_assignment_is_rechecked_after_a_rebind_is_requested() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+            let seat = gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", NOW)?;
+            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+            let actions = vec![(seat, Action::Assign { task:"T-1".into() })];
+            assert!(intend_dispatch(tx, "p", &actions, NOW)?.is_empty());
+            Ok(())
+        }).unwrap();
+    }
+
 }
