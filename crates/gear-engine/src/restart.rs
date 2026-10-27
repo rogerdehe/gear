@@ -528,6 +528,7 @@ fn start(
     // 3. the agent itself: the profile's unattended args, then the model's
     //    own flag and the arguments of the chain entry.
     let mut args = profile.unattended_args.clone();
+    args.extend(crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)?);
     if !plan.model.is_empty() { if let Some(model_args) = start_args(&plan.cli, &plan.model, &plan.args) {
         args.extend(model_args);
     }}
@@ -1142,6 +1143,22 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert_ne!(store.read(|tx|crate::session::round_session(tx,&round)).unwrap().as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("fresh"));
     }
+    #[test]
+    fn pi_resume_injects_lane_rules_after_unattended_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, mut cfg) = world(dir.path().to_str().unwrap(), false);
+        cfg.db_path = dir.path().join("gear.db").to_string_lossy().into();
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change(&mut store, "pi", "new-model");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T+1).unwrap();
+        herdr.exit_agent(PANE); advance_pending(&mut store, &mut herdr, &cfg, T+2);
+        let args = herdr.calls.iter().find_map(|c| if let Call::AgentStart {kind,args,..}=c { assert_eq!(kind,"pi"); Some(args) } else { None }).unwrap();
+        let path = dir.path().join("rules/lane.md");
+        assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
+        assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
+        assert!(std::fs::read_to_string(path).unwrap().starts_with(include_str!("../../../skills/gear/references/rules/lane.md").trim_end()));
+    }
+
     #[test]
     fn config_change_waits_for_an_existing_model_switch() {
         let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),true);
