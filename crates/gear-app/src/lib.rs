@@ -27,6 +27,7 @@ pub mod skill;
 pub mod station;
 pub mod tasks;
 pub mod time;
+pub mod voyage;
 
 use gear_model::GearCtx;
 

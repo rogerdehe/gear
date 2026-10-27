@@ -53,6 +53,81 @@ fn apply(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<plan::A
 const NEW_TASK: &str =
     "## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
 
+/// T-171: the work and the waiting time of a voyage (§5.4): the lane's work,
+/// its quota wait and its declared wait, the wall clock of the voyage and the
+/// time the fleet was stopped by the quota.
+#[test]
+fn the_report_of_a_voyage_separates_work_from_waiting() {
+    let mut s = world();
+    apply(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{NEW_TASK}"),
+        "r1",
+    )
+    .unwrap();
+    s.write(|tx| start_attempt(tx, "p", "T-1", "p:heat", 1, T0)).unwrap();
+    s.write(|tx| on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 5 * 60)).unwrap();
+    // The lane's round: half an hour of work.
+    let key = gear_store::RoundKey {
+        project: "p".into(),
+        task: "T-1".into(),
+        attempt: 1,
+        role: "dev".into(),
+    };
+    s.write(|tx| {
+        tx.insert_round(&gear_store::NewRound {
+            key: key.clone(),
+            seat: "p:heat".into(),
+            generation: 1,
+            cli: "opencode".into(),
+            model: Some("gpt".into()),
+            start_at: T0,
+        })?;
+        tx.set_round_active(&key, 30 * 60)?;
+        // The quota stopped the lane for two hours, and it waited for a task
+        // for twenty minutes.
+        tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0)?;
+        tx.close_pause("p", "p:heat", "quota", T0 + 2 * 3600)?;
+        tx.open_pause("p", "p:heat", "wait", "T-9", T0 + 2 * 3600)?;
+        tx.close_pause("p", "p:heat", "wait", T0 + 2 * 3600 + 20 * 60)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let report = s
+        .read(|tx| {
+            time::report(
+                tx,
+                "p",
+                &Filter { task: None, voyage: Some("M2".into()) },
+                T0 + 4 * 3600,
+            )
+        })
+        .unwrap();
+    let work = report.work.as_ref().expect("the voyage's work time");
+    assert_eq!(work.lanes.len(), 1, "{work:?}");
+    let lane = &work.lanes[0];
+    assert_eq!(lane.lane, "heat");
+    assert_eq!(lane.work_s, 30 * 60, "the active time of the lane's rounds");
+    assert_eq!(lane.quota_wait_s, 2 * 3600, "the quota pause");
+    assert_eq!(lane.declared_wait_s, 20 * 60, "the declared wait");
+    assert_eq!(lane.idle_s, 4 * 3600 - 30 * 60 - 2 * 3600 - 20 * 60, "the rest");
+    // The wall clock of the voyage and the time the fleet was stopped.
+    assert_eq!(work.elapsed_min, Some(240));
+    assert_eq!(work.fleet_stopped_min, 120);
+    assert_eq!(work.fleet_stops, 1);
+    assert_eq!(work.elapsed_without_quota_min, Some(120));
+
+    let text = time::render(&report);
+    assert!(text.contains("Voyage M2 · elapsed 4h00m"), "{text}");
+    assert!(text.contains("fleet stopped by quota 2h00m (1 stop)"), "{text}");
+    assert!(text.contains("elapsed without quota stops 2h00m"), "{text}");
+    assert!(
+        text.contains("lane heat · work 0h30m · quota wait 2h00m · declared wait 0h20m"),
+        "{text}"
+    );
+}
+
 /// The report on a seeded store: the durations and the ratio.
 #[test]
 fn the_report_prints_the_durations_and_the_ratio() {
@@ -88,7 +163,7 @@ fn the_report_prints_the_durations_and_the_ratio() {
     s.write(|tx| settle_review(tx, "p", "T-1", 1, T0 + 25 * 60)).unwrap();
 
     let report = s
-        .read(|tx| time::report(tx, "p", &Filter::default()))
+        .read(|tx| time::report(tx, "p", &Filter::default(), T0))
         .unwrap();
     let task = &report.tasks[0];
     assert_eq!(task.estimate_min, Some(60));
@@ -127,7 +202,7 @@ fn only_the_captain_may_read_the_report() {
         },
         Fingerprint { pane_id: LANE_PANE.into(), kind: Some("opencode".into()), session_ref: None },
     );
-    let err = time::build(&mut s, &lane.0, Some(&lane.1), &Filter::default()).unwrap_err();
+    let err = time::build(&mut s, &lane.0, Some(&lane.1), &Filter::default(), T0).unwrap_err();
     assert_eq!(err.code, ErrorCode::Forbidden, "{}", err.detail);
 }
 
@@ -142,7 +217,7 @@ fn an_unknown_task_is_no_target() {
     )
     .unwrap();
     let filter = Filter { task: Some("T-9".into()), voyage: None };
-    let err = s.read(|tx| time::report(tx, "p", &filter)).unwrap_err();
+    let err = s.read(|tx| time::report(tx, "p", &filter, T0)).unwrap_err();
     assert_eq!(err.code, ErrorCode::NoTarget, "{}", err.detail);
 }
 
@@ -188,7 +263,7 @@ fn a_successful_rework_reports_its_merge_for_task_and_voyage() {
     })
     .unwrap();
 
-    let report = s.read(|tx| time::report(tx, "p", &Filter::default())).unwrap();
+    let report = s.read(|tx| time::report(tx, "p", &Filter::default(), T0)).unwrap();
     let task = &report.tasks[0];
     assert_eq!(task.rounds[0].merge, None);
     assert_eq!(task.rounds[1].merge, Some(5));
