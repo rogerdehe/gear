@@ -27,11 +27,12 @@ fn world() -> (Store,FakeHerdr,EngineCfg) {
     let mut cfg=EngineCfg::default(); cfg.profiles=gear_herdr::builtins(); cfg.cooldown_s=0;
     (s,h,cfg)
 }
-fn block(s:&mut Store) {
+fn block(s:&mut Store) { block_at(s,10); }
+fn block_at(s:&mut Store, at:i64) {
     let env=Env {ctx:Some(GearCtx{project:"p".into(),seat:"heat".into(),generation:1}),pane_id:Some(LANE.into()),admin:false};
     let fp=Fingerprint{pane_id:LANE.into(),kind:Some("opencode".into()),session_ref:None};
     let args=SendArgs {kind:MsgKind::Blocked,body:"waiting for API".into(),task:Some("T-1".into()),attempt:Some(1),contract:Some(1),candidate:None,verdict:None,blocking:None,base:None,about:None,to:None,reply_to:None,urgent:false,left:None,blocker:None,on:Some("T-2".into()),friction:None,request_id:"wait-one".into()};
-    mail::send(s,&env,Some(&fp),&args,T+10).unwrap();
+    mail::send(s,&env,Some(&fp),&args,T+at).unwrap();
 }
 fn advance(s:&mut Store,h:&mut FakeHerdr,c:&EngineCfg,at:i64) {tick(s,h,c,T+at).unwrap();}
 #[test]
@@ -81,4 +82,15 @@ fn declared_wait_stops_the_live_overrun_clock() {
     assert_eq!((r.active_s,r.paused_s),(10,1990));
     assert!(s.read(|tx|tx.thread_messages("p","overrun-question:T-1:1:dev")).unwrap().is_empty());
     assert!(h.prompts_to(LANE).is_empty());
+}
+
+#[test]
+fn pending_overrun_does_not_escalate_while_task_is_waiting() {
+    let (mut s,mut h,c)=world();
+    advance(&mut s,&mut h,&c,600);
+    assert_eq!(s.read(|tx|tx.thread_messages("p","overrun-question:T-1:1:dev")).unwrap().len(),1);
+    block_at(&mut s,1200);
+    advance(&mut s,&mut h,&c,1200);
+    assert!(s.read(|tx|tx.thread_messages("p","overrun:T-1:dev")).unwrap().is_empty());
+    assert!(h.prompts_to(LANE).is_empty(),"{:?}",h.calls);
 }
