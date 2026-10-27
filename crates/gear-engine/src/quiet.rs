@@ -70,7 +70,7 @@ pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observe
     for obs in observed.iter().filter(|o| o.presence == Presence::Present && o.status == Some(AgentStatus::Working)) {
         let candidate = store.read(|tx| {
             let Some(seat) = tx.get_seat(&obs.seat.id)? else { return Ok(None) };
-            if seat.generation != obs.seat.generation { return Ok(None) }
+            if seat.project != project || seat.generation != obs.seat.generation { return Ok(None) }
             let Some(attempt) = loop_attempt(tx, &seat)? else { return Ok(None) };
             let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { return Ok(None) };
             let Some(path) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) else { return Ok(None) };
@@ -89,22 +89,24 @@ pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observe
             && a.agent_session.as_ref().is_none_or(|s| Some(s.value.as_str()) == binding.session_ref.as_deref())) { continue }
         let reserved = store.write(|tx| {
             let last = tx.get_meta(&loop_key(&seat.id))?.and_then(|s| s.parse::<Ts>().ok());
-            if last.is_some_and(|t| now.saturating_sub(t) < LOOP_INTERVAL) { return Ok(false) }
+            if last.is_some_and(|t| now.saturating_sub(t) < LOOP_INTERVAL) { return Ok(None) }
+            let Some(current) = tx.get_seat(&seat.id)? else { return Ok(None) };
+            let same_attempt = loop_attempt(tx, &current)?.is_some_and(|a| a.task == attempt.task && a.n == attempt.n);
+            let same_binding = tx.get_binding(&seat.id, current.generation)?.is_some_and(|b|
+                b.generation == binding.generation && b.pane_id == binding.pane_id && b.session_ref == binding.session_ref);
+            if !same_attempt || !same_binding { return Ok(None) }
+            let already_compacting = tx.get_meta(&compact_key(&seat.id))?.is_some_and(|v| !v.is_empty());
             tx.set_meta(&loop_key(&seat.id), &now.to_string())?;
-            tx.set_meta(&compact_key(&seat.id), "pending")?;
-            Ok(true)
+            if !already_compacting { tx.set_meta(&compact_key(&seat.id), "pending")?; }
+            Ok(Some(already_compacting))
         })?;
-        if !reserved { continue }
+        let Some(already_compacting) = reserved else { continue };
         if matches!(herdr.send_keys(&binding.pane_id, &["esc".into()]), Outcome::Refused { .. }) {
-            store.write(|tx| tx.set_meta(&compact_key(&seat.id), ""))?;
+            if !already_compacting { store.write(|tx| tx.set_meta(&compact_key(&seat.id), ""))?; }
             continue;
         }
-        store.write(|tx| {
-            tx.set_meta(&compact_key(&seat.id), "pending")?;
-            notify(tx, &seat, &attempt, &branch, minutes, now)
-        })?;
+        store.write(|tx| notify(tx, &seat, &attempt, &branch, minutes, now))?;
     }
-    let _ = project;
     Ok(())
 }
 
@@ -185,7 +187,7 @@ mod tests {
         git(dir.path(), &["update-ref", "refs/remotes/origin/heat/t1", "HEAD"], None);
         s.write(|tx| tick(tx, "p", T+2400)).unwrap();
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1, "a push resets the clock");
-        s.write(|tx| tick(tx, "p", T+2401)).unwrap();
+        s.write(|tx| tick(tx, "p", T+2460)).unwrap();
         assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 2);
     }
 

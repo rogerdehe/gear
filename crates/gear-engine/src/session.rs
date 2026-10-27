@@ -649,11 +649,17 @@ mod tests {
             tx.insert_round(&gear_store::NewRound {key:key.clone(),seat:seat.id.clone(),generation:1,cli:"codex".into(),model:None,start_at:T0})?;
             tx.add_round_session(&key, "round-session")?;
             tx.set_attempt_action("p", "T-1", 1, "keep")?;
-            tx.set_meta(&crate::quiet::compact_key(&seat.id), "pending")
+            tx.set_meta(&crate::quiet::compact_key(&seat.id), "pending")?;
+            tx.insert_op(&gear_store::NewOp { project:"p".into(), seat:seat.id.clone(), generation:1,
+                kind:gear_model::OpKind::Deliver, task:Some("T-1".into()), attempt:Some(1), ref_msg:None,
+                plan_version:None, payload:serde_json::json!({"text":"packet"}), created:T0 })?;
+            Ok(())
         }).unwrap();
         let run = |store: &mut Store, herdr: &mut FakeHerdr, now| prepare_lane(store, herdr, &cfg(), &seat, "T-1", 1, now).unwrap();
         assert_eq!(run(&mut store, &mut herdr, T0+1), Prep::Wait);
         assert!(herdr.calls.iter().any(|c| matches!(c, gear_herdr::fake::Call::PaneType {text,..} if text == "/compact")));
+        assert!(crate::ops::execute_intended(&mut store, &mut herdr, "p", T0+1).unwrap().is_empty(), "the already-intended packet must wait");
+        assert_eq!(store.read(|tx| tx.ops_in_state("p", gear_model::OpState::Intended)).unwrap().len(), 1);
         assert_eq!(run(&mut store, &mut herdr, T0+2), Prep::Wait);
         assert!(herdr.calls.iter().any(|c| matches!(c, gear_herdr::fake::Call::SendKeys {keys,..} if keys == &["enter"])));
         herdr.set_status("w1:p1", gear_herdr::AgentStatus::Done);
