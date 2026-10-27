@@ -491,3 +491,13 @@ delivery_grace_s={grace}
         assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,expected,"grace {grace}");
     }
 }
+
+#[test]
+fn an_old_hand_in_does_not_close_a_newer_stall() {
+    let (mut s,op)=world();
+    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
+    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+25).map(|_|())).unwrap();
+    confirm_pending_with(&mut s,"p",3,5,T0+30).unwrap();
+    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
+    assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Open);
+}

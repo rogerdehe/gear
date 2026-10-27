@@ -686,14 +686,12 @@ pub fn confirm_pending_with(
                     // review delivery is settled by a verdict row, not by a
                     // view: say so, so the stored explanation can be traced
                     // (P3 of the T-5 review).
-                    let evidence = if op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)? {
-                        format!(
-                            "verdict {} attempt {} @ {view_ts}",
-                            op.task.as_deref().unwrap_or("-"),
-                            op.attempt.unwrap_or(0)
-                        )
-                    } else if op.kind == OpKind::Deliver && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
-                        view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt) {
+                    let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
+                    let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
+                        view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
+                    let evidence = if review_delivery {
+                        format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
+                    } else if hand_in {
                         format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else {
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
@@ -709,11 +707,11 @@ pub fn confirm_pending_with(
                             // §3.2 step 5: at the check-in the attempt records
                             // the session it ran in.
                             record_attempt_session(tx, project, &op)?;
-                        }
-                        // A hand-in is evidence too, even if it already moved
-                        // the attempt out of Delivered before confirmation.
-                        if !is_reviewer(tx, &op.seat)? {
                             crate::stall::resolve(tx, project, &op.seat, now, None)?;
+                        } else if hand_in {
+                            // A result already started and submitted the
+                            // attempt. A newer stall belongs to later work.
+                            crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
                         }
                     }
                     confirmed.push(op.id.clone());
