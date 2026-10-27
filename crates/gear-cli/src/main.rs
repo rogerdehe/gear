@@ -4157,6 +4157,19 @@ path="api"
                 // The session file is gone: the log cannot be read.
                 tx.add_round_session(&key, "/nonexistent/gear-t207-gone.jsonl")
                     .unwrap();
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) the voyage sails".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(60),
+                    updated: T0,
+                })
+                .unwrap();
                 Ok(())
             })
             .unwrap();
@@ -4172,6 +4185,20 @@ path="api"
         .unwrap();
         assert!(out.contains("T-8 attempt 1 dev · tokens ? / cost ?"), "{out}");
         assert!(!out.contains("tokens 0 in / 0 out"), "{out}");
+
+        let voyage = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(voyage.contains("Time and tokens · tokens ? / cost ?"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens ? / cost ?"), "{voyage}");
+        assert!(!voyage.contains("tokens 0 in / 0 out"), "{voyage}");
     }
 
     /// T-207: a closed round keeps the numbers the store counted: the report
