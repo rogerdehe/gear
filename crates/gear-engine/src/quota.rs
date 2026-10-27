@@ -313,6 +313,7 @@ fn change_model(
         model: entry.model().to_string(),
         cli: target_cli,
         args: entry.args().to_vec(),
+        context_window_k: entry.context_window_k(),
     });
     crate::restart::advance(store, herdr, cfg, profiles, project, seat, Some(&target), now)
 }

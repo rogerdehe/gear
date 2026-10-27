@@ -408,6 +408,9 @@ pub struct ModelSpec {
     /// effort of codex, the effort of Claude Code…
     #[serde(default)]
     pub args: Vec<String>,
+    /// Model context window in thousands of tokens, when configured.
+    #[serde(default)]
+    pub context_window_k: Option<u64>,
 }
 
 impl ModelEntry {
@@ -433,6 +436,10 @@ impl ModelEntry {
             ModelEntry::Plain(_) => &[],
             ModelEntry::Entry(spec) => &spec.args,
         }
+    }
+
+    pub fn context_window_k(&self) -> Option<u64> {
+        match self { ModelEntry::Plain(_) => None, ModelEntry::Entry(spec) => spec.context_window_k }
     }
 
     /// The entry as one line, for a log or a message: the model id, and the
@@ -484,6 +491,7 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
         let mut model: Option<String> = None;
         let mut cli: Option<String> = None;
         let mut args: Vec<String> = Vec::new();
+        let mut context_window_k = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "model" => {
@@ -499,16 +507,17 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
                     cli = Some(map.next_value()?);
                 }
                 "args" => args = map.next_value()?,
+                "context_window_k" => context_window_k = Some(map.next_value()?),
                 other => {
                     return Err(serde::de::Error::unknown_field(
                         other,
-                        &["model", "cli", "args"],
+                        &["model", "cli", "args", "context_window_k"],
                     ))
                 }
             }
         }
         let model = model.ok_or_else(|| serde::de::Error::missing_field("model"))?;
-        Ok(ModelEntry::Entry(ModelSpec { model, cli, args }))
+        Ok(ModelEntry::Entry(ModelSpec { model, cli, args, context_window_k }))
     }
 }
 
