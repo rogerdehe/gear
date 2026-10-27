@@ -311,6 +311,15 @@ pub fn merge_passed(
     // resets to origin before doing any merges, and adopts a completed push.
     for op in merge_order(ready_merges(store, project)?) {
         let task = op.task.clone().unwrap_or_default();
+        // The work of this attempt is already on the integration branch: it
+        // landed with another task's merge (design §10.7, row B03-01). The
+        // queued merge is voided instead of run — a second gate and push would
+        // merge the same work twice.
+        let already_merged = store.read(|tx| attempt_already_merged(tx, project, &op))?;
+        if already_merged {
+            store.write(|tx| void_merged_op(tx, project, &op.id, now))?;
+            continue;
+        }
         let valid_task = store.read(|tx| {
             Ok(tx
                 .get_task(project, &task)?
@@ -898,8 +907,47 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
     Ok(())
 }
 
+/// Void a queued merge whose work is already on the integration branch
+/// (design §10.7, row B03-01): the attempt carries the merge time of the
+/// merge that landed it, so this merge has nothing left to do.
+///
+/// A merge that is already running (Executing) is left alone: its worker
+/// finishes on its own and the completion is kept.
+fn void_merged_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    id: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let from = tx.get_op(project, id)?.map(|op| op.state).unwrap_or(OpState::Intended);
+    match from {
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some("the work is already merged"), now)?,
+        OpState::Unknown => tx.set_op_state(project, id, OpState::Failed, Some("the work is already merged"), now)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Has the attempt of this merge op already landed on the integration branch?
+/// (design §10.7, row B03-01: the attempt carries the merge time of the
+/// merge that landed it.)
+fn attempt_already_merged(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    op: &OpRow,
+) -> GearResult<bool> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(false);
+    };
+    Ok(tx.attempt_times(project, task, attempt)?.merged.is_some())
+}
+
 /// The tasks of the project whose **current** attempt has a passing verdict:
 /// (task, lane, candidate, attempt, the attempt's candidate).
+///
+/// An attempt that already carries a merge time is left out (design §10.7, row
+/// B03-01): its work is on the integration branch — it landed with another
+/// task's merge — so the engine must not merge it again.
 fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String)>> {
     store.read(|tx| {
         let mut passed = Vec::new();
@@ -916,6 +964,11 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
                 continue;
             };
+            // The work is already on the integration branch (it landed with
+            // another task's merge): no merge of its own.
+            if tx.attempt_times(project, &task.id, latest.n)?.merged.is_some() {
+                continue;
+            }
             let Some(verdict) = tx
                 .verdicts_of_task(project, &task.id)?
                 .into_iter()
@@ -3822,6 +3875,69 @@ gate = "{gate}"
     ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
         let candidate = scratch.head_of("heat/t5");
         queued_merge_candidate(scratch, gate, &candidate)
+    }
+
+    /// T-165 (review F2, design §10.7 row B03-01): a task whose work is
+    /// already on the integration branch — it landed with another task's
+    /// merge — is not merged again: no merge op is queued for it, and a merge
+    /// op that was queued before is voided instead of run.
+    #[test]
+    fn a_task_already_merged_by_another_task_is_not_merged_again() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        store
+            .write(|tx| {
+                // T-5's attempt was accepted and carries the merge time of
+                // the merge that landed it (another task's merge).
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                attempt.candidate = Some("abc1234".into());
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Verifying;
+                tx.update_task(&task)?;
+                tx.set_attempt_time("p", "T-5", 1, gear_store::AttemptStep::Merged, 5)?;
+                // A merge op was queued in an earlier tick, before the
+                // attribution arrived.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t5",
+                        "candidate": "abc1234",
+                        "review": "review/t5",
+                    }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty(), "the work was already merged: {merged:?}");
+        // The queued op is void, not run: no worker was launched.
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "{op:?}");
+        assert!(!cfg.merges.running("p"), "no merge worker was launched");
+        // And no second merge op was queued for the same attempt.
+        let merges = store
+            .read(|tx| tx.ops_in_state("p", OpState::Void))
+            .unwrap()
+            .iter()
+            .filter(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some("T-5"))
+            .count();
+        assert_eq!(merges, 1, "one merge op for the task, not two");
     }
 
     /// A project with a handed-in task and a queued merge op for it, whose
