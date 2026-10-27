@@ -677,12 +677,21 @@ fn finish(
         if plan.resume.is_some() {
             if let Some(round) = tx.open_round_of_seat(&seat.id)? {
                 if round.role != "review" { tx.set_attempt_action(project, &round.task, round.attempt, "resume")?; }
+                let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+                tx.set_meta(&format!("engine.session_step.{}", seat.id), &serde_json::json!({
+                    "round":identity,"generation":plan.generation,"action":"resume","step":"done",
+                    "step_at":now,"result":"resume","target":plan.resume
+                }).to_string())?;
             }
         }
         if !plan.old_cli.is_empty() && plan.old_cli != plan.cli {
             if let Some(round) = tx.open_round_of_seat(&seat.id)? {
                 let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
                 tx.set_meta(&format!("engine.session_cross_cli.{}", seat.id), &serde_json::json!({"generation":plan.generation,"round":identity}).to_string())?;
+                tx.set_meta(&format!("engine.session_step.{}", seat.id), &serde_json::json!({
+                    "round":identity,"generation":plan.generation,"action":"fresh","step":"done",
+                    "step_at":now,"result":"fresh"
+                }).to_string())?;
                 if round.role != "review" { tx.set_attempt_action(project, &round.task, round.attempt, "fresh")?; }
                 if let Some(session) = session {
                     tx.add_round_session(&gear_store::RoundKey {project:round.project,task:round.task,attempt:round.attempt,role:round.role}, session)?;
@@ -1140,5 +1149,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
         let binding=store.read(|tx|tx.get_binding("p:heat",2)).unwrap().unwrap(); assert_eq!(binding.pane_id,PANE); assert_eq!(binding.session_ref.as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("resume"));
+        let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
+        let before=herdr.calls.len();
+        assert_eq!(crate::session::prepare_lane(&mut store,&mut herdr,&cfg,&seat,"T-1",1,T+3).unwrap(),crate::session::Prep::Ready);
+        assert!(!herdr.calls[before..].iter().any(|c|matches!(c,Call::Prompt {..}|Call::SendKeys {..}|Call::AgentStart {..}|Call::PaneType {..})), "the completed resume is not repeated");
     }
 }
