@@ -72,14 +72,6 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     let active = (end - start - total_pause).max(0);
     tx.set_round_active(&round_key(round), active)?;
     let live = if review { verdict.is_none() && round.end_at.is_none() } else { matches!(attempt.state, AttemptState::Started | AttemptState::Stopped) && stop.is_none() };
-    if !live {
-        for question in tx.thread_messages(&round.project, &format!("overrun-question:{}:{}:{}", round.task, round.attempt, round.role))? {
-            if matches!(question.state, MsgState::Open | MsgState::Waiting) {
-                tx.update_message_state(&round.project, &question.id, MsgState::Resolved, Some("round finished"), None, None, now)?;
-            }
-        }
-        return Ok(false)
-    }
     let Some(seat) = tx.get_seat(&round.seat)? else { return Ok(false) };
     let budget = tx.round_budget_min(&round.project, &round.task, round.attempt, &round.role, round.model.as_deref())?;
     let state_key = key(round);
@@ -94,7 +86,7 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     let mut changed = false;
     if let Some(asked) = asked_at {
         let last_id = state["answer_id"].as_str().and_then(|id| id.trim_start_matches("M-").parse::<u64>().ok()).unwrap_or(0);
-        if let Some(answer) = answers(tx, round)?.into_iter().rev().find(|m| m.created >= asked && m.id.trim_start_matches("M-").parse::<u64>().unwrap_or(0) > last_id) {
+        if let Some(answer) = answers(tx, round)?.into_iter().rev().find(|m| m.created >= asked && m.created >= start && m.created <= end && m.id.trim_start_matches("M-").parse::<u64>().unwrap_or(0) > last_id) {
             let meta: Value = serde_json::from_str(answer.meta.as_deref().unwrap_or("{}")).unwrap_or_default();
             let left = meta.get("left").and_then(Value::as_i64).unwrap_or(0).max(0);
             let blocker = meta.get("blocker").and_then(Value::as_str).unwrap_or("none");
@@ -112,6 +104,15 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
             crate::stall::resolve(tx, &round.project, &round.seat, now, None)?;
             changed = true;
         }
+    }
+    if !live {
+        for question in tx.thread_messages(&round.project, &format!("overrun-question:{}:{}:{}", round.task, round.attempt, round.role))? {
+            if matches!(question.state, MsgState::Open | MsgState::Waiting) {
+                tx.update_message_state(&round.project, &question.id, MsgState::Resolved, Some("round finished"), None, None, now)?;
+            }
+        }
+        tx.set_meta(&state_key, &state.to_string())?;
+        return Ok(changed)
     }
     let waiting = state["waiting"].as_bool().unwrap_or(false);
     let asked_active = state["asked_active"].as_i64().unwrap_or(0);
@@ -264,6 +265,41 @@ mod tests {
         assert!(messages(&mut s,"overrun:T-1:dev").is_empty());
         tick_at(&mut s,2600);
         assert!(messages(&mut s,"overrun:T-1:dev")[0].urgent);
+    }
+
+    #[test]
+    fn progress_before_handin_is_processed_on_the_finished_round() {
+        let mut s=world(); tick_at(&mut s,600);
+        answer(&mut s,601,0,"none");
+        s.write(|tx| tx.set_attempt_time("p","T-1",1,AttemptStep::HandedIn,T+602)).unwrap();
+        tick_at(&mut s,603); tick_at(&mut s,604);
+        let items=messages(&mut s,"overrun:T-1:dev");
+        assert_eq!(items.len(),1); assert!(!items[0].urgent); assert!(items[0].body.contains("work update"));
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:dev").len(),1);
+    }
+    #[test]
+    fn progress_after_handin_is_not_an_answer_for_the_closed_round() {
+        let mut s=world(); tick_at(&mut s,600);
+        s.write(|tx| tx.set_attempt_time("p","T-1",1,AttemptStep::HandedIn,T+601)).unwrap();
+        answer(&mut s,602,0,"none"); tick_at(&mut s,603);
+        assert!(messages(&mut s,"overrun:T-1:dev").is_empty());
+    }
+    #[test]
+    fn progress_before_review_verdict_is_processed_on_the_finished_round() {
+        let mut s=world();
+        s.write(|tx| {
+            testing::seed_temp_seat(tx,"p","review-1","T-1","w1:p3","codex",T)?;
+            tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},seat:"p:review-1".into(),generation:1,cli:"codex".into(),model:None,start_at:T })
+        }).unwrap();
+        tick_at(&mut s,1800);
+        s.write(|tx| {
+            tx.insert_message(&NewMessage {project:"p".into(),thread:"T-1:1".into(),task:Some("T-1".into()),attempt:Some(1),sender:"p:review-1".into(),sender_gen:1,recipient:"p:captain".into(),kind:MsgKind::Progress,urgent:false,body:"review update".into(),reply_to:None,needs_ack:false,state:MsgState::Info,created:T+1801,meta:Some(json!({"left":0,"blocker":"none"}).to_string())})?;
+            tx.insert_review_verdict(&gear_store::ReviewVerdictRow {project:"p".into(),task:"T-1".into(),attempt:1,passed:true,findings:String::new(),by_seat:"p:review-1".into(),created:T+1802})
+        }).unwrap();
+        tick_at(&mut s,1803); tick_at(&mut s,1804);
+        let items=messages(&mut s,"overrun:T-1:review");
+        assert_eq!(items.len(),1); assert!(!items[0].urgent); assert!(items[0].body.contains("review update"));
+        assert_eq!(messages(&mut s,"overrun-question:T-1:1:review").len(),1);
     }
 
 }
