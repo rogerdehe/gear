@@ -34,6 +34,7 @@ pub mod ops;
 pub mod overrun;
 pub mod parallel;
 pub mod quota;
+pub mod quiet;
 pub mod release;
 pub mod restart;
 pub mod rounds;
@@ -305,6 +306,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
 
+        // The loop guard acts on the observed working session before dispatch;
+        // its message also resets the ordinary push reminder clock.
+        quiet::loops(store, herdr, &project, &observed, now)?;
+        store.write(|tx| quiet::tick(tx, &project, now))?;
+
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let delivery_grace = gear_app::config::latest(store, &project)
             .map(|config| i64::from(config.timing.delivery_grace_s))
@@ -406,6 +412,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
+        quiet::prepare_pending_deliveries(store, herdr, cfg, &project, now)?;
         let executed = ops::execute_intended(store, herdr, &project, now)?;
         store.write(|tx| {
             for (id, state) in &executed {
