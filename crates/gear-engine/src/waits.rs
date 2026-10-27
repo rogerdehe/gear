@@ -1,7 +1,7 @@
 //! Declared task waits and their round clocks (design §5.3–5.4).
 use gear_herdr::HerdrAct;
 use gear_model::{AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, Ts};
-use gear_store::{NewMessage, RoundKey, Store, Tx};
+use gear_store::{NewMessage, Store, Tx};
 use crate::EngineCfg;
 
 /// A wait belongs only to the lane's current, unfinished attempt.
@@ -15,7 +15,7 @@ pub(crate) fn waiting_seat(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
     Ok(false)
 }
 
-/// Reconcile wait rows and add the union of each round's pauses once.
+/// Reconcile declared waits and their seat pause rows.
 fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     for task in tx.tasks_of_project(project)? {
         let Some(on) = task.wait_on.as_deref() else { continue };
@@ -66,30 +66,6 @@ fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     for pause in tx.pauses_of_project(project)? {
         if pause.kind == "wait" && pause.end_at.is_none() && !waiting_seat(tx, &pause.seat)? {
             tx.close_pause(project, &pause.seat, "wait", now)?;
-        }
-    }
-    let pauses = tx.pauses_of_project(project)?;
-    for round in tx.rounds_of_project(project)? {
-        if round.role != "dev" && round.role != "rework" { continue; }
-        let times = tx.attempt_times(project, &round.task, round.attempt)?;
-        let Some(start) = times.started else { continue };
-        let end = now.min(round.end_at.unwrap_or(now)).min(times.handed_in.unwrap_or(now)).max(start);
-        let mut intervals: Vec<_> = pauses.iter().filter(|p| p.seat == round.seat)
-            .map(|p| (p.start_at.max(start), p.end_at.unwrap_or(end).min(end)))
-            .filter(|(a,b)| b > a).collect();
-        intervals.sort_unstable();
-        let mut total = 0;
-        let mut current: Option<(Ts, Ts)> = None;
-        for (a,b) in intervals {
-            match current {
-                Some((x,y)) if a <= y => current = Some((x,y.max(b))),
-                Some((x,y)) => { total += y-x; current = Some((a,b)); },
-                None => current = Some((a,b)),
-            }
-        }
-        if let Some((a,b)) = current { total += b-a; }
-        if total > round.paused_s {
-            tx.add_round_pause(&RoundKey {project:project.into(),task:round.task,attempt:round.attempt,role:round.role}, total-round.paused_s)?;
         }
     }
     Ok(())

@@ -96,3 +96,26 @@ fn pending_overrun_does_not_escalate_while_task_is_waiting() {
     assert!(s.read(|tx|tx.thread_messages("p","overrun:T-1:dev")).unwrap().is_empty());
     assert!(h.prompts_to(LANE).is_empty(),"{:?}",h.calls);
 }
+
+#[test]
+fn merge_collected_after_entry_wait_pass_uses_its_actual_completion_time() {
+    let (mut s,mut h,c)=world(); block(&mut s);
+    s.write(|tx| tx.insert_attempt(&AttemptRow {session_ref:None,session_cli:None,session_action:None,sent_at:None,project:"p".into(),task:"T-2".into(),n:1,seat:"p:other".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Accepted,candidate:Some(SHA.into()),report:None,safe_point:None,started:T,updated:T+130})).unwrap();
+    gear_engine::waits::tick(&mut s,&mut h,&c,T+230).unwrap();
+    s.write(|tx|tx.set_attempt_time("p","T-2",1,AttemptStep::Merged,T+200)).unwrap();
+    gear_engine::waits::tick(&mut s,&mut h,&c,T+230).unwrap();
+    gear_engine::overrun::tick(&mut s,&mut h,&c,T+230).unwrap();
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0);
+    assert_eq!((r.paused_s,r.active_s),(190,40));
+}
+
+#[test]
+fn full_tick_uses_quota_resume_transition_instead_of_observation_time() {
+    let (mut s,mut h,c)=world();
+    s.write(|tx|tx.set_seat_state("p:heat",gear_model::SeatState::Parked,Some("quota"),T+700)).unwrap();
+    advance(&mut s,&mut h,&c,2000);
+    s.write(|tx|tx.set_seat_state("p:heat",gear_model::SeatState::Active,Some("quota reset"),T+2100)).unwrap();
+    advance(&mut s,&mut h,&c,2200);
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0);
+    assert_eq!((r.paused_s,r.active_s),(1400,800));
+}
