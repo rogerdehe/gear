@@ -23,6 +23,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod friction;
 pub mod guardrails;
 pub mod merge;
 pub mod model;
@@ -146,6 +147,10 @@ pub struct TickReport {
     /// The all-tail item opened or closed this tick (`all-tail:opened|closed`):
     /// every lane in the tail while required work remains (B02-08).
     pub tail: Vec<String>,
+    /// The friction item opened, updated or closed this tick
+    /// (`friction:opened|updated|closed`): the captain hears about the open
+    /// friction reports when it has nothing else to do (design §6.4).
+    pub friction: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
@@ -356,6 +361,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.tail.extend(
             tailed::watch(store, &project, now)?
                 .map(|change| format!("all-tail:{}", change.as_str())),
+        );
+
+        // 6d. the friction ring (design §6.4): an idle captain hears about
+        //     the open friction reports — one item on the thread `friction`,
+        //     at most once per 30 min, updated by a new report and closed
+        //     when every report it lists is closed.
+        report.friction.extend(
+            friction::ring(store, &project, now)?
+                .map(|change| format!("friction:{}", change.as_str())),
         );
 
         // 7. review: a lane handed a result in → a temp reviewer starts. The
