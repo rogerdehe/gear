@@ -916,7 +916,9 @@ fn start_reviewer(
             //    when the CLI takes one, the arguments of the chain entry and
             //    the session of an earlier review of the same task when the
             //    reviewer resumes it (F3).
-            let args = reviewer_args(store, config, profile, kind, entry, &task.task)?;
+            let mut args = reviewer_args(store, config, profile, kind, entry, &task.task)?;
+            let rules = crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile)?;
+            args.splice(profile.unattended_args.len()..profile.unattended_args.len(), rules);
 
             // The start is recorded before Herdr is asked: an engine restart
             // between the two must find the intent and adopt the agent it
@@ -1739,7 +1741,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["codex", "opencode", "claude"] {
             cfg.profiles
                 .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
@@ -2096,12 +2098,26 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(report.started, vec!["p:review-1"]);
         // T-76: the folder the reviewer runs in is trusted, so the args are
         // the profile's with the worktree filled in.
-        assert_eq!(
-            starts(&herdr)[0].1,
-            gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/home-review-1"),
-            "{:?}",
-            starts(&herdr)
-        );
+        let args = &starts(&herdr)[0].1;
+        assert!(args.starts_with(&gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/home-review-1")), "{args:?}");
+        assert!(args.iter().any(|s| s.starts_with("developer_instructions=")), "{args:?}");
+    }
+
+    #[test]
+    fn codex_reviewer_starts_with_review_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let mut config = cfg(); config.db_path = dir.path().join("gear.db").to_string_lossy().into();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0+10).unwrap();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0+20).unwrap();
+        let found = starts(&herdr);
+        let args = &found[0].1;
+        let value = args.iter().find(|s| s.starts_with("developer_instructions=")).unwrap();
+        let parsed: toml::Table = toml::from_str(value).unwrap();
+        let text = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
+        assert!(text.starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
+        assert_eq!(text, std::fs::read_to_string(dir.path().join("rules/review.md")).unwrap());
     }
 
     #[test]
@@ -2175,6 +2191,8 @@ review = [
             starts[0].1,
             vec![
                 "--dangerously-skip-permissions".to_string(),
+                "--append-system-prompt-file".to_string(),
+                std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy().into_owned(),
                 "--model".to_string(),
                 "claude-sonnet-5-5".to_string(),
                 "--effort".to_string(),
@@ -2328,6 +2346,8 @@ review = [
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
                     "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
+                    "-c".to_string(),
+                    format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md")).unwrap())),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),

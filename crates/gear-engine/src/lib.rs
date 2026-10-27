@@ -38,6 +38,7 @@ pub mod quota;
 pub mod release;
 pub mod restart;
 pub mod rounds;
+mod rules;
 pub mod session;
 mod session_runner;
 pub mod review;
@@ -180,6 +181,11 @@ pub struct TickReport {
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
     let mut report = TickReport::default();
+
+    // Settle recorded lane rebinds before onboarding or dispatch sees config.
+    for project in store.read(|tx| tx.project_ids())? {
+        gear_app::plan::reconcile_rebinds(store, &project)?;
+    }
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.

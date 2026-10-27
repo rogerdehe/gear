@@ -840,13 +840,23 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // it — a retry of this very delivery (design §10.3): the lane
             // recovered either way, so its stall item closes as well.
             let started_here = start_confirmed_attempt(tx, project, &op, now)?;
+            if started_here {
+                // §3.2 step 5: at the check-in the attempt records the session
+                // it ran in (T-192, the late check-in of a delivery whose
+                // answer was lost).
+                record_attempt_session(tx, project, &op)?;
+            }
             let mut late_hand_in_key = None;
+            // The scan reports an attempt only when it changes it: an attempt
+            // that is already Started is nothing new (T-192).
+            let mut changed = started_here;
             if !started_here {
                 let state = tx.get_attempt(project, task, attempt)?.map(|row| row.state);
                 if matches!(state, Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)) {
                     let key = format!("engine.delivery_late_handin.{}.{}", project, op.id);
                     if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) { continue }
                     late_hand_in_key = Some(key);
+                    changed = true;
                 } else if state != Some(AttemptState::Started) {
                     continue;
                 }
@@ -856,7 +866,9 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // its own item.
             crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
             if let Some(key) = late_hand_in_key { tx.set_meta(&key, "1")?; }
-            confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
+            if changed {
+                confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
+            }
         }
         Ok(confirmed)
     })

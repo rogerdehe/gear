@@ -711,6 +711,24 @@ mod tests {
     }
 
     #[test]
+    fn pi_session_resume_starts_with_role_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, seat, mut config) = pi_world();
+        config.db_path = dir.path().join("gear.db").to_string_lossy().into();
+        herdr.exit_agent("pi:p1");
+        store.write(|tx| tx.set_meta(&format!("engine.session_step.{}", seat.id), &serde_json::json!({
+            "round":"p:T-1:1:dev", "generation":1, "action":"resume", "step":"start_resume",
+            "step_at":T0, "target":"old-session"
+        }).to_string())).unwrap();
+        let action = Action::Resume("old-session".into());
+        assert_eq!(crate::session_runner::run(&mut store, &mut herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, T0+1).unwrap(), Prep::Wait);
+        let args = herdr.calls.iter().find_map(|c| if let gear_herdr::fake::Call::AgentStart { args, .. } = c {Some(args)} else {None}).unwrap();
+        let path = dir.path().join("rules/lane.md");
+        assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()), "{args:?}");
+        assert!(args.windows(2).any(|w| w == ["--session", "old-session"]));
+    }
+
+    #[test]
     fn compact_uses_log_or_done_and_falls_back_after_timeout() {
         for mode in ["log", "assistant", "done", "timeout"] {
             let (mut store, mut herdr, seat, config) = pi_world();
@@ -1218,7 +1236,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
 
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
         cfg.profiles
             .insert("codex".to_string(), gear_herdr::builtin("codex").unwrap());
         cfg

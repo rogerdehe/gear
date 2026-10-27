@@ -34,7 +34,7 @@ profile = "opencode"
 "#;
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
@@ -52,7 +52,7 @@ fn queued_lane_gets_worktree_env_and_agent() {
     assert_eq!(b.status, BindingStatus::Active);
     assert!(herdr.worktree_branches().contains(&"home/heat"));
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
-        if command == "export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db")), "{:?}", herdr.calls);
+        if command == &format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path))), "{:?}", herdr.calls);
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
         if name == "toy-heat" && kind == "opencode" && args == &vec!["--auto".to_string()])), "{:?}", herdr.calls);
     // the captain is bound at init (T-63), not onboarded by the engine
