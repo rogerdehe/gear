@@ -38,6 +38,7 @@ pub mod quota;
 pub mod release;
 pub mod restart;
 pub mod rounds;
+mod rules;
 pub mod session;
 mod session_runner;
 pub mod review;
