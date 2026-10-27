@@ -13,6 +13,7 @@ mod captain_handover_contract;
 mod captain_take_contract;
 mod config_change_contract;
 mod config_contract;
+mod decision_contract;
 mod draft_contract;
 mod github_contract;
 mod home_task_contract;
