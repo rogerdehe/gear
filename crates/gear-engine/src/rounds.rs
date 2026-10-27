@@ -140,8 +140,10 @@ pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::Round
     let (Some(seat), Some(project)) = (seat, project) else { return Ok(unknown()) };
     let config = project.config_toml.parse::<toml::Value>().ok();
     let resolve = |name: &str| {
-        let mut profile = cfg.profiles.get(name).cloned().or_else(|| gear_herdr::builtin(name))?;
-        if let Some(raw) = config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(name)) {
+        let raw = config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(name));
+        let mut profile = cfg.profiles.get(name).cloned().or_else(|| gear_herdr::builtin(name))
+            .or_else(|| raw.map(|_| gear_herdr::Profile::for_new()))?;
+        if let Some(raw) = raw {
             if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() { profile = profile.patched(&patch, name); }
         }
         Some(profile)

@@ -477,8 +477,6 @@ fn closed_codex_round_keeps_its_reader_after_the_seat_moves_to_pi() {
     assert_eq!(row.input,Some(300)); assert_eq!(row.counted_at,Some(T0+160));
     // A custom profile of the same CLI still applies its configured reader.
     store.write(|tx|tx.set_seat_profile(LANE,"custom")).unwrap();
-    let mut custom=gear_herdr::Profile::for_new(); custom.kind="codex".into();
-    cfg.profiles.insert("custom".into(),custom);
     assert_eq!(gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+160).unwrap().input,Some(300));
 }
 
