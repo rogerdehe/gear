@@ -89,11 +89,14 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         let current = tx.in_progress_attempts_of_seat(&seat.id)?;
         let working = !current.is_empty();
         // One task from dry: the lane works on its last task and has nothing
-        // startable behind it (§10.7 row B3).
+        // startable behind it (§10.7 row B3). It is a warning about work in
+        // flight: when the lane stops working, the idle state is the fact
+        // (F2 of the T-162 review).
         let dry = about_to_dry
             .iter()
             .find(|idle| idle.lane == seat.name)
-            .filter(|idle| idle.current.is_some());
+            .filter(|idle| idle.current.is_some())
+            .filter(|_| working);
         let average = average_task_seconds(tx, project, &seat.id)?;
         let horizon = match average {
             Some(average) => {
@@ -118,8 +121,12 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
             }
             continue;
         }
-        let severity = if dry.is_some() || (ready == 0 && !working) {
+        let severity = if ready == 0 && !working {
+            // The lane stands idle: the last fact, and worse than the warning
+            // about the work in flight (F2).
             3
+        } else if dry.is_some() {
+            2
         } else if let (Some(left), Some(average)) = (horizon, average) {
             // Taking the final queued task does not itself shorten the
             // forecast. Escalate when runway halves, then when actually idle.
@@ -132,14 +139,14 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         let previous = tx.get_meta(&state_key)?.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
         // The captain may resolve an alert without refilling immediately. The
         // same condition stays acknowledged until it worsens or recovers.
-        let body = if let Some(dry) = dry {
+        let body = if ready == 0 && !working {
+            format!("lane {} is IDLE", seat.name)
+        } else if let Some(dry) = dry {
             // The same words the plan apply uses: the lane has nothing to
             // start after its current task.
             dry.warning()
                 .trim_start_matches("warning: ")
                 .to_string()
-        } else if ready == 0 && !working {
-            format!("lane {} is IDLE", seat.name)
         } else if let Some(seconds) = horizon {
             format!("lane {} runs dry in ~{} min", seat.name, (seconds + 59) / 60)
         } else {
@@ -238,7 +245,9 @@ fn imbalance(
         }
     }
     let (Some(idle), Some((busy_lane, count, minutes))) = (idle, busy) else {
-        // The imbalance is over: the item closes.
+        // The imbalance is over: the item closes and the fact is forgotten, so
+        // a later imbalance is told again (F1).
+        tx.set_meta(&balance_key(project), "")?;
         let Some(item) = open_balance(tx, project, captain)? else {
             return Ok(None);
         };
@@ -256,15 +265,27 @@ fn imbalance(
     let body = format!(
         "{idle} has nothing left; {busy_lane} has {count} tasks ({minutes}m) left: move some (lane ownership allowing) or plan more for {idle}."
     );
+    // The incident: the idle lane and the lane it would take work from. It
+    // survives the item's resolution, so the same imbalance is not told again
+    // (F1).
+    let incident = format!("{idle}|{busy_lane}");
+    let told = tx.get_meta(&balance_key(project))?.unwrap_or_default();
     match open_balance(tx, project, captain)? {
         Some(item) => {
             // The same item, updated: the fact is not repeated (§8.4).
             if item.body != body {
                 tx.update_message_body(project, &item.id, &body)?;
             }
+            tx.set_meta(&balance_key(project), &incident)?;
             Ok(Some(FeedChange { lane: idle, action: "updated" }))
         }
         None => {
+            if told == incident {
+                // The captain resolved the item and the imbalance is the same:
+                // the fact is not told again.
+                return Ok(None);
+            }
+            tx.set_meta(&balance_key(project), &incident)?;
             tx.insert_message(&NewMessage {
                 meta: None,
                 project: project.to_string(),
@@ -285,6 +306,12 @@ fn imbalance(
             Ok(Some(FeedChange { lane: idle, action: "opened" }))
         }
     }
+}
+
+/// The key of the imbalance incident in the engine's meta: the fact that was
+/// told, so the captain is not told the same imbalance twice (F1).
+fn balance_key(project: &str) -> String {
+    format!("feed-balance:{project}")
 }
 
 /// The work of a lane that has not started yet: the tasks that are ready or

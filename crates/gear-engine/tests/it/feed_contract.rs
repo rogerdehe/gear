@@ -5,7 +5,7 @@
 use gear_engine::{feed, tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
 use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, SeatState, TaskState};
-use gear_store::{testing, NewMessage, Store, TaskRow};
+use gear_store::{testing, AttemptRow, AttemptStep, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -660,7 +660,29 @@ fn a_lane_one_task_from_dry_warns_once() {
         .write(|tx| {
             lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
             lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec!["T-3"])?;
-            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])
+            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])?;
+            // The lane works on T-1.
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)
         })
         .unwrap();
 
@@ -677,4 +699,107 @@ fn a_lane_one_task_from_dry_warns_once() {
     // The next tick does not repeat the warning: one item per state.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
     assert_eq!(items(&mut w.store, "heat").len(), 1, "no duplicate");
+}
+
+/// F2: the warning about the work in flight is not the idle state. When the
+/// lane hands its last task in, it stands idle — a fresh, worse fact, with
+/// its own item.
+#[test]
+fn a_lane_that_hands_its_last_task_in_says_it_is_idle() {
+    let mut w = world(AgentStatus::Working, 0);
+    w.store
+        .write(|tx| {
+            lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
+            lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec!["T-3"])?;
+            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "the warning about the work in flight");
+
+    // The lane hands the task in: the review runs, the lane has nothing left.
+    w.store
+        .write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.expect("the attempt");
+            attempt.state = AttemptState::Submitted;
+            tx.update_attempt(&attempt)?;
+            let mut task = tx.get_task("p", "T-1")?.expect("the task");
+            task.state = TaskState::Verifying;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+
+    let lane_items = items(&mut w.store, "heat");
+    assert_eq!(lane_items.len(), 2, "{lane_items:?}");
+    assert_eq!(lane_items[1].state, MsgState::Open, "the idle state is a fresh item");
+    assert_eq!(lane_items[1].body, "lane heat is IDLE");
+
+    // And the next tick is silent: the idle lane is not told again.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 2, "no duplicate");
+}
+
+/// F1: a balance item the captain resolved is not told again while the same
+/// imbalance lasts; a later imbalance is told again.
+#[test]
+fn a_resolved_balance_item_is_not_told_again() {
+    let mut w = imbalance_world();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(balance_items(&mut w.store).len(), 1, "{:?}", balance_items(&mut w.store));
+
+    // The captain resolves the item.
+    let id = balance_items(&mut w.store)[0].id.clone();
+    w.store
+        .write(|tx| {
+            tx.update_message_state("p", &id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+        })
+        .unwrap();
+
+    // The next tick does not tell the same fact again.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "no new item is opened: {items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved, "the one item stays resolved");
+
+    // The imbalance ends: the idle lane gets work.
+    w.store
+        .write(|tx| lane_task(tx, "T-9", "mast", 9, TaskState::Ready, Some(20), vec![]))
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+
+    // And it is back: the fact is told again.
+    w.store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-9")?.expect("the task");
+            task.state = TaskState::Done;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[1].state, MsgState::Open, "the imbalance is told again");
 }
