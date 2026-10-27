@@ -547,16 +547,27 @@ pub fn work_of(
         .collect();
     // The lane seats of the project: the fleet is stopped when all of them
     // are parked at once.
-    let lanes: Vec<(String, String)> = tx
+    let seats: Vec<gear_store::SeatRow> = tx
         .seats_of_project(project)?
         .into_iter()
         .filter(|seat| seat.role == SeatRole::Lane)
-        .map(|seat| (seat.name, seat.id))
         .collect();
     // The pauses of every lane seat, per kind.
     let pauses = tx.pauses_of_project(project)?;
     // The rounds of every lane seat: their active time is the work.
     let rounds = tx.rounds_of_project(project)?;
+    // A lane that was retired before this voyage is not one of the fleet's
+    // lanes: it is no line of the report, and it does not hold the fleet from
+    // being stopped (ops/reviews/T-171.md round 2, F10). A lane that was
+    // retired during the voyage, but worked in it, still is one.
+    let lanes: Vec<(String, String)> = seats
+        .iter()
+        .filter(|seat| {
+            seat.state != SeatState::Retired
+                || worked_in_window(&seat.id, &rounds, &pauses, departure, now)
+        })
+        .map(|seat| (seat.name.clone(), seat.id.clone()))
+        .collect();
 
     let mut work = VoyageWork {
         milestone: milestone.to_string(),
@@ -635,6 +646,32 @@ pub fn work_of(
     work.fleet_stops = stops;
     work.elapsed_without_quota_min = elapsed_s.map(|elapsed| (elapsed - stopped).max(0) / 60);
     Ok(work)
+}
+
+/// Whether a lane seat has a round or a pause inside the voyage's window
+/// (the departure until now). An open round or pause reaches now.
+fn worked_in_window(
+    seat_id: &str,
+    rounds: &[gear_store::RoundRow],
+    pauses: &[gear_store::PauseRow],
+    departure: Option<Ts>,
+    now: Ts,
+) -> bool {
+    let Some(departure) = departure else {
+        return false;
+    };
+    let overlaps = |start: Ts, end: Option<Ts>| {
+        let end = end.unwrap_or(now);
+        start < now && end > departure
+    };
+    rounds
+        .iter()
+        .filter(|row| row.seat == seat_id)
+        .any(|row| overlaps(row.start_at, row.end_at))
+        || pauses
+            .iter()
+            .filter(|pause| pause.seat == seat_id)
+            .any(|pause| overlaps(pause.start_at, pause.end_at))
 }
 
 /// The wall time during which **every** lane seat was in a quota pause at
