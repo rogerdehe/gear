@@ -352,3 +352,55 @@ fn a_misplaced_field_is_refused() {
         assert!(error.detail.contains(needle), "{rid}: {}", error.detail);
     }
 }
+
+#[test]
+fn rebind_waits_for_all_open_attempts_then_changes_config_and_preserves_old_tasks() {
+    let mut s = world();
+    s.write(|tx| {
+        let mut p = tx.get_project("p")?.unwrap();
+        p.config_toml.push_str("\n[[repos]]\nname='engine'\npath='crates/engine'\nintegration='engine-dev'\ngate='cargo test -p engine'\n");
+        tx.update_project(&p)
+    }).unwrap();
+    run_at(&mut s, &two_new(), "create").unwrap();
+    s.write(|tx| {
+        // Simulate a legacy task from before repo snapshots existed.
+        let mut old = tx.get_task("p", "T-1")?.unwrap();
+        old.repo = None; old.base = None; old.gate = None;
+        tx.update_task(&old)?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW + 20)?;
+        let mut a = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        a.state = AttemptState::Submitted;
+        tx.update_attempt(&a)
+    }).unwrap();
+    let result = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/core/, tests/]\n", "rebind").unwrap();
+    assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+    let before = gear_app::config::latest(&mut s, "p").unwrap();
+    assert_eq!(before.repo_of_lane("heat").name, "api");
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+    s.write(|tx| {
+        let mut a = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        a.state = AttemptState::Accepted;
+        tx.update_attempt(&a)
+    }).unwrap();
+    assert_eq!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(), vec!["heat"]);
+    let after = gear_app::config::latest(&mut s, "p").unwrap();
+    assert_eq!(after.repo_of_lane("heat").name, "engine");
+    assert_eq!(after.lanes.iter().find(|l| l.name == "heat").unwrap().owns, ["src/core/", "tests/"]);
+    let old = task(&mut s, "T-1");
+    assert_eq!((old.repo.as_deref(), old.base.as_deref(), old.gate.as_deref()), (Some("/repo/crates/api"), Some("feat/api"), Some("cargo test -p api")));
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+    let next = run_at(&mut s, "# Queue\n## NEW [must] lane=heat\ngoal: new\naccept: done\nestimate: 10\ndeps: -\n", "new").unwrap();
+    assert_eq!(task(&mut s, &next.created[0]).repo.as_deref(), Some("/repo/crates/engine"));
+}
+
+#[test]
+fn idle_rebind_applies_at_once_and_invalid_targets_are_atomic() {
+    let mut s = world();
+    let error = run_at(&mut s, "# Staff\n- rebind wire repo=missing owns=[src/]\n", "bad").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
+    let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/wire/]\n", "idle").unwrap();
+    assert!(result.warnings.contains(&"rebind wire: applied".into()));
+    assert_eq!(gear_app::config::latest(&mut s, "p").unwrap().repo_of_lane("wire").name, "api");
+    assert!(parse("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind wire repo=api owns=[]\n").is_err());
+}

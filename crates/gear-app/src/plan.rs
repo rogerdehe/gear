@@ -580,6 +580,15 @@ fn apply_queue(
     // is not a seat: it queues a new merge op for a task whose merge failed.
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
+        if let StaffItem::Rebind { lane, repo, owns, line } = item {
+            let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
+            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
+                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            warnings.push(message.clone());
+            staffed.push(message);
+            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            continue;
+        }
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
             // The decision log (design §7.4): a staff line is a decision.
@@ -654,6 +663,7 @@ fn apply_queue(
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
+            StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -1007,8 +1017,95 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retire { line, .. }
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
-        | StaffItem::Remerge { line, .. } => *line,
+        | StaffItem::Remerge { line, .. }
+        | StaffItem::Rebind { line, .. } => *line,
     }
+}
+
+/// A durable rebind request; the engine calls `reconcile_rebinds` each tick.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebindRequest { repo: String, owns: Vec<String> }
+
+pub fn rebind_pending_key(seat: &str) -> String { format!("lane-rebind:{seat}") }
+
+fn rebind_config(tx: &Tx<'_>, project: &str, lane: &str, request: &RebindRequest, line: usize) -> GearResult<String> {
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let current = crate::config::parse(&row.config_toml)?;
+    if !current.repos.iter().any(|r| r.name == request.repo) {
+        return Err(bad(line, format!("unknown repo {:?}", request.repo)));
+    }
+    let mut value: toml::Value = row.config_toml.parse().map_err(|e| bad(line, format!("invalid config: {e}")))?;
+    let lanes = value.get_mut("lanes").and_then(toml::Value::as_array_mut).ok_or_else(|| bad(line, "project has no lanes"))?;
+    let entry = lanes.iter_mut().find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
+        .and_then(toml::Value::as_table_mut).ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
+    entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    entry.insert("owns".into(), toml::Value::Array(request.owns.iter().cloned().map(toml::Value::String).collect()));
+    let text = toml::to_string(&value).map_err(|e| bad(line, format!("cannot serialize config: {e}")))?;
+    let new = crate::config::parse(&text)?;
+    let old_issues = crate::config::validate(&current);
+    if let Some(issue) = crate::config::validate(&new).into_iter().find(|issue| !old_issues.contains(issue)) {
+        return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
+    }
+    Ok(text)
+}
+
+fn request_rebind(tx: &Tx<'_>, project: &str, lane: &str, repo: &str, owns: &[String], line: usize) -> GearResult<Vec<String>> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx.get_seat(&seat_id)?.ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
+    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired { return Err(bad(line, "rebind needs a non-retired lane")); }
+    if tx.get_meta(&format!("lane-rebind-applied:{seat_id}"))?.is_some_and(|v| !v.is_empty()) {
+        return Err(bad(line, format!("lane {lane} is still moving to its new worktree")));
+    }
+    let request = RebindRequest { repo: repo.into(), owns: owns.to_vec() };
+    rebind_config(tx, project, lane, &request, line)?; // validate before recording anything
+    let key = rebind_pending_key(&seat_id);
+    let data = serde_json::to_string(&request).map_err(|e| bad(line, e))?;
+    if tx.get_meta(&key)?.is_some_and(|old| !old.is_empty() && old != data) {
+        return Err(bad(line, format!("lane {lane} already has a pending rebind")));
+    }
+    tx.set_meta(&key, &data)?;
+    let mut waiting: Vec<_> = tx.open_attempts_of_seat(&seat_id)?.into_iter().map(|a| a.task).collect();
+    waiting.sort(); waiting.dedup();
+    if waiting.is_empty() { apply_rebind(tx, project, lane, &seat_id, &request)?; }
+    Ok(waiting)
+}
+
+fn apply_rebind(tx: &Tx<'_>, project: &str, lane: &str, seat: &str, request: &RebindRequest) -> GearResult<()> {
+    let mut row = tx.get_project(project)?.ok_or_else(|| bad(0, "project not found"))?;
+    let old_config = crate::config::parse(&row.config_toml)?;
+    let text = rebind_config(tx, project, lane, request, 0)?;
+    // Legacy tasks created before repo snapshots keep the old target as well.
+    let old = old_config.repo_of_lane(lane);
+    for mut task in tx.tasks_of_project(project)?.into_iter().filter(|t| t.lane.as_deref() == Some(lane) && t.repo.is_none()) {
+        task.repo = Some(old.path.clone());
+        if task.base.is_none() { task.base = Some(old.integration.clone()); }
+        if task.gate.is_none() { task.gate = Some(old.gate.clone()); }
+        tx.update_task(&task)?;
+    }
+    row.config_toml = text;
+    row.config_version += 1;
+    tx.update_project(&row)?;
+    // The engine-side rebind can use this durable marker to move the worktree.
+    if old.name != request.repo {
+        tx.set_meta(&format!("lane-rebind-applied:{seat}"), &serde_json::to_string(request).map_err(|e| bad(0, e))?)?;
+    }
+    tx.set_meta(&rebind_pending_key(seat), "")?;
+    Ok(())
+}
+
+/// Finish recorded requests after their last non-terminal attempt settles.
+pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
+    store.write(|tx| {
+        let mut changed = Vec::new();
+        for seat in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane) {
+            let Some(raw) = tx.get_meta(&rebind_pending_key(&seat.id))?.filter(|v| !v.is_empty()) else { continue };
+            if !tx.open_attempts_of_seat(&seat.id)?.is_empty() { continue; }
+            let request: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
+            apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
+            changed.push(seat.name);
+        }
+        Ok(changed)
+    })
 }
 
 /// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
@@ -2299,6 +2396,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Retry { lane, .. } => format!("retry {lane}"),
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+        StaffItem::Rebind { lane, repo, owns, .. } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
     }
 }
 

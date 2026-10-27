@@ -61,6 +61,8 @@ pub enum StaffItem {
     /// or Queued (its agent is gone, the engine onboards it again) (T-133).
     /// `- release review-1`: a reviewer seat in Standby is released (T-140).
     Release { line: usize, name: String },
+    /// `- rebind heat repo=backend owns=[src/, tests/]`.
+    Rebind { line: usize, lane: String, repo: String, owns: Vec<String> },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
@@ -712,6 +714,19 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             }
             Ok(StaffItem::Release { line, name: name.to_string() })
         }
+        "rebind" => {
+            let lane = tokens.next().ok_or_else(|| bad(line, "`rebind` needs a lane"))?;
+            let repo = tokens.next().and_then(|s| s.strip_prefix("repo="))
+                .filter(|s| !s.is_empty()).ok_or_else(|| bad(line, "`rebind` needs `repo=<name>`"))?;
+            let remaining = tokens.collect::<Vec<_>>().join(" ");
+            let list = remaining.strip_prefix("owns=[").and_then(|s| s.strip_suffix(']'))
+                .ok_or_else(|| bad(line, "`rebind` needs `owns=[<path>, ...]`"))?;
+            let owns: Vec<String> = list.split(',').map(|s| s.trim().to_string()).collect();
+            if owns.iter().any(|s| s.is_empty() || s.chars().any(char::is_whitespace) || s.contains(['[', ']'])) {
+                return Err(bad(line, "`rebind` needs a nonempty comma-separated list of paths"));
+            }
+            Ok(StaffItem::Rebind { line, lane: lane.into(), repo: repo.into(), owns })
+        }
         "remerge" => {
             let task = tokens
                 .next()
@@ -726,7 +741,7 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry or remerge"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind or remerge"),
         )),
     }
 }
