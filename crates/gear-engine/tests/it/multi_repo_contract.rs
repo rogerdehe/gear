@@ -193,6 +193,7 @@ fn cfg() -> EngineCfg {
         merge_retry_wait: gear_engine::merge::RetryWait::immediate(),
         ..Default::default()
     };
+    cfg.review_git = std::sync::Arc::new(crate::FakeReviewGit);
     for kind in ["opencode", "claude"] {
         cfg.profiles.insert(kind.into(), builtin(kind).unwrap());
     }
@@ -223,21 +224,6 @@ fn opened(herdr: &FakeHerdr, branch: &str) -> (String, String, String) {
             _ => None,
         })
         .unwrap_or_else(|| panic!("the engine opened the worktree {branch}: {:?}", herdr.calls))
-}
-
-/// The token of the checkout the engine submitted: it is in the command it
-/// ran in the reviewer's pane.
-fn checkout_token(herdr: &FakeHerdr) -> String {
-    herdr.calls
-        .iter()
-        .find_map(|call| match call {
-            Call::PaneRun { command, .. } if command.contains("GEAR_CK_OK") => command
-                .strip_prefix("T=")
-                .and_then(|rest| rest.split(';').next())
-                .map(str::to_string),
-            _ => None,
-        })
-        .expect("the engine submitted the checkout")
 }
 
 /// Wait for the merge to finish; it must be confirmed.
@@ -374,21 +360,14 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
 
     // 3. the review: the reviewer works in the task's repo.
     let report = start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
-    assert!(report.started.is_empty(), "the reviewer waits for its checkout");
+    assert_eq!(report.started, vec!["p:review-1"]);
     let (repo, branch, base, label) = created(&herdr, "home/review-1");
     assert_eq!(repo, world.child.to_string_lossy().to_string(), "the child repo");
     assert_eq!(branch, "home/review-1");
     assert_eq!(base, "feat", "the child's own integration branch");
     assert_eq!(label, "p-review-1-child", "the label names the repo");
-    // The checkout: the shell reports that it landed on the candidate.
-    let token = checkout_token(&herdr);
-    let pane = store
-        .read(|tx| Ok(tx.get_binding("p:review-1", 1)?.map(|binding| binding.pane_id)))
-        .unwrap()
-        .expect("the reviewer is bound to a pane");
-    herdr.set_screen(&pane, &format!("GEAR_CK_OK_{token}_{candidate}_review/t1"));
-    let report = start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 20).unwrap();
-    assert_eq!(report.started, vec!["p:review-1".to_string()]);
+    let checkout = crate::REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+    assert!(checkout.iter().any(|args| args == &["checkout", "-f", "-B", "review/t1", candidate.as_str()]));
     // The packet asks for the diff against the child's integration branch.
     let packet = store
         .read(|tx| {
