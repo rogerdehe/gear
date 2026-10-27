@@ -393,7 +393,10 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
 
 /// The third view: the work done and left, per lane, and the burn-up.
 fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let voyage = project.voyages.first();
+    // The voyage the Workload view measures: the active one, else the latest
+    // departed voyage that is finished (the measurements of a landed voyage
+    // are still true, F5).
+    let voyage = project.workload.as_ref();
     let mut rows = Vec::new();
     let mut done_total = 0;
     let mut left_total = 0;
@@ -406,6 +409,7 @@ fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
             done_min: 0,
             done_estimate_min: 0,
             left_min: 0,
+            left_known: true,
             done_count: 0,
             left_count: 0,
             pace: None,
@@ -696,7 +700,14 @@ pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
     let mut left = 0;
     let mut minutes = 0;
     for task in &lane.tasks {
-        if task.state.is_terminal() {
+        // The tasks that run or wait for their review are in NOW: the panel
+        // shows them once (the prototype's LEFT lists the queued work only).
+        if task.state.is_terminal()
+            || matches!(
+                task.state,
+                gear_model::TaskState::Running | gear_model::TaskState::Verifying
+            )
+        {
             continue;
         }
         left += 1;

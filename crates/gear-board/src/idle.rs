@@ -302,7 +302,7 @@ pub fn clock(until: Ts) -> String {
     let local = unsafe { libc::localtime_r(&seconds, &mut parts) };
     let (hour, minute) = if local.is_null() {
         // No local time: the clock of the machine is not readable.
-        (((until / 3600) % 24) as i64, ((until % 3600) / 60) as i64)
+        ((((until / 3600) % 24)), (((until % 3600) / 60)))
     } else {
         (parts.tm_hour as i64, parts.tm_min as i64)
     };

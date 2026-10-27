@@ -109,6 +109,9 @@ pub struct Board {
 pub struct ProjectBoard {
     /// The same voyage measurements shown first on the captain home page.
     pub voyages: Vec<voyage::VoyageReport>,
+    /// The voyage the Workload view measures: the active one, else the latest
+    /// departed voyage that is finished (its measurements are still true).
+    pub workload: Option<voyage::VoyageReport>,
     pub project: String,
     pub captain_quota: Option<CaptainQuotaBoard>,
     pub totals: Totals,
@@ -547,6 +550,7 @@ pub fn project_with_agents(
 
     Ok(ProjectBoard {
         voyages: voyage::reports(tx, project, now)?,
+        workload: workload_voyage(tx, project, now)?,
         project: project.to_string(),
         captain_quota: tx.captain_quota(project)?.filter(|state| !state.resumed).map(|state| CaptainQuotaBoard {
             reset_at: state.reset_at, remaining_s: (state.reset_at - now).max(0),
@@ -774,6 +778,30 @@ fn actual_min_of(
 
 /// The quota readings of the providers (§9.1): the meta keys
 /// `quota.reading.<provider>`.
+/// The voyage the Workload view measures: the active one, else the latest
+/// departed voyage that is finished (F5).
+///
+/// The finished voyages are not in `voyages` (the home page and the station
+/// watch the active ones only), but their measurements are still true: a
+/// landed voyage keeps its burn-up and its lanes.
+fn workload_voyage(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+) -> GearResult<Option<voyage::VoyageReport>> {
+    let active = voyage::reports(tx, project, now)?;
+    if let Some(report) = active.first() {
+        return Ok(Some(report.clone()));
+    }
+    Ok(voyage::reports_including_finished(tx, project, now)?
+        .into_iter()
+        .filter(|report| !active.iter().any(|one| one.milestone == report.milestone))
+        // A departed voyage: its elapsed time is known.
+        .filter(|report| report.elapsed_min.is_some())
+        // The latest departure is the one with the least elapsed time.
+        .min_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX)))
+}
+
 fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
     let mut readings = Vec::new();
     for key in tx.meta_keys_with_prefix("quota.reading.")? {

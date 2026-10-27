@@ -91,7 +91,7 @@ fn walk(
         waits: task
             .deps
             .iter()
-            .filter(|dep| !done.iter().any(|done| *done == dep.as_str()))
+            .filter(|dep| !done.contains(&dep.as_str()))
             .cloned()
             .collect(),
         depth,

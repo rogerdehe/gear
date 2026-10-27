@@ -45,6 +45,9 @@ pub struct LaneProjection {
     pub done_estimate_min: i64,
     /// The estimates of the lane's open work.
     pub left_min: i64,
+    /// Every open task of the lane has an estimate: an unknown one leaves
+    /// the lane's finish unknown (it is never counted as zero work).
+    pub left_known: bool,
     /// The tasks the lane has finished.
     pub done_count: usize,
     /// The tasks the lane still has.
@@ -135,6 +138,7 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 done_min: 0,
                 done_estimate_min: 0,
                 left_min: 0,
+                left_known: true,
                 done_count: 0,
                 left_count: 0,
                 pace: None,
@@ -165,6 +169,11 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 r.remaining_estimate_min = add(r.remaining_estimate_min, estimate);
                 lane.left_min += estimate.unwrap_or(0);
                 lane.left_count += 1;
+                // An open task without an estimate is unknown work: it is
+                // never counted as zero (F2).
+                if estimate.is_none() {
+                    lane.left_known = false;
+                }
             }
         }
         // Every lane's own pace, and what it needs at that pace. A lane that
@@ -172,21 +181,47 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
         for lane in lanes.values_mut() {
             lane.pace = (lane.done_estimate_min > 0)
                 .then(|| lane.done_min as f64 / lane.done_estimate_min as f64);
-            lane.projected_min =
-                lane.pace.map(|pace| ((lane.left_min as f64) * pace).ceil() as i64);
+            lane.projected_min = lane
+                .pace
+                .filter(|_| lane.left_known)
+                .map(|pace| ((lane.left_min as f64) * pace).ceil() as i64);
         }
         r.lanes = lanes.into_values().collect();
-        // The slowest lane sets the finish and is named (§10.7 row B4).
-        r.slowest_lane = r
+        // The slowest lane sets the finish and is named (§10.7 row B4). The
+        // finish is known only when every lane that has open work has a pace
+        // and known estimates: an unmeasured lane is never dropped and never
+        // borrows another's pace (F2).
+        let finish_known = r
             .lanes
             .iter()
-            .filter_map(|lane| lane.projected_min.map(|min| (lane.lane.clone(), min)))
-            .max_by_key(|(_, min)| *min);
+            .all(|lane| lane.left_count == 0 || (lane.pace.is_some() && lane.left_known));
+        r.slowest_lane = if finish_known {
+            r.lanes
+                .iter()
+                .filter_map(|lane| lane.projected_min.map(|min| (lane.lane.clone(), min)))
+                .max_by_key(|(_, min)| *min)
+        } else {
+            None
+        };
         if let (Some(elapsed), Some(slowest)) =
             (r.elapsed_min, r.slowest_lane.as_ref().map(|(_, min)| *min))
         {
             r.projected_min = Some(elapsed + slowest);
             r.projected_at = voyage.departure.zip(r.projected_min).map(|(start, min)| start + min * 60);
+        }
+        // The burn-up is cumulative: the scope done so far, hour by hour (the
+        // prototype's BURN = [0, 0, 95, 170, 260, 330]). The hours without
+        // progress stay in the series (F3).
+        if let Some(departure) = voyage.departure {
+            let hour = ((now - departure) / 3600).max(0) as usize;
+            while burn_up.len() <= hour {
+                burn_up.push(0);
+            }
+        }
+        let mut done_so_far = 0;
+        for minutes in burn_up.iter_mut() {
+            done_so_far += *minutes;
+            *minutes = done_so_far;
         }
         r.burn_up = burn_up;
         reports.push(r);
