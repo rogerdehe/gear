@@ -61,7 +61,14 @@ pub fn release_finished_reviews(
         if seat.state != SeatState::Starting {
             if let Some(task) = pending.as_deref() {
                 if !under_review(store, project, &seat, task)? {
-                    store.write(|tx| tx.set_meta(&pending_key, ""))?;
+                    store.write(|tx| {
+                        tx.set_meta(&pending_key, "")?;
+                        if seat.state == SeatState::Queued {
+                            tx.set_seat_state(&seat.id, SeatState::Starting, Some("cancelled reservation"), now)?;
+                            tx.set_seat_state(&seat.id, SeatState::Released, Some("cancelled reservation"), now)?;
+                        }
+                        Ok(())
+                    })?;
                 }
             }
         }
@@ -1394,6 +1401,14 @@ profile = "codex"
         }).unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
         assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
+
+        store.write(|tx| {
+            tx.set_seat_state("p:r-1", SeatState::Queued, None, T0)?;
+            tx.set_meta("engine.review_pending.p:r-1", "T-1")
+        }).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 11).unwrap();
+        assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
+        assert_eq!(store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state, SeatState::Released);
     }
 
     /// T-143 (design §3.6): a reviewer that is still starting and whose job
