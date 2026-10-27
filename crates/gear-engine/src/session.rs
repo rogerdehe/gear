@@ -219,7 +219,7 @@ fn review_action(facts: &Facts) -> Action {
         && facts.ran_here_with_the_same_cli();
     if v1 {
         return match facts.earlier_session.as_deref() {
-            Some(session) if facts.current_session.as_deref() == Some(session) => Action::Keep,
+            Some(session) if facts.agent_live && facts.current_session.as_deref() == Some(session) => Action::Keep,
             Some(session) => Action::Resume(session.to_string()),
             // The earlier round has no session to continue.
             None => Action::New,
@@ -327,10 +327,10 @@ pub fn prepare_review(
     store.write(|tx| {
         if round.is_none() {
             create_round(tx, &key, seat, &facts, now)?;
+            tx.set_meta(&review_action_key(&project, task, attempt), &review_action_json(&action))?;
         }
         Ok(())
     })?;
-    if round.is_none() { set_review_action(store, &project, task, attempt, &action)?; }
 
     crate::session_runner::run(store, herdr, cfg, seat, task, attempt, Role::Review, &action, false, now)
 }
@@ -338,8 +338,8 @@ pub fn prepare_review(
 fn context_large(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, session: Option<&str>) -> GearResult<bool> {
     let (project, model, binding) = store.read(|tx| Ok((tx.get_project(&seat.project)?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?, tx.get_binding(&seat.id, seat.generation)?)))?;
     let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else { return Ok(true) };
-    let entries = match seat.role { gear_model::SeatRole::Lane => &config.models.lanes, gear_model::SeatRole::Temp => &config.models.review, gear_model::SeatRole::Captain => &config.models.captain };
-    let entry = model.as_deref().and_then(|model| entries.iter().find(|entry| entry.model() == model)).or_else(|| entries.first());
+    let entries = match seat.role { gear_model::SeatRole::Lane => config.lanes.iter().find(|lane| lane.name == seat.name).map(|lane| gear_app::config::lane_chain(&config, lane)).unwrap_or(&config.models.lanes), gear_model::SeatRole::Temp => config.models.review.as_slice(), gear_model::SeatRole::Captain => config.models.captain.as_slice() };
+    let entry = match model.as_deref() { Some(model) => entries.iter().find(|entry| entry.model() == model), None => entries.first() };
     let Some(window) = entry.and_then(|e| e.context_window_k()).filter(|w| *w > 0) else { return Ok(true) };
     let usage = binding.as_ref().and_then(|binding| cfg.profiles.get(&seat.profile).or_else(|| cfg.profiles.values().find(|p| p.kind == binding.kind)))
         .and_then(|p| p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name)
@@ -545,18 +545,18 @@ fn recorded_review_action(
     attempt: i64,
 ) -> GearResult<Option<Action>> {
     let action = store.read(|tx| tx.get_meta(&review_action_key(project, task, attempt)))?;
-    Ok(action.as_deref().and_then(parse_action))
+    Ok(action.as_deref().and_then(|value| {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+            let name = json.get("action")?.as_str()?;
+            if name == "resume" { return Some(Action::Resume(json.get("session_ref")?.as_str()?.to_string())); }
+            parse_action(name)
+        } else { parse_action(value) }
+    }))
 }
 
-/// Record the action of a review round.
-fn set_review_action(
-    store: &mut Store,
-    project: &str,
-    task: &str,
-    attempt: i64,
-    action: &Action,
-) -> GearResult<()> {
-    store.write(|tx| tx.set_meta(&review_action_key(project, task, attempt), action.as_str()))
+fn review_action_json(action: &Action) -> String {
+    let session = match action { Action::Resume(session) => Some(session.as_str()), _ => None };
+    serde_json::json!({ "action": action.as_str(), "session_ref": session }).to_string()
 }
 
 /// The key of a review round's action.
@@ -684,8 +684,15 @@ temps = 1
 pane = "p:captain"
 kind = "pi"
 profile = "pi"
+[[lanes]]
+name = "pi-lane"
+duty = "test"
+owns = []
+kind = "pi"
+profile = "pi"
+models = [{ model = "test-model", context_window_k = 100 }]
 [models]
-lanes = [{ model = "test-model", context_window_k = 100 }]
+lanes = [{ model = "test-model", context_window_k = 10 }]
 "#;
         store.write(|tx| {
             let mut project = tx.get_project("p")?.unwrap();
@@ -900,6 +907,9 @@ lanes = [{ model = "test-model", context_window_k = 100 }]
         };
         assert_eq!(choose(&facts), Action::Keep);
 
+        facts.agent_live = false;
+        assert_eq!(choose(&facts), Action::Resume("session-r".into()));
+        facts.agent_live = true;
         facts.current_session = Some("session-other".into());
         assert_eq!(choose(&facts), Action::Resume("session-r".into()));
     }
@@ -1020,7 +1030,8 @@ lanes = [{ model = "test-model", context_window_k = 100 }]
         let action = store
             .read(|tx| tx.get_meta(&review_action_key("p", "T-1", 1)))
             .unwrap();
-        assert_eq!(action.as_deref(), Some("new"), "the action is recorded");
+        let action: serde_json::Value = serde_json::from_str(action.as_deref().unwrap()).unwrap();
+        assert_eq!(action["action"], "new", "the action is recorded");
     }
 
     /// An engine that knows the codex profile.

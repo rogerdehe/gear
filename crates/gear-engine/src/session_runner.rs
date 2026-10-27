@@ -51,7 +51,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
     let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity)
-        .filter(|state| !(str_field(state, "step") == "done" && str_field(state, "action") != "resume" && matches!(action, Action::Resume(_))));
+        .filter(|state| !(str_field(state, "step") == "done" && matches!(action, Action::Resume(_)) && occupant.is_none()));
     let mut state = if let Some(state) = existing { state } else {
         let target = match action { Action::Resume(s) => Some(s.as_str()), _ => None };
         let old = binding.session_ref.as_deref().filter(|s| !s.is_empty());
@@ -62,8 +62,10 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     };
     let action_name = str_field(&state, "action").to_string();
     let phase = str_field(&state, "step").to_string();
-    if phase == "done" { return Ok(Prep::Ready) }
     let is_ready = occupant.as_ref().is_some_and(|a| ready(a.agent_status));
+    if phase == "done" {
+        return Ok(if is_ready || (occupant.is_none() && str_field(&state, "result") == "fresh") { Prep::Ready } else { Prep::Wait });
+    }
     if occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Working) && action_name == "compact" && !state["saw_working"].as_bool().unwrap_or(false) {
         state["saw_working"] = json!(true); save(store, seat, &state)?;
     }
@@ -91,6 +93,9 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         if matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) { return Ok(Prep::Wait) }
         step(&mut state, if action_name == "resume" { "wait_exit" } else { "wait_action" }, now);
         state["t0"] = json!(now);
+        if action_name == "compact" {
+            state["offset"] = json!(state.get("old_session_ref").and_then(Value::as_str).and_then(|path| std::fs::metadata(path).ok()).map(|m| m.len()).unwrap_or(0));
+        }
         save(store, seat, &state)?; return Ok(Prep::Wait);
     }
     if phase == "wait_action" {
@@ -160,9 +165,13 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         }
         let (model, project) = store.read(|tx| Ok((tx.get_meta(&crate::model::model_meta_key(&seat.id))?, tx.get_project(&seat.project)?)))?;
         if let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) {
-            let entries = match seat.role { SeatRole::Lane => &config.models.lanes, SeatRole::Temp => &config.models.review, SeatRole::Captain => &config.models.captain };
-            let entry = model.as_deref().and_then(|model| entries.iter().find(|e| e.model() == model)).or_else(|| entries.first());
-            if let Some(start) = entry.and_then(|e| crate::model::entry_args(&binding.kind, e)) { args.extend(start); }
+            let entries = match seat.role { SeatRole::Lane => config.lanes.iter().find(|lane| lane.name == seat.name).map(|lane| gear_app::config::lane_chain(&config, lane)).unwrap_or(&config.models.lanes), SeatRole::Temp => config.models.review.as_slice(), SeatRole::Captain => config.models.captain.as_slice() };
+            let entry = match model.as_deref() { Some(model) => entries.iter().find(|e| e.model() == model), None => entries.first() };
+            if let Some(start) = entry.and_then(|e| crate::model::entry_args(&binding.kind, e)) {
+                args.extend(start);
+            } else if let Some(start) = model.as_deref().and_then(|model| crate::model::model_start(&binding.kind, model)) {
+                args.extend(start.args);
+            }
         } else if let Some(model) = model {
             if let Some(start) = crate::model::model_start(&binding.kind, &model) { args.extend(start.args); }
         }
