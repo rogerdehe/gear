@@ -536,7 +536,13 @@ fn aim(
                         gear_herdr::AgentStatus::Unknown => matches!(policy, PromptPolicy::Doorbell { unknown: true, .. }),
                         gear_herdr::AgentStatus::Blocked => false,
                     };
-                    if !ready { return Aimed::Retry(format!("agent in {pane_id} is not ready")); }
+                    if !ready {
+                        let reason = format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
+                        return match policy {
+                            PromptPolicy::Delivery => Aimed::Retry(reason),
+                            PromptPolicy::Doorbell { .. } => Aimed::Refused(reason),
+                        };
+                    }
                 }
                 Ok(None) => return Aimed::Gone(format!("no agent in the pane {pane_id}")),
                 Ok(Some(_)) => return Aimed::Gone(format!("the agent in {pane_id} changed kind")),
@@ -595,7 +601,7 @@ fn aim(
             "the agent of {pane_id} had lost its name; it was renamed and the text goes again next tick"
         )),
         crate::names::Target::Gone(reason) => Aimed::Gone(reason),
-        crate::names::Target::Blocked(reason) => Aimed::Refused(reason),
+        crate::names::Target::Blocked(reason) => Aimed::Retry(reason),
         crate::names::Target::Unreadable(reason) => Aimed::Retry(reason),
     }
 }
