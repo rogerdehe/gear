@@ -77,6 +77,7 @@ pub struct Plan {
     /// Original CLI and same-CLI session, retained across engine restarts.
     pub old_cli: String,
     pub resume: Option<String>,
+    pub resume_required: bool,
     pub profile_name: Option<String>,
 }
 
@@ -133,6 +134,7 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Plan>> {
         phase,
         old_cli: text("old_cli"),
         resume: record.get("resume").and_then(|v|v.as_str()).map(str::to_string),
+        resume_required: record.get("resume_required").and_then(|v|v.as_bool()).unwrap_or(false),
         profile_name: record.get("profile_name").and_then(|v|v.as_str()).map(str::to_string),
         waited: record
             .get("waited")
@@ -215,18 +217,21 @@ pub(crate) fn advance(
                 )
             })?;
             let old_cli = current_cli(store, seat)?.unwrap_or_default();
-            let resume = if old_cli == cli {
+            let (resume_required, resume) = if old_cli == cli {
                 store.read(|tx| {
-                    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(None) };
-                    crate::session::round_session(tx, &round)
+                    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok((false, None)) };
+                    let session = crate::session::round_session(tx, &round)?;
+                    let session = session.filter(|s|!s.is_empty()).or(tx.get_binding(&seat.id, seat.generation)?.and_then(|binding|binding.session_ref).filter(|s|!s.is_empty()));
+                    Ok((true, session))
                 })?
-            } else { None };
+            } else { (false, None) };
             let profile_name = gear_app::config::latest(store, project).ok()
                 .and_then(|config|config.lanes.into_iter().find(|lane|lane.name == seat.name))
                 .and_then(|lane| profiles.get(&lane.profile).filter(|p|p.kind == cli).map(|_|lane.profile));
             let plan = Plan {
                 old_cli,
                 resume,
+                resume_required,
                 profile_name,
                 model: entry.model().to_string(),
                 cli: cli.to_string(),
@@ -240,6 +245,16 @@ pub(crate) fn advance(
         }
     };
 
+    // A same-CLI restart of an open round cannot safely start fresh merely
+    // because its session has not been observed yet. Keep the plan pending.
+    if plan.resume_required && plan.resume.is_none() {
+        let session = pane_of(store, seat)?.and_then(|pane|herdr.agent_get(&pane).ok().flatten())
+            .filter(|info|info.agent.as_deref() == Some(plan.old_cli.as_str()))
+            .and_then(|info|info.agent_session.map(|session|session.value));
+        let Some(session) = session.filter(|s|!s.is_empty()) else { return Ok(None) };
+        plan.resume = Some(session);
+        set_pending(store, &seat.id, &plan)?;
+    }
     loop {
         match plan.phase {
             Phase::Stop => {
@@ -967,6 +982,7 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> 
         "waited": plan.waited,
         "old_cli": plan.old_cli,
         "resume": plan.resume,
+        "resume_required": plan.resume_required,
         "profile_name": plan.profile_name,
     });
     meta_set(store, &plan_key(seat_id), &record.to_string())
@@ -1059,7 +1075,7 @@ profile = "{kind}"
 lanes = [{{model="{model}", cli="{kind}"}}]
 "#)
     }
-    fn world(worktree: &str) -> (Store, FakeHerdr, EngineCfg) {
+    fn world(worktree: &str, record_round_session: bool) -> (Store, FakeHerdr, EngineCfg) {
         let mut store = Store::open_in_memory().unwrap();
         store.write(|tx| {
             testing::seed_project(tx,"p","sess",T)?;
@@ -1075,7 +1091,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
             gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
             let key=RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()};
             tx.insert_round(&NewRound {key:key.clone(),seat:"p:heat".into(),generation:1,cli:"pi".into(),model:Some("old-model".into()),start_at:T})?;
-            tx.add_round_session(&key,"old-session")?;
+            if record_round_session { tx.add_round_session(&key,"old-session")?; }
             Ok(())
         }).unwrap();
         let mut herdr=FakeHerdr::new(); herdr.add_agent_named(PANE,"pi",AgentStatus::Idle,"p-heat"); herdr.set_agent_session(PANE,"old-session");
@@ -1093,7 +1109,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
     fn config_kind_change_waits_for_busy_agent_then_starts_fresh_in_same_worktree() {
         let dir=tempfile::tempdir().unwrap(); std::fs::create_dir(dir.path().join("target")).unwrap();
         std::fs::write(dir.path().join("target/keep"),"unchanged").unwrap();
-        let (mut store,mut herdr,mut cfg)=world(dir.path().to_str().unwrap());
+        let (mut store,mut herdr,mut cfg)=world(dir.path().to_str().unwrap(),true);
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
         change(&mut store,"codex","new-model");
         store.write(|tx| { let mut p=tx.get_project("p")?.unwrap();
@@ -1124,8 +1140,23 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("fresh"));
     }
     #[test]
+    fn same_cli_restart_waits_until_the_open_session_is_known() {
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        store.write(|tx|tx.set_binding_session_ref("p:heat",1,"")).unwrap(); herdr.set_agent_session(PANE,"");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        change(&mut store,"pi","new-model");
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some());
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::Prompt {..}|Call::AgentStart {..}|Call::SendKeys {..})));
+        herdr.set_agent_session(PANE,"old-session"); advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        assert!(herdr.calls.iter().any(|c|matches!(c,Call::Prompt {text,..} if text=="/quit")));
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+3);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(args.windows(2).any(|w|w==["--session","old-session"]),"{args:?}");
+    }
+    #[test]
     fn removing_the_model_chain_restarts_without_a_model_flag() {
-        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap());
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),true);
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
         store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();
             p.config_toml=p.config_toml.replace("lanes = [{model=\"old-model\", cli=\"pi\"}]", "lanes = []");
@@ -1139,7 +1170,9 @@ lanes = [{{model="{model}", cli="{kind}"}}]
     }
     #[test]
     fn config_model_change_resumes_open_session_on_the_same_cli() {
-        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap());
+        // The binding is authoritative even before rounds bookkeeping has
+        // recorded the session in the open round.
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
         change(&mut store,"pi","new-model");
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
