@@ -63,9 +63,9 @@ pub fn start_reviews(
         Err(_) => return Ok(report),
     };
     // Without `[temps]` there is no reviewer to start.
-    let Some(temps) = config.temps.as_ref() else {
+    if config.temps.is_none() {
         return Ok(report);
-    };
+    }
 
     // A hand-in takes priority over a direction reviewer that has reserved a
     // seat but has not started yet. Keep the reservation and let ordinary
@@ -76,7 +76,61 @@ pub fn start_reviews(
     // packet gets it before anything else is started.
     report.started.extend(recover_missing_packets(store, herdr, cfg, project, &config, now)?);
 
+    let hand_ins = tasks_to_review(store, project)?;
+    start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &hand_ins, &mut report, now)?;
+    finish_direction_results(store, project, now)?;
+    // A direction result can free the seat of a hand-in that waited behind its
+    // own direction check: the hand-in is eligible now (F1 of the T-199
+    // review, round 2). The hand-in comes first (design §14): it takes the
+    // seat, and no direction check starts in this tick.
+    let mut late_hand_ins: Vec<ReviewTask> = Vec::new();
     for task in tasks_to_review(store, project)? {
+        // Only a hand-in that waited for a seat: one that got its reviewer
+        // above is served.
+        if !report.waiting.contains(&task.task) {
+            continue;
+        }
+        // A seat that is already this task's is its reviewer already.
+        if temp_seat_of(store, project, &task.task)?.is_some() {
+            continue;
+        }
+        late_hand_ins.push(task);
+    }
+    if late_hand_ins.is_empty() {
+        if report.waiting.is_empty() {
+            start_direction_checks(store, herdr, cfg, profiles, project, &config, &mut report, now)?;
+        }
+    } else {
+        start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &late_hand_ins, &mut report, now)?;
+    }
+    Ok(report)
+}
+
+/// A task that waits is named once: the report says which tasks wait, not
+/// how often they were asked for a seat.
+fn note_waiting(report: &mut ReviewReport, task: &str) {
+    if !report.waiting.iter().any(|id| id == task) {
+        report.waiting.push(task.to_string());
+    }
+}
+
+/// Start the full reviews of the hand-ins that wait for a reviewer.
+///
+/// A hand-in comes before a direction check (design §14): the hand-in that
+/// waits for a seat takes it, and no direction check starts in the same tick.
+fn start_hand_in_reviews(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    config: &ProjectConfig,
+    profiles: &std::collections::BTreeMap<String, Profile>,
+    project: &str,
+    tasks: &[ReviewTask],
+    report: &mut ReviewReport,
+    now: Ts,
+) -> GearResult<()> {
+    let Some(temps) = config.temps.as_ref() else { return Ok(()) };
+    for task in tasks {
         // T-69 / B02-04: an attempt whose checkout already failed three times
         // is not tried again. A recovered seat (the park's slot freed) must
         // not restart the loop with a fresh generation and a fresh budget; a
@@ -87,11 +141,11 @@ pub fn start_reviews(
         // 1. the model the reviewer runs on: the first entry of the review
         //    chain that differs from the writer's **current** model (T-35).
         //    Without a review chain the model is not managed.
-        let writer = writer_current_model(store, &config, &task.writer)?;
-        let entry = crate::model::review_entry(&config, writer.as_deref());
+        let writer = writer_current_model(store, config, &task.writer)?;
+        let entry = crate::model::review_entry(config, writer.as_deref());
         if entry.is_none() && !config.models.review.is_empty() {
-            report.waiting.push(task.task.clone());
-            tell_captain(store, project, &task, "no review model differs from the writer's current model", now)?;
+            note_waiting(report, &task.task);
+            tell_captain(store, project, task, "no review model differs from the writer's current model", now)?;
             continue;
         }
         // The CLI that runs it: the entry names it, else the temps kind.
@@ -124,8 +178,8 @@ pub fn start_reviews(
                 None => match seats_free_for_new(store, project, i64::from(config.quota.temps))? {
                     true => create_temp_seat(store, project, &task.task, profile_name, now)?,
                     false => {
-                        report.waiting.push(task.task.clone());
-                        tell_captain(store, project, &task, "every temp seat is in use", now)?;
+                        note_waiting(report, &task.task);
+                        tell_captain(store, project, task, "every temp seat is in use", now)?;
                         continue;
                     }
                 },
@@ -149,8 +203,8 @@ pub fn start_reviews(
         if !occupies_quota(seat.state)
             && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
         {
-            report.waiting.push(task.task.clone());
-            tell_captain(store, project, &task, "every temp seat is in use", now)?;
+            note_waiting(report, &task.task);
+            tell_captain(store, project, task, "every temp seat is in use", now)?;
             continue;
         }
 
@@ -161,9 +215,9 @@ pub fn start_reviews(
             store,
             herdr,
             cfg,
-            &config,
+            config,
             &seat,
-            &task,
+            task,
             entry,
             &kind,
             profile,
@@ -177,11 +231,7 @@ pub fn start_reviews(
             Started::NotYet => report.waiting.push(task.task.clone()),
         }
     }
-    finish_direction_results(store, project, now)?;
-    if report.waiting.is_empty() {
-        start_direction_checks(store, herdr, cfg, profiles, project, &config, &mut report, now)?;
-    }
-    Ok(report)
+    Ok(())
 }
 
 fn yield_starting_direction_jobs(store: &mut Store, project: &str) -> GearResult<()> {
@@ -2263,6 +2313,76 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         publish(&work, "heat/t1");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 18).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], second);
+    }
+
+    /// F1 of the T-199 review (round 2): a hand-in waits behind its own
+    /// direction check. When the direction result lands, the hand-in takes the
+    /// seat the direction check held — and no direction check starts in the
+    /// same tick (design §14: hand-ins come first).
+    #[test]
+    fn a_hand_in_takes_the_seat_a_direction_result_frees() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        std::fs::write(work.join("src/base"), "two").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
+        publish(&work, "heat/t2");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)?;
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.id = "T-2".into(); task.state = TaskState::Ready; tx.insert_task(&task)?;
+            let mut contract = tx.get_contract("p", "T-1", 1)?.unwrap(); contract.task = "T-2".into(); tx.insert_contract(&contract)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.task = "T-2".into(); tx.insert_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        // The direction check of T-1 takes the only slot.
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
+        // The lane hands T-1 in while its direction check still runs.
+        store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 11)).unwrap();
+        // The direction check answers ok.
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: "result:1".into(), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "ok".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        // The tick that consumes the result: the hand-in takes the seat the
+        // direction check held, and no direction check starts for T-2.
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 13).unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(),
+            Some("T-1"),
+            "the hand-in took the seat the direction check held"
+        );
+        assert!(
+            store.read(|tx| tx.get_meta(&direction_key("p", "T-2", 1))).unwrap().is_none(),
+            "no direction check started for T-2: the hand-in came first"
+        );
+        assert_eq!(store.read(|tx| tx.seats_of_project("p")).unwrap().len(), 3, "no seat was created for T-2");
+        // The review of T-1 goes on and gets its packet.
+        let mut packet = String::new();
+        for tick in T0 + 14..T0 + 24 {
+            start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", tick).unwrap();
+            packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap().payload["text"].as_str().unwrap().to_string();
+            if packet.starts_with("Review T-1 attempt 1") { break }
+        }
+        assert!(packet.starts_with("Review T-1 attempt 1"), "{packet}");
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&direction_key("p", "T-1", 1))).unwrap().unwrap()).unwrap();
+        assert_eq!(job["checked_sha"], first);
     }
 
     #[test]
