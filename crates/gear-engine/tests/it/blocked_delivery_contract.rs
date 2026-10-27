@@ -119,7 +119,7 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
         w.herdr.prompts_to(LANE)
     );
 
-    // The dialog is dismissed: the lane is idle, and the pending delivery goes.
+    // The dialog is dismissed: session preparation completes and delivery goes.
     w.herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 41).unwrap();
     // The lane reads it (T-97: a delivery nobody confirms fails after its
@@ -155,12 +155,12 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
 }
 
 /// R1 of the T-68 review: a lane retired while it sits on a dialog is still
-/// alerted (its pane is a dialog nobody may ignore), and its pending delivery
-/// keeps waiting; when the dialog clears it is delivered once.
+/// alerted (its pane is a dialog nobody may ignore), and session preparation
+/// waits; when the dialog clears the assignment is delivered once.
 #[test]
 fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
     let mut w = world(AgentStatus::Blocked);
-    // The delivery is pending: a blocked seat is not typed into.
+    // The session is not prepared while the lane is blocked.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     let ops = deliveries(&mut w);
     assert!(ops.is_empty(), "session setup waits on the dialog: {ops:?}");

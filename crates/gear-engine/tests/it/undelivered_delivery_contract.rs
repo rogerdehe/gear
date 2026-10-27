@@ -267,12 +267,12 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     let ops = w.deliveries();
     assert_eq!(ops.len(), 2, "{ops:?}");
     assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
-    assert_eq!(ops[1].state, OpState::Submitted, "B got the attempt: {ops:?}");
+    assert_eq!(ops[1].state, OpState::Submitted, "the resumed round got the attempt: {ops:?}");
     assert_eq!(ops[1].attempt, Some(1));
     assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "{:?}", w.herdr.prompts_to(LANE));
     assert_eq!(w.stall_items().len(), 1);
 
-    // B reads it: the attempt starts.
+    // The resumed session reads it: the attempt starts.
     view(&mut w, 14);
     w.tick(17);
     let ops = w.deliveries();
@@ -322,7 +322,7 @@ fn a_failed_nudge_is_not_delivered_again_in_the_same_session() {
     assert_eq!(w.deliveries().len(), 2, "{:?}", w.deliveries());
     assert_eq!(w.herdr.prompts_to(LANE).len(), 2, "nothing is retyped in A");
 
-    // A new session gets exactly one delivery of the same attempt.
+    // A hand restart resumes the open round and gets exactly one retry.
     w.herdr.set_agent_session(LANE, "ses_B");
     w.resume_round(25, "ses_A");
     let ops = w.deliveries();
