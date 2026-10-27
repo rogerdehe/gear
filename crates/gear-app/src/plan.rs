@@ -2007,7 +2007,16 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLan
 /// when T-12 is over) or `- tail: heat until=2026-10-26T18:00:00Z` (at that
 /// time). The end belongs to the declaration: a tail without one lasts until
 /// the captain clears it.
+///
+/// Every tail line is validated, but only the final effective declaration
+/// writes: the `# Decisions` history is retained, and an earlier line must
+/// neither clear the spent marker nor revive a tail that has ended (T-191).
 fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
+    // Every tail line is validated (a broken one refuses the whole apply),
+    // but only the final effective declaration writes: the `# Decisions`
+    // history is retained, and an earlier line must never clear the spent
+    // marker or revive a tail that has ended (T-191).
+    let mut decls: Vec<TailDecl> = Vec::new();
     for decision in &draft.decisions {
         let Some(rest) = decision.strip_prefix("tail:") else { continue; };
         let mut lanes: BTreeSet<String> = BTreeSet::new();
@@ -2047,22 +2056,43 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
             return Err(bad(1, "tail: - clears the tail, it takes no `until=`"));
         }
         let until_stored = until.as_ref().map(TailUntil::as_stored).unwrap_or_default();
-        // The same declaration, replayed (its line is still in the plan file),
-        // must not revive a tail that has already ended: only a genuinely new
-        // declaration resets it.
-        let declaration = tail_declaration(&lanes.iter().cloned().collect::<Vec<_>>(), &until_stored);
-        let spent = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
-        let spent = spent == declaration;
-        for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
-            tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-                if spent { "0" } else if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
-        }
-        if !spent {
-            tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
-        }
-        tx.set_meta(&format!("lane-tail-until:{project}"), &until_stored)?;
+        decls.push(TailDecl {
+            lanes: lanes.into_iter().collect(),
+            until: until_stored,
+        });
     }
+    // A tail line replaces the set of lanes it silences: the last line is the
+    // effective declaration, the earlier ones are history.
+    let Some(effective) = decls.last() else {
+        // No tail line at all: the state is preserved.
+        return Ok(());
+    };
+    // The same declaration, replayed (its line is still in the plan file),
+    // must not revive a tail that has already ended: only a genuinely new
+    // declaration resets it. The marker is read before this replay writes
+    // anything — an earlier line in the retained history never clears it.
+    let spent_before = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+    let declaration = tail_declaration(&effective.lanes, &effective.until);
+    let spent = spent_before == declaration;
+    let seats = tx.seats_of_project(project)?;
+    for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
+        tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
+            if spent { "0" } else if effective.lanes.contains(&seat.name) { "1" } else { "0" })?;
+    }
+    if !spent {
+        tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
+    }
+    tx.set_meta(&format!("lane-tail-until:{project}"), &effective.until)?;
     Ok(())
+}
+
+/// A tail declaration, as the captain wrote it: the lanes it silences and
+/// its end.
+struct TailDecl {
+    /// The lanes it names (`-` alone clears the tail).
+    lanes: Vec<String>,
+    /// Its end, in the form the store keeps ("" when it has none).
+    until: String,
 }
 
 /// The end of a tail: a task id or an RFC3339 moment.
