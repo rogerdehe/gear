@@ -405,6 +405,17 @@ fn token_windows_cover_rework_followups_compaction_reviews_and_model_changes() {
         assert_eq!(tokens.input,Some(expected),"{task}/{attempt}");
         if task=="T-7" { assert!((tokens.cost_usd.unwrap()-0.0007).abs()<1e-10); assert_eq!(tokens.cost_source,"prices"); }
     }
+    // Some logs name only the model; a matching round model supplies its provider.
+    let bare = file("bare",vec![rec(T0+10,100,"m1")]);
+    let key=RoundKey{project:"p".into(),task:"T-10".into(),attempt:1,role:"dev".into()};
+    store.write(|tx| {
+        tx.insert_round(&NewRound {key:key.clone(),seat:LANE.into(),generation:1,cli:"opencode".into(),model:Some("p/m1".into()),start_at:T0})?;
+        tx.add_round_session(&key,&bare)?;
+        tx.close_round(&key,T0+30)
+    }).unwrap();
+    let row=round_of(&mut store,"T-10",1,"dev");
+    let cost=gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+200).unwrap().cost_usd.unwrap();
+    assert!((cost-0.0001).abs()<1e-10);
     // An open round is counted on demand without writing its columns.
     round(&mut store,"T-8",1,"dev",T0);
     let key=RoundKey{project:"p".into(),task:"T-8".into(),attempt:1,role:"dev".into()};

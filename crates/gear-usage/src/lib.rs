@@ -857,7 +857,9 @@ pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default
             check.input += u.input; check.output += u.output; check.cache_read += u.cache_read; check.cache_write += u.cache_write; check.reasoning += u.reasoning; check.records += u.records;
             if let Some(c) = u.cost_usd { check.cost_usd = Some(check.cost_usd.unwrap_or(0.0) + c); }
             if let Some(amount) = u.cost_usd { cost += amount; any_cost = true; continue }
-            let model = record.model.as_deref().or(default_model);
+            let model = record.model.as_deref().map(|model| {
+                default_model.filter(|full| !model.contains('/') && full.rsplit_once('/').is_some_and(|(_, id)| id == model)).unwrap_or(model)
+            }).or(default_model);
             let price = model.and_then(|m| prices.get(m));
             if let Some(p) = price {
                 cost += (u.input as f64*p.input + u.output as f64*p.output + u.cache_read as f64*p.cache_read + u.cache_write as f64*p.cache_write) / 1_000_000.0;
