@@ -1106,7 +1106,9 @@ fn open_panel(
 ) -> GearResult<Option<Vec<String>>> {
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
-        frame::Tab::Now => Ok(project.lanes.get(selected).map(frame::lane_panel)),
+        frame::Tab::Now | frame::Tab::Workload => {
+            Ok(project.lanes.get(selected).map(frame::lane_panel))
+        }
         frame::Tab::Graph => {
             let Some(task) = project.graph.get(selected) else { return Ok(None) };
             let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;

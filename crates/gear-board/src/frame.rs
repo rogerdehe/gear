@@ -9,6 +9,7 @@
 //! drawn over the view (as the prototype draws its window over the board).
 
 use crate::graph;
+use crate::voyage::LaneProjection;
 use crate::idle::IdleReason;
 use crate::{Board, LaneBoard, ProjectBoard, TaskBoard};
 
@@ -287,9 +288,9 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
                 "projected finish {} (slowest lane: {})",
                 hours(minutes),
                 voyage
-                    .slowest
+                    .slowest_lane
                     .as_ref()
-                    .map(|(id, _)| id.clone())
+                    .map(|(lane, _)| lane.clone())
                     .unwrap_or_else(|| "-".into())
             ),
             None => "projected finish unknown".to_string(),
@@ -381,11 +382,89 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
             let rest = lines.get(count + 1..).map(|rest| rest.to_vec()).unwrap_or_default();
             ViewRows { heading, rows, rest }
         }
-        Tab::Workload | Tab::Decisions | Tab::Tokens => ViewRows {
+        Tab::Workload => view_workload(project, selected),
+        Tab::Decisions | Tab::Tokens => ViewRows {
             heading: format!("{}: the next task", tab.title()),
             rows: Vec::new(),
             rest: Vec::new(),
         },
+    }
+}
+
+/// The third view: the work done and left, per lane, and the burn-up.
+fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let voyage = project.voyages.first();
+    let mut rows = Vec::new();
+    let mut done_total = 0;
+    let mut left_total = 0;
+    for (index, lane) in project.lanes.iter().enumerate() {
+        // The lane's own measurements (the voyage report).
+        let measured = voyage
+            .and_then(|voyage| voyage.lanes.iter().find(|l| l.lane == lane.lane));
+        let empty = LaneProjection {
+            lane: lane.lane.clone(),
+            done_min: 0,
+            done_estimate_min: 0,
+            left_min: 0,
+            done_count: 0,
+            left_count: 0,
+            pace: None,
+            projected_min: None,
+        };
+        let lane = measured.unwrap_or(&empty);
+        let mark = if index == selected { "›" } else { " " };
+        // The minutes of estimate (the prototype's view counts the estimates).
+        done_total += lane.done_estimate_min;
+        left_total += lane.left_min;
+        let done_cells = (lane.done_estimate_min / 8).max(0) as usize;
+        let left_cells = (lane.left_min / 8).max(0) as usize;
+        rows.push(format!(
+            "{mark} {:<5} {}{:<width$}done {} ({}m) · left {} ({}m)",
+            lane.lane,
+            "█".repeat(done_cells.min(14)),
+            "░".repeat(left_cells.min(14)),
+            lane.done_count,
+            lane.done_estimate_min,
+            lane.left_count,
+            lane.left_min,
+            width = 14usize.saturating_sub(done_cells.min(14))
+        ));
+    }
+    let mut rest = Vec::new();
+    let projected = voyage
+        .and_then(|voyage| voyage.projected_min)
+        .map(hours)
+        .unwrap_or_else(|| "-".into());
+    rest.push(format!(
+        "all lanes: done {done_total}m · left {left_total}m · at the measured pace the last lane ends at {projected}"
+    ));
+    rest.push(String::new());
+    rest.push("BURN-UP  (minutes of estimate merged, per voyage hour)".to_string());
+    let burn = voyage.map(|voyage| voyage.burn_up.clone()).unwrap_or_default();
+    if !burn.is_empty() {
+        let top = burn.iter().copied().max().unwrap_or(0).max(done_total + left_total);
+        for row in (1..=8).rev() {
+            let level = top as f64 * row as f64 / 8.0;
+            let line: String = burn
+                .iter()
+                .map(|minutes| {
+                    if *minutes as f64 >= level {
+                        " ██ "
+                    } else {
+                        "    "
+                    }
+                })
+                .collect();
+            rest.push(line.to_string());
+        }
+        rest.push(format!("    ─ total {}m", done_total + left_total));
+        let labels: String = (0..burn.len()).map(|hour| format!(" h{hour:<2}")).collect();
+        rest.push(labels);
+    }
+    ViewRows {
+        heading: "WORK DONE AND LEFT, BY LANE  (minutes of estimate)".to_string(),
+        rows,
+        rest,
     }
 }
 

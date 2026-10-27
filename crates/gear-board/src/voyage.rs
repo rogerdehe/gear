@@ -2,10 +2,12 @@
 //! Pace uses completed tasks with both an estimate and a recorded span. Unknown
 //! history stays unknown; remaining work is never treated as measured work.
 
+use std::collections::BTreeMap;
+
 use gear_model::{GearResult, TaskState, Ts};
 use gear_store::{TaskRow, Tx};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VoyageReport {
     pub milestone: String,
     pub title: String,
@@ -21,7 +23,36 @@ pub struct VoyageReport {
     pub scope_min: Option<i64>,
     pub departure_scope_min: Option<i64>,
     pub rework_rounds: usize,
+    /// The slowest task of the voyage: its id and the minutes it took.
     pub slowest: Option<(String, i64)>,
+    /// The lane that sets the finish (the slowest one, §10.7 row B4): its
+    /// name and the minutes of work it has left.
+    pub slowest_lane: Option<(String, i64)>,
+    /// The lanes of the voyage, with their own pace and what is left.
+    pub lanes: Vec<LaneProjection>,
+    /// The minutes of estimate merged per hour of the voyage (the burn-up).
+    pub burn_up: Vec<i64>,
+}
+
+/// One lane of the voyage (design §10.7 row B4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LaneProjection {
+    /// The name of the lane.
+    pub lane: String,
+    /// The minutes the lane measured on its finished work.
+    pub done_min: i64,
+    /// The estimate of the lane's finished work (its pace is measured against it).
+    pub done_estimate_min: i64,
+    /// The estimates of the lane's open work.
+    pub left_min: i64,
+    /// The tasks the lane has finished.
+    pub done_count: usize,
+    /// The tasks the lane still has.
+    pub left_count: usize,
+    /// The lane's own pace: measured minutes per estimated minute.
+    pub pace: Option<f64>,
+    /// The minutes the lane needs at its own pace.
+    pub projected_min: Option<i64>,
 }
 
 impl VoyageReport {
@@ -75,14 +106,20 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
             measured_actual_min: 0, measured_estimate_min: 0,
             remaining_estimate_min: Some(0), projected_min: None, projected_at: None,
             scope_min: Some(0), departure_scope_min: voyage.departure_estimate_min,
-            rework_rounds: 0, slowest: None,
+            rework_rounds: 0, slowest: None, slowest_lane: None,
+            lanes: Vec::new(), burn_up: Vec::new(),
         };
+        // Every lane of the voyage, with its own pace (§10.7 row B4).
+        let mut lanes: BTreeMap<String, LaneProjection> = BTreeMap::new();
+        // The burn-up: the minutes of estimate merged per hour of the voyage.
+        let mut burn_up: Vec<i64> = Vec::new();
         for task in scope {
             let estimate = estimate_of(tx, project, task)?;
             r.scope_min = add(r.scope_min, estimate);
             let rounds = tx.attempt_times_of_task(project, &task.id)?;
             r.rework_rounds += rounds.len().saturating_sub(1);
             let start = rounds.first().and_then(|(_, t)| t.started);
+            let merged = rounds.iter().filter_map(|(_, t)| t.merged).max();
             let end = if task.state == TaskState::Done {
                 rounds.iter().filter_map(|(_, t)| t.last()).max()
             } else {
@@ -92,26 +129,66 @@ fn build_reports(tx: &Tx<'_>, project: &str, now: Ts, include_finished: bool) ->
                 (Some(start), Some(end)) if end >= start => Some((end - start) / 60),
                 _ => None,
             };
-            if task.state == TaskState::Done {
-                if let (Some(actual), Some(estimate)) = (actual, estimate.filter(|e| *e > 0)) {
-                    r.measured_actual_min += actual;
-                    r.measured_estimate_min += estimate;
-                }
-            } else {
-                r.remaining_estimate_min = add(r.remaining_estimate_min, estimate);
-            }
+            let name = task.lane.clone().unwrap_or_else(|| "-".to_string());
+            let lane = lanes.entry(name.clone()).or_insert_with(|| LaneProjection {
+                lane: name,
+                done_min: 0,
+                done_estimate_min: 0,
+                left_min: 0,
+                done_count: 0,
+                left_count: 0,
+                pace: None,
+                projected_min: None,
+            });
             if let Some(actual) = actual {
                 if r.slowest.as_ref().is_none_or(|(_, longest)| actual > *longest) {
                     r.slowest = Some((task.id.clone(), actual));
                 }
             }
+            if task.state == TaskState::Done {
+                if let (Some(actual), Some(estimate)) = (actual, estimate.filter(|e| *e > 0)) {
+                    r.measured_actual_min += actual;
+                    r.measured_estimate_min += estimate;
+                    lane.done_min += actual;
+                    lane.done_estimate_min += estimate;
+                    lane.done_count += 1;
+                }
+                // The work that was merged in that hour of the voyage.
+                if let (Some(merged), Some(departure)) = (merged, voyage.departure) {
+                    let hour = ((merged - departure) / 3600).max(0) as usize;
+                    while burn_up.len() <= hour {
+                        burn_up.push(0);
+                    }
+                    burn_up[hour] += estimate.unwrap_or(0);
+                }
+            } else {
+                r.remaining_estimate_min = add(r.remaining_estimate_min, estimate);
+                lane.left_min += estimate.unwrap_or(0);
+                lane.left_count += 1;
+            }
         }
-        if let (Some(elapsed), Some(remaining), Some(pace)) =
-            (r.elapsed_min, r.remaining_estimate_min, r.pace())
+        // Every lane's own pace, and what it needs at that pace. A lane that
+        // measured nothing has no pace: its projection stays unknown.
+        for lane in lanes.values_mut() {
+            lane.pace = (lane.done_estimate_min > 0)
+                .then(|| lane.done_min as f64 / lane.done_estimate_min as f64);
+            lane.projected_min =
+                lane.pace.map(|pace| ((lane.left_min as f64) * pace).ceil() as i64);
+        }
+        r.lanes = lanes.into_values().collect();
+        // The slowest lane sets the finish and is named (§10.7 row B4).
+        r.slowest_lane = r
+            .lanes
+            .iter()
+            .filter_map(|lane| lane.projected_min.map(|min| (lane.lane.clone(), min)))
+            .max_by_key(|(_, min)| *min);
+        if let (Some(elapsed), Some(slowest)) =
+            (r.elapsed_min, r.slowest_lane.as_ref().map(|(_, min)| *min))
         {
-            r.projected_min = Some(elapsed + (remaining as f64 * pace).ceil() as i64);
+            r.projected_min = Some(elapsed + slowest);
             r.projected_at = voyage.departure.zip(r.projected_min).map(|(start, min)| start + min * 60);
         }
+        r.burn_up = burn_up;
         reports.push(r);
     }
     Ok(reports)
