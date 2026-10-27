@@ -82,6 +82,12 @@ fn me() -> Vec<u32> {
     vec![std::process::id()]
 }
 
+/// The caller's ancestry in the signed form `gear whoami` takes (design §10.7,
+/// row B9).
+fn me_i32() -> Vec<i32> {
+    me().into_iter().map(|pid| pid as i32).collect()
+}
+
 #[test]
 fn no_ctx() {
     let mut s = world();
@@ -661,4 +667,123 @@ fn a_codex_daemon_caller_keeps_its_captain_seat() {
     // A lane's shell (really in the lane's pane) claiming the captain is refused.
     let error = observe(&captain, &mut herdr, &LANE_CALLER).unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered);
+}
+
+// ---------------------------------------------------------------- whoami (B9)
+
+/// §10.7 row B9: `gear whoami` names the pane the caller runs in, the seat
+/// bound to it, the store, and why a claim fails.
+#[test]
+fn whoami_in_a_bound_pane_names_the_seat() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    // The pane claims this process, so the caller runs in it.
+    herdr.set_pane_processes(LANE_PANE, Some(std::process::id()), &[]);
+
+    let who = gear_app::identity::whoami(
+        &mut s,
+        &env(Some("heat"), 1, Some(LANE_PANE), false),
+        &mut herdr,
+        &me_i32(),
+    );
+
+    assert_eq!(who.pane.as_deref(), Some(LANE_PANE));
+    assert_eq!(who.seat.as_deref(), Some("p:heat"));
+    assert_eq!(who.reason, None, "the claim holds: {:?}", who.reason);
+    let text = who.to_string();
+    assert!(text.contains(LANE_PANE), "{text}");
+    assert!(text.contains("p:heat"), "{text}");
+    assert!(text.contains("store:"), "{text}");
+}
+
+/// A pane with no seat bound to it: whoami says why the caller has no seat.
+#[test]
+fn whoami_in_an_unbound_pane_says_why() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent("w1:p9", "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes("w1:p9", Some(std::process::id()), &[]);
+
+    let who = gear_app::identity::whoami(
+        &mut s,
+        &env(Some("heat"), 1, Some("w1:p9"), false),
+        &mut herdr,
+        &me_i32(),
+    );
+
+    assert_eq!(who.pane.as_deref(), Some("w1:p9"));
+    assert_eq!(who.seat, None, "no seat is bound to that pane");
+    let reason = who.reason.clone().expect("the reason a claim fails");
+    assert!(reason.contains("no seat is bound"), "{reason}");
+    assert!(who.to_string().contains("reason:"), "{}", who);
+}
+
+/// A claim of a seat the pane does not own: whoami names the seat the pane
+/// really has.
+#[test]
+fn whoami_names_the_seat_the_pane_really_has() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(std::process::id()), &[]);
+
+    // The caller claims the lane's seat from the captain's pane.
+    let who = gear_app::identity::whoami(
+        &mut s,
+        &env(Some("heat"), 1, Some(CAP_PANE), false),
+        &mut herdr,
+        &me_i32(),
+    );
+
+    assert_eq!(who.seat.as_deref(), Some("p:captain"));
+    let reason = who.reason.expect("the reason a claim fails");
+    assert!(reason.contains("p:heat"), "{reason}");
+    assert!(reason.contains("p:captain"), "{reason}");
+}
+
+/// T-165 (review F3): a seat that was restarted carries a new generation. The
+/// caller still carries the old one: `require_seat` refuses it
+/// (STALE_GENERATION), so whoami must say so — not "nothing is wrong".
+#[test]
+fn whoami_reports_the_stale_generation_of_a_restarted_seat() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(std::process::id()), &[]);
+
+    // The seat is at generation 1; the caller carries generation 0.
+    let who = gear_app::identity::whoami(
+        &mut s,
+        &env(Some("heat"), 0, Some(LANE_PANE), false),
+        &mut herdr,
+        &me_i32(),
+    );
+
+    assert_eq!(who.pane.as_deref(), Some(LANE_PANE));
+    assert_eq!(who.seat.as_deref(), Some("p:heat"), "the seat of the pane");
+    let reason = who.reason.expect("the reason a claim fails");
+    assert!(reason.contains("generation"), "{reason}");
+}
+
+/// T-165 (review F3): a caller without `GEAR_CTX` that runs in a bound pane
+/// **is** the seat of that pane (the rule every command resolves with). The
+/// claim holds: whoami must not say "no GEAR_CTX in the environment".
+#[test]
+fn whoami_resolves_a_context_free_bound_pane() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(std::process::id()), &[]);
+
+    let who = gear_app::identity::whoami(
+        &mut s,
+        &env(None, 1, Some(LANE_PANE), false),
+        &mut herdr,
+        &me_i32(),
+    );
+
+    assert_eq!(who.pane.as_deref(), Some(LANE_PANE));
+    assert_eq!(who.seat.as_deref(), Some("p:heat"), "the seat of the pane");
+    assert_eq!(who.reason, None, "the claim holds: {:?}", who.reason);
 }
