@@ -216,3 +216,59 @@ fn only_the_available_reviewers_are_in_the_queue() {
     assert!(!text.contains("r-3"), "{text}");
     assert!(!text.contains("r-4"), "{text}");
 }
+
+/// T-208: an overlap with the integration branch is an information line: the
+/// queue shows it after the lanes, and the JSON carries it as `overlaps`.
+#[test]
+fn the_queue_shows_the_overlaps_with_the_integration_branch() {
+    let mut s = world();
+    s.write(|tx| {
+        let value = serde_json::json!({
+            "task": "T-9",
+            "integration": "dev",
+            "files": ["crates/gear-app/src/queue.rs"],
+        })
+        .to_string();
+        tx.set_meta("parallel:p:integration:T-9", &value)
+    })
+    .unwrap();
+
+    let queue = s.read(|tx| queue::queue(tx, "p", T0)).unwrap();
+    assert_eq!(queue.overlaps.len(), 1);
+    assert_eq!(queue.overlaps[0].task, "T-9");
+    assert_eq!(queue.overlaps[0].integration, "dev");
+
+    // The text says the same, after the lane lines.
+    let text = queue::render(&queue);
+    let lane_line = text.lines().next().unwrap_or_default();
+    let overlap_line = text
+        .lines()
+        .find(|line| line.starts_with("overlap:"))
+        .unwrap_or_default();
+    assert_eq!(
+        overlap_line,
+        "overlap: T-9 shares crates/gear-app/src/queue.rs with dev"
+    );
+    assert!(
+        text.find("overlap:").unwrap() > text.find(lane_line).unwrap(),
+        "the overlap comes after the lanes: {text}"
+    );
+
+    // The JSON carries the same list.
+    let json: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&queue).unwrap()).unwrap();
+    assert_eq!(json["overlaps"][0]["task"], "T-9");
+    assert_eq!(json["overlaps"][0]["integration"], "dev");
+    assert_eq!(json["overlaps"][0]["files"][0], "crates/gear-app/src/queue.rs");
+}
+
+/// T-208: a cleared overlap shows nothing.
+#[test]
+fn a_cleared_overlap_is_not_in_the_queue() {
+    let mut s = world();
+    s.write(|tx| tx.set_meta("parallel:p:integration:T-9", "")).unwrap();
+
+    let queue = s.read(|tx| queue::queue(tx, "p", T0)).unwrap();
+    assert!(queue.overlaps.is_empty());
+    assert!(!queue::render(&queue).contains("overlap:"));
+}

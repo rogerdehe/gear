@@ -140,6 +140,25 @@ pub struct ProjectBoard {
     pub decisions: Vec<DecisionBoard>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
+    /// The tasks that overlap the integration branch of their repo (T-188):
+    /// information lines, never items that wait for the captain.
+    pub overlaps: Vec<Overlap>,
+}
+
+/// One task that overlaps the integration branch of its repo (T-188).
+///
+/// The overlap is an information line: the lane merges the integration branch
+/// in and the merge gate catches a conflict. It never waits for the captain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Overlap {
+    /// The task that overlaps the integration branch.
+    pub task: String,
+    /// The repo the task is in; empty for the project root.
+    pub repo: String,
+    /// The integration branch the task overlaps.
+    pub integration: String,
+    /// The files the task and the integration branch share.
+    pub files: Vec<String>,
 }
 
 /// One decision of the captain's log, as the board shows it (§7.1).
@@ -617,10 +636,135 @@ pub fn project_with_agents(
         quota: quota_readings(tx)?,
         decisions,
         frictions: frictions_of(tx, project)?,
+        // The overlaps with the integration branch (T-188): information
+        // lines, never items that wait for the captain.
+        overlaps: integration_overlaps_of(tx, project)?,
         waiting,
         temps,
         unconfirmed_deliveries,
     })
+}
+
+/// The overlaps of the project with the integration branches (T-188).
+///
+/// The engine's scan writes the meta keys
+/// `parallel:<project>[:<repo>]:integration:<task>`; the value holds the files
+/// the task and the integration branch share. A cleared key (an empty value)
+/// shows nothing.
+pub fn integration_overlaps(store: &mut Store, project: &str) -> GearResult<Vec<Overlap>> {
+    store.read(|tx| integration_overlaps_of(tx, project))
+}
+
+/// The overlaps of the project, read inside an open transaction.
+pub fn integration_overlaps_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Overlap>> {
+    let prefix = format!("parallel:{project}:");
+    let mut overlaps = Vec::new();
+    for key in tx.meta_keys_with_prefix(&prefix)? {
+        let Some(rest) = key.strip_prefix(&prefix) else { continue };
+        let Some((repo, task)) = split_overlap_key(rest) else { continue };
+        let Some(raw) = tx.get_meta(&key)? else { continue };
+        // A cleared key shows nothing: the scan clears it when the overlap
+        // is gone.
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let (files, integration) = overlap_value(&raw);
+        if files.is_empty() {
+            continue;
+        }
+        overlaps.push(Overlap {
+            task,
+            repo,
+            integration: integration.unwrap_or_default(),
+            files,
+        });
+    }
+    overlaps.sort_by(|left, right| {
+        (&left.task, &left.repo).cmp(&(&right.task, &right.repo))
+    });
+    Ok(overlaps)
+}
+
+/// The repo and the task of one overlap key: `integration:<task>` for the
+/// project root, `<repo>:integration:<task>` for a child repo.
+///
+/// Only that exact shape is an overlap (F1): the bookkeeping keys of the
+/// scan — `pair:<pair>:files`, `pair:<pair>:item` — are not overlaps, and
+/// the task is a task id, not the rest of the key.
+fn split_overlap_key(rest: &str) -> Option<(String, String)> {
+    // A repo named `integration` is the one case where the key has two
+    // `integration` segments.
+    if let Some(task) = rest.strip_prefix("integration:integration:") {
+        return task_id(task).map(|task| ("integration".to_string(), task));
+    }
+    let (repo, tail) = match rest.split_once(':') {
+        Some((repo, tail)) if repo != "integration" => (repo.to_string(), tail),
+        _ => (String::new(), rest),
+    };
+    let task = tail.strip_prefix("integration:")?;
+    // `pair` is the namespace of the scan's bookkeeping, not a repo.
+    if repo == "pair" {
+        return None;
+    }
+    task_id(task).map(|task| (repo, task))
+}
+
+/// A task id: one segment, not empty. The suffixes of the bookkeeping keys
+/// (`:files`, `:item`, `:notified`) are not part of a task id.
+fn task_id(task: &str) -> Option<String> {
+    if task.is_empty() || task.contains(':') {
+        return None;
+    }
+    Some(task.to_string())
+}
+
+/// The files and the integration branch of one overlap value.
+///
+/// The scan writes the files and the branch as a JSON object; a value that
+/// only holds the files is read as the files it names.
+fn overlap_value(raw: &str) -> (Vec<String>, Option<String>) {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(_)) => {
+            let value: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+            let files = value
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let integration = value
+                .get("integration")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            (files, integration)
+        }
+        Ok(serde_json::Value::Array(files)) => (
+            files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect(),
+            None,
+        ),
+        Ok(serde_json::Value::String(file)) => (vec![file], None),
+        // A plain value: the shared files, separated by commas.
+        _ => (
+            raw.split(',').map(|file| file.trim().to_string()).filter(|file| !file.is_empty()).collect(),
+            None,
+        ),
+    }
+}
+
+/// The information line of one overlap: the task, the files it shares and
+/// the integration branch it shares them with.
+pub fn overlap_line(overlap: &Overlap) -> String {
+    let integration = if !overlap.integration.is_empty() {
+        overlap.integration.clone()
+    } else if !overlap.repo.is_empty() {
+        overlap.repo.clone()
+    } else {
+        "integration".to_string()
+    };
+    format!(
+        "overlap: {} shares {} with {integration}",
+        overlap.task,
+        overlap.files.join(", ")
+    )
 }
 
 /// The seat's own account of why it is not running (T-82): None while it runs
@@ -783,6 +927,14 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
         View::Graph => {
             lines.push(String::new());
             lines.extend(graph::lines(&project.graph, &project.graph_lanes, None));
+        }
+    }
+    // The overlaps with the integration branch (T-188): information lines.
+    // They are not items that wait for the captain.
+    if !project.overlaps.is_empty() {
+        lines.push(String::new());
+        for overlap in &project.overlaps {
+            lines.push(overlap_line(overlap));
         }
     }
     lines.push(String::new());
@@ -1076,6 +1228,10 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                 "frictions": project.frictions.iter().map(|friction| serde_json::json!({
                     "task": friction.task, "lane": friction.lane, "body": friction.body,
                     "closed": friction.closed, "outcome": friction.outcome,
+                })).collect::<Vec<_>>(),
+                "overlaps": project.overlaps.iter().map(|overlap| serde_json::json!({
+                    "task": overlap.task, "repo": overlap.repo,
+                    "integration": overlap.integration, "files": overlap.files,
                 })).collect::<Vec<_>>(),
                 "deps": project.deps.iter().map(|node| serde_json::json!({
                     "id": node.id,
