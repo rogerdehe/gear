@@ -176,3 +176,67 @@ fn a_working_agent_gets_only_at_once_messages() {
     assert!(said[0].contains(&urgent), "the urgent one is typed: {said:?}");
     assert!(!said[0].contains(&normal), "the normal one waits: {said:?}");
 }
+
+#[test]
+fn tick_doorbells_wait_for_blocked_and_allow_only_urgent_for_unknown() {
+    for status in [AgentStatus::Blocked, AgentStatus::Unknown] {
+        let mut w = world(status);
+        w.herdr.add_agent_named(LANE_PANE, "pi", status, "p-heat");
+        let normal = captain_message(&mut w, MsgKind::Instruction, false, T0 + 1);
+        let urgent = captain_message(&mut w, MsgKind::Instruction, true, T0 + 2);
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+        let prompts = w.herdr.prompts_to(LANE_PANE);
+        if status == AgentStatus::Blocked { assert!(prompts.is_empty(), "{prompts:?}"); }
+        else { assert_eq!(prompts.len(),1); assert!(prompts[0].contains(&urgent)); assert!(!prompts[0].contains(&normal)); }
+    }
+}
+
+#[test]
+fn sender_doorbells_check_blocked_and_unknown_live() {
+    for (status, urgent, should_prompt) in [
+        (AgentStatus::Blocked,true,false), (AgentStatus::Blocked,false,false),
+        (AgentStatus::Unknown,true,true), (AgentStatus::Unknown,false,false),
+    ] {
+        let mut w=world(status);
+        w.herdr.add_agent_named(LANE_PANE,"pi",status,"p-heat");
+        let message=captain_message(&mut w,MsgKind::Instruction,urgent,T0+1);
+        let result=gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&message,urgent,T0+2).unwrap();
+        assert_eq!(result.is_some(),should_prompt,"{status:?} urgent={urgent}");
+        assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),usize::from(should_prompt));
+    }
+}
+
+#[test]
+fn intended_delivery_waits_for_live_ready_state_and_is_not_duplicated() {
+    let mut w=world(AgentStatus::Idle);
+    w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Idle,"p-heat");
+    let seat=w.store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
+    let op=w.store.write(|tx| gear_engine::dispatch::intend_dispatch(tx,"p",&[(seat,gear_engine::dispatch::Action::Assign{task:"T-1".into()})],T0+1)).unwrap().remove(0);
+    for (at,status) in [(10,AgentStatus::Working),(20,AgentStatus::Unknown),(30,AgentStatus::Blocked)] {
+        w.herdr.set_status(LANE_PANE,status);
+        tick(&mut w.store,&mut w.herdr,&w.cfg,T0+at).unwrap();
+        assert!(w.herdr.prompts_to(LANE_PANE).is_empty(),"{status:?}");
+        let ops=deliveries(&mut w); assert_eq!(ops.len(),1); assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,OpState::Intended);
+    }
+    w.herdr.set_status(LANE_PANE,AgentStatus::Done);
+    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+40).unwrap();
+    assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),1);
+    assert!(w.herdr.prompts_to(LANE_PANE)[0].contains("New task T-1"));
+    let ops=deliveries(&mut w); assert_eq!(ops.len(),1); assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,OpState::Submitted);
+}
+
+#[test]
+fn intended_doorbell_rechecks_eligibility_when_status_changes() {
+    for (status,urgent,allowed) in [(AgentStatus::Blocked,true,false),(AgentStatus::Unknown,true,true),(AgentStatus::Unknown,false,false),(AgentStatus::Working,false,true)] {
+        let mut w=world(AgentStatus::Idle);
+        w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Idle,"p-heat");
+        let message=captain_message(&mut w,MsgKind::Instruction,urgent,T0+1);
+        let action=gear_engine::doorbell::DoorbellAction { project:"p".into(),seat:"p:heat".into(),generation:1,pane_id:LANE_PANE.into(),text:format!("GEAR: {message}"),covers:vec![message] };
+        let op=w.store.write(|tx|gear_engine::ops::intend_doorbells(tx,&[action],T0+2)).unwrap().remove(0);
+        w.herdr.set_status(LANE_PANE,status);
+        gear_engine::ops::execute_intended(&mut w.store,&mut w.herdr,"p",T0+3).unwrap();
+        assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),usize::from(allowed),"{status:?} urgent={urgent}");
+        let ops=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
+        assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,if allowed {OpState::Submitted} else {OpState::Intended});
+    }
+}
