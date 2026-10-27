@@ -59,7 +59,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
         }
     );
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10 });
+    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
@@ -564,4 +564,20 @@ fn an_unknown_reader_is_a_finding() {
     let mut cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
     cfg.quota.sources[0].provider = "  ".into();
     assert_eq!(fields(&validate(&cfg)), vec!["quota.sources.provider"]);
+}
+
+#[test]
+fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
+    let text=format!("{MINIMAL}\n[timing]\ndelivery_grace_s=45\n[prices.\"openai/model\"]\ninput=1.5\noutput=2.0\ncache_read=0.25\ncache_write=0.0\n");
+    let cfg=parse(&text).unwrap();
+    assert_eq!(cfg.timing.delivery_grace_s,45);
+    let price=&cfg.prices["openai/model"];
+    assert_eq!((price.input,price.output,price.cache_read,price.cache_write),(1.5,2.0,0.25,0.0));
+    assert!(validate(&cfg).is_empty());
+    let mut bad=cfg.clone(); bad.timing.delivery_grace_s=0; bad.prices.get_mut("openai/model").unwrap().cache_read=-1.0;
+    let issues=validate(&bad); let fields=fields(&issues);
+    assert!(fields.contains(&"timing.delivery_grace_s"),"{issues:?}");
+    assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
+    assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
+    assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
 }
