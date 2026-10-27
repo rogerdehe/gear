@@ -56,10 +56,13 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
             _ => { tx.set_meta(&since_key, &now.to_string())?; now }
         };
         if now - since <= threshold { continue; }
-        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
-            continue; // acknowledged or still open: the incident is unchanged
-        }
         let Some(captain) = tx.captain_of(project)? else { continue; };
+        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
+            if !crate::attention::due(tx, project, &format!("lane-busy:{}", seat.id), &captain.id, now)? {
+                continue;
+            }
+        }
+
         let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.into(), thread: format!("lane-busy:{}", seat.id),
