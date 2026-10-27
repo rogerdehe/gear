@@ -763,9 +763,15 @@ fn start_reviewer(
     };
 
     if seat.state == SeatState::Standby {
-        let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
         let ready = herdr.agent_get(&pane).ok().flatten().is_some_and(|agent| matches!(agent.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done));
         if !ready { return Ok(Started::NotYet) }
+        let current_repo = store.read(|tx| tx.get_meta(&repo_key(&seat.id)))?.unwrap_or_else(|| config.root_repo().path);
+        if current_repo != repo.path {
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
+            return Ok(Started::NotYet);
+        }
+        let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
         if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
         if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
             return Ok(Started::NotYet);
@@ -3083,6 +3089,42 @@ profile = "opencode"
 
         assert!(start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 31)
             .unwrap().started.is_empty());
+    }
+
+    #[test]
+    fn standby_reviewer_releases_before_moving_to_another_repo() {
+        let config = config_with_repos().replace("lanes = 1", "lanes = 2") + r#"
+[[lanes]]
+name = "root"
+duty = "root work"
+owns = ["root/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+        let mut store = world(&config);
+        store.write(|tx| { let mut task = tx.get_task("p", "T-1")?.unwrap(); task.lane = Some("root".into()); tx.update_task(&task) }).unwrap();
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap().started, vec!["p:review-1"]);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Done; tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")
+        }).unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
+        assert!(report.started.is_empty());
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Releasing);
+        assert!(REVIEW_GIT_CALLS.with(|calls| calls.borrow().is_empty()), "no Git checkout in the old repository");
+        assert_eq!(store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(), Some("T-2"));
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Released);
+        herdr.add_shell("child:p1");
+        herdr.add_worktree("home/review-1", "/child-review", "child:p1");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 14).unwrap();
+        assert_eq!(report.started, vec!["p:review-1"]);
+        let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+        assert!(calls.iter().any(|(path, args)| path == "/child-review" && args.iter().any(|arg| arg == "review/t2")), "{calls:?}");
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {

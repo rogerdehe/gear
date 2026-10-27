@@ -312,7 +312,7 @@ fn under_review(
 /// worktree to go), `Err` = the step failed and a human should look.
 ///
 /// `task` is the job the seat held, if any: a standby reviewer has none.
-fn release_one(
+pub(crate) fn release_one(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     project: &str,
