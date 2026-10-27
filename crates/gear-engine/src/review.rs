@@ -486,7 +486,12 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
             })?;
             if used >= 3 {
                 let reason = format!("review checkout failed {used} times: {}", error.detail);
-                park(store, &seat.id, &reason, now)?;
+                if seat.state == SeatState::Standby {
+                    crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                        .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
+                } else {
+                    park(store, &seat.id, &reason, now)?;
+                }
                 mark_checkout_stuck(store, &seat.project, &task.task, task.attempt, &reason)?;
                 store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
                 tell_captain(store, &seat.project, task, &reason, now)?;
@@ -3171,6 +3176,26 @@ profile = "opencode"
         assert_eq!(action["action"], "resume");
         assert_eq!(action["session_ref"], "review-session");
         assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id))).unwrap().as_deref(), Some("gpt-6-astra"));
+    }
+
+    #[test]
+    fn standby_checkout_retries_then_releases_after_exhaustion() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Done; tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")
+        }).unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        REVIEW_GIT_FAIL.with(|fail| fail.set(true));
+        for tick in 0..3 {
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12 + tick).unwrap();
+        }
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Releasing);
+        assert!(checkout_stuck(&mut store, "p", "T-2", 1).unwrap());
+        assert_eq!(store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(), Some(""));
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
