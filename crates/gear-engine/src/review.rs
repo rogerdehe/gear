@@ -69,7 +69,7 @@ pub fn start_reviews(
 
     // A reviewer that the old activation/delivery pair could leave without its
     // packet gets it before anything else is started.
-    report.started.extend(recover_missing_packets(store, project, &config, now)?);
+    report.started.extend(recover_missing_packets(store, herdr, cfg, project, &config, now)?);
 
     for task in tasks_to_review(store, project)? {
         // T-69 / B02-04: an attempt whose checkout already failed three times
@@ -126,7 +126,7 @@ pub fn start_reviews(
 
         // 2. a seat that is already up needs nothing; a seat that was parked
         //    (unknown, needs check, missing) is never retried (design/10).
-        if !matches!(seat.state, SeatState::Queued | SeatState::Starting | SeatState::Released) {
+        if !matches!(seat.state, SeatState::Queued | SeatState::Starting | SeatState::Released | SeatState::Standby) {
             continue;
         }
 
@@ -319,16 +319,13 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
 /// The temp seat bound to `task`, if there is one.
 fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
-        Ok(tx
-            .seats_of_project(project)?
-            .into_iter()
-            // A released or retired reviewer is finished; a rework attempt
-            // (or a lost review) gets a new seat.
-            .find(|seat| {
-                seat.role == SeatRole::Temp
-                    && seat.task_id.as_deref() == Some(task)
-                    && !matches!(seat.state, SeatState::Released | SeatState::Retired)
-            }))
+        for seat in tx.seats_of_project(project)? {
+            if seat.role == SeatRole::Temp && seat.state != SeatState::Retired
+                && (seat.task_id.as_deref() == Some(task) || tx.get_meta(&pending_review_key(&seat.id))?.as_deref() == Some(task)) {
+                return Ok(Some(seat));
+            }
+        }
+        Ok(None)
     })
 }
 
@@ -337,6 +334,8 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
 fn free_seat(store: &mut Store, project: &str, task: &str, kind: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
         let seats = tx.seats_of_project(project)?;
+        let mut seats = seats;
+        seats.retain(|seat| tx.get_meta(&pending_review_key(&seat.id)).ok().flatten().is_none_or(|v| v.is_empty()));
         let available = |seat: &&SeatRow| {
             seat.role == SeatRole::Temp
                 && matches!(seat.state, SeatState::Standby | SeatState::Released)
@@ -449,13 +448,15 @@ fn take_seat(
     now: Ts,
 ) -> GearResult<SeatRow> {
     store.write(|tx| {
-        tx.set_seat_task(&seat.id, task)?;
+        tx.set_meta(&pending_review_key(&seat.id), task)?;
         tx.set_seat_profile(&seat.id, profile)?;
         Ok(())
     })?;
     let _ = now;
-    Ok(SeatRow { task_id: Some(task.to_string()), ..seat.clone() })
+    Ok(seat.clone())
 }
+
+fn pending_review_key(seat: &str) -> String { format!("engine.review_pending.{seat}") }
 
 /// Create the temp seat bound to `task`: one transaction, so two ticks cannot
 /// create two seats for the same task.
@@ -483,9 +484,10 @@ fn create_temp_seat(
             state: SeatState::Queued,
             state_since: now,
             state_reason: Some("waiting for a review".to_string()),
-            task_id: Some(task.to_string()),
+            task_id: None,
         };
         tx.insert_seat(&seat)?;
+        tx.set_meta(&pending_review_key(&id), task)?;
         Ok(seat)
     })
 }
@@ -684,6 +686,28 @@ fn start_reviewer(
         }
     };
 
+    if seat.state == SeatState::Standby {
+        let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
+        let ready = herdr.agent_get(&pane).ok().flatten().is_some_and(|agent| matches!(agent.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done));
+        if !ready { return Ok(Started::NotYet) }
+        if !prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+        if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
+            return Ok(Started::NotYet);
+        }
+        let packet = review_packet_for(store, config, &task.task, task.attempt, &task.candidate)?;
+        store.write(|tx| {
+            tx.set_seat_state(&seat.id, SeatState::Active, Some("review assigned"), now)?;
+            tx.set_seat_task(&seat.id, &task.task)?;
+            tx.set_meta(&pending_review_key(&seat.id), "")?;
+            tx.set_meta(&branch_key(&seat.id, &repo.path), &branch)?;
+            tx.insert_op(&NewOp { project: config.project.id.clone(), seat: seat.id.clone(), generation: seat.generation,
+                kind: OpKind::Deliver, task: Some(task.task.clone()), attempt: Some(task.attempt), ref_msg: None,
+                plan_version: None, payload: serde_json::json!({ "text": packet }), created: now })?;
+            Ok(())
+        })?;
+        return Ok(Started::Yes);
+    }
+
     // 2. a new job is a new generation of the seat: the previous binding is
     //    voided and a pending one is opened on the same pane. An interrupted
     //    start keeps the pending binding it already has.
@@ -716,6 +740,35 @@ fn start_reviewer(
             return Ok(Started::NotYet);
         }
     };
+
+    if occupant.as_ref().is_some_and(|agent| !matches!(agent.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done)) {
+        return Ok(Started::NotYet);
+    }
+    if occupant.is_some() && !recorded_start(store, &seat.id, generation, &pane, kind)? {
+        park(store, &seat.id, "the reviewer's pane is held by another agent", now)?;
+        return Ok(Started::NotYet);
+    }
+    let Some(path) = worktree_path(store, &seat.id)? else {
+        park(store, &seat.id, "the seat's worktree path is unknown", now)?;
+        return Ok(Started::NotYet);
+    };
+    match prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now) {
+        Ok(true) => {},
+        Ok(false) => return Ok(Started::NotYet),
+        Err(error) => {
+            let reason = format!("review checkout: {}", error.detail);
+            park(store, &seat.id, &reason, now)?;
+            mark_checkout_stuck(store, &config.project.id, &task.task, task.attempt, &reason)?;
+            tell_captain(store, &config.project.id, task, &reason, now)?;
+            return Ok(Started::NotYet);
+        }
+    }
+    store.write(|tx| tx.set_meta(&branch_key(&seat.id, &repo.path), &branch))?;
+
+    let current_seat = store.read(|tx| tx.get_seat(&seat.id))?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "review seat disappeared"))?;
+    if crate::session::prepare_review(store, herdr, cfg, &current_seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
+        return Ok(Started::NotYet);
+    }
 
     let started = match occupant {
         // The start was accepted before the restart: adopt it. Nothing is
@@ -758,24 +811,6 @@ fn start_reviewer(
             //    changes go (never the ignored files, so `target/` and the
             //    build cache survive). The reviewer starts only once the
             //    engine has *seen* the checkout land on the candidate (F1).
-            let Some(path) = worktree_path(store, &seat.id)? else {
-                // The seat's worktree was never recorded: do not check out blind.
-                park(store, &seat.id, "the seat's worktree path is unknown", now)?;
-                return Ok(Started::NotYet);
-            };
-            match prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now) {
-                Ok(true) => {},
-                Ok(false) => return Ok(Started::NotYet),
-                Err(error) => {
-                    let reason = format!("review checkout: {}", error.detail);
-                    park(store, &seat.id, &reason, now)?;
-                    mark_checkout_stuck(store, &config.project.id, &task.task, task.attempt, &reason)?;
-                    tell_captain(store, &config.project.id, task, &reason, now)?;
-                    return Ok(Started::NotYet);
-                }
-            }
-            store.write(|tx| tx.set_meta(&branch_key(&seat.id, &repo.path), &branch))?;
-
             // 6. the agent's args: the profile's unattended args, the model
             //    when the CLI takes one, the arguments of the chain entry and
             //    the session of an earlier review of the same task when the
@@ -834,6 +869,8 @@ fn start_reviewer(
     let packet = review_packet_for(store, config, &task.task, task.attempt, &task.candidate)?;
     store.write(|tx| {
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
+        tx.set_seat_task(&seat.id, &task.task)?;
+        tx.set_meta(&pending_review_key(&seat.id), "")?;
         // The task's reviewer session is kept: a re-review of the same task
         // resumes it instead of starting a new conversation (F3).
         tx.set_meta(&session_cli_key(&config.project.id, &task.task), kind)?;
@@ -1339,6 +1376,8 @@ fn review_packet_for(
 /// Deliver op for that seat is the guard, so the next tick adds nothing.
 fn recover_missing_packets(
     store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
     project: &str,
     config: &ProjectConfig,
     now: Ts,
@@ -1370,6 +1409,9 @@ fn recover_missing_packets(
         let Some(candidate) = attempt.candidate.clone() else {
             continue;
         };
+        if crate::session::prepare_review(store, herdr, cfg, &seat, &task, attempt.n, now)? != crate::session::Prep::Ready {
+            continue;
+        }
         let packet = review_packet_for(store, config, &task, attempt.n, &candidate)?;
         let generation = seat.generation;
         store.write(|tx| {
