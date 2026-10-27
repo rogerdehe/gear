@@ -1,24 +1,101 @@
-//! The declared waits (design §5.3).
-//!
-//! A task can wait for another one ("wait for T-9 to merge"). The wait, the
-//! captain's item and the round's paused clock belong to the task that fills
-//! this module; until it lands, the tick does nothing — no task is parked and
-//! no message is written.
-
+//! Declared task waits and their round clocks (design §5.3–5.4).
 use gear_herdr::HerdrAct;
-use gear_model::{GearResult, Ts};
-use gear_store::Store;
-
+use gear_model::{AttemptState, GearResult, MsgKind, MsgState, OpKind, OpState, Ts};
+use gear_store::{NewMessage, RoundKey, Store, Tx};
 use crate::EngineCfg;
 
-/// The declared waits of every project (design §5.3).
-///
-/// Empty until the task that implements the wait lands.
-pub fn tick(
-    _store: &mut Store,
-    _herdr: &mut dyn HerdrAct,
-    _cfg: &EngineCfg,
-    _now: Ts,
-) -> GearResult<()> {
+/// A wait belongs only to the lane's current, unfinished attempt.
+pub(crate) fn waiting_seat(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
+    for attempt in tx.open_attempts_of_seat(seat)? {
+        if matches!(attempt.state, AttemptState::Started | AttemptState::Stopped)
+            && tx.get_task(&attempt.project, &attempt.task)?.is_some_and(|task| task.wait_on.is_some()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Reconcile wait rows and add the union of each round's pauses once.
+fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+    for task in tx.tasks_of_project(project)? {
+        let Some(on) = task.wait_on.as_deref() else { continue };
+        let Some(attempt) = tx.attempts_of_task(project, &task.id)?.into_iter().rev()
+            .find(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)) else { continue };
+        tx.open_pause(project, &attempt.seat, "wait", &format!("waiting for {on}"), now)?;
+        crate::stall::resolve(tx, project, &attempt.seat, now, None)?;
+        // A packet or overrun doorbell intended before the wait must not be
+        // typed into the lane after it declares the wait.
+        for op in tx.slot_ops(&attempt.seat)? {
+            if op.state != OpState::Intended { continue; }
+            let overrun_doorbell = if op.kind == OpKind::Doorbell {
+                let mut found = false;
+                if let Some(ids) = op.payload.get("covers").and_then(|v| v.as_array()) {
+                    for id in ids.iter().filter_map(|v| v.as_str()) {
+                        if tx.get_message(project, id)?.is_some_and(|m| m.thread.starts_with("overrun-question:")) { found = true; }
+                    }
+                }
+                found
+            } else { false };
+            if (op.kind == OpKind::Deliver && op.task.as_deref() == Some(task.id.as_str())) || overrun_doorbell {
+                tx.set_op_state(project, &op.id, OpState::Void, Some("task is in a declared wait"), now)?;
+            }
+        }
+        // A verdict can mark a task Done before the merge actually lands.
+        // Only a merged attempt is evidence that the awaited work arrived.
+        let mut landed = None;
+        for candidate in tx.attempts_of_task(project, on)?.into_iter().rev() {
+            if let (Some(at), Some(sha)) = (tx.attempt_times(project, on, candidate.n)?.merged, candidate.candidate.as_deref()) {
+                landed = Some((at, sha.to_string()));
+                break;
+            }
+        }
+        if let Some((at, sha)) = landed {
+            tx.clear_task_wait(project, &task.id)?;
+            tx.close_pause(project, &attempt.seat, "wait", at.min(now))?;
+            tx.insert_message(&NewMessage {
+                project: project.into(), thread: format!("wait:{}:{}:{on}", task.id, attempt.n),
+                task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0,
+                recipient: attempt.seat.clone(), kind: MsgKind::Instruction, urgent: true,
+                body: format!("GEAR: {on} is merged ({sha}). Continue {}.", task.id),
+                reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None,
+            })?;
+        }
+    }
+    for pause in tx.pauses_of_project(project)? {
+        if pause.kind == "wait" && pause.end_at.is_none() && !waiting_seat(tx, &pause.seat)? {
+            tx.close_pause(project, &pause.seat, "wait", now)?;
+        }
+    }
+    let pauses = tx.pauses_of_project(project)?;
+    for round in tx.rounds_of_project(project)? {
+        if round.role != "dev" && round.role != "rework" { continue; }
+        let times = tx.attempt_times(project, &round.task, round.attempt)?;
+        let Some(start) = times.started else { continue };
+        let end = now.min(round.end_at.unwrap_or(now)).min(times.handed_in.unwrap_or(now)).max(start);
+        let mut intervals: Vec<_> = pauses.iter().filter(|p| p.seat == round.seat)
+            .map(|p| (p.start_at.max(start), p.end_at.unwrap_or(end).min(end)))
+            .filter(|(a,b)| b > a).collect();
+        intervals.sort_unstable();
+        let mut total = 0;
+        let mut current: Option<(Ts, Ts)> = None;
+        for (a,b) in intervals {
+            match current {
+                Some((x,y)) if a <= y => current = Some((x,y.max(b))),
+                Some((x,y)) => { total += y-x; current = Some((a,b)); },
+                None => current = Some((a,b)),
+            }
+        }
+        if let Some((a,b)) = current { total += b-a; }
+        if total > round.paused_s {
+            tx.add_round_pause(&RoundKey {project:project.into(),task:round.task,attempt:round.attempt,role:round.role}, total-round.paused_s)?;
+        }
+    }
+    Ok(())
+}
+
+/// Process the declared waits of every project.
+pub fn tick(store: &mut Store, _herdr: &mut dyn HerdrAct, _cfg: &EngineCfg, now: Ts) -> GearResult<()> {
+    let projects = store.read(|tx| tx.project_ids())?;
+    for project in projects { store.write(|tx| reconcile(tx, &project, now))?; }
     Ok(())
 }

@@ -214,3 +214,15 @@ fn a_restart_between_the_bump_and_the_delivery_still_delivers_once() {
     assert_eq!(report.intended.len(), 1, "{report:?}");
     assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1);
 }
+
+#[test]
+fn contract_change_atomically_clears_wait_and_closes_pause() {
+    let mut s=world();
+    s.write(|tx| { tx.set_task_wait("p","T-1","T-2","merged")?; tx.open_pause("p","p:heat","wait","waiting for T-2",T0+5) }).unwrap();
+    bump(&mut s,0,"updated goal","clear-wait");
+    let task=s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap();
+    assert!(task.wait_on.is_none() && task.wait_cond.is_none());
+    let pauses=s.read(|tx|tx.pauses_of_project("p")).unwrap();
+    let pause=pauses.iter().find(|p|p.kind=="wait").unwrap();
+    assert_eq!(pause.end_at,Some(T0+10));
+}

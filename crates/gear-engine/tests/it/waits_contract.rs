@@ -1,0 +1,68 @@
+//! T-161: declared waits suppress stall work and wake after the merge.
+use gear_app::{mail::{self, SendArgs}, identity::Fingerprint, Env};
+use gear_engine::{tick, EngineCfg};
+use gear_herdr::{fake::FakeHerdr, AgentStatus};
+use gear_model::{AttemptState, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState};
+use gear_store::{testing, AttemptRow, AttemptStep, ContractRow, NewMessage, NewOp, NewRound, RoundKey, Store, TaskRow};
+const T:i64=1_800_000_000;
+const LANE:&str="w1:p2";
+const SHA:&str="abc1234567890abc1234567890abc1234567890a";
+
+fn world() -> (Store,FakeHerdr,EngineCfg) {
+    let mut s=Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx,"p","sess",T)?;
+        testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p1","codex",T)?;
+        testing::seed_active_seat(tx,"p","heat",SeatRole::Lane,LANE,"opencode",T)?;
+        for (id,rank) in [("T-1",1),("T-2",2)] {
+            tx.insert_task(&TaskRow {repo:None,base:None,gate:None,rework_estimate_min:None,project:"p".into(),id:id.into(),rank,state:TaskState::Ready,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(10),issue:None,updated:T})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:id.into(),version:1,goal:"goal".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+        }
+        gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
+        gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
+        tx.insert_round(&NewRound {key:RoundKey{project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()},seat:"p:heat".into(),generation:1,cli:"opencode".into(),model:None,start_at:T})?;
+        Ok(())
+    }).unwrap();
+    let mut h=FakeHerdr::new(); h.add_agent_named("w1:p1","codex",AgentStatus::Idle,"p-captain"); h.add_agent_named(LANE,"opencode",AgentStatus::Idle,"p-heat"); h.set_agent_session(LANE,"existing-session");
+    let mut cfg=EngineCfg::default(); cfg.profiles=gear_herdr::builtins(); cfg.cooldown_s=0;
+    (s,h,cfg)
+}
+fn block(s:&mut Store) {
+    let env=Env {ctx:Some(GearCtx{project:"p".into(),seat:"heat".into(),generation:1}),pane_id:Some(LANE.into()),admin:false};
+    let fp=Fingerprint{pane_id:LANE.into(),kind:Some("opencode".into()),session_ref:None};
+    let args=SendArgs {kind:MsgKind::Blocked,body:"waiting for API".into(),task:Some("T-1".into()),attempt:Some(1),contract:Some(1),candidate:None,verdict:None,blocking:None,base:None,about:None,to:None,reply_to:None,urgent:false,left:None,blocker:None,on:Some("T-2".into()),friction:None,request_id:"wait-one".into()};
+    mail::send(s,&env,Some(&fp),&args,T+10).unwrap();
+}
+fn advance(s:&mut Store,h:&mut FakeHerdr,c:&EngineCfg,at:i64) {tick(s,h,c,T+at).unwrap();}
+#[test]
+fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
+    let (mut s,mut h,c)=world(); block(&mut s);
+    s.write(|tx| {
+        tx.insert_message(&NewMessage {project:"p".into(),thread:"overrun-question:T-1:1:dev".into(),task:Some("T-1".into()),attempt:Some(1),sender:"engine".into(),sender_gen:0,recipient:"p:heat".into(),kind:MsgKind::Instruction,urgent:true,body:"old overrun question".into(),reply_to:None,needs_ack:false,state:MsgState::Open,created:T+11,meta:None})?;
+        tx.insert_op(&NewOp {project:"p".into(),seat:"p:heat".into(),generation:1,kind:OpKind::Deliver,task:Some("T-1".into()),attempt:Some(1),ref_msg:None,plan_version:None,payload:serde_json::json!({"text":"old nudge"}),created:T+12})?;
+        Ok(())
+    }).unwrap();
+    advance(&mut s,&mut h,&c,100);
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0); assert_eq!(r.paused_s,90);
+    let ops=s.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap(); assert_eq!(ops[0].state,OpState::Void);
+    assert!(h.prompts_to(LANE).is_empty(),"{:?}",h.calls);
+    h.exit_agent(LANE);
+    let report=tick(&mut s,&mut h,&c,T+120).unwrap(); assert!(!report.flagged.contains(&"p:heat".into()));
+    assert!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap().iter().all(|m|m.state!=MsgState::Open));
+    h.add_agent_named(LANE,"opencode",AgentStatus::Idle,"p-heat"); h.set_agent_session(LANE,"existing-session");
+    s.write(|tx| {
+        let mut task=tx.get_task("p","T-2")?.unwrap(); task.state=TaskState::Done; tx.update_task(&task)?;
+        tx.insert_attempt(&AttemptRow {session_ref:None,session_cli:None,session_action:None,sent_at:None,project:"p".into(),task:"T-2".into(),n:1,seat:"p:other".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Accepted,candidate:Some(SHA.into()),report:None,safe_point:None,started:T,updated:T+130})?;
+        Ok(())
+    }).unwrap();
+    advance(&mut s,&mut h,&c,150);
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().wait_on.as_deref(),Some("T-2"),"Done alone is not a merge");
+    s.write(|tx|tx.set_attempt_time("p","T-2",1,AttemptStep::Merged,T+200)).unwrap();
+    advance(&mut s,&mut h,&c,230); advance(&mut s,&mut h,&c,240);
+    let task=s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap(); assert!(task.wait_on.is_none());
+    let pauses=s.read(|tx|tx.pauses_of_project("p")).unwrap(); let pause=pauses.iter().find(|p|p.kind=="wait" && p.seat=="p:heat").unwrap(); assert_eq!((pause.start_at,pause.end_at),(T+10,Some(T+200)));
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0); assert_eq!(r.paused_s,190);
+    let wake=s.read(|tx|tx.thread_messages("p","wait:T-1:1:T-2")).unwrap(); assert_eq!(wake.len(),1); assert!(wake[0].urgent); assert_eq!(wake[0].body,format!("GEAR: T-2 is merged ({SHA}). Continue T-1."));
+    assert!(h.prompts_to(LANE).iter().any(|p|p.contains(&wake[0].id)),"{:?}",h.calls);
+    assert_eq!(s.read(|tx|tx.get_binding("p:heat",1)).unwrap().unwrap().session_ref.as_deref(),Some("existing-session"));
+}

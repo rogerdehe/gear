@@ -277,6 +277,9 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
+            if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
+                return Ok(empty_view(obs));
+            }
             let continues = task
                 .map(|task| match task.state {
                     TaskState::Running | TaskState::Verifying => true,

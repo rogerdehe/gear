@@ -459,6 +459,7 @@ pub fn send(
                     args.attempt.unwrap_or_default(),
                     args.contract.unwrap_or_default(),
                     args.on.as_deref().unwrap_or_default(),
+                    now,
                 )?;
             }
 
@@ -903,6 +904,7 @@ fn declare_wait(
     attempt: i64,
     contract: i64,
     on: &str,
+    now: Ts,
 ) -> GearResult<()> {
     let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
         GearError::new(
@@ -970,6 +972,7 @@ fn declare_wait(
         ));
     }
     tx.set_task_wait(project, task, on, "merged")?;
+    tx.open_pause(project, &seat.id, "wait", &format!("waiting for {on}"), now)?;
     Ok(())
 }
 
