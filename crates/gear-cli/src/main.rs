@@ -886,26 +886,17 @@ fn current_voyage(store: &mut gear_store::Store, env: &gear_app::Env) -> GearRes
                 "no GEAR_CTX in the environment",
             )
         })?;
-    store.read(|tx| {
-        let open: std::collections::BTreeSet<String> = tx
-            .tasks_of_project(&project)?
-            .into_iter()
-            .filter(|task| !task.state.is_terminal())
-            .filter_map(|task| task.milestone)
-            .collect();
-        let mut voyages = tx.voyages_of_project(&project)?;
-        voyages.sort_by_key(|voyage| (!open.contains(&voyage.milestone), voyage.milestone.clone()));
-        voyages
-            .into_iter()
-            .next()
-            .map(|voyage| voyage.milestone)
-            .ok_or_else(|| {
-                GearError::new(
-                    gear_model::ErrorCode::NoTarget,
-                    format!("the project {project} has no voyage"),
-                )
-            })
-    })
+    // The voyage the landing is about: the one that departed last (the
+    // plan's own rule, `gear_app::plan::current_voyage`), so a finished
+    // voyage never hands the captain an older one.
+    let milestone = store.read(|tx| gear_app::plan::current_voyage(tx, &project))?;
+    if milestone.is_empty() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!("the project {project} has no voyage"),
+        ));
+    }
+    Ok(milestone)
 }
 
 /// `gear report time`: where the time went (T-38). The captain's view of the

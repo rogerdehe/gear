@@ -186,9 +186,18 @@ pub fn report(
         *kind_counts.entry(decision.kind.clone()).or_default() += 1;
     }
     // The friction reports with their outcomes; the open ones are marked.
+    // Only this voyage's tasks: the friction of an earlier voyage is not
+    // this voyage's (design §7.5).
+    let voyage_tasks: Vec<String> = tx
+        .tasks_of_project(project)?
+        .into_iter()
+        .filter(|task| task.milestone.as_deref() == Some(milestone))
+        .map(|task| task.id)
+        .collect();
     let frictions: Vec<FrictionLine> = tx
         .frictions_of_project(project)?
         .into_iter()
+        .filter(|row| voyage_tasks.iter().any(|task| task == &row.task))
         .map(|row| FrictionLine {
             id: row.id,
             task: row.task,
@@ -287,6 +296,8 @@ pub fn render(report: &Report) -> String {
     ));
     for lane in &report.work.lanes {
         lines.push(format!("  {}", crate::time::lane_line(lane)));
+        // The lane's own tokens and cost of this voyage (design §7.5).
+        lines.push(format!("  lane {} · {}", lane.lane, lane.tokens.line()));
     }
     if !report.slowest.is_empty() {
         lines.push("  slowest tasks (actual/estimate)".to_string());
