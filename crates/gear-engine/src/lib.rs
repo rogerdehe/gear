@@ -233,6 +233,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     };
 
+    let mut reviewer_nudge_flags = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -363,9 +364,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let (_nudged, stuck) =
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
-            if !report.flagged.contains(&seat) {
-                report.flagged.push(seat);
-            }
+            reviewer_nudge_flags.push((project.clone(), seat));
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
@@ -412,6 +411,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     report.rounds = rounds::tick(store, herdr, cfg, now)?;
     overrun::tick(store, herdr, cfg, now)?;
     waits::tick(store, herdr, cfg, now)?;
+    for (project, seat) in reviewer_nudge_flags {
+        if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
+            && !report.flagged.contains(&seat) {
+            report.flagged.push(seat);
+        }
+    }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
     for seat in report.flagged.clone() {
@@ -537,6 +542,7 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -548,6 +554,7 @@ fn doorbell_inputs(
                     && !shown.contains(&message.id)
             };
             if include && !doorbelled.contains(&message.id) {
+                if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
                 waiting.push(item(&message));
             }
         }
@@ -561,12 +568,25 @@ fn doorbell_inputs(
             {
                 continue;
             }
+            if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
             waiting.push(item(&message));
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_ops = tx.slot_ops(&seat.id)?;
+        // A review delivery stays submitted until the verdict. Its reviewer
+        // must still receive the urgent overrun question during the review.
+        let review_question = seat.role == gear_model::SeatRole::Temp
+            && !overrun_questions.is_empty()
+            && !slot_ops.is_empty()
+            && slot_ops.iter().all(|op| op.kind == OpKind::Deliver
+                && op.state == OpState::Submitted
+                && op.task == seat.task_id);
+        if review_question {
+            waiting.retain(|item| overrun_questions.contains(&item.id));
+        }
+        let slot_busy = !slot_ops.is_empty() && !review_question;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
