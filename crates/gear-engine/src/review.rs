@@ -698,7 +698,8 @@ fn start_reviewer(
     // The repo the work is in: the repo of the lane that wrote it (T-53).
     // The reviewer's worktree, its branch and the diff the packet names all
     // belong to that repo.
-    let repo = config.repo_of_lane(&task.lane);
+    let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
+    let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
     let branch = review_branch(&task.task);
@@ -1313,7 +1314,8 @@ fn review_packet_for(
     })?;
     // The diff is against the integration branch of the repo the work is in
     // (T-53): a child repo has its own branch.
-    let repo = config.repo_of_lane(&lane);
+    let saved = store.read(|tx| tx.get_task(&config.project.id, task))?;
+    let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&lane));
     let packet = review_packet(
         task,
         attempt,
@@ -1529,6 +1531,13 @@ fn review_packet(
     )
 }
 
+/// The key that remembers that the captain was told that the review of a
+/// task's attempt waits. The notice is told once per attempt (T-214): a
+/// resolved item does not bring the same news back.
+fn review_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_wait_told.{project}.{task}.{attempt}")
+}
+
 /// Tell the captain that a review waits: one open item per task, so the tick
 /// does not fill the inbox with the same news.
 fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &str, now: Ts) -> GearResult<()> {
@@ -1536,11 +1545,15 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
+        let told_key = review_wait_told_key(project, &task.task, task.attempt);
         // One open item per task: the captain is told once, not every tick.
-        let already = tx
-            .actionable_for(project, &captain.id, now)?
-            .into_iter()
-            .any(|message| message.task.as_deref() == Some(task.task.as_str()));
+        // And once per attempt: a resolved item does not bring the same news
+        // back on the next tick (T-214).
+        let already = tx.get_meta(&told_key)?.is_some()
+            || tx
+                .actionable_for(project, &captain.id, now)?
+                .into_iter()
+                .any(|message| message.task.as_deref() == Some(task.task.as_str()));
         if already {
             return Ok(());
         }
@@ -1571,6 +1584,9 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             created: now,
         };
         tx.insert_message(&message)?;
+        // The notice is told once per attempt: remember it, so a later tick
+        // does not add it again after the captain resolved the item.
+        tx.set_meta(&told_key, &now.to_string())?;
         Ok(())
     })
 }
@@ -2581,6 +2597,64 @@ review = [
         assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
     }
 
+    /// T-214: the "the review waits" notice is told once per attempt. A
+    /// resolved item does not bring the same news back on the next tick, and
+    /// the next attempt of the task is told once again.
+    #[test]
+    fn the_review_waits_notice_is_told_once_per_attempt() {
+        let mut store = world(CONFIG_NO_SLOT);
+        let mut herdr = FakeHerdr::new();
+
+        // The first tick: the review waits, the captain is told once.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
+        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
+        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+
+        // The captain resolves the item.
+        let id = inbox[0].id.clone();
+        store
+            .write(|tx| {
+                tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, T0 + 12)
+            })
+            .unwrap();
+
+        // The later ticks add no item: the notice was already told for this
+        // attempt.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 31)).unwrap();
+        assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        let again = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
+        assert!(again.is_empty(), "a second item was added: {again:?}");
+
+        // The next attempt of the same task is told once again.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 40)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 40)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "ops/reports/T-1.md",
+                    T0 + 41,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 50).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 51)).unwrap();
+        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
+        assert!(inbox[0].body.contains("attempt 2"), "{}", inbox[0].body);
+    }
+
     #[test]
     fn a_pane_that_is_not_ready_is_tried_again_on_the_next_tick() {
         let mut store = world(CONFIG);
@@ -3077,6 +3151,26 @@ review = [
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
         assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+    }
+
+    #[test]
+    fn review_after_a_rebind_uses_the_tasks_original_repo_and_base() {
+        let config = config_with_repos().replace("repo = \"web\"", "");
+        let mut store = world(&config);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.repo = Some("/repo/web".into());
+            task.base = Some("original-base".into());
+            tx.update_task(&task)
+        }).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0+10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0+20).unwrap();
+        let (repo, _, base, _) = created_worktree(&herdr);
+        assert_eq!(repo, "/repo/web");
+        assert_eq!(base, "original-base");
+        let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
+        assert!(packet.contains("Diff to review: `original-base..abc1234`"), "{packet}");
     }
 
     #[test]
