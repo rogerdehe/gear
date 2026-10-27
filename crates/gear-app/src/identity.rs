@@ -532,6 +532,87 @@ pub fn prove_seat(
     Ok(fp)
 }
 
+/// What `gear whoami` reports (design §10.7, row B9): the real pane, the seat
+/// bound to it, the store the caller would write to, and why a claim fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhoAmI {
+    /// The pane the caller really runs in (its own pane by process ancestry).
+    pub pane: Option<String>,
+    /// The seat bound to that pane.
+    pub seat: Option<String>,
+    /// The store the caller would write to.
+    pub store: String,
+    /// Why the caller cannot act as a seat; `None` when it can.
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Display for WhoAmI {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "pane: {}", self.pane.as_deref().unwrap_or("unknown"))?;
+        writeln!(f, "seat: {}", self.seat.as_deref().unwrap_or("none"))?;
+        writeln!(f, "store: {}", self.store)?;
+        if let Some(reason) = &self.reason {
+            writeln!(f, "reason: {reason}")?;
+        }
+        Ok(())
+    }
+}
+
+/// `gear whoami` (design §10.7, row B9): the real pane, the seat bound to it,
+/// the store, and why a claim fails.
+///
+/// It never fails: the answer to "who am I" is a report, not a refusal. The
+/// pane comes from the process ancestry (T-104) and the seat from the store's
+/// bindings (T-126), so an agent that claims a seat it does not own sees why.
+pub fn whoami(
+    store: &mut Store,
+    env: &Env,
+    herdr: &mut dyn HerdrRead,
+    ancestors: &[i32],
+) -> WhoAmI {
+    // The pids of the caller's ancestors (the pane's own types are unsigned).
+    let ancestors: Vec<u32> = ancestors
+        .iter()
+        .filter(|pid| **pid >= 0)
+        .map(|pid| *pid as u32)
+        .collect();
+    let pane = caller_pane(herdr, &ancestors, env.pane_id.as_deref());
+    let seat = pane.as_deref().and_then(|pane| {
+        store
+            .read(|tx| seat_bound_to(tx, pane))
+            .ok()
+            .flatten()
+            .map(|seat| seat.id)
+    });
+
+    let store_path = std::env::var(gear_model::ctx::ENV_DB).unwrap_or_default();
+    let reason = match (&env.ctx, &pane, &seat) {
+        (None, _, _) => Some("no GEAR_CTX in the environment".to_string()),
+        (Some(_), None, _) => Some(
+            "this session does not know the pane the caller runs in".to_string(),
+        ),
+        (Some(_), Some(_), None) => {
+            Some("no seat is bound to the pane the caller runs in".to_string())
+        }
+        (Some(ctx), Some(pane), Some(seat)) => {
+            let claimed = ctx.seat_id();
+            if claimed != *seat {
+                Some(format!(
+                    "the seat {claimed} is not the seat of the pane {pane} ({seat})"
+                ))
+            } else {
+                None
+            }
+        }
+    };
+    WhoAmI {
+        pane,
+        seat,
+        store: store_path,
+        reason,
+    }
+}
+
 /// Tell the captain that a caller in `real_pane` claimed `seat` of its project
 /// (T-104): one urgent item per real pane while it is open, so a repeat claim
 /// does not pile up. Best effort by design — a refusal is still the answer when
