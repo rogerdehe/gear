@@ -501,3 +501,16 @@ fn an_old_hand_in_does_not_close_a_newer_stall() {
     assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
     assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Open);
 }
+
+#[test]
+fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
+    let (mut s,op)=world();
+    confirm_pending_with(&mut s,"p",3,5,T0+18).unwrap();
+    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Failed);
+    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+19).map(|_|())).unwrap();
+    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
+    let confirmed=confirm_late_views(&mut s,"p",T0+21).unwrap();
+    assert_eq!(confirmed.len(),1);
+    assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Resolved);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,AttemptState::Submitted);
+}

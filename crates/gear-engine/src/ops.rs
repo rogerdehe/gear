@@ -837,7 +837,7 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             if !started_here {
                 let already = tx
                     .get_attempt(project, task, attempt)?
-                    .map(|row| row.state == AttemptState::Started)
+                    .map(|row| matches!(row.state, AttemptState::Started | AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected))
                     .unwrap_or(false);
                 if !already {
                     continue;
