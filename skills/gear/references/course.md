@@ -6,7 +6,7 @@ For the captain. A fleet of agents never runs out of things to do: every reviewe
 
 - Each voyage (milestone) carries three lines in the plan, agreed with the user at kickoff: `done:` (the one checkable sentence that says it is finished), `bar:` (what blocks a task, what is only logged) and `eta:` (the user's expectation of style, see §3). Every packet and every reviewer sees them.
 - The bar is the user's choice. Nobody — you, a lane, a reviewer — raises it mid-voyage.
-- Log each decision in `# Decisions` as `- <YYYY-MM-DD HH:MM> <kind>: <what> | why: <reason> | else: <alternative> | changes: <scope/time/quality/risk>`; `else` and `changes` are optional. Put `★` after the dash only for a changed deliverable, accepted defect in delivered behavior, user resources or contract, or eta change over 20%. New ideas go into the next voyage.
+- Log each decision in `# Decisions` as `- <YYYY-MM-DD HH:MM> <kind>: <what> | why: <reason> | else: <alternative> | changes: <scope/time/quality/risk>`; `else` and `changes` are optional. Put `★` after the dash only for a changed deliverable, accepted defect in delivered behavior, user resources or contract not set at kickoff, or eta change over 20%. New ideas go into the next voyage.
 
 ## 2. Reviewers are screws; you mind the ship
 
