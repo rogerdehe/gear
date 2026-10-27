@@ -104,7 +104,7 @@ pub fn release_finished_reviews(
             // waits for a slot and a seat a human has to look at is left
             // alone.
             SeatState::Starting => {
-                let Some(task) = seat.task_id.clone().or(pending) else {
+                let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
                 if under_review(store, project, &seat, &task)? {
@@ -214,7 +214,7 @@ fn cancel_start(
     //    are still live for that job are voided (the captain's decision of
     //    M-2603: the `Intended` and the `Submitted` ones — an op in flight
     //    ends on its own).
-    let job = seat.task_id.clone().or(store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).map_err(|e| e.detail)?.filter(|s| !s.is_empty()));
+    let job = store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).map_err(|e| e.detail)?.filter(|s| !s.is_empty()).or_else(|| seat.task_id.clone());
     let live = store
         .read(|tx| tx.slot_ops(&seat.id))
         .map_err(|e| e.detail)?;
@@ -267,6 +267,7 @@ fn cancel_start(
                 SeatState::Starting.as_str(),
                 SeatState::Released.as_str(),
             )?;
+            tx.clear_seat_task(&seat.id)?;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -367,7 +368,10 @@ pub(crate) fn release_one(
         )
         .map_err(|e| e.detail)?;
         store
-            .write(|tx| tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now))
+            .write(|tx| {
+                tx.clear_seat_task(&seat.id)?;
+                tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now)
+            })
             .map_err(|e| e.detail)?;
         return Ok(false);
     }
@@ -421,6 +425,7 @@ pub(crate) fn release_one(
                     tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
                 }
             }
+            tx.clear_seat_task(&seat.id)?;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,

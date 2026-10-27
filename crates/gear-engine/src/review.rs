@@ -105,6 +105,9 @@ pub fn start_reviews(
         }
         // 2. the reviewer seat: created once and bound to the task for life.
         let seat = match temp_seat_of(store, project, &task.task)? {
+            Some(seat) if matches!(seat.state, SeatState::Standby | SeatState::Released)
+                || (seat.state == SeatState::Starting && seat.task_id.is_some()) =>
+                take_seat(store, &seat, &task.task, profile_name, now)?,
             Some(seat) => seat,
             // A seat that finished its last job is warm: the job takes it
             // rather than building a new worktree (17 §8a).
@@ -320,8 +323,10 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
 fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
         for seat in tx.seats_of_project(project)? {
+            let pending = tx.get_meta(&pending_review_key(&seat.id))?.filter(|v| !v.is_empty());
+            let job = pending.as_deref().or(seat.task_id.as_deref());
             if seat.role == SeatRole::Temp && seat.state != SeatState::Retired
-                && (seat.task_id.as_deref() == Some(task) || tx.get_meta(&pending_review_key(&seat.id))?.as_deref() == Some(task)) {
+                && job == Some(task) {
                 return Ok(Some(seat));
             }
         }
@@ -442,7 +447,7 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
             if !recorded.as_deref().is_some_and(|recorded| same_path(recorded, holder)) { continue }
             let job_active = store.read(|tx| {
                 let pending = tx.get_meta(&pending_review_key(&seat.id))?;
-                Ok(match seat.task_id.as_deref().or(pending.as_deref().filter(|id| !id.is_empty())) {
+                Ok(match pending.as_deref().filter(|id| !id.is_empty()).or(seat.task_id.as_deref()) {
                     Some(id) => {
                         let verifying = tx.get_task(project, id)?.is_some_and(|t| t.state == TaskState::Verifying);
                         let attempt = tx.attempts_of_task(project, id)?.into_iter().last();
@@ -530,11 +535,14 @@ fn take_seat(
 ) -> GearResult<SeatRow> {
     store.write(|tx| {
         tx.set_meta(&pending_review_key(&seat.id), task)?;
+        tx.clear_seat_task(&seat.id)?;
         tx.set_seat_profile(&seat.id, profile)?;
         Ok(())
     })?;
     let _ = now;
-    Ok(seat.clone())
+    let mut reserved = seat.clone();
+    reserved.task_id = None;
+    Ok(reserved)
 }
 
 fn pending_review_key(seat: &str) -> String { format!("engine.review_pending.{seat}") }
@@ -783,8 +791,9 @@ fn start_reviewer(
             return Ok(Started::NotYet);
         }
         let selected = review_model_entry(kind, entry);
-        let recorded = store.read(|tx| tx.get_meta(&review_model_key(&seat.id)))?;
-        if recorded.as_deref() != Some(selected.as_str()) {
+        let (recorded, current_model) = store.read(|tx| Ok((tx.get_meta(&review_model_key(&seat.id))?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?)))?;
+        let model_matches = entry.is_none_or(|entry| current_model.as_deref() == Some(entry.model()));
+        if recorded.as_deref() != Some(selected.as_str()) || !model_matches {
             crate::release::release_one(store, herdr, &seat.project, seat, None, now)
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
@@ -1197,7 +1206,8 @@ pub(crate) fn job_for_seat(
     project: &str,
     seat: &SeatRow,
 ) -> GearResult<Option<ReviewJob>> {
-    let Some(task) = seat.task_id.clone() else {
+    let pending = store.read(|tx| tx.get_meta(&pending_review_key(&seat.id)))?.filter(|task| !task.is_empty());
+    let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
         return Ok(None);
     };
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
@@ -1238,7 +1248,8 @@ pub(crate) fn seat_current_model(
     if recorded.is_some() {
         return Ok(recorded);
     }
-    let Some(task) = seat.task_id.clone() else {
+    let pending = store.read(|tx| tx.get_meta(&pending_review_key(&seat.id)))?.filter(|task| !task.is_empty());
+    let Some(task) = pending.or_else(|| seat.task_id.clone()) else {
         return Ok(None);
     };
     let writer = store
@@ -3138,6 +3149,86 @@ profile = "opencode"
         assert_eq!(report.started, vec!["p:review-1"]);
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
         assert!(calls.iter().any(|(path, args)| path == "/child-review" && args.iter().any(|arg| arg == "review/t2")), "{calls:?}");
+    }
+
+
+    #[test]
+    fn cancelled_active_reviewer_can_reuse_seat_when_next_start_is_busy() {
+        let mut store=world(CONFIG);
+        let mut herdr=FakeHerdr::new();
+        assert_eq!(start_reviews(&mut store,&mut herdr,&cfg(),&cfg().profiles,"p",T0+10).unwrap().started,vec!["p:review-1"]);
+        store.write(|tx| { let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Done; tx.update_task(&task) }).unwrap();
+        crate::release::release_finished_reviews(&mut store,&mut herdr,"p",T0+11).unwrap();
+        let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Releasing); assert!(seat.task_id.is_none());
+        crate::release::release_finished_reviews(&mut store,&mut herdr,"p",T0+12).unwrap();
+        assert_eq!(store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap().state,SeatState::Released);
+        queue_review_job(&mut store,2,"heat");
+        herdr.refuse_starts=Some(("agent_pane_busy".into(),1));
+        let report=start_reviews(&mut store,&mut herdr,&cfg(),&cfg().profiles,"p",T0+13).unwrap();
+        assert!(report.started.is_empty(),"{report:?}");
+        let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Starting); assert!(seat.task_id.is_none());
+        assert_eq!(store.read(|tx|tx.get_meta(&pending_review_key(&seat.id))).unwrap().as_deref(),Some("T-2"));
+        // A persisted stale binding from an older engine cannot override the reservation.
+        store.write(|tx|tx.set_seat_task("p:review-1","T-1")).unwrap();
+        crate::release::release_finished_reviews(&mut store,&mut herdr,"p",T0+14).unwrap();
+        assert_eq!(store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap().state,SeatState::Starting);
+        assert_eq!(store.read(|tx|tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(),Some("T-2"));
+        let report=start_reviews(&mut store,&mut herdr,&cfg(),&cfg().profiles,"p",T0+15).unwrap();
+        assert_eq!(report.started,vec!["p:review-1"],"{report:?}");
+        let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Active); assert_eq!(seat.task_id.as_deref(),Some("T-2"));
+    }
+
+    #[test]
+    fn standby_reviewer_after_model_restart_restores_the_selected_model() {
+        use gear_app::config::{ModelEntry, ModelSpec};
+        let chain="review = [{ model = \"gpt-6.1-sol\", cli = \"codex\" }, { model = \"gpt-6-astra\", cli = \"codex\" }]";
+        let mut store=world(&CONFIG.replace(REVIEW_CHAIN,chain));
+        let mut herdr=FakeHerdr::new(); let cfg=cfg();
+        assert_eq!(start_reviews(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T0+10).unwrap().started,vec!["p:review-1"]);
+        let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+        let binding=store.read(|tx|tx.get_binding(&seat.id,seat.generation)).unwrap().unwrap();
+        let target=ModelEntry::Entry(ModelSpec {model:"gpt-6-astra".into(),cli:Some("codex".into()),args:vec![],context_window_k:None});
+        crate::restart::advance(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",&seat,Some(&target),T0+11).unwrap();
+        herdr.exit_agent(&binding.pane_id);
+        crate::restart::advance(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",&seat,None,T0+12).unwrap();
+        assert_eq!(store.read(|tx|tx.get_meta(&crate::model::model_meta_key("p:review-1"))).unwrap().as_deref(),Some("gpt-6-astra"));
+        store.write(|tx| {
+            tx.add_round_session(&gear_store::RoundKey{project:"p".into(),task:"T-1".into(),attempt:1,role:"review".into()},"review-session")?;
+            let mut a=tx.get_attempt("p","T-1",1)?.unwrap(); a.state=AttemptState::Rejected; tx.update_attempt(&a)?;
+            let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Ready; tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1",SeatState::Standby,None,T0+13)?; tx.clear_seat_task("p:review-1")?;
+            tx.set_meta(&crate::model::model_meta_key("p:heat"),"gpt-6-astra")?;
+            gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T0+14)?;
+            gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",2,T0+14)?;
+            gear_app::tasks::submit_result(tx,"p","T-1",2,1,"def5678","report",T0+14)
+        }).unwrap();
+        let report=start_reviews(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T0+15).unwrap();
+        assert!(report.started.is_empty(),"must restart before delivery: {report:?}");
+        assert_eq!(store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap().state,SeatState::Releasing);
+        assert!(!store.read(|tx|tx.ops_of_seat_kind("p:review-1",OpKind::Deliver)).unwrap().iter().any(|op|op.attempt==Some(2)));
+        crate::release::release_finished_reviews(&mut store,&mut herdr,"p",T0+16).unwrap();
+        let mut delivered=false;
+        for at in 17..35 {
+            start_reviews(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T0+at).unwrap();
+            let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+            let current=store.read(|tx|tx.get_meta(&crate::model::model_meta_key(&seat.id))).unwrap();
+            let ops=store.read(|tx|tx.ops_of_seat_kind(&seat.id,OpKind::Deliver)).unwrap();
+            if ops.iter().any(|op|op.attempt==Some(2)) {
+                assert_eq!(current.as_deref(),Some("gpt-6.1-sol"));
+                delivered=true; break;
+            }
+            if let Some(binding)=store.read(|tx|tx.get_binding(&seat.id,seat.generation)).unwrap() {
+                use gear_herdr::HerdrRead as _;
+                if herdr.agent_get(&binding.pane_id).unwrap().is_some() {
+                    herdr.set_agent_session(&binding.pane_id,"review-session");
+                    store.write(|tx|tx.set_binding_session_ref(&seat.id,seat.generation,"review-session")).unwrap();
+                }
+            }
+        }
+        assert!(delivered,"the selected model must eventually receive the re-review: {:?}",herdr.calls);
     }
 
     #[test]
