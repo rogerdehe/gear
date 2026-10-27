@@ -18,7 +18,7 @@ fn record(store: &mut Store, seat: &SeatRow, task: &str, attempt: i64, role: Rol
     step(state, "done", now);
     state["result"] = json!(action);
     store.write(|tx| {
-        if role == Role::Review {
+        if matches!(role, Role::Review | Role::Direction) {
             let value = json!({"action": action, "session_ref": state.get("target").cloned().unwrap_or(Value::Null)});
             tx.set_meta(&format!("engine.review_action.{}.{task}.{attempt}", seat.project), &value.to_string())?;
         } else {
@@ -255,7 +255,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         } else if let Some(model) = model {
             if let Some(start) = crate::model::model_start(&binding.kind, &model) { args.extend(start.args); }
         }
-        let folder_key = if role == Role::Review { format!("engine.review_path.{}", seat.id) } else { crate::onboard::worktree_path_key(&seat.id) };
+        let folder_key = if matches!(role, Role::Review | Role::Direction) { format!("engine.review_path.{}", seat.id) } else { crate::onboard::worktree_path_key(&seat.id) };
         if let Some(folder) = store.read(|tx| tx.get_meta(&folder_key))? { args = gear_herdr::render_args(&args, &folder); }
         let name = if seat.role == SeatRole::Temp { crate::names::review_agent_name(&seat.project, task) } else { crate::names::desired(seat) };
         match herdr.agent_start(&name, &binding.kind, &binding.pane_id, &args) {
