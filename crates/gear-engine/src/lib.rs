@@ -534,6 +534,7 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -545,6 +546,7 @@ fn doorbell_inputs(
                     && !shown.contains(&message.id)
             };
             if include && !doorbelled.contains(&message.id) {
+                if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
                 waiting.push(item(&message));
             }
         }
@@ -558,12 +560,25 @@ fn doorbell_inputs(
             {
                 continue;
             }
+            if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
             waiting.push(item(&message));
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_ops = tx.slot_ops(&seat.id)?;
+        // A review delivery stays submitted until the verdict. Its reviewer
+        // must still receive the urgent overrun question during the review.
+        let review_question = seat.role == gear_model::SeatRole::Temp
+            && !overrun_questions.is_empty()
+            && !slot_ops.is_empty()
+            && slot_ops.iter().all(|op| op.kind == OpKind::Deliver
+                && op.state == OpState::Submitted
+                && op.task == seat.task_id);
+        if review_question {
+            waiting.retain(|item| overrun_questions.contains(&item.id));
+        }
+        let slot_busy = !slot_ops.is_empty() && !review_question;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
