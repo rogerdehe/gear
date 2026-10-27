@@ -373,7 +373,7 @@ pub fn builtins() -> BTreeMap<String, Profile> {
 /// rules text as one TOML basic string — the form a `codex -c` value takes, so
 /// a text with a quote or a newline survives the round trip.
 pub fn render_rules(args: &[String], rules_file: &str, rules_text: &str) -> Vec<String> {
-    let rules_toml = toml::Value::String(rules_text.to_string()).to_string();
+    let rules_toml = toml_one_line(rules_text);
     args.iter()
         .map(|arg| {
             arg.replace("{rules_file}", rules_file)
@@ -381,6 +381,30 @@ pub fn render_rules(args: &[String], rules_file: &str, rules_text: &str) -> Vec<
         })
         .collect()
 }
+
+/// The rules as a TOML basic string on one line. Herdr refuses an agent
+/// argument with a newline ("cannot be encoded safely for the target shell"),
+/// and `toml::Value::String` writes multi-line text as a multi-line string.
+pub fn toml_one_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The Codex rules argument: a short pointer to the rules file.
+pub const CODEX_RULES_ARG: &str = "developer_instructions=\"Your GEAR role rules are in the file {rules_file}. Read that file before anything else and follow it for the whole session.\"";
 
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
@@ -522,7 +546,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             ],
             // T-195: codex takes the rules as a developer instruction, in one
             // TOML value.
-            instructions_args: vec!["-c".into(), "developer_instructions={rules_toml}".into()],
+            // A pointer, not the text: Herdr types the command into the shell and
+            // the terminal cuts a typed line near 1024 bytes (M4 05:50: every
+            // reviewer start broke off inside the rules).
+            instructions_args: vec!["-c".into(), CODEX_RULES_ARG.into()],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
             // M4 §12 item 4: the typed command `/quit` exits Codex, and
@@ -636,6 +663,17 @@ pub fn builtin(kind: &str) -> Option<Profile> {
 mod tests {
     use super::*;
 
+    /// Herdr refuses an agent argument with a newline: the rules go in as a
+    /// one-line TOML string that reads back to the same text.
+    #[test]
+    fn rules_render_on_one_line_and_parse_back() {
+        let text = "Rule one: \"quote\" and \\ backslash.\n\tTab, `code` and $HOME.\r\nVoyage done: x\n";
+        let args = render_rules(&["-c".into(), "developer_instructions={rules_toml}".into()], "/r.md", text);
+        assert!(!args[1].contains('\n') && !args[1].contains('\r'), "{:?}", args[1]);
+        let value: toml::Table = toml::from_str(&args[1]).unwrap();
+        assert_eq!(value["developer_instructions"].as_str().unwrap(), text);
+    }
+
     /// The status line Codex shows while it retries a request, from its own
     /// source (`codex-rs/core/src/responses_retry.rs`, codex-cli 0.164.0):
     /// the retry notification is `Reconnecting... {retry}/{max_retries}` and
@@ -661,7 +699,7 @@ mod tests {
         );
         assert_eq!(
             builtin("codex").unwrap().instructions_args,
-            vec!["-c".to_string(), "developer_instructions={rules_toml}".to_string()]
+            vec!["-c".to_string(), CODEX_RULES_ARG.to_string()]
         );
         assert!(builtin("opencode").unwrap().instructions_args.is_empty());
         assert!(builtin("grok").unwrap().instructions_args.is_empty());
@@ -688,20 +726,18 @@ mod tests {
     /// T-195: the codex value is one TOML string: a text with a quote and a
     /// newline comes back as the same text.
     #[test]
-    fn the_rules_text_is_rendered_as_one_toml_value() {
+    fn the_codex_rules_arg_is_a_short_toml_pointer_to_the_file() {
         let codex = builtin("codex").unwrap();
-        let text = "the lane reports:\n  \"progress\" and \"blocked\"";
-        let args = render_rules(&codex.instructions_args, "/tmp/gear/rules.md", text);
+        let text = "the lane reports:\n  \"progress\" and \"blocked\"\n".repeat(200);
+        let args = render_rules(&codex.instructions_args, "/tmp/gear/rules/review.md", &text);
         assert_eq!(args.len(), 2);
         assert_eq!(args[0], "-c");
-        // The argument is one TOML `key = value` pair: it parses back to the
-        // same text.
+        // One TOML pair naming the file, short enough to be typed into a
+        // shell whatever the rules' length (a typed line is cut near 1024 bytes).
         let parsed: toml::Table = toml::from_str(&args[1]).expect("the argument is TOML");
-        assert_eq!(
-            parsed.get("developer_instructions").and_then(toml::Value::as_str),
-            Some(text),
-            "the same text comes back"
-        );
+        let value = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
+        assert!(value.contains("/tmp/gear/rules/review.md"), "{value}");
+        assert!(args[1].len() < 300 && !args[1].contains('\n'), "{}", args[1]);
     }
 
     /// T-195: a project's config may set the args.
