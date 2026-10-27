@@ -16,6 +16,7 @@
 
 use gear_app::config::{ModelEntry, ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome, Profile};
+use gear_model::state::require_transition;
 use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
     TaskState, Ts,
@@ -198,6 +199,13 @@ pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearR
             continue;
         }
         store.write(|tx| {
+            // Active → Standby (design §3.6): the model knows the transition.
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, SeatState::Active, SeatState::Standby),
+                "seat",
+                SeatState::Active.as_str(),
+                SeatState::Standby.as_str(),
+            )?;
             tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), now)?;
             // The job binding ends: the seat waits for the next review.
             tx.clear_seat_task(&seat.id)?;

@@ -243,6 +243,13 @@ fn cancel_start(
                     tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
                 }
             }
+            // Starting → Released (design §3.6, B03-05).
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, SeatState::Starting, SeatState::Released),
+                "seat",
+                SeatState::Starting.as_str(),
+                SeatState::Released.as_str(),
+            )?;
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
@@ -331,6 +338,15 @@ fn release_one(
             Some(_) => "review done",
             None => "idle reviewer released",
         };
+        // The transition the seat makes on its way out (design §3.6): the
+        // model knows it.
+        require_transition(
+            SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Releasing),
+            "seat",
+            seat.state.as_str(),
+            SeatState::Releasing.as_str(),
+        )
+        .map_err(|e| e.detail)?;
         store
             .write(|tx| tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now))
             .map_err(|e| e.detail)?;
