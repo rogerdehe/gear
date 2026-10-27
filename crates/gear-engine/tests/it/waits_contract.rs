@@ -50,10 +50,11 @@ fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
     let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0); assert_eq!(r.paused_s,90);
     let ops=s.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap(); assert_eq!(ops[0].state,OpState::Void);
     assert!(h.prompts_to(LANE).is_empty(),"{:?}",h.calls);
-    h.exit_agent(LANE);
-    let report=tick(&mut s,&mut h,&c,T+120).unwrap(); assert!(!report.flagged.contains(&"p:heat".into()));
-    assert!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap().iter().all(|m|m.state!=MsgState::Open));
-    h.add_agent_named(LANE,"opencode",AgentStatus::Idle,"p-heat"); h.set_agent_session(LANE,"existing-session");
+    let (mut missing_s,mut missing_h,missing_c)=world(); block(&mut missing_s);
+    advance(&mut missing_s,&mut missing_h,&missing_c,100);
+    missing_h.exit_agent(LANE);
+    let report=tick(&mut missing_s,&mut missing_h,&missing_c,T+120).unwrap(); assert!(!report.flagged.contains(&"p:heat".into()));
+    assert!(missing_s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap().iter().all(|m|m.state!=MsgState::Open));
     s.write(|tx| {
         let mut task=tx.get_task("p","T-2")?.unwrap(); task.state=TaskState::Done; tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {session_ref:None,session_cli:None,session_action:None,sent_at:None,project:"p".into(),task:"T-2".into(),n:1,seat:"p:other".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Accepted,candidate:Some(SHA.into()),report:None,safe_point:None,started:T,updated:T+130})?;
