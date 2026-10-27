@@ -30,9 +30,13 @@ pub struct ReleaseReport {
 /// Release every reviewer of `project` whose task is no longer under review.
 ///
 /// The step of the tick that owns the life cycle of a reviewer seat
-/// (design §3.6): the reviewers whose verdict is in go to `Standby` — the
-/// agent stays alive, the pane stays open, the job binding ends — and a
-/// reviewer whose job is gone leaves.
+/// (design §3.6):
+///
+/// 1. the reviewers whose verdict is in go to `Standby` — the agent stays
+///    alive, the pane stays open, the job binding ends;
+/// 2. a reviewer whose job is gone (the task was cancelled, a newer attempt
+///    was handed in) leaves;
+/// 3. the Standby reviewers that the rule of §3.6 releases are released.
 pub fn release_finished_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -42,7 +46,7 @@ pub fn release_finished_reviews(
     let mut report = ReleaseReport::default();
 
     // The verdict ends the job, not the seat: the reviewer waits for the
-    // next one.
+    // next one (the rules below apply to it right away).
     crate::review::standby_after_verdict(store, project, now)?;
 
     let seats = store.read(|tx| tx.seats_of_project(project))?;
@@ -50,29 +54,104 @@ pub fn release_finished_reviews(
         if seat.role != SeatRole::Temp {
             continue;
         }
-        let Some(task) = seat.task_id.clone() else {
-            continue;
-        };
-        // Only a reviewer that is up, or one already on its way out, is
-        // released. A Queued or Starting reviewer has no slot and no worktree
-        // yet — releasing it would throw away the review it is waiting to do
-        // (R1 of the T-17 review) — and a seat a human has to look at is left
-        // alone.
-        if !matches!(seat.state, SeatState::Active | SeatState::Releasing) {
-            continue;
+        match seat.state {
+            // A reviewer that is on its way out (the captain released it, or
+            // the rule of §3.6 did): the pane goes, the binding ends, the
+            // seat is free — with a job or without one.
+            SeatState::Releasing => {
+                match release_one(store, herdr, project, &seat, seat.task_id.as_deref(), now) {
+                    Ok(true) => report.released.push(seat.id.clone()),
+                    Ok(false) => {}
+                    // One failing reviewer does not stop the others.
+                    Err(_) => report.failed.push(seat.id.clone()),
+                }
+            }
+            // A reviewer that is up and whose job is gone: it leaves.
+            SeatState::Active => {
+                let Some(task) = seat.task_id.clone() else {
+                    continue;
+                };
+                // Still doing its job: nothing to release.
+                if under_review(store, project, &seat, &task)? {
+                    continue;
+                }
+                match release_one(store, herdr, project, &seat, Some(&task), now) {
+                    Ok(true) => report.released.push(seat.id.clone()),
+                    Ok(false) => {}
+                    Err(_) => report.failed.push(seat.id.clone()),
+                }
+            }
+            _ => {}
         }
-        // Still doing its job: nothing to release.
-        if seat.state == SeatState::Active && under_review(store, project, &seat, &task)? {
-            continue;
-        }
-        match release_one(store, herdr, project, &seat, &task, now) {
+    }
+
+    // The Standby reviewers beyond W are released (§3.6).
+    let idle = release_idle_standby(store, herdr, project, now)?;
+    report.released.extend(idle.released);
+    report.failed.extend(idle.failed);
+    Ok(report)
+}
+
+/// The Standby reviewers that the rule of design §3.6 releases.
+///
+/// With W = the lane seats that work on a task (an attempt in `Started`), the
+/// Standby reviewers beyond W are released — the one idle longest first: it
+/// has waited longest for a review that is not coming. With W = 0 every
+/// Standby reviewer is released at once: no lane works, so no hand-in can
+/// come (a hand-in that does come starts a reviewer again in seconds).
+pub fn release_idle_standby(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    now: Ts,
+) -> GearResult<ReleaseReport> {
+    let mut report = ReleaseReport::default();
+    let mut standby: Vec<SeatRow> = store.read(|tx| {
+        Ok(tx
+            .seats_of_project(project)?
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp && seat.state == SeatState::Standby)
+            .collect())
+    })?;
+    if standby.is_empty() {
+        return Ok(report);
+    }
+    // The idle longest goes first: the seat that has been in Standby since
+    // the longest.
+    standby.sort_by_key(|seat| seat.state_since);
+    let working = working_lanes(store, project)?;
+    let excess = standby.len().saturating_sub(working.max(0) as usize);
+    for seat in standby.into_iter().take(excess) {
+        // A standby reviewer has no job: it is idle, its agent alive.
+        match release_one(store, herdr, project, &seat, None, now) {
             Ok(true) => report.released.push(seat.id.clone()),
             Ok(false) => {}
-            // One failing reviewer does not stop the others.
             Err(_) => report.failed.push(seat.id.clone()),
         }
     }
     Ok(report)
+}
+
+/// The number of lane seats that work on a task now (design §3.6's W): a
+/// lane with an attempt in `Started`. A lane that waits, that hands in or
+/// that is idle does not count: no review of its work is coming.
+fn working_lanes(store: &mut Store, project: &str) -> GearResult<i64> {
+    store.read(|tx| {
+        let mut working = 0;
+        for seat in tx.seats_of_project(project)? {
+            if seat.role != SeatRole::Lane {
+                continue;
+            }
+            let attempts = tx.open_attempts_of_seat(&seat.id)?;
+            if attempts
+                .iter()
+                .any(|attempt| attempt.state == AttemptState::Started)
+            {
+                working += 1;
+            }
+        }
+        Ok(working)
+    })
 }
 
 /// Whether the reviewer still has work: its task is `Verifying`, its attempt is
@@ -114,12 +193,14 @@ fn under_review(
 
 /// Release one reviewer. `Ok(false)` = nothing to do (it is waiting for its
 /// worktree to go), `Err` = the step failed and a human should look.
+///
+/// `task` is the job the seat held, if any: a standby reviewer has none.
 fn release_one(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     project: &str,
     seat: &SeatRow,
-    task: &str,
+    task: Option<&str>,
     now: Ts,
 ) -> Result<bool, String> {
     let pane = binding_pane(store, seat)?;
@@ -128,7 +209,11 @@ fn release_one(
     //    agent and fail quietly (codex needs two ctrl+c, grok only `/exit`,
     //    L-63); closing the pane ends any agent. The worktree stays — the next
     //    job reopens it. A pane already gone is fine.
-    if seat.state == SeatState::Active {
+    //
+    //    A standby reviewer is released the same way (design §3.6): it is
+    //    idle, its agent alive, and the rule that releases it closes its pane
+    //    like any other release.
+    if matches!(seat.state, SeatState::Active | SeatState::Standby) {
         if let Some(pane) = pane.as_deref() {
             // A finished reviewer's pane is always closed (herdr `pane_close`),
             // grok included: a reviewer lives for one job, there is no session
@@ -142,8 +227,12 @@ fn release_one(
                 Outcome::Uncertain { reason } => return Err(format!("pane_close: {reason}")),
             }
         }
+        let reason = match task {
+            Some(_) => "review done",
+            None => "idle reviewer released",
+        };
         store
-            .write(|tx| tx.set_seat_state(&seat.id, SeatState::Releasing, Some("review done"), now))
+            .write(|tx| tx.set_seat_state(&seat.id, SeatState::Releasing, Some(reason), now))
             .map_err(|e| e.detail)?;
         return Ok(false);
     }
@@ -200,7 +289,10 @@ fn release_one(
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Released,
-                Some(&format!("review of {task} done")),
+                Some(&match task {
+                    Some(task) => format!("review of {task} done"),
+                    None => "idle reviewer released".to_string(),
+                }),
                 now,
             )
         })
@@ -1069,11 +1161,18 @@ profile = "codex"
                 })
             })
             .unwrap();
-        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
+        // Its verdict ends its job (L-58): the reviewer waits for the next
+        // one, its agent alive and its pane open (design §3.6).
+        let parked = crate::review::standby_after_verdict(&mut store, "p", T0 + 30).unwrap();
+        assert_eq!(parked, vec!["p:r-1".to_string()], "the reviewer waits for the next review");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Standby, "the reviewer waits for the next review");
         assert_eq!(seat.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+
+        // No lane works (W = 0), so the idle reviewer is released at once.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+        assert_eq!(exits(&herdr), 1, "the idle reviewer is released");
     }
 
     /// T-143 (design §3.6): after its verdict a reviewer seat goes to
@@ -1095,6 +1194,68 @@ profile = "codex"
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
         let binding = store.read(|tx| tx.get_binding(&seat.id, 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Active, "its agent is still there");
+    }
+
+    /// T-143 (design §3.6): with one lane working (W = 1) and two Standby
+    /// reviewers, the one that waits longest is released; the other stays.
+    #[test]
+    fn with_one_lane_working_the_longest_waiting_standby_reviewer_is_released() {
+        let (mut store, seat) = world_with_a_working_lane();
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0 + 1)?;
+                tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        // The one that waits longest goes first: its pane is closed and it is
+        // on its way out.
+        let first = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(first.state, SeatState::Releasing, "the longest waiting reviewer goes");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+        let second = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
+        assert_eq!(second.state, SeatState::Standby, "the other one waits");
+
+        // The next tick frees the seat.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+        let first = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(first.state, SeatState::Released, "the seat is free");
+        assert_eq!(exits(&herdr), 1, "the close is not repeated");
+        assert!(removes(&herdr).is_empty(), "the worktree is kept");
+    }
+
+    /// T-143 (design §3.6): with no lane working (W = 0) every Standby
+    /// reviewer is released at once.
+    #[test]
+    fn with_no_lane_working_every_standby_reviewer_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.set_seat_state("p:r-1", SeatState::Standby, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Released, "{name} is free");
+        }
+        assert_eq!(exits(&herdr), 2, "both panes are closed");
     }
 
     /// B02-04: a parked reviewer that runs no reviewer is released — the slot
