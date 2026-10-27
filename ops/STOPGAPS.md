@@ -5,6 +5,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
+| The captain's 15-minute lane scan (`scratchpad/lanecheck.sh`: task age, last commit, last report per lane) | the engine does not yet ask a lane that has not pushed | T-194 runs in the engine | captain |
 | Plan park ended by hand: `- hold <lane>`, apply, `- release <lane>`, apply | a plan park has no exit (`until=` never expires, `release` refuses Parked) | T-190 merged | captain |
 
 ## Removed
