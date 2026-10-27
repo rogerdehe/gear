@@ -23,7 +23,7 @@ A task in the plan is a header plus `goal`, `accept`, `estimate`, `deps`. The en
 
 1. **Map files before tasks.** List the files to create or change and the single responsibility of each; split by responsibility, not by technical layer.
 2. **Find the seams between lanes** and write their interfaces (rule 3).
-3. **Cut the tasks per lane** (rules 2, 5, 7), each with goal, accept, estimate.
+3. **Cut the tasks per lane** (rules 2, 5), each with goal, accept, estimate.
 4. **Order each lane's queue** so rule 3 holds; declare the real dependencies.
 5. **Self-check**, then `gear plan apply`.
 
