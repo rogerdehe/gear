@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 
-use gear_forge::{sync, sync_with, Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef};
+use gear_forge::{sync, sync_with, Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef, PrState};
 use gear_model::{AttemptState, OpKind, OpState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, ContractRow, NewOp, ReviewVerdictRow, Store, TaskRow};
 
@@ -22,11 +22,31 @@ struct Fake {
     /// Fail the next call whose text contains this, once.
     fail_once: RefCell<Option<String>>,
     number: Cell<u64>,
+    /// What a pull request's state is (design §11.3).
+    state: RefCell<PrState>,
+    /// The pull request a branch lookup finds (design §11.3).
+    by_head: RefCell<Option<PrRef>>,
 }
 
 impl Fake {
     fn up() -> Fake {
-        Fake::default()
+        let fake = Fake::default();
+        *fake.state.borrow_mut() = PrState {
+            state: "OPEN".into(),
+            merge_commit: None,
+            head_ref_oid: None,
+        };
+        fake
+    }
+
+    /// What the pull request's state is.
+    fn state(&self, state: PrState) {
+        *self.state.borrow_mut() = state;
+    }
+
+    /// The pull request a branch lookup finds.
+    fn by_head(&self, pr: Option<PrRef>) {
+        *self.by_head.borrow_mut() = pr;
     }
 
     fn calls(&self) -> Vec<String> {
@@ -88,15 +108,28 @@ impl Forge for Fake {
         Ok(())
     }
 
-    fn merge(&self, pr: &PrRef, method: MergeMethod) -> ForgeResult<MergeResult> {
+    fn merge(&self, pr: &PrRef, method: MergeMethod, head: &str) -> ForgeResult<MergeResult> {
         self.reachable("merge")?;
         self.calls
             .borrow_mut()
-            .push(format!("merge {}#{} {}", pr.repo, pr.number, method.flag()));
+            .push(format!("merge {}#{} {} {head}", pr.repo, pr.number, method.flag()));
         Ok(MergeResult {
             merged: true,
             message: "merged".to_string(),
         })
+    }
+
+    fn pr_state(&self, _pr: &PrRef) -> ForgeResult<PrState> {
+        self.reachable("state")?;
+        Ok(self.state.borrow().clone())
+    }
+
+    fn pr_by_head(&self, repo: &str, branch: &str) -> ForgeResult<Option<PrRef>> {
+        self.reachable("by-head")?;
+        self.calls
+            .borrow_mut()
+            .push(format!("by-head {repo} {branch}"));
+        Ok(self.by_head.borrow().clone())
     }
 
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> ForgeResult<()> {
@@ -321,15 +354,32 @@ fn a_restart_does_not_repeat_a_call_it_may_have_made() {
 
     tick(&mut store, &forge, 2);
 
-    assert!(forge.calls().is_empty(), "a claim may have been opened: {:?}", forge.calls());
+    // The claim is not opened again (it may have been opened): the branch is
+    // only looked up, so an interrupted claim can be adopted (T-91, F4).
+    assert!(
+        !forge.calls().iter().any(|call| call.starts_with("claim ")),
+        "a claim may have been opened: {:?}",
+        forge.calls()
+    );
     let ops = store
         .read(|tx| tx.ops_of_seat_kind("p:forge", OpKind::Forge))
         .expect("the ops");
     assert_eq!(ops.len(), 1);
     assert_eq!(ops[0].state, OpState::Unknown);
     // And the next tick does not bring it back either.
+    let before = forge.calls();
     tick(&mut store, &forge, 3);
-    assert!(forge.calls().is_empty(), "{:?}", forge.calls());
+    assert!(
+        !forge.calls().iter().any(|call| call.starts_with("claim ")),
+        "{:?}",
+        forge.calls()
+    );
+    assert_eq!(
+        forge.calls().len() - before.len(),
+        1,
+        "only the branch is looked up again: {:?}",
+        forge.calls()
+    );
 }
 
 #[test]
@@ -597,4 +647,206 @@ fn a_local_project_makes_no_call() {
 
     assert!(done.is_empty(), "{done:?}");
     assert!(forge.calls().is_empty());
+}
+
+// ---- the landing of a pull request (design §11.2-§11.3, T-177)
+
+/// The claim op of the task, confirmed: the pull request is there.
+fn claimed(store: &mut Store) {
+    store
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:forge".into(),
+                generation: 0,
+                kind: OpKind::Forge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "forge": "claim", "key": "T-1:claim" }),
+                created: T0 + 1,
+            })?;
+            let result = serde_json::json!({
+                "repo": "owner/name",
+                "number": 7,
+                "url": "https://github.com/owner/name/pull/7",
+            })
+            .to_string();
+            tx.set_op_state("p", &op.id, OpState::Confirmed, Some(&result), T0 + 2)
+        })
+        .expect("the claim");
+}
+
+/// The land op the engine inserted (design §11.2 step 4): the pull request,
+/// the head the gate checked and the method.
+fn land_op(store: &mut Store, state: OpState, head: &str) -> String {
+    store
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:forge".into(),
+                generation: 0,
+                kind: OpKind::Forge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "forge": "land",
+                    "key": "T-1:1:land",
+                    "pr": 7,
+                    "head": head,
+                    "method": "squash",
+                }),
+                created: T0 + 170,
+            })?;
+            if state != OpState::Intended {
+                tx.set_op_state("p", &op.id, state, Some("the engine stopped"), T0 + 171)?;
+            }
+            Ok(op.id)
+        })
+        .expect("the land op")
+}
+
+/// The state of the land op.
+fn land_state(store: &mut Store, id: &str) -> OpState {
+    store
+        .read(|tx| tx.get_op("p", id))
+        .expect("the ops")
+        .expect("the land op")
+        .state
+}
+
+#[test]
+fn the_land_merges_the_pull_request_with_the_gated_head() {
+    let mut store = world();
+    deliver(&mut store);
+    claimed(&mut store);
+    let id = land_op(&mut store, OpState::Intended, "abc1234");
+    let forge = Fake::up();
+    forge.state(PrState {
+        state: "MERGED".into(),
+        merge_commit: Some("sha99".into()),
+        head_ref_oid: Some("abc1234".into()),
+    });
+
+    tick(&mut store, &forge, 180);
+
+    let calls = forge.calls();
+    assert!(
+        calls.iter().any(|call| call == "merge owner/name#7 --squash abc1234"),
+        "the merge carries the head: {calls:?}"
+    );
+    assert_eq!(land_state(&mut store, &id), OpState::Confirmed);
+    let result = store
+        .read(|tx| tx.get_op("p", &id))
+        .unwrap()
+        .unwrap()
+        .result
+        .unwrap_or_default();
+    assert!(result.contains("sha99"), "the merge commit is read: {result}");
+}
+
+#[test]
+fn an_unknown_land_op_is_reconciled_by_the_pull_request() {
+    // The pull request is merged: the op is confirmed, and no merge runs.
+    let mut store = world();
+    deliver(&mut store);
+    claimed(&mut store);
+    let id = land_op(&mut store, OpState::Unknown, "abc1234");
+    let forge = Fake::up();
+    forge.state(PrState {
+        state: "MERGED".into(),
+        merge_commit: Some("sha99".into()),
+        head_ref_oid: Some("abc1234".into()),
+    });
+    tick(&mut store, &forge, 180);
+    assert_eq!(land_state(&mut store, &id), OpState::Confirmed);
+    assert!(
+        !forge.calls().iter().any(|call| call.starts_with("merge ")),
+        "a merged pull request is not merged again: {:?}",
+        forge.calls()
+    );
+
+    // The pull request is open with the same head: the merge runs again.
+    let mut store = world();
+    deliver(&mut store);
+    claimed(&mut store);
+    let _id = land_op(&mut store, OpState::Unknown, "abc1234");
+    let forge = Fake::up();
+    forge.state(PrState {
+        state: "OPEN".into(),
+        merge_commit: None,
+        head_ref_oid: Some("abc1234".into()),
+    });
+    tick(&mut store, &forge, 180);
+    assert!(
+        forge
+            .calls()
+            .iter()
+            .any(|call| call == "merge owner/name#7 --squash abc1234"),
+        "the merge runs again: {:?}",
+        forge.calls()
+    );
+
+    // Any other state: the op fails.
+    let mut store = world();
+    deliver(&mut store);
+    claimed(&mut store);
+    let id = land_op(&mut store, OpState::Unknown, "abc1234");
+    let forge = Fake::up();
+    forge.state(PrState {
+        state: "CLOSED".into(),
+        merge_commit: None,
+        head_ref_oid: Some("other".into()),
+    });
+    tick(&mut store, &forge, 180);
+    assert_eq!(land_state(&mut store, &id), OpState::Failed);
+}
+
+#[test]
+fn an_unknown_claim_adopts_the_open_pull_request() {
+    let mut store = world();
+    deliver(&mut store);
+    // The engine opened the claim and stopped before the answer.
+    let id = store
+        .write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:forge".into(),
+                generation: 0,
+                kind: OpKind::Forge,
+                task: Some("T-1".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "forge": "claim", "key": "T-1:claim" }),
+                created: T0 + 1,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Unknown, Some("the engine stopped"), T0 + 2)?;
+            Ok(op.id)
+        })
+        .expect("the unfinished claim");
+    let forge = Fake::up();
+    forge.by_head(Some(PrRef {
+        repo: "owner/name".into(),
+        number: 7,
+        url: "https://github.com/owner/name/pull/7".into(),
+    }));
+
+    tick(&mut store, &forge, 3);
+
+    let op = store
+        .read(|tx| tx.get_op("p", &id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(op.state, OpState::Confirmed, "the claim is adopted");
+    let result = op.result.unwrap_or_default();
+    assert!(result.contains("\"number\":7"), "the pull request is named: {result}");
+    assert!(
+        !forge.calls().iter().any(|call| call.starts_with("claim ")),
+        "the claim is not opened again: {:?}",
+        forge.calls()
+    );
 }

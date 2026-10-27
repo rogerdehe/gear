@@ -46,7 +46,7 @@ pub struct Issue {
 }
 
 /// Which issues to read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Filter {
     /// Only issues that carry every one of these labels; empty = all open
     /// issues.
@@ -55,14 +55,6 @@ pub struct Filter {
     pub limit: u32,
 }
 
-impl Default for Filter {
-    fn default() -> Self {
-        Filter {
-            labels: Vec::new(),
-            limit: 0,
-        }
-    }
-}
 
 /// A pull request, and the repo it lives in: a comment or a merge names the
 /// number and the repo, never the branch it came from.
@@ -120,6 +112,36 @@ pub struct MergeResult {
     pub message: String,
 }
 
+/// The state of a pull request, read from the forge (design §11.3).
+///
+/// The pull request is the truth about a merge whose outcome is unknown: it
+/// says whether it is merged, with which commit, and which head it points
+/// at.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct PrState {
+    /// The state the forge names: `OPEN`, `MERGED`, `CLOSED`…
+    #[serde(default)]
+    pub state: String,
+    /// The commit the merge created, when the pull request is merged.
+    #[serde(rename = "mergeCommit", default)]
+    pub merge_commit: Option<String>,
+    /// The sha the pull request's head points at.
+    #[serde(rename = "headRefOid", default)]
+    pub head_ref_oid: Option<String>,
+}
+
+impl PrState {
+    /// Is the pull request merged?
+    pub fn is_merged(&self) -> bool {
+        self.state.eq_ignore_ascii_case("MERGED")
+    }
+
+    /// Is the pull request still open?
+    pub fn is_open(&self) -> bool {
+        self.state.eq_ignore_ascii_case("OPEN")
+    }
+}
+
 /// What a forge call can fail with. Every variant names where it came from:
 /// the tool, the answer, or the time it took.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -163,8 +185,18 @@ pub trait Forge {
     /// Comment on a pull request.
     fn comment(&self, pr: &PrRef, body: &str) -> ForgeResult<()>;
 
-    /// Merge a pull request.
-    fn merge(&self, pr: &PrRef, method: MergeMethod) -> ForgeResult<MergeResult>;
+    /// Merge a pull request, with the head the gate checked: the forge merges
+    /// exactly that commit (`--match-head-commit`), never another head that
+    /// landed in between (design §11.2).
+    fn merge(&self, pr: &PrRef, method: MergeMethod, head: &str) -> ForgeResult<MergeResult>;
+
+    /// The state of a pull request (design §11.3): what a merge whose outcome
+    /// is unknown asks the forge.
+    fn pr_state(&self, pr: &PrRef) -> ForgeResult<PrState>;
+
+    /// The open pull request of a branch, if there is one (design §11.3): a
+    /// claim that was interrupted is adopted by its branch.
+    fn pr_by_head(&self, repo: &str, branch: &str) -> ForgeResult<Option<PrRef>>;
 
     /// Close an issue, with one closing comment.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> ForgeResult<()>;
