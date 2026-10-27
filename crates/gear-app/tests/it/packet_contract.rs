@@ -33,6 +33,7 @@ fn world(attempt: bool) -> Store {
 fn packet_has_contract_and_copyable_commands() {
     let mut s = world(true);
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(text.ends_with("You implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n"));
     for needle in [
         "# T-7 — Fix the login crash",
         "Lane: heat · Contract: v1 · State: ready",

@@ -186,7 +186,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "gear-app"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-board",
  "gear-forge",
@@ -203,7 +203,7 @@ dependencies = [
 
 [[package]]
 name = "gear-board"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-herdr",
  "gear-model",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "gear-cli"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "clap",
  "gear-app",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "gear-engine"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-app",
  "gear-board",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "gear-forge"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-model",
  "gear-store",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "gear-herdr"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "board-herdr",
  "serde",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "gear-model"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "gear-store"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-model",
  "rusqlite",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "gear-usage"
-version = "0.3.4"
+version = "0.4.0"
 dependencies = [
  "gear-model",
  "rusqlite",
