@@ -20,6 +20,8 @@
 //!
 //! Read-only: the report changes nothing.
 
+use std::collections::BTreeMap;
+
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
@@ -40,7 +42,11 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    /// The tokens of two rounds, added up (the known ones only).
+    /// The tokens of two rounds, added up.
+    ///
+    /// A round whose usage could not be read is **unknown**: the sum of a
+    /// known round and an unknown one is unknown, never the known part alone
+    /// (a number that was not read is not a zero, design §4.3).
     pub fn add(&mut self, other: &Tokens) {
         self.input = add(self.input, other.input);
         self.output = add(self.output, other.output);
@@ -49,29 +55,113 @@ impl Tokens {
         self.reasoning = add(self.reasoning, other.reasoning);
         self.cost_usd = match (self.cost_usd, other.cost_usd) {
             (Some(a), Some(b)) => Some(a + b),
-            (Some(a), None) => Some(a),
-            (None, b) => b,
+            _ => None,
         };
+        // Where the cost came from: the last known source, "mixed" when two
+        // rounds disagree.
+        if other.cost_usd.is_some() {
+            self.cost_source = match (&self.cost_source, &other.cost_source) {
+                (Some(a), Some(b)) if a == b => Some(a.clone()),
+                (Some(_), Some(_)) => Some("mixed".to_string()),
+                (Some(a), None) => Some(a.clone()),
+                (None, Some(b)) => Some(b.clone()),
+                (None, None) => None,
+            };
+        }
+    }
+
+    /// The tokens of a round that consumed nothing: a known zero, not an
+    /// unknown.
+    pub fn zero() -> Tokens {
+        Tokens {
+            input: Some(0),
+            output: Some(0),
+            cache_read: Some(0),
+            cache_write: Some(0),
+            reasoning: Some(0),
+            cost_usd: Some(0.0),
+            cost_source: None,
+        }
     }
 
     /// The tokens in and out, as the report shows them.
+    ///
+    /// An unknown usage is shown as `tokens ? / cost ?`, never as zero: a log
+    /// that cannot be read leaves the numbers unknown (design §4.3).
     pub fn line(&self) -> String {
-        let input = self.input.unwrap_or(0);
-        let output = self.output.unwrap_or(0);
-        let mut line = format!("tokens {input} in / {output} out");
-        if let Some(cost) = self.cost_usd {
-            line.push_str(&format!(" · cost ${cost:.4}"));
+        match (self.input, self.output) {
+            (Some(input), Some(output)) => {
+                let mut line = format!("tokens {input} in / {output} out");
+                line.push_str(&self.cost_line(" · "));
+                line
+            }
+            _ => {
+                let mut line = "tokens ?".to_string();
+                line.push_str(&self.cost_line(" / "));
+                line
+            }
         }
-        line
+    }
+
+    /// The cost as the report shows it: `$0.1234`, or `?` when it is not
+    /// known.
+    fn cost_line(&self, separator: &str) -> String {
+        match self.cost_usd {
+            Some(cost) => format!("{separator}cost ${cost:.4}"),
+            None => format!("{separator}cost ?"),
+        }
     }
 }
 
-/// The sum of two known values; None when neither is known.
+impl From<&gear_store::RoundTokens> for Tokens {
+    fn from(tokens: &gear_store::RoundTokens) -> Tokens {
+        Tokens {
+            input: tokens.input,
+            output: tokens.output,
+            cache_read: tokens.cache_read,
+            cache_write: tokens.cache_write,
+            reasoning: tokens.reasoning,
+            cost_usd: tokens.cost_usd,
+            cost_source: Some(tokens.cost_source.clone()),
+        }
+    }
+}
+
+/// The sum of two values; None when either of them is unknown.
 fn add(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a + b),
-        (Some(a), None) => Some(a),
-        (None, b) => b,
+        _ => None,
+    }
+}
+
+/// The counted usage of the open rounds (T-207).
+///
+/// The store keeps the counted tokens of a round that has ended. An **open**
+/// round has none yet: the report counts it as it reads (design §4.3) and
+/// passes the count in here as an override. The stored numbers of a closed
+/// round are never replaced, and nothing is written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageOverrides {
+    /// The count of each open round: (task, attempt, role) → tokens.
+    rounds: BTreeMap<(String, i64, String), Tokens>,
+}
+
+impl UsageOverrides {
+    /// The count of one round, when it was counted.
+    pub fn get(&self, task: &str, attempt: i64, role: &str) -> Option<&Tokens> {
+        self.rounds.get(&(task.to_string(), attempt, role.to_string()))
+    }
+
+    /// The count of one round: the override of its stored numbers.
+    pub fn set(&mut self, task: &str, attempt: i64, role: &str, tokens: Tokens) {
+        self.rounds
+            .insert((task.to_string(), attempt, role.to_string()), tokens);
+    }
+
+    /// Whether no round was counted at all.
+    pub fn is_empty(&self) -> bool {
+        self.rounds.is_empty()
     }
 }
 
@@ -227,6 +317,21 @@ pub fn build(
     filter: &Filter,
     now: Ts,
 ) -> GearResult<Report> {
+    build_with(store, env, fp, filter, now, &UsageOverrides::default())
+}
+
+/// [`build`] with the counted usage of the open rounds (T-207).
+///
+/// The overrides are the counts of the rounds that are still running: they
+/// stand in for the numbers the store has not written yet.
+pub fn build_with(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    filter: &Filter,
+    now: Ts,
+    overrides: &UsageOverrides,
+) -> GearResult<Report> {
     store.read(|tx| {
         let (ctx, _seat) = require_seat(
             tx,
@@ -235,12 +340,23 @@ pub fn build(
             Some(&[SeatRole::Captain]),
             Some(&[SeatState::Active]),
         )?;
-        report(tx, &ctx.project, filter, now)
+        report_with(tx, &ctx.project, filter, now, overrides)
     })
 }
 
 /// The report of a project, read from the store.
 pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter, now: Ts) -> GearResult<Report> {
+    report_with(tx, project, filter, now, &UsageOverrides::default())
+}
+
+/// [`report`] with the counted usage of the open rounds (T-207).
+pub fn report_with(
+    tx: &Tx<'_>,
+    project: &str,
+    filter: &Filter,
+    now: Ts,
+    overrides: &UsageOverrides,
+) -> GearResult<Report> {
     // A task that does not exist is `NoTarget`, not an empty report: a typo
     // must not look like a project without work.
     if let Some(wanted) = &filter.task {
@@ -271,7 +387,7 @@ pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter, now: Ts) -> GearResul
         // The tokens and the cost of every attempt's own round (design §4.3):
         // the lane's dev round (or its rework round) is the work of that
         // attempt; the reviewer's round is the reviewer's, not the task's.
-        let tokens = tokens_of_attempts(tx, project, &task.id, &mut rounds)?;
+        let tokens = tokens_of_attempts(tx, project, &task.id, &mut rounds, overrides)?;
         // A task with neither an estimate nor an attempt has nothing to
         // account for; it is not in the report.
         let estimate = estimate_of(tx, project, &task)?;
@@ -284,7 +400,7 @@ pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter, now: Ts) -> GearResul
     let voyages = voyages_of(&tasks);
     // The work and waiting time of the voyage the report is about (§5.4).
     let work = match &filter.voyage {
-        Some(voyage) => Some(work_of(tx, project, voyage, now)?),
+        Some(voyage) => Some(work_of_with(tx, project, voyage, now, overrides)?),
         None => None,
     };
     Ok(Report { project: project.to_string(), tasks, voyages, work })
@@ -372,20 +488,26 @@ fn tokens_of_attempts(
     project: &str,
     task: &str,
     rounds: &mut [Round],
+    overrides: &UsageOverrides,
 ) -> GearResult<Tokens> {
     let stored = tx.rounds_of_task(project, task)?;
-    let mut tokens = Tokens::default();
+    let mut tokens = Tokens::zero();
     for round in rounds.iter_mut() {
         let mut usage: Vec<RoundUsage> = Vec::new();
         for row in stored.iter().filter(|row| row.attempt == round.n) {
-            let round_tokens = Tokens {
-                input: row.input,
-                output: row.output,
-                cache_read: row.cache_read,
-                cache_write: row.cache_write,
-                reasoning: row.reasoning,
-                cost_usd: row.cost_usd,
-                cost_source: row.cost_source.clone(),
+            // The count of an open round stands in for the numbers the store
+            // has not written yet (T-207); a closed round keeps its own.
+            let round_tokens = match overrides.get(task, row.attempt, &row.role) {
+                Some(counted) => counted.clone(),
+                None => Tokens {
+                    input: row.input,
+                    output: row.output,
+                    cache_read: row.cache_read,
+                    cache_write: row.cache_write,
+                    reasoning: row.reasoning,
+                    cost_usd: row.cost_usd,
+                    cost_source: row.cost_source.clone(),
+                },
             };
             tokens.add(&round_tokens);
             usage.push(RoundUsage {
@@ -401,8 +523,10 @@ fn tokens_of_attempts(
 }
 
 /// The tokens and the cost of a list of stored rounds.
+///
+/// An empty list is a known zero: no round ran, so nothing was consumed.
 fn tokens_of(usage: &[RoundUsage]) -> Tokens {
-    let mut tokens = Tokens::default();
+    let mut tokens = Tokens::zero();
     for round in usage {
         tokens.add(&round.tokens);
     }
@@ -452,7 +576,7 @@ fn voyages_of(tasks: &[TaskTime]) -> Vec<VoyageTime> {
         voyage.wait = sum_known(voyage.tasks.iter().map(|task| task.wait()));
         voyage.merge = sum_known(voyage.tasks.iter().map(|task| task.merge()));
         voyage.actual_min = sum_known(voyage.tasks.iter().map(|task| task.actual_min));
-        let mut tokens = Tokens::default();
+        let mut tokens = Tokens::zero();
         for task in &voyage.tasks {
             tokens.add(&task.tokens);
         }
@@ -532,6 +656,18 @@ pub fn work_of(
     milestone: &str,
     now: Ts,
 ) -> GearResult<VoyageWork> {
+    work_of_with(tx, project, milestone, now, &UsageOverrides::default())
+}
+
+/// [`work_of`] with the counted usage of the open rounds (T-207): the tokens
+/// of a lane's open round are counted as the report reads it.
+pub fn work_of_with(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    now: Ts,
+    overrides: &UsageOverrides,
+) -> GearResult<VoyageWork> {
     let voyage = tx.get_voyage(project, milestone)?;
     // The voyage's window: from its departure until now (design §5.4).
     let departure = voyage.as_ref().and_then(|v| v.departure);
@@ -578,7 +714,11 @@ pub fn work_of(
     // a pause of another voyage is not this voyage's stoppage.
     let mut quota_spans: Vec<(String, i64, i64)> = Vec::new();
     for (name, seat_id) in &lanes {
-        let mut lane = LaneWork { lane: name.clone(), ..Default::default() };
+        let mut lane = LaneWork {
+            lane: name.clone(),
+            tokens: Tokens::zero(),
+            ..Default::default()
+        };
         for row in rounds.iter().filter(|row| &row.seat == seat_id) {
             // The reviewer's round is the reviewer's work, not the lane's.
             if row.role == "review" {
@@ -595,15 +735,21 @@ pub fn work_of(
             if !own.iter().any(|task| task == &row.task) {
                 continue;
             }
-            lane.tokens.add(&Tokens {
-                input: row.input,
-                output: row.output,
-                cache_read: row.cache_read,
-                cache_write: row.cache_write,
-                reasoning: row.reasoning,
-                cost_usd: row.cost_usd,
-                cost_source: row.cost_source.clone(),
-            });
+            // The count of an open round stands in for the numbers the store
+            // has not written yet (T-207).
+            let tokens = match overrides.get(&row.task, row.attempt, &row.role) {
+                Some(counted) => counted.clone(),
+                None => Tokens {
+                    input: row.input,
+                    output: row.output,
+                    cache_read: row.cache_read,
+                    cache_write: row.cache_write,
+                    reasoning: row.reasoning,
+                    cost_usd: row.cost_usd,
+                    cost_source: row.cost_source.clone(),
+                },
+            };
+            lane.tokens.add(&tokens);
         }
         for pause in pauses.iter().filter(|pause| &pause.seat == seat_id) {
             // A pause that is still open ends now (design §5.4): the lane is
