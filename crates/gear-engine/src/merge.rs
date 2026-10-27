@@ -2179,6 +2179,13 @@ fn wait_thread(task: &str) -> String {
     format!("merge-wait:{task}")
 }
 
+/// The key that remembers that the captain was told that the merge of a
+/// task's attempt waits. The notice is told once per attempt (T-220): a
+/// resolved item does not bring the same news back.
+fn merge_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.merge_wait_told.{project}.{task}.{attempt}")
+}
+
 /// Tell the captain that a merge waits for another task (T-62): one open item
 /// per merge, naming the tasks it waits for. The item closes when the merge
 /// goes through, or when the tasks it waits for have passed and only their
@@ -2241,6 +2248,13 @@ fn tell_captain_waiting(
         if unpassed.is_empty() {
             return Ok(());
         }
+        // And once per attempt: the captain was told about this wait already
+        // (T-220). A resolved item does not bring the same news back on the
+        // next tick.
+        let told_key = merge_wait_told_key(project, &task, op.attempt.unwrap_or(0));
+        if tx.get_meta(&told_key)?.is_some() {
+            return Ok(());
+        }
         tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(),
@@ -2258,6 +2272,9 @@ fn tell_captain_waiting(
             state: MsgState::Open,
             created: now,
         })?;
+        // The notice is told once per attempt: remember it, so a later tick
+        // does not add it again after the captain resolved the item.
+        tx.set_meta(&told_key, &now.to_string())?;
         Ok(())
     })
 }
@@ -2881,6 +2898,53 @@ mod tests {
         // The captain's item about the wait is closed.
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 60)).unwrap();
         assert!(inbox.is_empty(), "the wait is over: {inbox:?}");
+    }
+
+    /// T-220: the "the merge waits" notice is told once per attempt. A
+    /// resolved item does not bring the same news back on the next tick, and
+    /// the next attempt of the same task is told once again.
+    ///
+    /// The tick calls `tell_captain_waiting` once per waiting merge; this
+    /// test calls it as the tick does.
+    #[test]
+    fn the_merge_waits_notice_is_told_once_per_attempt() {
+        let mut store = world(TaskState::Verifying);
+        let waiting = op("abc1234"); // T-5, attempt 1
+        // T-1 has not passed: the merge of T-5 waits for it.
+        let blocked = vec![("T-1".to_string(), false)];
+
+        // The first tick: the captain is told once.
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 10).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 11)).unwrap();
+        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
+        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("T-5"), "{}", inbox[0].body);
+
+        // The captain resolves the item.
+        let id = inbox[0].id.clone();
+        store
+            .write(|tx| {
+                tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, 12)
+            })
+            .unwrap();
+
+        // The later ticks add no item: the notice was already told for this
+        // attempt.
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 20).unwrap();
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 30).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 31)).unwrap();
+        assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        let items = store.read(|tx| tx.thread_messages("p", "merge-wait:T-5")).unwrap();
+        assert_eq!(items.len(), 1, "a second item was added: {items:?}");
+
+        // The next attempt of the same task is told once again.
+        let mut next = waiting.clone();
+        next.attempt = Some(2);
+        tell_captain_waiting(&mut store, "p", &next, &blocked, 40).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 41)).unwrap();
+        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
+        let items = store.read(|tx| tx.thread_messages("p", "merge-wait:T-5")).unwrap();
+        assert_eq!(items.len(), 2, "the next attempt has no item: {items:?}");
     }
 
     /// T-62: a task that is not built on another task's branch is not held.
