@@ -186,6 +186,7 @@ mod tests {
             model: model.to_string(),
             cli: cli.map(str::to_string),
             args: args.iter().map(|arg| arg.to_string()).collect(),
+            context_window_k: None,
         })
     }
 
