@@ -5,10 +5,11 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 | Stopgap | Why it exists | Remove when | Removed by |
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
-| A Delivered attempt moved to Started, and its task Ready to Running, in the store by hand (T-157 attempt 3, 16:44 and 18:59) | v0.3.4 never confirms a delivery the lane viewed after its checks failed, and refuses a hand-in for a Delivered attempt | the engine runs T-150 and T-147 (v0.4.0 rebuild) | captain |
 | Plan park ended by hand: `- hold <lane>`, apply, `- release <lane>`, apply | a plan park has no exit (`until=` never expires, `release` refuses Parked) | T-190 merged | captain |
 
 ## Removed
+
+- 2026-10-26 Delivered attempts started by hand in the store (T-157, T-156): the engine rebuilt at 19:54 runs T-150's late confirm.
 
 - 2026-10-26 home-deck/home-hull worktrees removed by hand: T-125 (a re-registered lane reuses its worktree).
 - 2026-10-26 captain instructions typed into lane panes: T-130 (messages reach a working lane).
