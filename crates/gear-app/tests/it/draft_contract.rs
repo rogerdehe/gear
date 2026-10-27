@@ -156,6 +156,43 @@ fn a_verdict_quoted_value_keeps_its_quotes_and_comes_last() {
     assert!(detail.contains("estimate=25"), "{detail}");
 }
 
+/// T-141 (round 2, F1): the closing quote of a quoted value is the **last**
+/// quote on the line, so the prose may quote a field of its own.
+#[test]
+fn a_quoted_value_keeps_a_literal_field_inside_it() {
+    /// A draft with one verdict line.
+    fn draft(line: &str) -> String {
+        format!("<!-- gear-plan project=p base=0 -->\n# Verdicts\n{line}\n")
+    }
+
+    // The reviewer's line: a rework that quotes `estimate=25`.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"accept \"estimate=25\" before the quoted reason\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].rework.as_deref(),
+        Some("accept \"estimate=25\" before the quoted reason")
+    );
+    assert_eq!(d.verdicts[0].estimate, Some(25));
+
+    // And a why that quotes it.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=x why=\"the reviewer rejected \"estimate=25\" inside prose\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].why.as_deref(),
+        Some("the reviewer rejected \"estimate=25\" inside prose")
+    );
+
+    // A value without a closing quote is still refused.
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case",
+    ));
+    assert!(detail.contains("no closing quote"), "{detail}");
+}
+
 #[test]
 fn staff_lines_are_strict() {
     let park_both = FULL.replace("park media until-task=T-12", "park media until=2026-10-21T15:30Z until-task=T-12");

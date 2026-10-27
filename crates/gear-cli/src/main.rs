@@ -2621,6 +2621,40 @@ mod tests {
         assert!(summary < warning, "the warning comes after the summary: {out}");
     }
 
+    #[test]
+    fn plan_apply_prints_the_tasks_a_rebind_is_waiting_for() {
+        let (mut store, mut herdr) = world_with_task();
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = r#"
+[project]
+id="p"
+repo="/repo"
+herdr_session="sess"
+[quota]
+lanes=1
+temps=0
+[captain]
+pane="w1:p1"
+kind="codex"
+profile="codex"
+[[lanes]]
+name="heat"
+duty="work"
+owns=["src/"]
+kind="opencode"
+profile="opencode"
+[[repos]]
+name="api"
+path="api"
+"#.into();
+            tx.update_project(&project)
+        }).unwrap();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
+        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+    }
+
     /// The JSON output carries the same warnings as the text: the lanes that
     /// would stand idle and the apply's own (design §7.2: a decision line
     /// that is not structured).
