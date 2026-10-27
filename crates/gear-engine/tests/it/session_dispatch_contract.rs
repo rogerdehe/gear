@@ -172,3 +172,23 @@ fn retiring_lane_recovers_its_open_round_without_receiving_new_work() {
     assert!(s.read(|tx|tx.get_attempt("p","T-2",1)).unwrap().is_none());
     assert!(h.prompts_to(PANE).iter().all(|p|!p.contains("New task T-2")));
 }
+
+#[test]
+fn doorbell_waits_when_recovery_cannot_initialize_its_session_step() {
+    use gear_model::{MsgKind, MsgState};
+    use gear_store::NewMessage;
+    let (mut s,mut h,mut c)=world(false);
+    s.write(|tx| {
+        gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T)?;
+        gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",1,T)?;
+        let key=gear_store::RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()};
+        tx.insert_round(&gear_store::NewRound {key:key.clone(),seat:"p:heat".into(),generation:1,cli:"opencode".into(),model:None,start_at:T})?;
+        tx.add_round_session(&key,"old")?;
+        tx.insert_message(&NewMessage {project:"p".into(),thread:"instruction".into(),task:None,attempt:None,sender:"p:captain".into(),sender_gen:1,recipient:"p:heat".into(),kind:MsgKind::Instruction,urgent:true,body:"please read".into(),reply_to:None,needs_ack:false,state:MsgState::Open,created:T,meta:None})?;
+        Ok(())
+    }).unwrap();
+    c.profiles.remove("opencode"); h.set_agent_session(PANE,"restart");
+    advance(&mut s,&mut h,&c,1);
+    assert!(s.read(|tx|tx.get_meta("engine.session_step.p:heat")).unwrap().is_none());
+    assert!(h.prompts_to(PANE).is_empty(),"{:?}",h.calls);
+}

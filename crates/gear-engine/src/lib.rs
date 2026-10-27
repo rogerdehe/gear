@@ -490,7 +490,11 @@ fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) 
     let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
     if let Some(state) = state.filter(|s| s["round"] == identity) {
-        return Ok(!matches!(state["step"].as_str(), Some("done" | "failed")));
+        match state["step"].as_str() {
+            Some("failed") => return Ok(false),
+            Some("done") => {},
+            _ => return Ok(true),
+        }
     }
     // A round can exist before the runner has written its first step (or when
     // no profile is available); an unsent assignment still reserves the pane.
