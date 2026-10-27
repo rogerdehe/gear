@@ -137,10 +137,25 @@ fn process(tx: &Tx<'_>, round: &RoundRow, now: Ts) -> GearResult<bool> {
     Ok(changed)
 }
 
+/// Mirror quota parking into pause rows before calculating any round clock.
+fn reconcile_quota_pauses(tx: &Tx<'_>, project: &str) -> GearResult<()> {
+    let pauses = tx.pauses_of_project(project)?;
+    for seat in tx.seats_of_project(project)? {
+        let open = pauses.iter().any(|p| p.seat == seat.id && p.kind == "quota" && p.end_at.is_none());
+        if seat.state == SeatState::Parked {
+            if !open { tx.open_pause(project, &seat.id, "quota", "quota parked", seat.state_since)?; }
+        } else if open {
+            tx.close_pause(project, &seat.id, "quota", seat.state_since)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, _cfg: &EngineCfg, now: Ts) -> GearResult<()> {
     let projects = store.read(|tx| tx.project_ids())?;
     for project in projects {
         store.write(|tx| {
+            reconcile_quota_pauses(tx, &project)?;
             let mut changed = false;
             for round in tx.rounds_of_project(&project)? { changed |= process(tx, &round, now)?; }
             Ok(changed)
@@ -231,6 +246,24 @@ mod tests {
         tick_at(&mut s,4000);
         let review=s.read(|tx| tx.rounds_of_task("p","T-1")).unwrap().into_iter().find(|r| r.attempt==1 && r.role=="review").unwrap();
         assert_eq!(review.active_s,2900);
+    }
+
+    #[test]
+    fn actual_quota_park_pauses_the_clock_and_no_answer_timer() {
+        let mut s = world();
+        tick_at(&mut s, 600);
+        s.write(|tx| tx.set_seat_state("p:heat", SeatState::Parked, Some("quota"), T+700)).unwrap();
+        tick_at(&mut s, 2000);
+        let round=s.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().remove(0);
+        assert_eq!((round.active_s,round.paused_s),(700,1300));
+        assert!(messages(&mut s,"overrun:T-1:dev").is_empty());
+        s.write(|tx| tx.set_seat_state("p:heat", SeatState::Active, Some("quota reset"), T+2100)).unwrap();
+        tick_at(&mut s, 2200);
+        let round=s.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().remove(0);
+        assert_eq!((round.active_s,round.paused_s),(800,1400));
+        assert!(messages(&mut s,"overrun:T-1:dev").is_empty());
+        tick_at(&mut s,2600);
+        assert!(messages(&mut s,"overrun:T-1:dev")[0].urgent);
     }
 
 }
