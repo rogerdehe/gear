@@ -139,10 +139,17 @@ pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::Round
     let (seat, project) = store.read(|tx| Ok((tx.get_seat(&round.seat)?, tx.get_project(&round.project)?)))?;
     let (Some(seat), Some(project)) = (seat, project) else { return Ok(unknown()) };
     let config = project.config_toml.parse::<toml::Value>().ok();
-    let mut profile = cfg.profiles.get(&seat.profile).cloned().or_else(|| gear_herdr::builtin(&round.cli));
-    if let (Some(profile), Some(raw)) = (profile.as_mut(), config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(&seat.profile))) {
-        if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() { *profile = profile.patched(&patch, &seat.profile); }
-    }
+    let resolve = |name: &str| {
+        let mut profile = cfg.profiles.get(name).cloned().or_else(|| gear_herdr::builtin(name))?;
+        if let Some(raw) = config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(name)) {
+            if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() { profile = profile.patched(&patch, name); }
+        }
+        Some(profile)
+    };
+    // A seat may have switched CLI after this round ended. Its new profile
+    // must not decide how the old CLI's session logs are read.
+    let profile = resolve(&seat.profile).filter(|p| p.kind == round.cli)
+        .or_else(|| resolve(&round.cli).filter(|p| p.kind == round.cli));
     let Some(log) = profile.as_ref().and_then(|p|p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name) else { return Ok(unknown()) };
     if round.sessions.is_empty() { return Ok(unknown()) }
     let end = round.end_at.unwrap_or(now).min(now);

@@ -860,7 +860,12 @@ pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default
             let model = record.model.as_deref().map(|model| {
                 default_model.filter(|full| !model.contains('/') && full.rsplit_once('/').is_some_and(|(_, id)| id == model)).unwrap_or(model)
             }).or(default_model);
-            let price = model.and_then(|m| prices.get(m));
+            let price = model.and_then(|m| prices.get(m).or_else(|| {
+                if m.contains('/') { return None }
+                let mut candidates = prices.iter().filter(|(key, _)| key.rsplit_once('/').is_some_and(|(_, id)| id == m));
+                let (_, price) = candidates.next()?;
+                if candidates.next().is_some() { None } else { Some(price) }
+            }));
             if let Some(p) = price {
                 cost += (u.input as f64*p.input + u.output as f64*p.output + u.cache_read as f64*p.cache_read + u.cache_write as f64*p.cache_write) / 1_000_000.0;
                 any_cost = true; priced = true;

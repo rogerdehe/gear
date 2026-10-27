@@ -452,3 +452,57 @@ fn closed_round_waits_for_late_logs_and_missing_logs_stay_unknown() {
     let row=round_of(&mut store,"T-1",1,"dev");
     assert_eq!(row.input,Some(42)); assert_eq!(row.cost_usd,Some(0.25)); assert_eq!(row.cost_source.as_deref(),Some("agent")); assert_eq!(row.counted_at,Some(T0+220));
 }
+
+#[test]
+fn closed_codex_round_keeps_its_reader_after_the_seat_moves_to_pi() {
+    let dir=tempfile::tempdir().unwrap();
+    let path=dir.path().join("codex.jsonl");
+    let record=serde_json::json!({"type":"event_msg","timestamp":T0+20,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":0,"output_tokens":0}}}});
+    std::fs::write(&path,format!("{record}\n")).unwrap();
+    let mut store=world();
+    let key=RoundKey{project:"p".into(),task:"T-20".into(),attempt:1,role:"dev".into()};
+    store.write(|tx| {
+        let mut project=tx.get_project("p")?.unwrap();
+        project.config_toml="[profiles.pi]\nusage_log='pi-jsonl'\n[profiles.codex]\nusage_log='codex-rollout'\n[profiles.custom]\nkind='codex'\nusage_log='codex-rollout'\n".into();
+        tx.update_project(&project)?;
+        tx.insert_round(&NewRound {key:key.clone(),seat:LANE.into(),generation:1,cli:"codex".into(),model:None,start_at:T0})?;
+        tx.add_round_session(&key,path.to_str().unwrap())?;
+        tx.close_round(&key,T0+100)?;
+        tx.set_seat_profile(LANE,"pi")
+    }).unwrap();
+    let mut cfg=gear_engine::EngineCfg::default(); cfg.profiles=gear_herdr::builtins();
+    let mut h=FakeHerdr::new();
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+160).unwrap();
+    let row=round_of(&mut store,"T-20",1,"dev");
+    assert_eq!(row.input,Some(300)); assert_eq!(row.counted_at,Some(T0+160));
+    // A custom profile of the same CLI still applies its configured reader.
+    store.write(|tx|tx.set_seat_profile(LANE,"custom")).unwrap();
+    let mut custom=gear_herdr::Profile::for_new(); custom.kind="codex".into();
+    cfg.profiles.insert("custom".into(),custom);
+    assert_eq!(gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+160).unwrap().input,Some(300));
+}
+
+#[test]
+fn codex_model_switch_prices_each_bare_id_and_rejects_ambiguity() {
+    let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("switch.jsonl");
+    let context=|model|serde_json::json!({"type":"turn_context","timestamp":T0+1,"payload":{"model":model}});
+    let count=|at,input|serde_json::json!({"type":"event_msg","timestamp":T0+at,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":0,"output_tokens":0}}}});
+    let lines=vec![context("m1"),count(10,100),context("m2"),count(20,300)];
+    std::fs::write(&path,lines.into_iter().map(|v|v.to_string()+"\n").collect::<String>()).unwrap();
+    let mut store=world();
+    let key=RoundKey{project:"p".into(),task:"T-21".into(),attempt:1,role:"dev".into()};
+    store.write(|tx| {
+        let mut project=tx.get_project("p")?.unwrap();
+        project.config_toml="[prices.\"openai/m1\"]\ninput=1\noutput=0\ncache_read=0\ncache_write=0\n[prices.\"openai/m2\"]\ninput=3\noutput=0\ncache_read=0\ncache_write=0\n".into();
+        tx.update_project(&project)?; tx.set_seat_profile(LANE,"codex")?;
+        tx.insert_round(&NewRound{key:key.clone(),seat:LANE.into(),generation:1,cli:"codex".into(),model:Some("openai/m1".into()),start_at:T0})?;
+        tx.add_round_session(&key,path.to_str().unwrap())?; tx.close_round(&key,T0+30)
+    }).unwrap();
+    let mut cfg=gear_engine::EngineCfg::default(); cfg.profiles=gear_herdr::builtins();
+    let row=round_of(&mut store,"T-21",1,"dev");
+    let tokens=gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+100).unwrap();
+    assert_eq!(tokens.input,Some(300)); assert!((tokens.cost_usd.unwrap()-0.0007).abs()<1e-10); assert_eq!(tokens.cost_source,"prices");
+    store.write(|tx| {let mut p=tx.get_project("p")?.unwrap(); p.config_toml.push_str("[prices.\"other/m2\"]\ninput=7\noutput=0\ncache_read=0\ncache_write=0\n");tx.update_project(&p)}).unwrap();
+    let tokens=gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+100).unwrap();
+    assert_eq!(tokens.input,Some(300)); assert_eq!(tokens.cost_usd,None); assert_eq!(tokens.cost_source,"none");
+}
