@@ -107,7 +107,7 @@ pub const FIRST_ROW: usize = VIEW_ROW + 1;
 ///
 /// Short enough for an 80 column terminal: a row that is cut at the edge
 /// hides the end of it, and the end says how to leave.
-pub const FOOTER: &str = "←→ / Tab / 1-5 / click: views · ↑↓ select · Enter: details · q quit";
+pub const FOOTER: &str = "←→ / Tab / 1-5: views · ↑↓ select · Enter: a lane or a task · q quit";
 
 /// A screen of characters: the frame, the view and the panel are drawn on it.
 pub struct Canvas {
