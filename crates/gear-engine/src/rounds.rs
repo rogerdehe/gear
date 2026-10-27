@@ -74,7 +74,7 @@ pub fn tick(
                 if round.sessions.iter().any(|owned| owned == session) {
                     continue;
                 }
-                tx.add_round_session(&key_of(&round), session)?;
+                add_session(tx, &key_of(&round), session, &binding.kind)?;
                 report.sessions.push(label(&round));
             }
             // 3. §4.1: or when the seat is released — the agent is gone and
@@ -119,6 +119,16 @@ fn key_of(round: &gear_store::RoundRow) -> RoundKey {
     }
 }
 
+/// Record the owner of each session independently of the round's initial CLI.
+fn session_cli_key(key: &RoundKey, session: &str) -> String {
+    format!("round-session-cli:{}", serde_json::json!([key.project, key.task, key.attempt, key.role, session]))
+}
+
+pub(crate) fn add_session(tx: &Tx<'_>, key: &RoundKey, session: &str, cli: &str) -> GearResult<()> {
+    tx.add_round_session(key, session)?;
+    tx.set_meta(&session_cli_key(key, session), cli)
+}
+
 /// How a round is named in the report.
 fn label(round: &gear_store::RoundRow) -> String {
     format!("{}/{}/{}", round.task, round.attempt, round.role)
@@ -148,12 +158,11 @@ pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::Round
         }
         Some(profile)
     };
-    // A seat may have switched CLI after this round ended. Its new profile
-    // must not decide how the old CLI's session logs are read.
-    let profile = resolve(&seat.profile).filter(|p| p.kind == round.cli)
-        .or_else(|| resolve(&round.cli).filter(|p| p.kind == round.cli));
-    let Some(log) = profile.as_ref().and_then(|p|p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name) else { return Ok(unknown()) };
     if round.sessions.is_empty() { return Ok(unknown()) }
+    let owners = store.read(|tx| round.sessions.iter().map(|session| {
+        Ok((session.clone(), tx.get_meta(&session_cli_key(&key_of(round), session))?
+            .filter(|cli| !cli.is_empty()).unwrap_or_else(|| round.cli.clone())))
+    }).collect::<GearResult<Vec<_>>>())?;
     let end = round.end_at.unwrap_or(now).min(now);
     let mut prices = std::collections::BTreeMap::new();
     if let Some(table) = config.as_ref().and_then(|c|c.get("prices")).and_then(toml::Value::as_table) {
@@ -164,7 +173,27 @@ pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::Round
             }
         }
     }
-    let Some(result) = gear_usage::round_usage(log, &round.sessions, round.start_at, end, round.model.as_deref(), &prices) else { return Ok(unknown()) };
-    let u = result.usage;
-    Ok(RoundTokens { input:Some(u.input), output:Some(u.output), cache_read:Some(u.cache_read), cache_write:Some(u.cache_write), reasoning:Some(u.reasoning), cost_usd:u.cost_usd, cost_source:result.cost_source.into() })
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (session, cli) in owners { groups.entry(cli).or_default().push(session); }
+    let mut total = RoundTokens { input:Some(0), output:Some(0), cache_read:Some(0), cache_write:Some(0), reasoning:Some(0), cost_usd:None, cost_source:"none".into() };
+    let (mut cost, mut any_cost, mut cost_known, mut priced) = (0.0, false, true, false);
+    for (cli, sessions) in groups {
+        // Keep custom profile behavior for the current CLI; use the original
+        // CLI's profile for older sessions after a cross-CLI restart.
+        let profile = resolve(&seat.profile).filter(|p| p.kind == cli)
+            .or_else(|| resolve(&cli).filter(|p| p.kind == cli));
+        let Some(log) = profile.as_ref().and_then(|p| p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name) else { return Ok(unknown()) };
+        let model = if cli == round.cli { round.model.as_deref() } else { None };
+        let Some(result) = gear_usage::round_usage(log, &sessions, round.start_at, end, model, &prices) else { return Ok(unknown()) };
+        let u = result.usage;
+        *total.input.as_mut().unwrap() += u.input;
+        *total.output.as_mut().unwrap() += u.output;
+        *total.cache_read.as_mut().unwrap() += u.cache_read;
+        *total.cache_write.as_mut().unwrap() += u.cache_write;
+        *total.reasoning.as_mut().unwrap() += u.reasoning;
+        if let Some(value) = u.cost_usd { cost += value; any_cost = true; priced |= result.cost_source == "prices"; }
+        else if u.records > 0 { cost_known = false; }
+    }
+    if any_cost && cost_known { total.cost_usd = Some(cost); total.cost_source = if priced { "prices" } else { "agent" }.into(); }
+    Ok(total)
 }
