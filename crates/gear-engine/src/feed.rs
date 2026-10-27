@@ -198,7 +198,7 @@ fn imbalance(
     let mut idle: Option<String> = None;
     let mut busy: Option<(String, usize, i64)> = None;
     for seat in tx.seats_of_project(project)? {
-        if seat.role != SeatRole::Lane {
+        if seat.role != SeatRole::Lane || seat.state == SeatState::Retired {
             continue;
         }
         // A lane in the captain's tail is idle on purpose: it is no imbalance.
