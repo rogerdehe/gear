@@ -4,3 +4,4 @@ mod deps_contract;
 mod graph_contract;
 mod idle_contract;
 mod measures_contract;
+mod workload_contract;
