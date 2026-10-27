@@ -341,7 +341,8 @@ fn context_large(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, session: Op
     let entries = match seat.role { gear_model::SeatRole::Lane => config.lanes.iter().find(|lane| lane.name == seat.name).map(|lane| gear_app::config::lane_chain(&config, lane)).unwrap_or(&config.models.lanes), gear_model::SeatRole::Temp => config.models.review.as_slice(), gear_model::SeatRole::Captain => config.models.captain.as_slice() };
     let entry = match model.as_deref() { Some(model) => entries.iter().find(|entry| entry.model() == model), None => entries.first() };
     let Some(window) = entry.and_then(|e| e.context_window_k()).filter(|w| *w > 0) else { return Ok(true) };
-    let usage = binding.as_ref().and_then(|binding| cfg.profiles.get(&seat.profile).or_else(|| cfg.profiles.values().find(|p| p.kind == binding.kind)))
+    let profiles = gear_app::config::profile_table(&cfg.profiles, &config)?;
+    let usage = binding.as_ref().and_then(|binding| profiles.get(&seat.profile).or_else(|| profiles.values().find(|p| p.kind == binding.kind)))
         .and_then(|p| p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name)
         .and_then(|log| session.and_then(|session| gear_usage::last_context(log, session)));
     Ok(usage.is_none_or(|tokens| (tokens as u128) * 2 >= (window as u128) * 1000))
@@ -548,9 +549,13 @@ fn recorded_review_action(
     Ok(action.as_deref().and_then(|value| {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
             let name = json.get("action")?.as_str()?;
-            if name == "resume" { return Some(Action::Resume(json.get("session_ref")?.as_str()?.to_string())); }
+            if name == "resume" {
+                return Some(Action::Resume(json.get("session_ref")?.as_str()?.to_string()));
+            }
             parse_action(name)
-        } else { parse_action(value) }
+        } else {
+            parse_action(value)
+        }
     }))
 }
 

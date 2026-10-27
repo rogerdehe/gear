@@ -39,15 +39,20 @@ fn notify_new(store: &mut Store, seat: &SeatRow, now: Ts) -> GearResult<()> {
     })
 }
 
-fn profile<'a>(cfg: &'a EngineCfg, seat: &SeatRow, kind: &str) -> Option<&'a Profile> {
-    cfg.profiles.get(&seat.profile).or_else(|| cfg.profiles.values().find(|p| p.kind == kind))
+fn profile(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, kind: &str) -> GearResult<Option<Profile>> {
+    let project = store.read(|tx| tx.get_project(&seat.project))?;
+    let mut profiles = cfg.profiles.clone();
+    if let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) {
+        profiles = gear_app::config::profile_table(&profiles, &config)?;
+    }
+    Ok(profiles.get(&seat.profile).or_else(|| profiles.values().find(|p| p.kind == kind)).cloned())
 }
 
 /// Drive one action by at most one terminal submission or state transition.
 pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow, task: &str, attempt: i64, role: Role, action: &Action, compact_after: bool, now: Ts) -> GearResult<Prep> {
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
     let Some(binding) = binding else { return Ok(Prep::Wait) };
-    let Some(profile) = profile(cfg, seat, &binding.kind) else { return Ok(Prep::Wait) };
+    let Some(profile) = profile(store, cfg, seat, &binding.kind)? else { return Ok(Prep::Wait) };
     let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
     let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity)
