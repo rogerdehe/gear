@@ -67,6 +67,11 @@ pub fn start_reviews(
         return Ok(report);
     };
 
+    // A hand-in takes priority over a direction reviewer that has reserved a
+    // seat but has not started yet. Keep the reservation and let ordinary
+    // full-review startup continue it on the same seat.
+    yield_starting_direction_jobs(store, project)?;
+
     // A reviewer that the old activation/delivery pair could leave without its
     // packet gets it before anything else is started.
     report.started.extend(recover_missing_packets(store, herdr, cfg, project, &config, now)?);
@@ -177,6 +182,26 @@ pub fn start_reviews(
         start_direction_checks(store, herdr, cfg, profiles, project, &config, &mut report, now)?;
     }
     Ok(report)
+}
+
+fn yield_starting_direction_jobs(store: &mut Store, project: &str) -> GearResult<()> {
+    store.write(|tx| {
+        for task in tx.tasks_of_project(project)? {
+            if task.state != TaskState::Verifying { continue }
+            let Some(attempt) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else { continue };
+            if attempt.state != AttemptState::Submitted { continue }
+            let key = direction_key(project, &task.id, attempt.n);
+            let Some(job) = tx.get_meta(&key)?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) else { continue };
+            if job["state"] != "starting" { continue }
+            let Some(seat_id) = job["seat"].as_str() else { continue };
+            let pending_key = pending_review_key(seat_id);
+            if tx.get_meta(&pending_key)?.as_deref().is_some_and(|value| value == task.id)
+                || tx.get_seat(seat_id)?.is_some_and(|seat| seat.task_id.as_deref() == Some(task.id.as_str())) {
+                tx.set_meta(&key, "")?;
+            }
+        }
+        Ok(())
+    })
 }
 
 fn direction_key(project: &str, task: &str, attempt: i64) -> String {
@@ -586,7 +611,7 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
 
 fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let key = format!("engine.review_tree.{}", seat.id);
-    let job = format!("{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo);
+    let job = format!("{}:{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo, branch);
     if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(job.as_str()) { return Ok(true) }
     match prepare_review_tree(git, store, herdr, &seat.project, repo, path, branch, task, now) {
         Ok(true) => {},
@@ -1519,13 +1544,19 @@ fn recover_missing_packets(
         else {
             continue;
         };
-        let Some(candidate) = attempt.candidate.clone() else {
-            continue;
+        let direction = store.read(|tx| tx.get_meta(&direction_key(project, &task, attempt.n)))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|job| job["state"] == "running" && job["seat"] == seat.id && job["generation"] == seat.generation);
+        let candidate = match direction.as_ref().and_then(|job| job["sha"].as_str()) {
+            Some(sha) => sha.to_string(),
+            None => match attempt.candidate.clone() { Some(candidate) => candidate, None => continue },
         };
-        if crate::session::prepare_review(store, herdr, cfg, &seat, &task, attempt.n, now)? != crate::session::Prep::Ready {
+        let role = if direction.is_some() { crate::session::Role::Direction } else { crate::session::Role::Review };
+        if crate::session::prepare_review_role(store, herdr, cfg, &seat, &task, attempt.n, role, now)? != crate::session::Prep::Ready {
             continue;
         }
-        let packet = review_packet_for(store, config, &task, attempt.n, &candidate)?;
+        let review_task = ReviewTask { task:task.clone(), attempt:attempt.n, writer:attempt.seat.clone(), lane:store.read(|tx|tx.get_task(project,&task))?.and_then(|row|row.lane).unwrap_or_default(), candidate:candidate.clone() };
+        let packet = job_packet(store, config, &review_task, direction.is_some())?;
         let generation = seat.generation;
         store.write(|tx| {
             tx.insert_op(&NewOp {
@@ -2194,6 +2225,23 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().iter().filter(|r| r.role == "direction").count(), 1);
         let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap().payload["text"].as_str().unwrap().to_string();
         assert!(packet.contains("Direction check of T-1 attempt 1"));
+        let failed = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
+        store.write(|tx| tx.set_op_state("p", &failed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let replayed = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
+        assert_ne!(replayed.id, failed.id);
+        assert!(replayed.payload["text"].as_str().unwrap().contains("Direction check of T-1 attempt 1"));
+        store.write(|tx| tx.set_op_state("p", &replayed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
+        store.write(|tx| gear_app::tasks::submit_result(tx,"p","T-1",1,1,&first,"ops/reports/T-1.md",T0+10)).unwrap();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let after_handin = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
+        assert_ne!(after_handin.id, replayed.id);
+        assert!(after_handin.payload["text"].as_str().unwrap().contains("Direction check of T-1 attempt 1"));
+        store.write(|tx| {
+            let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Running; tx.update_task(&task)?;
+            let mut attempt=tx.get_attempt("p","T-1",1)?.unwrap(); attempt.state=AttemptState::Started; attempt.candidate=None; tx.update_attempt(&attempt)?;
+            tx.set_op_state("p",&after_handin.id,gear_model::OpState::Submitted,None,T0+10)
+        }).unwrap();
         std::fs::write(work.join("src/base"), "two").unwrap();
         sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
         publish(&work, "heat/t1");
@@ -2243,6 +2291,62 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
         assert!(store.read(|tx| tx.get_meta(&direction_key("p", "T-2", 1))).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_starting_direction_job_yields_to_a_handin() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "change").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm change");
+        publish(&work, "heat/t1");
+        let sha = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Running; tx.update_task(&task)?;
+            let mut attempt=tx.get_attempt("p","T-1",1)?.unwrap(); attempt.state=AttemptState::Started; attempt.candidate=None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config=cfg(); config.review_git=std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr=FakeHerdr::new(); herdr.refuse_starts=Some(("agent_pane_busy".into(),1));
+        start_reviews(&mut store,&mut herdr,&config,&config.profiles,"p",T0+10).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&store.read(|tx|tx.get_meta(&direction_key("p","T-1",1))).unwrap().unwrap()).unwrap()["state"],"starting");
+        store.write(|tx| gear_app::tasks::submit_result(tx,"p","T-1",1,1,&sha,"ops/reports/T-1.md",T0+11)).unwrap();
+        start_reviews(&mut store,&mut herdr,&config,&config.profiles,"p",T0+12).unwrap();
+        assert_eq!(store.read(|tx|tx.get_meta(&direction_key("p","T-1",1))).unwrap().as_deref(),Some(""));
+        assert_eq!(store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap().state,SeatState::Active);
+        herdr.refuse_starts=None;
+        start_reviews(&mut store,&mut herdr,&config,&config.profiles,"p",T0+13).unwrap();
+        assert!(starts(&herdr).iter().any(|(kind,_)|kind=="codex"));
+        let packet=store.read(|tx|tx.ops_of_seat_kind("p:review-1",OpKind::Deliver)).unwrap().into_iter().last().unwrap().payload["text"].as_str().unwrap().to_string();
+        assert!(packet.starts_with("Review T-1 attempt 1"),"{packet}");
+    }
+
+    #[test]
+    fn changing_from_direction_to_review_invalidates_checkout_cache() {
+        REVIEW_GIT_FAKE.with(|fake| fake.set(true));
+        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
+        let mut store=world(CONFIG);
+        let seat=store.write(|tx| {
+            let seat=testing::seed_active_seat(tx,"p","review-9",SeatRole::Temp,"w9:p9","codex",T0)?;
+            tx.set_meta(&path_key(&seat.id),"/fake-review-worktree")?;
+            tx.set_meta(&repo_key(&seat.id),"/repo")?;
+            Ok(seat)
+        }).unwrap();
+        let mut herdr=FakeHerdr::new();
+        let task=ReviewTask {task:"T-1".into(),attempt:1,writer:"p:heat".into(),lane:"heat".into(),candidate:"abc1234".into()};
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","direction/t-1",&task,T0).unwrap();
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","review/t1",&task,T0+1).unwrap();
+        let branches=REVIEW_GIT_CALLS.with(|calls|calls.borrow().iter().filter_map(|(_,args)| {
+            (args.first().map(String::as_str)==Some("checkout") && args.get(2).map(String::as_str)==Some("-B")).then(||args.get(3).cloned()).flatten()
+        }).collect::<Vec<_>>());
+        assert_eq!(branches,["direction/t-1","review/t1"]);
     }
 
     #[test]
