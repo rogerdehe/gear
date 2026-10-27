@@ -97,6 +97,6 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - Cut from M4 at station M-2572: T-176 (the engine follows the project's own Herdr session, design §10.7 A1) and T-185 (three merge.rs tests over 10 s; share the git setup).
 
 - Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
-- A light procedure for small tasks, decided from M4's per-round token and time data.
+- **A light procedure for small tasks (user, 2026-10-27, must).** Small, low-risk work must not go through the full loop (task, hand-in, review, rework, re-review). Example: adding two log lines to see a server error took that whole loop. Size the procedure to the work, decided from M4's per-round token and time data.
 - OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
 - Cut from M4 at station M-2503 (pace 1.66x): T-180 admin stop waits for merges (T-121), T-181 acknowledged instructions and the config drift warning, T-182 a push race does not re-run the gate, T-183 T-134 F2/F3 names. Their goals are in gear/voyages/M4.md.

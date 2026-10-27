@@ -121,6 +121,20 @@ pub fn send(
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
             crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+            // A rework keeps the work the reviewer read (design §10.7, row
+            // B03-08): the new candidate carries the previous attempt's
+            // candidate. The refusal names that commit. It comes before the
+            // push check: a branch that lost the reviewed work is refused for
+            // that, not for where it is pushed.
+            if let (Some(ctx), Some(task), Some(attempt)) =
+                (env.ctx.as_ref(), args.task.as_deref(), args.attempt)
+            {
+                let previous = store
+                    .read(|tx| crate::tasks::rework_base_candidate(tx, &ctx.project, task, attempt))?;
+                if let Some(previous) = previous {
+                    crate::tasks::require_rework_contains(&gate.worktree, &previous, candidate)?;
+                }
+            }
             // And it must be on the task's branch on origin (T-83): a hand-in
             // nobody can fetch is not a hand-in (M2.1: T-60).
             if let Some(task) = args.task.as_deref() {

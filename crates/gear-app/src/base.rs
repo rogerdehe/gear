@@ -107,6 +107,124 @@ pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearRes
     ))
 }
 
+/// Whether `candidate` contains `base`: `git merge-base --is-ancestor base
+/// candidate` in `worktree`.
+///
+/// Git that cannot place a commit is an error, never a "no": a check that
+/// cannot answer must not pass silently (T-19's rule).
+pub fn contains(worktree: &Path, base: &str, candidate: &str) -> GearResult<bool> {
+    let where_ = worktree.display();
+    let checked = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-base", "--is-ancestor", base, candidate])
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot check whether {candidate} contains {base} in {where_}: {error}"),
+            )
+        })?;
+    match checked.status.code() {
+        // 0: the base is an ancestor of the candidate — the candidate carries it.
+        Some(0) => Ok(true),
+        // 1: the base is not an ancestor of the candidate — it does not carry it.
+        Some(1) => Ok(false),
+        _ => Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot check whether {candidate} contains {base} in {where_}: {}",
+                excerpt(&checked.stderr)
+            ),
+        )),
+    }
+}
+
+/// Whether the tree of `candidate` is present in the integration branch at
+/// origin (design §10.7, row B03-01): the work landed there, even when the
+/// commit that carried it was rewritten by the merge.
+///
+/// The branch is fetched first: a local tracking ref may be stale, and the
+/// answer must be about the remote as it is now.
+pub fn tree_on_integration(
+    repo_path: &str,
+    integration: &str,
+    candidate: &str,
+) -> GearResult<bool> {
+    let reference = format!("refs/remotes/origin/{integration}");
+    let fetched = Command::new("git")
+        .args([
+            "fetch",
+            "origin",
+            &format!("+refs/heads/{integration}:{reference}"),
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "cannot fetch origin/{integration} in {repo_path} to tell whether {candidate} is merged: {error}"
+                ),
+            )
+        })?;
+    if !fetched.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot fetch origin/{integration} in {repo_path} to tell whether {candidate} is merged: {}",
+                excerpt(&fetched.stderr)
+            ),
+        ));
+    }
+    // The tree of the candidate: the content it brings, whatever the merge
+    // did to the commit that carried it.
+    let tree = Command::new("git")
+        .args(["rev-parse", &format!("{candidate}^{{tree}}")])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot place {candidate} in {repo_path}: {error}"),
+            )
+        })?;
+    if !tree.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot place {candidate} in {repo_path}: {}",
+                excerpt(&tree.stderr)
+            ),
+        ));
+    }
+    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+    // The trees of the commits on the branch: the candidate's tree is one of
+    // them when that content landed there.
+    let trees = Command::new("git")
+        .args(["log", "--format=%T", &reference])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read {reference} in {repo_path}: {error}"),
+            )
+        })?;
+    if !trees.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot read {reference} in {repo_path}: {}",
+                excerpt(&trees.stderr)
+            ),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&trees.stdout)
+        .lines()
+        .any(|line| line.trim() == tree))
+}
+
 /// Refuse unless `candidate` contains the current `origin/<integration>`:
 /// `git fetch origin`, then `git merge-base --is-ancestor origin/<integration>
 /// <candidate>` in `worktree`. Nothing is written here; the caller runs this
