@@ -5,6 +5,7 @@
 //! `plan apply`'s job, not this parser's.
 
 use gear_model::{ErrorCode, GearError, GearResult};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -1031,15 +1032,42 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
 /// - every `## NEW` block header becomes `## T-<id>`, in draft order (the ids
 ///   the apply assigned);
 /// - the `# Verdicts` section is dropped: verdicts live in the store, and a
-///   re-applied file must settle nothing.
+///   re-applied file must settle nothing;
+/// - the `# Staff` lines the apply used are dropped (B5): a staff line is an
+///   instruction, and an instruction that was carried out must not be carried
+///   out again (a `- remerge T-<n>` line would be refused the second time).
+///   A `# Staff` section that keeps no line is dropped with them: an empty
+///   section is noise, and a second one would be refused by the parser.
 ///
 /// Everything else — comments, sections, field lines, spacing — is kept as the
 /// captain wrote it, so the file is edited in place and re-applied as is.
-pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
+pub fn rewrite_applied(
+    text: &str,
+    version: i64,
+    created: &[String],
+    used_staff: &[usize],
+) -> String {
+    let source: Vec<&str> = text.lines().collect();
+    // The staff lines the apply used, by their number in the text.
+    let used: BTreeSet<usize> = used_staff.iter().copied().collect();
+    // The `# Staff` section, and whether it keeps a line of its own.
+    let staff_header = source
+        .iter()
+        .position(|line| is_section_named(line.trim(), "Staff"));
+    let staff_empty = staff_header.is_some_and(|header| {
+        source
+            .iter()
+            .enumerate()
+            .skip(header + 1)
+            .take_while(|(_, line)| !line.trim().starts_with("# "))
+            .filter(|(_, line)| !line.trim().is_empty())
+            .all(|(index, _)| used.contains(&(index + 1)))
+    });
     let mut lines: Vec<String> = Vec::new();
     let mut ids = created.iter();
     let mut dropping = false;
-    for line in text.lines() {
+    for (index, line) in source.iter().enumerate() {
+        let line_no = index + 1;
         let trimmed = line.trim();
         if dropping {
             // The section ends at the next `# ` header (which is kept) or at
@@ -1051,6 +1079,15 @@ pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
             }
         }
         if is_section_named(trimmed, "Verdicts") {
+            dropping = true;
+            continue;
+        }
+        // The staff lines the apply used are gone (B5), and a section that
+        // keeps nothing goes with them.
+        if used.contains(&line_no) {
+            continue;
+        }
+        if staff_empty && staff_header == Some(index) {
             dropping = true;
             continue;
         }
@@ -1130,7 +1167,7 @@ mod tests {
         let text = format!(
             "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
         );
-        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()]);
+        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[]);
         assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
         assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
         assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
@@ -1150,9 +1187,33 @@ mod tests {
     }
 
     #[test]
+    fn the_staff_lines_the_apply_used_are_gone() {
+        // B5: a staff line is an instruction, and an instruction that was
+        // carried out must not be carried out again (a `- remerge T-<n>` line
+        // would be refused the second time).
+        let text = format!(
+            "{HEADER}# Staff\n- remerge T-12\n- hold heat reason=test\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        );
+        // The remerge line was used (line 3), the hold line was not.
+        let rewritten = rewrite_applied(&text, 2, &[], &[3]);
+        assert!(!rewritten.contains("remerge"), "{rewritten}");
+        assert!(rewritten.contains("- hold heat reason=test"), "{rewritten}");
+        assert!(rewritten.contains("# Staff"), "the section keeps a line: {rewritten}");
+
+        // A section that keeps nothing goes with its lines: no empty section
+        // and no second one.
+        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4]);
+        assert!(!rewritten.contains("# Staff"), "{rewritten}");
+        assert!(!rewritten.contains("remerge"), "{rewritten}");
+        assert!(!rewritten.contains("hold heat"), "{rewritten}");
+        // The file still parses as a draft.
+        parse(&rewritten).unwrap();
+    }
+
+    #[test]
     fn a_verdicts_section_at_the_end_leaves_no_tail() {
         let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
-        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()]);
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[]);
         assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
         assert!(!rewritten.contains("Verdicts"), "{rewritten}");
     }

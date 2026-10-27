@@ -115,6 +115,7 @@ fn send_args(kind: MsgKind) -> SendArgs {
         left: None,
         blocker: None,
         on: None,
+        friction: None,
         request_id: "r1".into(),
     }
 }

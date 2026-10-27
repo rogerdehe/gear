@@ -44,6 +44,9 @@ pub struct SendArgs {
     pub blocker: Option<String>,
     /// Blocked only (design §5.3): the task the lane waits for.
     pub on: Option<String>,
+    /// Result/Review only (design §6.1): what cost time that the captain
+    /// could fix.
+    pub friction: Option<String>,
     pub request_id: String,
 }
 
@@ -228,6 +231,17 @@ pub fn send(
                 ),
             ));
         }
+        if args.friction.is_some()
+            && !matches!(args.kind, MsgKind::Result | MsgKind::Review)
+        {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--friction` belongs to a hand-in or a review, not to {}",
+                    args.kind.as_str()
+                ),
+            ));
+        }
         if args.to.is_some() && args.reply_to.is_some() {
             return Err(GearError::new(
                 ErrorCode::BadFormat,
@@ -358,6 +372,23 @@ pub fn send(
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
             if args.kind == MsgKind::Result {
+                // The friction report of the round (design §6.1): when the
+                // round passed its budget, the report is required (§6.2) and
+                // the hand-in is refused without it.
+                let role = if args.attempt.unwrap_or_default() >= 2 {
+                    "rework"
+                } else {
+                    "dev"
+                };
+                let required = check_friction(
+                    tx,
+                    &ctx.project,
+                    task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    role,
+                    args.friction.as_deref(),
+                    now,
+                )?;
                 crate::tasks::submit_result(
                     tx,
                     &ctx.project,
@@ -376,13 +407,44 @@ pub fn send(
                     &args.body,
                     now,
                 )?;
+                store_friction(
+                    tx,
+                    &ctx.project,
+                    task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    role,
+                    &seat.id,
+                    args.friction.as_deref(),
+                    required,
+                )?;
             }
 
             // A review stores the verdict on the attempt's review record
             // before the item reaches the captain (T-2). It settles nothing:
             // the task and the attempt keep their state.
             if let Some(review) = &review {
+                // The reviewer's own friction report (§6.1): the review round
+                // has a budget too (§5.1).
+                let required = check_friction(
+                    tx,
+                    &ctx.project,
+                    &review.task,
+                    review.attempt,
+                    "review",
+                    args.friction.as_deref(),
+                    now,
+                )?;
                 crate::review::submit_review(tx, review, now)?;
+                store_friction(
+                    tx,
+                    &ctx.project,
+                    &review.task,
+                    review.attempt,
+                    "review",
+                    &seat.id,
+                    args.friction.as_deref(),
+                    required,
+                )?;
             }
 
             // A declared wait (design §5.3): the lane's task waits for
@@ -499,7 +561,7 @@ fn stored_receipt(
 /// transaction (to replay a committed receipt) or inside it.
 fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
     format!(
-        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}",
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}|friction={:?}",
         args.kind.as_str(),
         args.body,
         args.task,
@@ -513,7 +575,8 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> S
         args.urgent,
         args.left,
         args.blocker,
-        args.on
+        args.on,
+        args.friction
     )
 }
 
@@ -713,6 +776,94 @@ fn handlable(message: &MessageRow, mode: ReplyMode) -> bool {
                 || (message.state == MsgState::Info && mode == ReplyMode::Resolve)
         }
     }
+}
+
+/// The friction report of a round (design §6.1): what cost the lane or the
+/// reviewer time that the captain could fix.
+///
+/// When the round is over its budget the report is required (§6.2): the
+/// hand-in is refused with `FRICTION_REQUIRED` and the numbers that say so.
+/// Nothing is written when it refuses. Returns whether the report was
+/// required.
+fn check_friction(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    role: &str,
+    friction: Option<&str>,
+    now: Ts,
+) -> GearResult<bool> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let round = rounds
+        .iter()
+        .find(|round| round.attempt == attempt && round.role == role);
+    let model = round.and_then(|round| round.model.as_deref());
+    let budget = tx.round_budget_min(project, task, attempt, role, model)?;
+    // The round's own clock (design §5.1). A review is charged from the
+    // reviewer's own start — its delivery confirmation, else the round's
+    // start — and never from the writer's check-in: the reviewer did not
+    // spend the writer's time.
+    let started = if role == "review" {
+        tx.get_attempt(project, task, attempt)?
+            .and_then(|attempt| attempt.sent_at)
+            .or_else(|| round.map(|round| round.start_at))
+    } else {
+        tx.attempt_times(project, task, attempt)
+            .ok()
+            .and_then(|times| times.started)
+            .or_else(|| {
+                tx.get_attempt(project, task, attempt)
+                    .ok()
+                    .flatten()
+                    .map(|attempt| attempt.started)
+            })
+    };
+    // The active time of the round: now − its start − its own pauses.
+    let paused = round.map(|round| round.paused_s).unwrap_or(0);
+    let active_s = match started {
+        Some(started) => (now - started - paused).max(0),
+        None => 0,
+    };
+    // The budget is in minutes and the active time in seconds: a round that is
+    // one second over its budget is over (§6.2). The minutes are for the
+    // message only.
+    let over = active_s > budget * 60;
+    if over && friction.is_none() {
+        return Err(GearError::new(
+            ErrorCode::FrictionRequired,
+            format!(
+                "{task} took {} min against {budget} min. Add --friction \"<what made it slow>\" and send again.",
+                (active_s + 59) / 60
+            ),
+        ));
+    }
+    Ok(over)
+}
+
+/// Store the friction report of a round (design §6.1): what cost time that
+/// the captain could fix, with the round's own facts (§6.3).
+fn store_friction(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    role: &str,
+    seat: &str,
+    friction: Option<&str>,
+    required: bool,
+) -> GearResult<()> {
+    let Some(body) = friction else { return Ok(()) };
+    tx.insert_friction(&gear_store::NewFriction {
+        project: project.to_string(),
+        task: task.to_string(),
+        attempt,
+        role: role.to_string(),
+        seat: seat.to_string(),
+        body: body.to_string(),
+        required,
+    })?;
+    Ok(())
 }
 
 /// The structured fields of a progress answer (design §5.2): the minutes the
@@ -925,18 +1076,27 @@ pub fn reply(
                     )));
                 }
                 // A review fail (or a failed merge) is settled where it can
-                // be: by a `# Verdicts` line. Resolving it by reply would
-                // close the item and settle nothing (T-90).
+                // be: by a plan line — a `# Verdicts` line, or a `# Staff`
+                // `- remerge T-<n>` line for a failed merge (B5). Resolving it
+                // by reply would close the item and settle nothing (T-90).
                 if args.mode == ReplyMode::Resolve {
                     if let Some(hint) = crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
-                        return Err(GearError::new(
-                            ErrorCode::BadFormat,
-                            format!(
-                                "message {} is settled by a plan # Verdicts line, not by a reply: next: {}",
-                                message.id,
-                                crate::home::verdict_command(&hint),
-                            ),
-                        ));
+                        let mut detail = format!(
+                            "message {} is settled by a plan {} line, not by a reply: next: {}",
+                            message.id,
+                            crate::home::verdict_section(&hint),
+                            crate::home::verdict_command(&hint),
+                        );
+                        // A failed merge is retried with `- remerge T-<n>` (B5);
+                        // a rework is the other way round, and the line for it
+                        // is named too.
+                        if hint.remerge.is_some() {
+                            detail.push_str(&format!(
+                                " (a rework is a `# Verdicts` line: {})",
+                                hint.line
+                            ));
+                        }
+                        return Err(GearError::new(ErrorCode::BadFormat, detail));
                     }
                 }
                 originals.push(message);

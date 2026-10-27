@@ -36,6 +36,10 @@ pub struct ApplyResult {
     /// cancelled done task, resolved "cancelled by the captain".
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// What the captain should know about this apply (design §7.2: a decision
+    /// line that is not structured is logged as a note).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -188,6 +192,35 @@ fn apply_queue(
     // 4. sections that belong to later cuts (after the base check, as the doc
     // comment orders the steps).
     reject_sections(draft)?;
+
+    // The captain's decision lines (design §7): every line of `# Decisions` is
+    // read, structured or a note (§7.2), and recorded (§7.3).
+    let decisions: Vec<crate::decision::Decision> = draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .collect();
+    let voyage = voyage_of(tx, project, draft)?;
+    let applied_version = current + 1;
+    let mut warnings: Vec<String> = Vec::new();
+    for (index, line) in draft.decisions.iter().enumerate() {
+        let decision = &decisions[index];
+        if decision.note {
+            warnings.push(format!(
+                "warning: decision line {} is not structured; logged as a note",
+                index + 1
+            ));
+        }
+        record_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            line,
+            decision,
+            now,
+        )?;
+    }
 
     let existing: BTreeMap<String, TaskRow> = tx
         .tasks_of_project(project)?
@@ -431,6 +464,21 @@ fn apply_queue(
                         task.state = TaskState::Cancelled;
                         if was != TaskState::Cancelled {
                             cancelled.push(id.clone());
+                            // The decision log (design §7.4): a cancelled task
+                            // is a cut, and the why is the one the captain
+                            // wrote about it.
+                            record_gear_decision(
+                                tx,
+                                project,
+                                &voyage,
+                                applied_version,
+                                "cut",
+                                &format!("{id} cancelled"),
+                                why_naming(&decisions, id)
+                                    .or_else(|| Some("(no why written)".to_string())),
+                                id,
+                                now,
+                            )?;
                         }
                         // T-112: a done task's open merge items close with it —
                         // the failed merge and the push refusal are history,
@@ -524,16 +572,50 @@ fn apply_queue(
     for item in &draft.staff {
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
+            // The decision log (design §7.4): a staff line is a decision.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         if let StaffItem::Release { name, .. } = item {
             release_seat(tx, project, name, staff_line(item), agents, now)?;
             staffed.push(format!("release {name}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         let (lane, verb, target, reason) = match item {
@@ -575,6 +657,19 @@ fn apply_queue(
         }
         if seat.state == target {
             // Staff is a target, not a command: already there, nothing to do.
+            // The captain still made a decision (design §7.4), so it is
+            // logged — once.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         require_transition(
@@ -595,6 +690,18 @@ fn apply_queue(
         })?;
         tx.set_seat_state(&seat_id, target, Some(&reason), now)?;
         staffed.push(format!("{verb} {lane}"));
+        // The decision log (design §7.4): a staff line is a decision.
+        record_gear_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            "staff",
+            &staff_text(item),
+            None,
+            &staff_text(item),
+            now,
+        )?;
     }
 
     let version = current + 1;
@@ -604,16 +711,14 @@ fn apply_queue(
     for line in &draft.verdicts {
         // A pass over a failed review says why (design §7.4): the captain
         // overrules the reviewer, and the reason is recorded.
-        if line.pass && line.why.is_none() {
-            let failed_review = tx
-                .get_review_verdict(project, &line.task, line.attempt)?
-                .is_some_and(|review| !review.passed);
-            if failed_review {
-                return Err(bad(
-                    line.line,
-                    "a pass over a failed review needs why=\"…\"",
-                ));
-            }
+        let failed_review = tx
+            .get_review_verdict(project, &line.task, line.attempt)?
+            .is_some_and(|review| !review.passed);
+        if line.pass && failed_review && line.why.is_none() {
+            return Err(bad(
+                line.line,
+                "a pass over a failed review needs why=\"…\"",
+            ));
         }
         let verdict = crate::tasks::Verdict {
             project: project.to_string(),
@@ -630,6 +735,38 @@ fn apply_queue(
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The decision log (design §7.4): a pass over a failed review is an
+        // override, a fail is a rework.
+        if line.pass {
+            if failed_review {
+                record_gear_decision(
+                    tx,
+                    project,
+                    &voyage,
+                    applied_version,
+                    "override",
+                    &format!(
+                        "{} attempt {} passed over a failed review",
+                        line.task, line.attempt
+                    ),
+                    line.why.clone(),
+                    &format!("{}|{}", line.task, line.attempt),
+                    now,
+                )?;
+            }
+        } else {
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "rework",
+                line.rework.as_deref().unwrap_or_default(),
+                None,
+                &format!("{}|{}", line.task, line.attempt),
+                now,
+            )?;
+        }
         // The minutes the rework round gets (design §5.1): written after the
         // settle, which writes the task row itself.
         if let Some(minutes) = line.estimate {
@@ -654,6 +791,7 @@ fn apply_queue(
 
     Ok(ApplyResult {
         version,
+        warnings,
         created,
         contract_changed,
         not_mentioned,
@@ -851,7 +989,7 @@ fn reject_sections(draft: &Draft) -> GearResult<()> {
 }
 
 /// The draft line of a staff item.
-fn staff_line(item: &StaffItem) -> usize {
+pub fn staff_line(item: &StaffItem) -> usize {
     match item {
         StaffItem::Temp { line, .. }
         | StaffItem::Park { line, .. }
@@ -1377,7 +1515,7 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
 
 /// `YYYY-MM-DD` for unix seconds (civil-from-days, no extra crate) — enough to
 /// date a departure without pulling a time library in.
-fn utc_date(ts: i64) -> String {
+pub fn utc_date(ts: i64) -> String {
     let (days, _) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -1392,8 +1530,171 @@ fn utc_date(ts: i64) -> String {
 }
 
 /// Whether refill/idle warnings are suppressed by the captain's tail decision.
+///
+/// The tail can end by itself (B6): `- tail: heat until=T-12` stops silencing
+/// the lane when T-12 is done, `- tail: heat until=2026-10-26T18:00:00Z` when
+/// that time has come. The callers that have no clock of their own get the
+/// wall clock — a deadline is a wall-clock stamp, so that is the clock it is
+/// compared with.
 pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> {
-    Ok(tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() == Some("1"))
+    lane_in_tail_now(tx, project, lane, wall_clock(), true)
+}
+
+/// The same, with the caller's clock, writing nothing: the read-only callers
+/// (the plan's own checks) see the tail as it is, without ending it.
+pub fn lane_in_tail_at(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    lane_in_tail_now(tx, project, lane, now, false)
+}
+
+/// Whether the captain's tail silences this lane now, and — when the caller
+/// writes — the end of a tail that has ended.
+///
+/// The end is written once: the lanes the tail silences go back to "not
+/// tailed" and the declaration is marked spent. A task that is reopened for a
+/// rework (a failed merge, a fail verdict) therefore never revives a tail
+/// that has already ended (design §10.7, row B6).
+fn lane_in_tail_now(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    now: Ts,
+    write: bool,
+) -> GearResult<bool> {
+    if tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() != Some("1") {
+        return Ok(false);
+    }
+    if !tail_is_over(tx, project, now)? {
+        return Ok(true);
+    }
+    if write {
+        persist_tail_end(tx, project)?;
+    }
+    Ok(false)
+}
+
+/// Write the end of a tail: the lanes it silences go back to "not tailed" and
+/// the declaration is marked spent — a later apply of the same line (it is
+/// still in the plan file) does not revive it.
+fn persist_tail_end(tx: &Tx<'_>, project: &str) -> GearResult<()> {
+    let mut lanes: Vec<String> = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        if tx.get_meta(&format!("lane-tail:{project}:{}", seat.name))?.as_deref() == Some("1") {
+            lanes.push(seat.name);
+        }
+    }
+    if lanes.is_empty() {
+        return Ok(());
+    }
+    lanes.sort();
+    let until = tx.get_meta(&format!("lane-tail-until:{project}"))?.unwrap_or_default();
+    let declaration = tail_declaration(&lanes, &until);
+    for lane in &lanes {
+        tx.set_meta(&format!("lane-tail:{project}:{lane}"), "0")?;
+    }
+    tx.set_meta(&format!("lane-tail-spent:{project}"), &declaration)?;
+    Ok(())
+}
+
+/// The fingerprint of a tail declaration: the lanes it silences and its end.
+/// The same declaration replayed (the line is still in the plan file) has the
+/// same fingerprint.
+fn tail_declaration(lanes: &[String], until: &str) -> String {
+    format!("{}|{}", lanes.join(","), until)
+}
+
+/// When the captain's tail ends by itself (B6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailUntil {
+    /// The tail ends when the task is over (done, failed or cancelled).
+    Task(String),
+    /// The tail ends at this moment (unix seconds).
+    At(Ts),
+}
+
+impl TailUntil {
+    /// The form the store keeps it in.
+    fn as_stored(&self) -> String {
+        match self {
+            TailUntil::Task(task) => format!("task:{task}"),
+            TailUntil::At(at) => format!("at:{at}"),
+        }
+    }
+
+    /// The form the store keeps it in, read back.
+    fn from_stored(text: &str) -> Option<TailUntil> {
+        let (kind, value) = text.split_once(':')?;
+        match kind {
+            "task" => Some(TailUntil::Task(value.to_string())),
+            "at" => value.parse().ok().map(TailUntil::At),
+            _ => None,
+        }
+    }
+
+    /// The text the captain reads (in the plan and in the apply's output).
+    pub fn as_text(&self) -> String {
+        match self {
+            TailUntil::Task(task) => format!("until={task}"),
+            TailUntil::At(at) => format!("until={}", rfc3339(*at)),
+        }
+    }
+}
+
+/// The tail's end, when it has one.
+pub fn tail_until(tx: &Tx<'_>, project: &str) -> GearResult<Option<TailUntil>> {
+    Ok(tx
+        .get_meta(&format!("lane-tail-until:{project}"))?
+        .and_then(|text| TailUntil::from_stored(&text)))
+}
+
+/// Whether the tail is over: its end has come (B6).
+fn tail_is_over(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<bool> {
+    let Some(until) = tail_until(tx, project)? else {
+        return Ok(false);
+    };
+    match until {
+        // The task the tail waits for is over: done, failed or cancelled. A
+        // task that failed can be reworked by a new attempt, but the wait is
+        // over — the captain decides what happens next.
+        TailUntil::Task(task) => Ok(match tx.get_task(project, &task)? {
+            Some(row) => matches!(row.state, TaskState::Done | TaskState::Failed | TaskState::Cancelled),
+            // A task that does not exist will never be done.
+            None => true,
+        }),
+        TailUntil::At(at) => Ok(now >= at),
+    }
+}
+
+/// The lanes the captain's tail silences right now (B5: the apply says which
+/// ones, so a lane that gets no warning is not a mystery). The end of a tail
+/// that has ended is written here, so the apply's path ends it too.
+pub fn tailed_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
+    let mut tailed = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        if lane_in_tail_now(tx, project, &seat.name, now, true)? {
+            tailed.push(seat.name);
+        }
+    }
+    Ok(tailed)
+}
+
+/// The wall clock, for the callers that have none. A tail's deadline is a
+/// wall-clock stamp, so the wall clock is the clock it is compared with.
+fn wall_clock() -> Ts {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A lane that is about to stand idle after an apply (T-58, ops/lessons.md 7a).
@@ -1443,7 +1744,7 @@ impl IdleLane {
 /// one — and stands idle when there is none.
 ///
 /// Read-only: the apply is not changed by this, the captain is only told.
-pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
+pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLane>> {
     let tasks = tx.tasks_of_project(project)?;
     let done: BTreeSet<&str> = tasks
         .iter()
@@ -1457,8 +1758,9 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
         {
             continue;
         }
-        // The captain's tail: these lanes may stand idle (design/05).
-        if lane_in_tail(tx, project, &seat.name)? {
+        // The captain's tail: these lanes may stand idle (design/05). The
+        // read does not end a tail (the apply's path does).
+        if lane_in_tail_at(tx, project, &seat.name, now)? {
             continue;
         }
         let lane_tasks: Vec<&TaskRow> = tasks
@@ -1503,12 +1805,29 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
 
 /// `# Decisions` / `- tail: heat wire` replaces the named tail lanes;
 /// `- tail: -` clears the declaration. Omitted declarations keep the state.
+///
+/// The tail can end by itself (B6): `- tail: heat until=T-12` (the tail ends
+/// when T-12 is over) or `- tail: heat until=2026-10-26T18:00:00Z` (at that
+/// time). The end belongs to the declaration: a tail without one lasts until
+/// the captain clears it.
 fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
     for decision in &draft.decisions {
-        let Some(names) = decision.strip_prefix("tail:") else { continue; };
-        let names = names.trim();
-        let lanes: BTreeSet<_> = names.split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|s| !s.is_empty()).collect();
+        let Some(rest) = decision.strip_prefix("tail:") else { continue; };
+        let mut lanes: BTreeSet<String> = BTreeSet::new();
+        let mut until: Option<TailUntil> = None;
+        for token in rest.split(|c: char| c.is_whitespace() || c == ',') {
+            if token.is_empty() {
+                continue;
+            }
+            if let Some(value) = token.strip_prefix("until=") {
+                if until.is_some() {
+                    return Err(bad(1, "tail: takes one `until=`"));
+                }
+                until = Some(parse_tail_until(value)?);
+                continue;
+            }
+            lanes.insert(token.to_string());
+        }
         if lanes.is_empty() {
             return Err(bad(1, "tail: needs lane names, or - to clear"));
         }
@@ -1521,12 +1840,196 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
         if lanes.contains("-") && lanes.len() != 1 {
             return Err(bad(1, "tail: - cannot be combined with lane names"));
         }
+        // The end of the tail: a task that must be over, or a moment.
+        if let Some(TailUntil::Task(task)) = &until {
+            if tx.get_task(project, task)?.is_none() {
+                return Err(bad(1, format!("tail: unknown task {task}")));
+            }
+        }
+        if lanes.contains("-") && until.is_some() {
+            return Err(bad(1, "tail: - clears the tail, it takes no `until=`"));
+        }
+        let until_stored = until.as_ref().map(TailUntil::as_stored).unwrap_or_default();
+        // The same declaration, replayed (its line is still in the plan file),
+        // must not revive a tail that has already ended: only a genuinely new
+        // declaration resets it.
+        let declaration = tail_declaration(&lanes.iter().cloned().collect::<Vec<_>>(), &until_stored);
+        let spent = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+        let spent = spent == declaration;
         for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
             tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-                if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
+                if spent { "0" } else if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
         }
+        if !spent {
+            tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
+        }
+        tx.set_meta(&format!("lane-tail-until:{project}"), &until_stored)?;
     }
     Ok(())
+}
+
+/// The end of a tail: a task id or an RFC3339 moment.
+fn parse_tail_until(value: &str) -> GearResult<TailUntil> {
+    let is_task = match value.strip_prefix("T-") {
+        Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    };
+    if is_task {
+        return Ok(TailUntil::Task(value.to_string()));
+    }
+    match parse_rfc3339(value) {
+        Some(at) => Ok(TailUntil::At(at)),
+        None => Err(bad(
+            1,
+            format!("tail: `until=` needs a task id or an RFC3339 time, got {value:?}"),
+        )),
+    }
+}
+
+/// An RFC3339 moment (`2026-10-26T18:00:00Z`, with an optional `+HH:MM` or
+/// `-HH:MM` offset) as unix seconds. `None` when the text is not one.
+///
+/// No time library: the civil date is counted from the Unix epoch, the same
+/// way [`utc_date`] counts back.
+pub fn parse_rfc3339(text: &str) -> Option<Ts> {
+    let text = text.trim();
+    let (date, time) = text.split_once(['T', 't', ' '])?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    // The day must exist in that month: 2026-02-31 is not a date, and
+    // counting it as one would end the tail in March.
+    if date_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+    {
+        return None;
+    }
+    // The zone: `Z`, `+HH:MM`, `-HH:MM` or nothing (UTC).
+    let (clock, zone) = match time.find(['+', '-']) {
+        Some(at) => (&time[..at], &time[at..]),
+        None => {
+            // The zone may be the `Z` at the end: it is not part of the clock.
+            let clock = time
+                .strip_suffix('Z')
+                .or_else(|| time.strip_suffix('z'))
+                .unwrap_or(time);
+            (clock, "Z")
+        }
+    };
+    let mut clock_parts = clock.split(':');
+    let hour: i64 = clock_parts.next()?.parse().ok()?;
+    let minute: i64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    // The seconds, with an optional fraction (`18:00:00.123`).
+    let (seconds_text, fraction) = match clock_parts.next() {
+        Some(text) => match text.split_once('.') {
+            Some((seconds, fraction)) => (seconds, Some(fraction)),
+            None => (text, None),
+        },
+        None => ("0", None),
+    };
+    let second: i64 = seconds_text.parse().ok()?;
+    if clock_parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    // The fraction: digits only, and a nonzero one rounds the moment up to the
+    // next second — the tail must not end before the instant the captain
+    // named.
+    let mut second = second;
+    if let Some(fraction) = fraction {
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if fraction.bytes().any(|byte| byte != b'0') {
+            second += 1;
+        }
+    }
+    let offset = match zone {
+        "Z" | "z" => 0,
+        _ => {
+            let sign = match zone.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let (hours, minutes) = zone[1..].split_once(':')?;
+            let hours: i64 = hours.parse().ok()?;
+            let minutes: i64 = minutes.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// The civil date of a moment as `YYYY-MM-DDTHH:MM:SSZ` (the inverse of
+/// [`parse_rfc3339`]).
+fn rfc3339(ts: Ts) -> String {
+    let days = ts.div_euclid(86_400);
+    let seconds = ts.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
+/// The days in a month of a year (0 for a month that does not exist).
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The days since the Unix epoch of a civil date (Howard Hinnant's civil
+/// calendar algorithms).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = floor_div(year, 400);
+    let year_of_era = year - era * 400;
+    let month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The civil date of a number of days since the Unix epoch.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = floor_div(z, 146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// The floor of a division (Rust's `/` truncates towards zero).
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b;
+    if a % b != 0 && (a < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    }
 }
 
 /// Fix the departure of every milestone that has tasks and no departure yet:
@@ -1678,6 +2181,128 @@ fn cancel_task(
     Ok(())
 }
 
+
+/// The voyage a plan is for: the last milestone block of the file (the
+/// current one). A plan with no milestone block — a decisions-only or
+/// staff-only apply — belongs to the voyage the project is in, the one that
+/// departed last (the same rule the config logging uses).
+fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
+    if let Some((header, _)) = draft.milestones.last() {
+        return Ok(crate::draft::milestone_parts(header).0.to_string());
+    }
+    current_voyage(tx, project)
+}
+
+/// The voyage the project is in: the one that departed last.
+pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
+    let mut latest: Option<(Ts, String)> = None;
+    for voyage in tx.voyages_of_project(project)? {
+        let Some(departure) = voyage.departure else { continue };
+        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
+            latest = Some((departure, voyage.milestone));
+        }
+    }
+    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
+}
+
+/// Record a decision of the captain (§7.3): the line as it was written, its
+/// parts, and its key — the sha256 of the line with its whitespace collapsed.
+/// A line that is already in the log is skipped, and an edited line is a new
+/// decision (the table is append-only).
+fn record_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    line: &str,
+    decision: &crate::decision::Decision,
+    now: Ts,
+) -> GearResult<()> {
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key(line),
+        voyage: voyage.to_string(),
+        at: if decision.at.is_empty() {
+            crate::decision::apply_time(now)
+        } else {
+            decision.at.clone()
+        },
+        kind: decision.kind.clone(),
+        what: decision.what.clone(),
+        why: decision.why.clone(),
+        alt: decision.alt.clone(),
+        changes: decision.changes.clone(),
+        star: decision.star,
+        source: "plan".to_string(),
+        line: Some(line.to_string()),
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// Record an entry GEAR writes itself (§7.4): the event, its kind and what it
+/// was about. The key is the sha256 of the entry's own text, so the same event
+/// is recorded once.
+fn record_gear_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    kind: &str,
+    what: &str,
+    why: Option<String>,
+    event: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let text = format!("{kind}|{event}|{what}|{}", why.clone().unwrap_or_default());
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key_of(&text),
+        voyage: voyage.to_string(),
+        at: crate::decision::apply_time(now),
+        kind: kind.to_string(),
+        what: what.to_string(),
+        why,
+        alt: None,
+        changes: None,
+        // GEAR's own entries are never starred (§7.2).
+        star: false,
+        source: "gear".to_string(),
+        line: None,
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// The text of a staff line as the captain wrote it (§7.4: the `staff`
+/// entry's "what" is the line).
+fn staff_text(item: &StaffItem) -> String {
+    match item {
+        StaffItem::Temp { id, task, .. } => format!("temp {id} task={task}"),
+        StaffItem::Park { lane, until, until_task, .. } => match (until, until_task) {
+            (Some(until), _) => format!("park {lane} until={until}"),
+            (_, Some(task)) => format!("park {lane} until-task={task}"),
+            _ => format!("park {lane}"),
+        },
+        StaffItem::Hold { lane, reason, .. } => format!("hold {lane} reason={reason}"),
+        StaffItem::Retire { lane, .. } => format!("retire {lane}"),
+        StaffItem::Retry { lane, .. } => format!("retry {lane}"),
+        StaffItem::Release { name, .. } => format!("release {name}"),
+        StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+    }
+}
+
+/// The why of the decision line that names this task (§7.4: the `cut` entry's
+/// why is the one the captain wrote, or `(no why written)`).
+///
+/// A whole identifier only: `T-1` does not name `T-10`.
+fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<String> {
+    decisions
+        .iter()
+        .filter(|decision| crate::decision::names_task(&decision.what, task))
+        .find_map(|decision| decision.why.clone())
+}
+
 /// The departure is fixed when the milestone gets its first task: the time of
 /// that apply (the tasks it creates are created then) and how many tasks the
 /// milestone holds. Later applies update the words but never move it.
@@ -1780,6 +2405,17 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("Estimate: {minutes} minutes\n"));
     }
+    // The round's budget (design §5.1) and what a hand-in past it must carry
+    // (design §6.2): the friction report is then required.
+    if let Some(n) = open_n {
+        let role = if n >= 2 { "rework" } else { "dev" };
+        let budget = tx.round_budget_min(project, task, n, role, None)?;
+        text.push_str(&format!(
+            "Budget: {budget} min. Past it, your hand-in must carry --friction \"…\" \
+             (a permission you lacked and worked around, a test or build that took far too long, \
+             an unclear contract, a missing tool or fixture, a step that cost much time).\n"
+        ));
+    }
     // The project standard (T-84): the writer judges against it too.
     if let Some(line) = crate::standard::line_for(tx, project)? {
         text.push_str(&line);
@@ -1871,4 +2507,17 @@ fn failed_round_of(
         note(verdict.attempt, verdict.passed);
     }
     Ok(failed)
+}
+
+#[cfg(test)]
+mod tail_time_tests {
+    use super::parse_rfc3339;
+
+    #[test]
+    fn parses() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-26T18:00:00Z"), Some(1793037600));
+        assert_eq!(parse_rfc3339("2026-10-26T18:00:00+01:00"), Some(1793037600 - 3600));
+        assert_eq!(parse_rfc3339("tomorrow"), None);
+    }
 }

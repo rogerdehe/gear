@@ -43,6 +43,7 @@ A lane's worktree holds only its repo (§9).
 
 0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework).
 1. **Orient.** Read the packet completely (goal, acceptance, the voyage's `done:`/`bar:`), the files it names, the recent history of the area.
+   **You implement; you never design.** When the packet is unclear, contradicts the design or a message, or you catch yourself weighing two readings, stop at once and ask (§6) with your default, then go on with the default. A design question is the captain's work, not yours.
 2. **Reproduce before fixing** a bug. If you cannot observe it, your model is wrong: ask.
 3. **Implement the minimum** the goal needs. No side refactors; what you notice goes into the brief under "Out of scope".
 4. **Verify at the depth the change deserves:**
@@ -56,7 +57,7 @@ A lane's worktree holds only its repo (§9).
    | schema / migration | migrate a real database + the store's tests |
 
    A bug fix is shown red before, green after. The same failure three times → `gear send --kind question`; do not grind.
-5. **One branch per task, every round.** Commit small and push to the task's branch; each commit builds. A rework continues on the same branch — never a new one. Before handing in, merge (never rebase) the latest integration branch into it, build, and push: the engine merges only what is on `origin/<lane>/t<n>`.
+5. **One branch per task, every round.** Commit small and push to the task's branch at least every 15 minutes; each commit builds. A rework continues on the same branch — never a new one. Before handing in, merge (never rebase) the latest integration branch into it, build, and push: the engine merges only what is on `origin/<lane>/t<n>`.
 6. **Hand in** with the exact command in your packet; the result text is the final brief:
 
    ```

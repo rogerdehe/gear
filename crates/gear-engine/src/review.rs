@@ -1290,6 +1290,22 @@ fn review_packet_for(
         &repo.integration,
         &review_branch(task),
     );
+    // The review's own budget (design §5.1) and what a verdict past it must
+    // carry (design §6.2): the reviewer is charged from its own start, and a
+    // verdict past its budget needs the friction report.
+    let budget = store.read(|tx| {
+        let model = tx
+            .rounds_of_task(&config.project.id, task)?
+            .iter()
+            .find(|round| round.attempt == attempt && round.role == "review")
+            .and_then(|round| round.model.clone());
+        tx.round_budget_min(&config.project.id, task, attempt, "review", model.as_deref())
+    })?;
+    let packet = format!(
+        "{packet}\nBudget: {budget} min. Past it, your hand-in must carry --friction \"…\" \
+         (a permission you lacked and worked around, a test or build that took far too long, \
+         an unclear contract, a missing tool or fixture, a step that cost much time)."
+    );
     // T-84: the reviewer judges against the project standard when it has one.
     Ok(match gear_app::standard::line(&config.project.repo) {
         Some(line) => format!("{packet}\n{line}"),
@@ -1898,6 +1914,22 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Goal: the revised goal"), "{packet}");
         assert!(packet.contains("Accept: the revised criteria"), "{packet}");
         assert!(!packet.contains("the first goal"), "not the old contract: {packet}");
+    }
+
+    /// T-168 (design §6.2): the reviewer's packet says the review's own
+    /// budget and what a verdict past it must carry.
+    #[test]
+    fn the_reviewer_packet_carries_the_budget_and_the_friction_flag() {
+        let mut store = world(CONFIG);
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+
+        assert!(
+            packet.contains("Budget: 30 min. Past it, your hand-in must carry --friction"),
+            "{packet}"
+        );
+        // The words that belong in a report (design §6.1).
+        assert!(packet.contains("a permission you lacked"), "{packet}");
     }
 
     /// The command's output, whether or not it succeeded (the checkout's

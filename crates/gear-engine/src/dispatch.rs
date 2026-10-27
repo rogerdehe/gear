@@ -5,9 +5,9 @@
 use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
 use gear_herdr::{AgentStatus, ScreenFlag};
-use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
+use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
-use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
+use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, TaskRow, Tx};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneView {
@@ -70,6 +70,8 @@ pub enum Action {
 ///    `nudges_since_progress >= nudge_budget` (a Delivered attempt was
 ///    confirmed but the agent never started, so it is nudged like a stopped
 ///    one);
+///    a Started attempt gets no delivery at all (design §10.3: one packet per
+///    round);
 ///    attempt Submitted → Assign the first ready task if `safe_for_next`, else None;
 ///    attempt Unknown → None (an unknown outcome is never retried);
 ///    no attempt (or a terminal one, which the view contract excludes) →
@@ -149,6 +151,13 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                             version,
                         };
                     }
+                }
+                // Design §10.3: an attempt that already Started got its packet
+                // and the lane checked in — the engine never delivers it a
+                // second one. The lane that stops working is reached by the
+                // overrun question of design §5.2, not by a second packet.
+                if attempt.state == AttemptState::Started {
+                    return none("the attempt already started; no second packet");
                 }
                 if v.nudges_since_progress >= cfg.nudge_budget {
                     Action::Escalate {
@@ -434,14 +443,23 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                 else {
                     continue;
                 };
-                deliveries.push(DeliverAction {
-                    project: project.to_string(),
-                    seat: seat.id.clone(),
-                    generation: seat.generation,
-                    task: task.clone(),
-                    attempt: attempt.n,
-                    text: contract_changed_text(task, *version),
-                });
+                if attempt.state == AttemptState::Started {
+                    // Design §10.3: an attempt that already started got its
+                    // packet — the engine never delivers it a second one. The
+                    // contract change goes as an instruction message, which the
+                    // doorbell rings; the lane adopts the new contract at its
+                    // next view (T-8).
+                    contract_notice(tx, seat, task, attempt.n, *version, now)?;
+                } else {
+                    deliveries.push(DeliverAction {
+                        project: project.to_string(),
+                        seat: seat.id.clone(),
+                        generation: seat.generation,
+                        task: task.clone(),
+                        attempt: attempt.n,
+                        text: contract_changed_text(task, *version),
+                    });
+                }
             }
             // A seat that must wait, or one handed to the captain: no delivery.
             Action::None { .. } | Action::Escalate { .. } => {}
@@ -454,6 +472,49 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
         crate::delivery::clear(tx, &delivery.seat)?;
     }
     Ok(ops)
+}
+
+/// The notice that the contract of an open attempt changed, for an attempt
+/// that already started (T-8, design §10.3).
+///
+/// It is an instruction message, not a delivery: the doorbell rings it (at
+/// once, so a working lane reads it), and the lane adopts the new contract at
+/// its next view. One notice per task and version: the lane's answer closes
+/// it, so the engine does not write a second one every tick.
+fn contract_notice(
+    tx: &Tx<'_>,
+    seat: &SeatRow,
+    task: &str,
+    attempt: i64,
+    version: i64,
+    now: Ts,
+) -> GearResult<bool> {
+    let thread = format!("contract:{task}:{version}");
+    let open = tx
+        .thread_messages(&seat.project, &thread)?
+        .into_iter()
+        .any(|message| matches!(message.state, MsgState::Open | MsgState::Waiting));
+    if open {
+        return Ok(false);
+    }
+    tx.insert_message(&NewMessage {
+        project: seat.project.clone(),
+        thread,
+        task: Some(task.to_string()),
+        attempt: Some(attempt),
+        sender: "engine".to_string(),
+        sender_gen: 0,
+        recipient: seat.id.clone(),
+        kind: MsgKind::Instruction,
+        urgent: true,
+        body: contract_changed_text(task, version),
+        reply_to: None,
+        needs_ack: false,
+        state: MsgState::Open,
+        created: now,
+        meta: None,
+    })?;
+    Ok(true)
 }
 
 #[cfg(test)]

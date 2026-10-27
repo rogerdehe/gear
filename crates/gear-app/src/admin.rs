@@ -469,6 +469,29 @@ fn re_register(
     row.quota_includes_captain = config.quota.includes_captain;
     tx.update_project(&row)?;
 
+    // The decision log (design §7.4): a config change is GEAR's own entry.
+    {
+        let voyage = crate::plan::current_voyage(tx, &project_id)?;
+        let what = format!("config v{version}");
+        let text = format!("config|{what}");
+        tx.insert_decision_if_new(&gear_store::NewDecision {
+            project: project_id.to_string(),
+            key: crate::decision::key_of(&text),
+            voyage,
+            at: crate::decision::apply_time(now),
+            kind: "config".to_string(),
+            what,
+            why: None,
+            alt: None,
+            changes: None,
+            // GEAR's own entries are never starred (§7.2).
+            star: false,
+            source: "gear".to_string(),
+            line: None,
+            plan_version: None,
+        })?;
+    }
+
     // The roster: the captain first, then the lanes in config order.
     let mut seats: Vec<String> = vec![captain_id.clone()];
     for lane in &config.lanes {

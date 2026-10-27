@@ -83,6 +83,7 @@ The station's "projected finish" multiplies the sum of all open estimates by the
   The session choice is a fixed rule the engine applies, never a captain call at dispatch: a review is always new, a re-review or rework resumes, a lane's next task is new unless its plan block says it continues an earlier task (then keep, compacted). The only difference between lanes and reviewers is the idle release time, a config value per role: a reviewer seat is released after a short idle spell, a lane keeps its pane, worktree and build cache.
 
 ## For M5 (user, 2026-10-26)
+- Cut from M4 at station M-2572: T-176 (the engine follows the project's own Herdr session, design §10.7 A1) and T-185 (three merge.rs tests over 10 s; share the git setup).
 
 - Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
 - A light procedure for small tasks, decided from M4's per-round token and time data.
