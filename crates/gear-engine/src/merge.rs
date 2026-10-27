@@ -2179,6 +2179,13 @@ fn wait_thread(task: &str) -> String {
     format!("merge-wait:{task}")
 }
 
+/// The key that remembers that the captain was told that the merge of a
+/// task's attempt waits. The notice is told once per attempt (T-220): a
+/// resolved item does not bring the same news back.
+fn merge_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.merge_wait_told.{project}.{task}.{attempt}")
+}
+
 /// Tell the captain that a merge waits for another task (T-62): one open item
 /// per merge, naming the tasks it waits for. The item closes when the merge
 /// goes through, or when the tasks it waits for have passed and only their
@@ -2241,6 +2248,13 @@ fn tell_captain_waiting(
         if unpassed.is_empty() {
             return Ok(());
         }
+        // And once per attempt: the captain was told about this wait already
+        // (T-220). A resolved item does not bring the same news back on the
+        // next tick.
+        let told_key = merge_wait_told_key(project, &task, op.attempt.unwrap_or(0));
+        if tx.get_meta(&told_key)?.is_some() {
+            return Ok(());
+        }
         tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(),
@@ -2258,6 +2272,9 @@ fn tell_captain_waiting(
             state: MsgState::Open,
             created: now,
         })?;
+        // The notice is told once per attempt: remember it, so a later tick
+        // does not add it again after the captain resolved the item.
+        tx.set_meta(&told_key, &now.to_string())?;
         Ok(())
     })
 }
