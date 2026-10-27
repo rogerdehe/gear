@@ -426,10 +426,11 @@ fn next_temp_name(tx: &Tx<'_>, project: &str) -> GearResult<String> {
 }
 
 /// Whether a temp slot is free: the seats that occupy the quota are the ones
-/// with a live agent or starting — `Active`, `Standby`, `Starting`
-/// (design §3.6). A `Released` seat holds no slot, and a parked (`Unknown`)
-/// one holds its slot only while its agent still runs (B02-04: a parked
-/// reviewer is a reviewer a human has to look at).
+/// with a live agent or starting — `Active`, `Standby`, `Starting` and
+/// `Releasing` (design §3.6, the captain's decision of M-2603). A `Released`
+/// seat holds no slot, and a parked (`Unknown`) one holds its slot only while
+/// Herdr shows an agent in its pane (B02-04: a parked reviewer is a reviewer
+/// a human has to look at).
 fn has_free_slot(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -446,19 +447,40 @@ fn has_free_slot(
             occupying += 1;
             continue;
         }
-        if seat.state == SeatState::Unknown && crate::release::runs_a_reviewer(store, herdr, &seat)? {
+        if seat.state == SeatState::Unknown && shows_an_agent(store, herdr, &seat)? {
             occupying += 1;
         }
     }
     Ok(occupying < quota)
 }
 
+/// Whether Herdr shows an agent in the seat's pane: a parked (`Unknown`)
+/// seat holds a temp slot only while its agent is there (design §3.6).
+///
+/// A pane that cannot be read is not an absence: the seat keeps its slot
+/// (design/08).
+fn shows_an_agent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<bool> {
+    let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
+        return Ok(false);
+    };
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(_) => Ok(true),
+    }
+}
+
 /// The states in which a temp seat occupies the quota (design §3.6): a live
-/// agent (`Active`, `Standby`) or one that is starting.
+/// agent (`Active`, `Standby`), one that is starting, and one on its way out
+/// (`Releasing` — its agent is still leaving).
 fn occupies_quota(state: SeatState) -> bool {
     matches!(
         state,
-        SeatState::Active | SeatState::Standby | SeatState::Starting
+        SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Releasing
     )
 }
 
@@ -3642,6 +3664,19 @@ profile = "opencode"
             has_free_slot(&mut store, &mut herdr, "p", 2).unwrap(),
             "a second slot is free"
         );
+
+        // A reviewer on its way out holds its slot too (the captain's decision
+        // of M-2603): its agent is still leaving.
+        store
+            .write(|tx| tx.set_seat_state("p:review-1", SeatState::Releasing, Some("released"), T0 + 1))
+            .unwrap();
+        assert!(
+            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            "the reviewer on its way out holds the slot"
+        );
+        store
+            .write(|tx| tx.set_seat_state("p:review-1", SeatState::Standby, Some("review done"), T0))
+            .unwrap();
 
         // A second task is handed in: the warm seat could take it, but the
         // standby reviewer holds the only slot of the project.
