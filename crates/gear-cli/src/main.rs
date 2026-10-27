@@ -115,6 +115,9 @@ struct SendCmd {
     urgent: bool,
     #[arg(long)]
     candidate: Option<String>,
+    /// Result of a direction check, as text (not a task hand-in).
+    #[arg(long, value_name = "TEXT", conflicts_with = "body")]
+    direction: Option<String>,
     /// Review only: the verdict a temp reviewer hands in (pass|fail).
     #[arg(long)]
     verdict: Option<String>,
@@ -1015,7 +1018,7 @@ fn run_report_time(
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let body = match c.body.clone() {
+    let body = match c.direction.clone().or_else(|| c.body.clone()) {
         Some(body) => body,
         None => read_stdin()?,
     };
@@ -1027,7 +1030,7 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     // A hand-in must contain the project's current integration branch (T-19);
     // the gate is built here, from this process's worktree and config.
     let base = match parse_kind(&c.kind)? {
-        gear_model::MsgKind::Result => Some(gear_app::base::gate_for(&mut store, &env)?),
+        gear_model::MsgKind::Result if c.direction.is_none() => Some(gear_app::base::gate_for(&mut store, &env)?),
         _ => None,
     };
     let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
@@ -1648,7 +1651,9 @@ fn run_send(
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
-    let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
+    let result = if c.direction.is_some() {
+        gear_app::mail::send_direction(store, env, fp.as_ref(), &args, now)?
+    } else { gear_app::mail::send(store, env, fp.as_ref(), &args, now)? };
     // T-130: an urgent message, and every captain instruction to a lane whose
     // agent queues input (pi, claude), is typed into the pane before this call
     // returns. A replay already typed it once.
@@ -1661,7 +1666,7 @@ fn run_send(
         let mut doc = serde_json::to_value(&result).map_err(json_error)?;
         // The answer to a hand-in travels with the receipt (design §10.7, row
         // B03-04/10).
-        if kind == gear_model::MsgKind::Result && !result.replayed {
+        if kind == gear_model::MsgKind::Result && c.direction.is_none() && !result.replayed {
             if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
                 doc["hand_in"] = serde_json::Value::String(hand_in);
             }
@@ -1682,7 +1687,7 @@ fn run_send(
         // The answer to a hand-in (design §10.7, row B03-04/10): the work is
         // in, the next task comes by itself, and the task branch is not
         // pushed again. The lane reads the line where it handed in.
-        if kind == gear_model::MsgKind::Result && !result.replayed {
+        if kind == gear_model::MsgKind::Result && c.direction.is_none() && !result.replayed {
             if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
                 line.push('\n');
                 line.push_str(&hand_in);
@@ -2462,6 +2467,7 @@ mod tests {
             on: None,
             friction: None,
             candidate: None,
+            direction: None,
             verdict: None,
             blocking: None,
             preempted: None,
@@ -4009,6 +4015,74 @@ path="api"
         c.attempt = Some(1);
         c.verdict = Some(verdict.into());
         c
+    }
+
+    #[test]
+    fn direction_result_is_bound_to_the_reviewer_and_does_not_submit() {
+        let cli=Cli::try_parse_from(["gear","send","--kind","result","--task","T-7","--attempt","1","--direction","ok"]).unwrap();
+        assert!(matches!(cli.cmd,Some(Cmd::Send(ref c)) if c.direction.as_deref()==Some("ok")));
+        let (mut store, mut herdr) = review_world();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"abc123"
+        }).to_string())).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        let mut c=send_cmd("result");
+        c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        let out=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap();
+        assert!(!out.contains("Handed in"), "{out}");
+        let history=store.read(|tx|tx.thread_messages("p","T-7:1")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(history[0].kind, gear_model::MsgKind::Result);
+        assert_eq!(history[0].body,"ok");
+        let meta:serde_json::Value=serde_json::from_str(history[0].meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta,serde_json::json!({"direction":true,"sha":"abc123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Started);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
+        let replay=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+2,false).unwrap();
+        assert!(replay.contains("replayed"));
+    }
+
+    #[test]
+    fn direction_result_rejects_lane_and_other_reviewer() {
+        let (mut store,mut herdr)=review_world();
+        store.write(|tx| {
+            testing::seed_temp_seat(tx,"p","r-2","T-7","w1:p4","opencode",T0)?;
+            tx.set_meta("engine.direction.p.T-7.1",&serde_json::json!({"seat":"p:r-1","generation":1,"state":"running","sha":"abc123"}).to_string())
+        }).unwrap();
+        herdr.add_agent("w1:p4","opencode",AgentStatus::Idle);
+        let mut c=send_cmd("result"); c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        for (name,pane) in [("heat",LANE_PANE),("r-2","w1:p4")] {
+            let err=run_send(&mut store,&env(name,pane),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+            assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
+        }
+        c.direction=None; c.contract=Some(1); c.candidate=Some("abc123".into());
+        let err=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+        assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
+    }
+
+    #[test]
+    fn direction_result_after_lane_submission_preserves_submitted_state() {
+        let (mut store, mut herdr) = review_world();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"checked123"
+        }).to_string())).unwrap();
+        let mut lane = send_cmd("result");
+        lane.task=Some("T-7".into()); lane.attempt=Some(1); lane.contract=Some(1);
+        lane.candidate=Some("candidate123".into()); lane.request_id=Some("lane-result".into());
+        run_send(&mut store,&env("heat",LANE_PANE),&mut herdr,&lane,"done".into(),None,T0+1,false).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(task_before,gear_model::TaskState::Verifying);
+        let mut direction=send_cmd("result");
+        direction.task=Some("T-7".into()); direction.attempt=Some(1); direction.direction=Some("ok".into());
+        run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&direction,"ok".into(),None,T0+2,false).unwrap();
+        let history=store.read(|tx|tx.thread_messages("p","T-7:2")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(history[0].meta.as_deref().unwrap()).unwrap(),serde_json::json!({"direction":true,"sha":"checked123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
     }
 
     #[test]
