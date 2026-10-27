@@ -97,7 +97,7 @@ pub fn tick(
         let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
         for round in rounds {
             let Some(end) = round.end_at else { continue };
-            if now < end.saturating_add(60) || (round.counted_at.is_some() && round.input.is_some()) { continue }
+            if now < end.saturating_add(60) || round.counted_at.is_some_and(|at| round.input.is_some() || now < at.saturating_add(60)) { continue }
             let tokens = count_round(store, cfg, &round, now)?;
             store.write(|tx| {
                 tx.set_round_tokens(&key_of(&round), &tokens, now)?;

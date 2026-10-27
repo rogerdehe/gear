@@ -435,7 +435,9 @@ fn closed_round_waits_for_late_logs_and_missing_logs_stay_unknown() {
     gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+160).unwrap();
     assert_eq!(round_of(&mut store,"T-1",1,"dev").input,None);
     std::fs::write(path,format!("{}\n",serde_json::json!({"type":"message","timestamp":T0+20,"message":{"role":"assistant","usage":{"input":42,"cost":{"total":0.25}}}}))).unwrap();
-    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+161).unwrap();
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+219).unwrap();
+    assert_eq!(round_of(&mut store,"T-1",1,"dev").input,None);
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+220).unwrap();
     let row=round_of(&mut store,"T-1",1,"dev");
-    assert_eq!(row.input,Some(42)); assert_eq!(row.cost_usd,Some(0.25)); assert_eq!(row.cost_source.as_deref(),Some("agent")); assert_eq!(row.counted_at,Some(T0+161));
+    assert_eq!(row.input,Some(42)); assert_eq!(row.cost_usd,Some(0.25)); assert_eq!(row.cost_source.as_deref(),Some("agent")); assert_eq!(row.counted_at,Some(T0+220));
 }
