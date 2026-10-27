@@ -399,6 +399,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         for (seat, action) in &planned {
             // An escalated seat needs a human; nothing is sent to it.
             if matches!(action, dispatch::Action::Escalate { .. })
+                && !restarted.contains(&seat.id)
                 && !report.flagged.contains(&seat.id)
             {
                 report.flagged.push(seat.id.clone());
@@ -875,4 +876,95 @@ fn doorbell_inputs(
         });
     }
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod t209_tick_tests {
+    use super::*;
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_model::{AttemptState, MsgState, SeatRole, TaskState};
+    use gear_store::{testing, AttemptRow, ContractRow, NewRound, RoundKey, TaskRow};
+
+    const NOW: Ts = 1_900_000_000;
+    const CONFIG: &str = r#"
+[project]
+id="p"
+herdr_session="sess"
+repo="/repo"
+[quota]
+lanes=1
+temps=1
+[captain]
+pane="w1:p9"
+kind="claude"
+profile="claude"
+[[lanes]]
+name="heat"
+duty="everything"
+owns=["src/"]
+kind="codex"
+profile="codex"
+[temps]
+kind="codex"
+profile="codex"
+[models]
+lanes=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+"#;
+
+    fn fixture(role: SeatRole) -> (Store, FakeHerdr, EngineCfg, String) {
+        let mut store=Store::open_in_memory().unwrap();
+        let pane=if role==SeatRole::Lane {"w1:p1"} else {"w1:p2"};
+        let seat_name=if role==SeatRole::Lane {"heat"} else {"review-1"};
+        let task_state=if role==SeatRole::Lane {TaskState::Running} else {TaskState::Verifying};
+        let attempt_state=if role==SeatRole::Lane {AttemptState::Started} else {AttemptState::Submitted};
+        let seat=store.write(|tx| {
+            let mut p=testing::seed_project(tx,"p","sess",NOW)?; p.config_toml=CONFIG.into(); tx.update_project(&p)?;
+            let seat=testing::seed_active_seat(tx,"p",seat_name,role,pane,"codex",NOW)?;
+            testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p9","claude",NOW)?;
+            if role==SeatRole::Temp { tx.set_seat_task(&seat.id,"T-1")?; }
+            tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+            tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some("codex".into()),session_action:None,sent_at:Some(NOW)})?;
+            let round_role=if role==SeatRole::Lane {"dev"} else {"review"};
+            tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:"codex".into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
+            tx.set_meta(&crate::model::model_meta_key(&seat.id),"gpt-6.1-sol")?;
+            if role==SeatRole::Temp {
+                tx.set_meta("engine.review_model_entry.p:review-1",&serde_json::json!({"cli":"codex","model":"gpt-6.1-sol","args":["-c","model_reasoning_effort=high"]}).to_string())?;
+                tx.set_meta("engine.review_pending.p:review-1","T-1")?;
+                tx.set_meta("engine.review_path.p:review-1","/work/review")?;
+                tx.set_meta("engine.review_repo.p:review-1","/repo")?;
+            } else { tx.set_meta(&crate::onboard::worktree_path_key(&seat.id),"/work/heat")?; }
+            Ok(seat)
+        }).unwrap();
+        let _=seat;
+        let mut herdr=FakeHerdr::new(); herdr.add_shell(pane); herdr.add_shell("w1:p9");
+        let mut cfg=EngineCfg::default(); cfg.db_path="/tmp/t209.db".into();
+        for kind in ["codex","claude"] { cfg.profiles.insert(kind.into(),gear_herdr::builtin(kind).unwrap()); }
+        (store,herdr,cfg,pane.into())
+    }
+
+    #[test]
+    fn exited_lane_and_reviewer_restart_once_replay_their_packets_and_stall_after_second_exit() {
+        for role in [SeatRole::Lane,SeatRole::Temp] {
+            let (mut store,mut herdr,cfg,pane)=fixture(role);
+            tick(&mut store,&mut herdr,&cfg,NOW+1).unwrap();
+            let starts: Vec<_>=herdr.calls.iter().filter_map(|call|if let Call::AgentStart {kind,args,pane,..}=call {Some((kind.clone(),args.clone(),pane.clone()))} else {None}).collect();
+            assert_eq!(starts.len(),1,"{role:?}: {starts:?}");
+            assert_eq!(starts[0].0,"codex");
+            assert_eq!(starts[0].2,pane);
+            assert!(starts[0].1.iter().any(|arg|arg.contains("gpt-6.1-sol")),"{:?}",starts[0].1);
+            assert!(starts[0].1.iter().any(|arg|arg.contains("model_reasoning_effort=high")),"{:?}",starts[0].1);
+            let packet=herdr.calls.iter().find_map(|call|if let Call::Prompt{text,..}=call {Some(text.as_str())} else {None}).unwrap_or("");
+            if role==SeatRole::Lane { assert!(packet.contains("Continue T-1"),"{packet}"); }
+            else { assert!(packet.contains("Review T-1 attempt 1"),"{packet}"); }
+            herdr.exit_agent(&pane);
+            tick(&mut store,&mut herdr,&cfg,NOW+2).unwrap();
+            assert_eq!(herdr.calls.iter().filter(|call|matches!(call,Call::AgentStart{..})).count(),1);
+            let stall=store.read(|tx|tx.thread_messages("p","stall:p:review-1")).unwrap();
+            let lane_stall=store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
+            assert_eq!(if role==SeatRole::Lane {lane_stall.len()} else {stall.len()},1);
+            assert_eq!(if role==SeatRole::Lane {lane_stall[0].state} else {stall[0].state},MsgState::Open);
+        }
+    }
 }
