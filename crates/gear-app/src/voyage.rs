@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::identity::{require_seat, Fingerprint};
-use crate::time::VoyageWork;
+use crate::time::{UsageOverrides, VoyageWork};
 use crate::Env;
 use gear_model::{GearResult, SeatRole, TaskState, Ts};
 use gear_store::{Store, Tx};
@@ -97,6 +97,22 @@ pub fn build(
     all: bool,
     now: Ts,
 ) -> GearResult<Report> {
+    build_with(store, env, fp, milestone, all, now, &UsageOverrides::default())
+}
+
+/// [`build`] with the counted usage of the open rounds (T-207).
+///
+/// The overrides are the counts of the rounds that are still running: they
+/// stand in for the numbers the store has not written yet.
+pub fn build_with(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    milestone: &str,
+    all: bool,
+    now: Ts,
+    overrides: &UsageOverrides,
+) -> GearResult<Report> {
     store.read(|tx| {
         let (ctx, _seat) = require_seat(
             tx,
@@ -105,7 +121,7 @@ pub fn build(
             Some(&[SeatRole::Captain]),
             Some(&[gear_model::SeatState::Active]),
         )?;
-        report(tx, &ctx.project, milestone, all, now)
+        report_with(tx, &ctx.project, milestone, all, now, overrides)
     })
 }
 
@@ -116,6 +132,18 @@ pub fn report(
     milestone: &str,
     all: bool,
     now: Ts,
+) -> GearResult<Report> {
+    report_with(tx, project, milestone, all, now, &UsageOverrides::default())
+}
+
+/// [`report`] with the counted usage of the open rounds (T-207).
+pub fn report_with(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    all: bool,
+    now: Ts,
+    overrides: &UsageOverrides,
 ) -> GearResult<Report> {
     let voyage = tx.get_voyage(project, milestone)?;
     let voyage = voyage.ok_or_else(|| {
@@ -133,11 +161,12 @@ pub fn report(
     // The `done:` sentence, clause by clause.
     let done_clauses = clauses_of(voyage.done.as_deref().unwrap_or_default());
     // The time and tokens of the voyage's tasks.
-    let time = crate::time::report(
+    let time = crate::time::report_with(
         tx,
         project,
         &crate::time::Filter { task: None, voyage: Some(milestone.to_string()) },
         now,
+        overrides,
     )?;
     let voyage_time = time
         .voyages
@@ -220,7 +249,7 @@ pub fn report(
         title: voyage.title,
         voyage_lines,
         done_clauses,
-        work: crate::time::work_of(tx, project, milestone, now)?,
+        work: crate::time::work_of_with(tx, project, milestone, now, overrides)?,
         time: voyage_time,
         slowest,
         starred,

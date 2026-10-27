@@ -291,6 +291,13 @@ fn the_first_failure_waits_for_the_retry() {
 
     // The first failure.
     tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+    // T-218: the captain is not rung yet: the one automatic retry of the
+    // lane's own path may still come.
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing before the retry: {:?}",
+        stall_items(&mut s)
+    );
 
     // Two minutes later the packet is delivered again.
     tick(&mut s, &mut h, &cfg, T + 130).unwrap();
@@ -301,9 +308,295 @@ fn the_first_failure_waits_for_the_retry() {
         .filter(|op| op.payload.get("redeliver").is_some())
         .count();
     assert_eq!(redelivered, 1, "the packet goes out again once");
+    // The retry is on its way: the captain still hears nothing.
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing while the retry is on its way: {:?}",
+        stall_items(&mut s)
+    );
 
     // The retry fails too: the captain hears about it, once.
     tick(&mut s, &mut h, &cfg, T + 140).unwrap();
     let items = stall_items(&mut s);
     assert_eq!(items.len(), 1, "{items:?}");
+
+    // And the item is not repeated.
+    tick(&mut s, &mut h, &cfg, T + 160).unwrap();
+    assert_eq!(stall_items(&mut s).len(), 1, "one item only");
+}
+
+/// The world of the retry tests: a lane whose packet was sent and never
+/// confirmed, so the delivery fails at once.
+fn failed_packet_world() -> (Store, FakeHerdr, EngineCfg) {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T)?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: T,
+        })?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+        // The packet was sent and never confirmed.
+        let op = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "the packet" }),
+            created: T,
+        })?;
+        tx.set_op_state("p", &op.id, gear_model::OpState::Submitted, None, T)
+    })
+    .unwrap();
+    let mut h = FakeHerdr::new();
+    h.add_agent("w1:p1", "codex", AgentStatus::Idle);
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+    let cfg = EngineCfg {
+        profiles: gear_herdr::builtins(),
+        cooldown_s: 0,
+        // A short grace: the delivery fails at once.
+        delivery_grace_s: 1,
+        ..Default::default()
+    };
+    (s, h, cfg)
+}
+
+/// T-218 (F1): a retry that fails while it is sent — the agent of the pane
+/// was gone between the observation and the execution — never reaches the
+/// confirmation window. It spends its marker and opens the one stall item,
+/// the same as a retry that times out.
+#[test]
+fn a_retry_that_fails_while_it_is_sent_opens_the_stall_item() {
+    let (mut s, mut h, cfg) = failed_packet_world();
+
+    // The first failure: the captain is not rung yet.
+    tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing before the retry: {:?}",
+        stall_items(&mut s)
+    );
+
+    // T+130: the retry is planned, but the agent of the pane exits before
+    // the execution: the retry fails at once (agent-gone).
+    let agents = gear_engine::observe::snapshot(&mut h).unwrap();
+    let observed = s
+        .read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles))
+        .unwrap();
+    gear_engine::lane_nudge::nudge_stopped_lanes(&mut s, "p", &observed, T + 130).unwrap();
+    h.add_shell(LANE);
+    gear_engine::ops::execute_intended(&mut s, &mut h, "p", T + 130).unwrap();
+    // The replacement agent is there before the next observation.
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+
+    // Exactly one redelivery, and it failed.
+    let retries: Vec<_> = s
+        .read(|tx| tx.ops_of_seat_kind("p:heat", gear_model::OpKind::Deliver))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.payload.get("redeliver").is_some())
+        .collect();
+    assert_eq!(retries.len(), 1, "the packet goes out again once");
+    assert_eq!(retries[0].state, gear_model::OpState::Failed, "{:?}", retries[0]);
+    assert!(
+        retries[0].result.as_deref().unwrap_or("").contains("agent-gone"),
+        "{:?}",
+        retries[0].result
+    );
+
+    // The captain hears about it: the marker is spent and the item is open.
+    tick(&mut s, &mut h, &cfg, T + 140).unwrap();
+    let items = stall_items(&mut s);
+    assert_eq!(items.len(), 1, "{items:?}");
+    let marker = s
+        .read(|tx| tx.get_meta(&gear_engine::lane_nudge::retry_marker("p:heat", "T-1", 1)))
+        .unwrap();
+    assert_eq!(marker.as_deref(), Some(""), "the marker is spent: {marker:?}");
+
+    // And the item is not repeated.
+    tick(&mut s, &mut h, &cfg, T + 160).unwrap();
+    tick(&mut s, &mut h, &cfg, T + 1000).unwrap();
+    assert_eq!(stall_items(&mut s).len(), 1, "one item only");
+}
+
+/// T-218: the same ordering with the default confirmation window: the
+/// captain is not rung before the retry, and the retry's own window opens the
+/// one item.
+#[test]
+fn the_first_failure_waits_for_the_retry_with_the_default_window() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T)?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: T,
+        })?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+        let op = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "the packet" }),
+            created: T,
+        })?;
+        tx.set_op_state("p", &op.id, gear_model::OpState::Submitted, None, T)
+    })
+    .unwrap();
+    let mut h = FakeHerdr::new();
+    h.add_agent("w1:p1", "codex", AgentStatus::Idle);
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+    let cfg = EngineCfg {
+        profiles: gear_herdr::builtins(),
+        cooldown_s: 0,
+        delivery_grace_s: 180,
+        ..Default::default()
+    };
+    // The default window: the delivery fails 180 s after it was sent.
+    assert_eq!(cfg.delivery_grace_s, 180, "the default window");
+
+    // The window is over: the delivery fails. The captain is not rung: the
+    // one automatic retry may still come.
+    tick(&mut s, &mut h, &cfg, T + 200).unwrap();
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing before the retry: {:?}",
+        stall_items(&mut s)
+    );
+
+    // The retry is on its way: still nothing.
+    tick(&mut s, &mut h, &cfg, T + 320).unwrap();
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing while the retry is on its way: {:?}",
+        stall_items(&mut s)
+    );
+
+    // The retry's own window ends unconfirmed: the captain hears about it,
+    // once.
+    tick(&mut s, &mut h, &cfg, T + 520).unwrap();
+    let items = stall_items(&mut s);
+    assert_eq!(items.len(), 1, "{items:?}");
+}
+
+/// T-218: a delivery that cannot get the one automatic retry of the lane's own
+/// path (the attempt already started: the lane read the packet) reaches the
+/// captain at once — nothing holds the fact back.
+#[test]
+fn a_delivery_without_the_automatic_retry_is_flagged_at_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T)?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: T,
+        })?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+        // The attempt already started: the lane's own path has no retry for
+        // it.
+        gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
+        let op = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "the packet" }),
+            created: T,
+        })?;
+        tx.set_op_state("p", &op.id, gear_model::OpState::Submitted, None, T)
+    })
+    .unwrap();
+    let mut h = FakeHerdr::new();
+    h.add_agent("w1:p1", "codex", AgentStatus::Idle);
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+    let cfg = EngineCfg {
+        profiles: gear_herdr::builtins(),
+        cooldown_s: 0,
+        delivery_grace_s: 1,
+        ..Default::default()
+    };
+
+    tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+
+    assert_eq!(
+        stall_items(&mut s).len(),
+        1,
+        "the captain hears about a delivery that cannot be retried: {:?}",
+        stall_items(&mut s)
+    );
 }

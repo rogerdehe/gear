@@ -665,6 +665,14 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
         ));
     }
     let mut rest = Vec::new();
+    // The overlaps with the integration branch (T-188): information lines.
+    // They never wait for the captain.
+    if !project.overlaps.is_empty() {
+        rest.push(String::new());
+        for overlap in &project.overlaps {
+            rest.push(crate::overlap_line(overlap));
+        }
+    }
     let looks = needs_a_look(project);
     rest.push(format!("NEEDS A LOOK ({})", looks.len()));
     for (task, lane, kind, why) in &looks {

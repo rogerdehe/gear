@@ -932,6 +932,59 @@ fn cmd_report_voyage(voyage: Option<String>, all: bool, json: bool) -> GearResul
     Ok(())
 }
 
+/// The counted usage of the open rounds of a project (T-207).
+///
+/// A round that is still running has no counted tokens in the store yet: the
+/// report counts it as it reads (design §4.3) and passes the count to the
+/// report as an override. Nothing is written — a closed round keeps its
+/// stored numbers, and the store is left as it was.
+fn open_round_usage(
+    store: &mut gear_store::Store,
+    cfg: &gear_engine::EngineCfg,
+    project: &str,
+    now: i64,
+) -> gear_app::time::UsageOverrides {
+    let mut overrides = gear_app::time::UsageOverrides::default();
+    let rounds = match store.read(|tx| tx.rounds_of_project(project)) {
+        Ok(rounds) => rounds,
+        Err(error) => {
+            eprintln!("gear: cannot read the rounds of {project}: {error}");
+            return overrides;
+        }
+    };
+    for round in rounds.iter().filter(|round| round.end_at.is_none()) {
+        match gear_engine::rounds::count_round(store, cfg, round, now) {
+            Ok(counted) => {
+                // A log that cannot be read leaves the round unknown: the
+                // store's own numbers stand (a round that was never counted
+                // has none, and stays a question mark).
+                if counted.input.is_some() {
+                    overrides.set(&round.task, round.attempt, &round.role, (&counted).into());
+                }
+            }
+            // A round that cannot be counted stays unknown: the report shows
+            // a question mark, never a zero.
+            Err(error) => eprintln!(
+                "gear: cannot count the open round {} attempt {} {}: {error}",
+                round.task, round.attempt, round.role
+            ),
+        }
+    }
+    overrides
+}
+
+/// The counted usage of the open rounds of the caller's project (T-207).
+fn caller_open_round_usage(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    now: i64,
+) -> gear_app::time::UsageOverrides {
+    let Some(project) = env.ctx.as_ref().map(|ctx| ctx.project.clone()) else {
+        return gear_app::time::UsageOverrides::default();
+    };
+    open_round_usage(store, &report_cfg(), &project, now)
+}
+
 /// `gear report voyage` body, over injected state.
 fn run_report_voyage(
     store: &mut gear_store::Store,
@@ -949,7 +1002,16 @@ fn run_report_voyage(
         Some(milestone) => milestone.to_string(),
         None => current_voyage(store, env)?,
     };
-    let report = gear_app::voyage::build(store, env, fp.as_ref(), &milestone, all, now)?;
+    let overrides = caller_open_round_usage(store, env, now);
+    let report = gear_app::voyage::build_with(
+        store,
+        env,
+        fp.as_ref(),
+        &milestone,
+        all,
+        now,
+        &overrides,
+    )?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
     }
@@ -994,7 +1056,7 @@ fn cmd_report_time(task: Option<String>, voyage: Option<String>, json: bool) -> 
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     let filter = gear_app::time::Filter { task, voyage };
-    let out = run_report_time(&mut store, &env, &mut herdr, &filter, json)?;
+    let out = run_report_time(&mut store, &env, &mut herdr, &filter, json, now_ts())?;
     println!("{out}");
     Ok(())
 }
@@ -1006,9 +1068,11 @@ fn run_report_time(
     herdr: &mut dyn gear_herdr::HerdrRead,
     filter: &gear_app::time::Filter,
     json: bool,
+    now: i64,
 ) -> GearResult<String> {
     let fp = observe_identity(store, env, herdr)?;
-    let report = gear_app::time::build(store, env, fp.as_ref(), filter, now_ts())?;
+    let overrides = caller_open_round_usage(store, env, now);
+    let report = gear_app::time::build_with(store, env, fp.as_ref(), filter, now, &overrides)?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
     }
@@ -2179,11 +2243,26 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // A passing review merges without the captain; a failing one waits for
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
+    cfg.profiles = builtin_profiles();
+    cfg
+}
+
+/// Every built-in agent profile, by name.
+fn builtin_profiles() -> std::collections::BTreeMap<String, gear_herdr::Profile> {
+    let mut profiles = std::collections::BTreeMap::new();
     for kind in ["opencode", "claude", "codex", "grok", "pi"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
-            cfg.profiles.insert(kind.to_string(), profile);
+            profiles.insert(kind.to_string(), profile);
         }
     }
+    profiles
+}
+
+/// The configuration the reports count their rounds with: the built-in agent
+/// profiles (each kind's log) and nothing else.
+fn report_cfg() -> gear_engine::EngineCfg {
+    let mut cfg = gear_engine::EngineCfg::default();
+    cfg.profiles = builtin_profiles();
     cfg
 }
 
@@ -3533,6 +3612,7 @@ path="api"
             &mut herdr,
             &gear_app::time::Filter::default(),
             false,
+            T0,
         )
         .unwrap();
         assert!(out.contains("Time report · project p"), "{out}");
@@ -3549,6 +3629,7 @@ path="api"
             &mut herdr,
             &gear_app::time::Filter::default(),
             false,
+            T0,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
@@ -3906,10 +3987,283 @@ path="api"
             &mut herdr,
             &gear_app::time::Filter::default(),
             false,
+            T0,
         )
         .unwrap();
         assert!(out.contains("T-7 attempt 1 dev · tokens 100 in / 10 out"), "{out}");
         assert!(out.contains("T-7 attempt 1 review · tokens 200 in / 10 out"), "{out}");
+    }
+
+    /// A task of a voyage: a lane works on it and the plan knows its time.
+    fn voyage_task(id: &str, lane: &str, milestone: &str) -> TaskRow {
+        let mut task = lane_task(id, lane, gear_model::TaskState::Ready, &[]);
+        task.milestone = Some(milestone.to_string());
+        task.estimate_min = Some(60);
+        task
+    }
+
+    /// A pi session log with one assistant record: the usage a report counts
+    /// (T-207).
+    fn pi_log(name: &str, at: i64) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gear-t207-{name}-{}.jsonl",
+            std::process::id()
+        ));
+        let record = serde_json::json!({
+            "type": "message",
+            "timestamp": at,
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input": 1200,
+                    "output": 300,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "reasoning": 0,
+                    "cost": {"total": 0.42}
+                }
+            }
+        });
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        path
+    }
+
+    /// The contract of a task the lane starts.
+    fn contract_of(task: &str) -> gear_store::ContractRow {
+        gear_store::ContractRow {
+            project: "p".into(),
+            task: task.into(),
+            version: 1,
+            goal: "g".into(),
+            accept: "a".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0,
+        }
+    }
+
+    /// T-207: the reports count the open rounds — the round that is still
+    /// running — and never show an unknown usage as zero.
+    ///
+    /// The store counts a round when it ends, so an open round has no numbers
+    /// yet: the report counts it as it reads (design §4.3) and shows what it
+    /// counted, in the round's own line and in the task's and the lane's sums.
+    #[test]
+    fn the_reports_count_the_open_round() {
+        let (mut store, mut herdr) = world();
+        let log = pi_log("open", T0 + 10);
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-7", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-7")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                // The session the lane runs in: pi's log, which the report reads.
+                tx.add_round_session(&key, log.to_str().unwrap()).unwrap();
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) the voyage sails".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(60),
+                    updated: T0,
+                })
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        // The round's own count: the open round is counted as the report reads.
+        assert!(out.contains("T-7 attempt 1 dev · tokens 1200 in / 300 out"), "{out}");
+        assert!(out.contains("cost $0.4200"), "{out}");
+        // The task's sum and the voyage's sum carry the same numbers.
+        assert!(out.contains("T-7 · estimate 60m"), "{out}");
+        assert!(out.contains("Voyage M2 · 1 task"), "{out}");
+
+        let voyage = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(voyage.contains("Time and tokens · tokens 1200 in / 300 out"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens 1200 in / 300 out"), "{voyage}");
+
+        // The store is not written: the open round keeps its empty columns.
+        let stored = store.read(|tx| tx.rounds_of_project("p")).unwrap();
+        let open = stored.iter().find(|row| row.task == "T-7").unwrap();
+        assert_eq!(open.input, None, "the report writes no tokens");
+        assert_eq!(open.counted_at, None, "the report counts nothing into the store");
+        std::fs::remove_file(&log).ok();
+    }
+
+    /// T-207: an open round whose log cannot be read stays unknown: the
+    /// report shows a question mark, never a zero.
+    #[test]
+    fn an_unreadable_open_round_is_unknown_not_zero() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-8", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-8")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-8", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-8".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                // The session file is gone: the log cannot be read.
+                tx.add_round_session(&key, "/nonexistent/gear-t207-gone.jsonl")
+                    .unwrap();
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) the voyage sails".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(60),
+                    updated: T0,
+                })
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(out.contains("T-8 attempt 1 dev · tokens ? / cost ?"), "{out}");
+        assert!(!out.contains("tokens 0 in / 0 out"), "{out}");
+
+        let voyage = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(voyage.contains("Time and tokens · tokens ? / cost ?"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens ? / cost ?"), "{voyage}");
+        assert!(!voyage.contains("tokens 0 in / 0 out"), "{voyage}");
+    }
+
+    /// T-207: a closed round keeps the numbers the store counted: the report
+    /// does not count it again.
+    #[test]
+    fn a_closed_round_keeps_its_counted_numbers() {
+        let (mut store, mut herdr) = world();
+        let log = pi_log("closed", T0 + 10);
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-9", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-9")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-9", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                tx.add_round_session(&key, log.to_str().unwrap()).unwrap();
+                // The round ended: the engine counted it and stored the count.
+                tx.close_round(&key, T0 + 30).unwrap();
+                tx.set_round_tokens(
+                    &key,
+                    &gear_store::RoundTokens {
+                        input: Some(7),
+                        output: Some(8),
+                        cache_read: Some(0),
+                        cache_write: Some(0),
+                        reasoning: Some(0),
+                        cost_usd: Some(0.01),
+                        cost_source: "prices".into(),
+                    },
+                    T0 + 30,
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        // The stored count, not a fresh one: the round is over.
+        assert!(out.contains("T-9 attempt 1 dev · tokens 7 in / 8 out"), "{out}");
+        assert!(out.contains("cost $0.0100"), "{out}");
+        let stored = store.read(|tx| tx.rounds_of_task("p", "T-9")).unwrap();
+        assert_eq!(stored[0].input, Some(7), "the stored count is untouched");
+        assert_eq!(stored[0].counted_at, Some(T0 + 30));
+        std::fs::remove_file(&log).ok();
     }
 
     #[test]
