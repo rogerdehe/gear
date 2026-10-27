@@ -169,6 +169,11 @@ fn retiring_lane_recovers_its_open_round_without_receiving_new_work() {
     advance(&mut s,&mut h,&c,1); advance(&mut s,&mut h,&c,2);
     assert!(h.calls.iter().any(|x|matches!(x,Call::AgentStart {pane,args,..} if pane==PANE && args.windows(2).any(|w|w==["--session","old"]))),"{:?}",h.calls);
     h.set_agent_session(PANE,"old"); advance(&mut s,&mut h,&c,3);
+    s.write(|tx| {
+        let mut attempt=tx.get_attempt("p","T-1",1)?.unwrap(); attempt.state=gear_model::AttemptState::Accepted; tx.update_attempt(&attempt)?;
+        let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Done; tx.update_task(&task)
+    }).unwrap();
+    advance(&mut s,&mut h,&c,4);
     assert!(s.read(|tx|tx.get_attempt("p","T-2",1)).unwrap().is_none());
     assert!(h.prompts_to(PANE).iter().all(|p|!p.contains("New task T-2")));
 }
