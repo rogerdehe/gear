@@ -34,6 +34,7 @@ mod opencode;
 pub mod ops;
 pub mod overrun;
 pub mod parallel;
+pub mod quiet;
 pub mod quota;
 pub mod release;
 pub mod restart;
@@ -126,6 +127,8 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
     pub quota: Vec<String>,
+    /// The lanes that were told to go on after they stopped (T-206).
+    pub lane_nudged: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -406,6 +409,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
             reviewer_nudge_flags.push((project.clone(), seat));
+        }
+
+        // 7c. a lane that stopped on a server error goes on by itself
+        //     (T-206): its agent is idle with an attempt in flight.
+        let (nudged_lanes, stuck_lanes) = quiet::nudge_stopped_lanes(store, &project, &observed, now)?;
+        report.lane_nudged.extend(nudged_lanes);
+        for seat in stuck_lanes {
+            report.flagged.push(seat);
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).

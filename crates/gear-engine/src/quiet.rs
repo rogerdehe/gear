@@ -1,0 +1,255 @@
+//! A lane that stopped on a server error goes on by itself (T-206).
+//!
+//! The mirror of [`crate::review::nudge_stopped_reviewers`] for the lanes: a
+//! lane whose agent has been idle for two minutes with an attempt in flight
+//! gets one nudge into the same session, and the captain is told when the
+//! nudges are spent.
+//!
+//! The screen text rules out only what a nudge cannot fix: a lane whose
+//! screen shows a quota or a login is left to the quota and the auth paths
+//! (the reviewer's rule), and a lane that waits for its provider is not stuck
+//! (T-75).
+
+use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, Ts};
+use gear_store::{NewOp, Store, Tx};
+
+use crate::observe::SeatObs;
+
+/// The nudges one attempt gets before the captain is told (T-206).
+const LANE_NUDGE_BUDGET: i64 = 3;
+
+/// How long a lane's agent must be idle before the lane is nudged (T-206).
+const IDLE_BEFORE_NUDGE_S: i64 = 120;
+
+/// The text a stopped lane is nudged with (T-206).
+fn nudge_text(task: &str) -> String {
+    format!(
+        "Continue {task}: your last turn stopped (a server error such as \"model at capacity\", a dropped connection, or a pause). Go on where you stopped; when done, hand in with gear send --kind handin."
+    )
+}
+
+/// The key of the idle mark of one attempt (T-206): the first tick the lane's
+/// agent was idle on.
+fn idle_key(seat: &str, task: &str, attempt: i64) -> String {
+    format!("engine.lanenudge.{seat}.{task}.{attempt}")
+}
+
+/// Tell the lanes that stopped to go on.
+///
+/// A lane seat (role `Lane`) with an attempt in flight, that is neither
+/// parked nor held and does not wait for its provider, whose agent has been
+/// idle for [`IDLE_BEFORE_NUDGE_S`] seconds gets one nudge into the same
+/// session. A working agent clears the idle mark: the next idle episode
+/// starts over.
+///
+/// The nudges of one attempt are counted like the reviewer's
+/// ([`crate::review::nudge_stopped_reviewers`]): a push or a progress message
+/// after a nudge resets the count. Past [`LANE_NUDGE_BUDGET`] the captain
+/// hears about it once, on the lane's stall thread.
+pub fn nudge_stopped_lanes(
+    store: &mut Store,
+    project: &str,
+    observed: &[SeatObs],
+    now: Ts,
+) -> GearResult<(Vec<String>, Vec<String>)> {
+    let mut nudged = Vec::new();
+    let mut flagged = Vec::new();
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        // A parked or a held lane is not stopped: the captain or the quota
+        // path owns it.
+        if matches!(seat.state, SeatState::Parked | SeatState::Held) {
+            continue;
+        }
+        // A nudge cannot fix a quota or a login (the reviewer's path).
+        if obs.flags.iter().any(|flag| {
+            matches!(
+                flag,
+                gear_herdr::profile::ScreenFlag::Quota | gear_herdr::profile::ScreenFlag::Auth
+            )
+        }) {
+            continue;
+        }
+        // A lane that waits for its provider is not stuck (T-75).
+        if obs.flags.contains(&gear_herdr::profile::ScreenFlag::Backoff) {
+            continue;
+        }
+        let Some(attempt) = attempt_in_flight(store, project, &seat.id)? else {
+            continue;
+        };
+        let key = idle_key(&seat.id, &attempt.task, attempt.attempt);
+        if !obs.idle {
+            // A working agent clears the idle mark.
+            store.write(|tx| tx.set_meta(&key, ""))?;
+            continue;
+        }
+        // The first idle tick of the episode is kept; the nudge follows two
+        // minutes later.
+        let idle_since = store
+            .read(|tx| tx.get_meta(&key))?
+            .and_then(|at| at.trim().parse::<Ts>().ok());
+        let Some(idle_since) = idle_since else {
+            store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+            continue;
+        };
+        if now - idle_since < IDLE_BEFORE_NUDGE_S {
+            continue;
+        }
+        if attempt.state == AttemptState::Delivered {
+            // The delivery was never confirmed: the turn ended before the
+            // lane took the packet. It is delivered again, once, the same
+            // way (T-206).
+            let deliveries: Vec<_> = store
+                .read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver))?
+                .into_iter()
+                .filter(|op| {
+                    op.task.as_deref() == Some(attempt.task.as_str())
+                        && op.attempt == Some(attempt.attempt)
+                })
+                .collect();
+                let Some(last) = deliveries.last() else { continue };
+                if last.state == gear_model::OpState::Confirmed {
+                    continue; // the delivery is through
+                }
+                if deliveries
+                    .iter()
+                    .any(|op| op.payload.get("redeliver").is_some())
+                {
+                    continue; // it was delivered again already
+                }
+                let Some(text) = last.payload.get("text").and_then(|text| text.as_str()) else {
+                    continue;
+                };
+                let text = text.to_string();
+                store.write(|tx| {
+                    tx.insert_op(&NewOp {
+                        project: project.to_string(),
+                        seat: seat.id.clone(),
+                        generation: seat.generation,
+                        kind: OpKind::Deliver,
+                        task: Some(attempt.task.clone()),
+                        attempt: Some(attempt.attempt),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": text, "redeliver": 1 }),
+                        created: now,
+                    })?;
+                    Ok(())
+                })?;
+                nudged.push(seat.id.clone());
+                continue;
+            }
+        // The nudges this attempt got, and the progress after them.
+        let used = nudges_used(store, project, &seat.id, &attempt.task, attempt.attempt, now)?;
+        if used >= LANE_NUDGE_BUDGET {
+            // The captain hears about it, once.
+            let fact = format!(
+                "its agent has been idle for {IDLE_BEFORE_NUDGE_S}s and {used} nudges did not help"
+            );
+            let opened = store.write(|tx| crate::stall::alert_fact(tx, &seat.id, now, &fact))?;
+            if opened {
+                flagged.push(seat.id.clone());
+            }
+            continue;
+        }
+        // The nudge: the same session, a new turn.
+        store.write(|tx| {
+            tx.insert_op(&NewOp {
+                project: project.to_string(),
+                seat: seat.id.clone(),
+                generation: seat.generation,
+                kind: OpKind::Deliver,
+                task: Some(attempt.task.clone()),
+                attempt: Some(attempt.attempt),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "text": nudge_text(&attempt.task),
+                    "nudge": used + 1,
+                }),
+                created: now,
+            })?;
+            Ok(())
+        })?;
+        nudged.push(seat.id.clone());
+    }
+    Ok((nudged, flagged))
+}
+
+/// The attempt of a seat that is in flight: the one that is `Started` (the
+/// lane works on it) or the one that is `Delivered` (its delivery was never
+/// confirmed: the turn ended before the lane took it).
+#[derive(Debug, Clone)]
+struct InFlight {
+    task: String,
+    attempt: i64,
+    state: AttemptState,
+}
+
+fn attempt_in_flight(
+    store: &mut Store,
+    _project: &str,
+    seat: &str,
+) -> GearResult<Option<InFlight>> {
+    let attempts = store.read(|tx| tx.open_attempts_of_seat(seat))?;
+    for wanted in [AttemptState::Started, AttemptState::Delivered] {
+        if let Some(attempt) = attempts.iter().find(|attempt| attempt.state == wanted) {
+            return Ok(Some(InFlight {
+                task: attempt.task.clone(),
+                attempt: attempt.n,
+                state: attempt.state,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// The nudges one attempt got, like the reviewer's: a push or a progress
+/// message after a nudge resets the count.
+fn nudges_used(
+    store: &mut Store,
+    project: &str,
+    seat: &str,
+    task: &str,
+    attempt: i64,
+    now: Ts,
+) -> GearResult<i64> {
+    let ops: Vec<_> = store
+        .read(|tx| tx.ops_of_seat_kind(seat, OpKind::Deliver))?
+        .into_iter()
+        .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt))
+        .collect();
+    let progress = store
+        .read(|tx| tx.progress_of_attempt(project, task, attempt))?
+        .into_iter()
+        .filter(|message| message.sender == seat && message.created <= now)
+        .map(|message| message.created)
+        .max();
+    Ok(match progress {
+        Some(at) => ops
+            .iter()
+            .filter(|op| op.created > at && op.payload.get("nudge").is_some())
+            .count() as i64,
+        None => ops
+            .last()
+            .and_then(|op| op.payload.get("nudge"))
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0),
+    })
+}
+
+/// The nudge of a lane that stopped, as the reviewer's path counts it.
+pub fn nudges_of(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<i64> {
+    let ops: Vec<_> = tx
+        .ops_of_seat_kind(seat, OpKind::Deliver)?
+        .into_iter()
+        .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt))
+        .collect();
+    Ok(ops
+        .iter()
+        .filter(|op| op.payload.get("nudge").is_some())
+        .count() as i64)
+}
