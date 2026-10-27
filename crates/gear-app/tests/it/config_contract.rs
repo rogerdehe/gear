@@ -231,7 +231,7 @@ fn captain_stale_period_is_configurable_and_nonzero() {
 fn a_model_entry_names_its_cli_and_its_arguments() {
     let text = format!(
         "{MINIMAL}\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \
-         {{ model = \"gpt-6.1-sol\", cli = \"codex\", args = [\"-c\", \"model_reasoning_effort=medium\"] }}]\n"
+         {{ model = \"gpt-6.1-sol\", cli = \"codex\", args = [\"-c\", \"model_reasoning_effort=medium\"], context_window_k = 500 }}]\n"
     );
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.models.lanes.len(), 2);
@@ -243,6 +243,8 @@ fn a_model_entry_names_its_cli_and_its_arguments() {
     assert_eq!(cfg.models.lanes[1].model(), "gpt-6.1-sol");
     assert_eq!(cfg.models.lanes[1].cli(), Some("codex"));
     assert_eq!(cfg.models.lanes[1].args(), ["-c", "model_reasoning_effort=medium"]);
+    assert_eq!(cfg.models.lanes[1].context_window_k(), Some(500));
+    assert_eq!(cfg.models.lanes[0].context_window_k(), None);
     // It is valid: the review chain still holds a model no lane runs.
     assert!(validate(&cfg).is_empty());
 }

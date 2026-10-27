@@ -263,7 +263,7 @@ pub fn prepare_lane(
     let round = round_of(store, &key)?;
     facts.open_round_session = round.as_ref().and_then(|round| round.sessions.last().cloned());
 
-    let action = match &round {
+    let mut action = match &round {
         // A new round: the rules of §3.3 decide.
         None => choose(&facts),
         // The round is open: S1 decides, else the round goes on with the
@@ -273,16 +273,24 @@ pub fn prepare_lane(
             None => recorded_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
         },
     };
+    if round.is_none() && facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Keep)
+        && context_large(store, cfg, seat, facts.current_session.as_deref())? {
+        action = Action::Compact;
+    }
 
     store.write(|tx| {
         if round.is_none() {
             create_round(tx, &key, seat, &facts, now)?;
         }
-        tx.set_attempt_action(&project, task, attempt, action.as_str())?;
+        if round.is_none() {
+            tx.set_attempt_action(&project, task, attempt, action.as_str())?;
+        }
         Ok(())
     })?;
 
-    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, now)
+    let compact_after = facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Resume(_))
+        && context_large(store, cfg, seat, facts.earlier_session.as_deref())?;
+    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, compact_after, now)
 }
 
 /// The session step of a **review** round (design §3.2 steps 2-3, §13.4):
@@ -322,9 +330,21 @@ pub fn prepare_review(
         }
         Ok(())
     })?;
-    set_review_action(store, &project, task, attempt, &action)?;
+    if round.is_none() { set_review_action(store, &project, task, attempt, &action)?; }
 
-    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, Role::Review, &action, now)
+    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, Role::Review, &action, false, now)
+}
+
+fn context_large(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, session: Option<&str>) -> GearResult<bool> {
+    let (project, model, binding) = store.read(|tx| Ok((tx.get_project(&seat.project)?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?, tx.get_binding(&seat.id, seat.generation)?)))?;
+    let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else { return Ok(true) };
+    let entries = match seat.role { gear_model::SeatRole::Lane => &config.models.lanes, gear_model::SeatRole::Temp => &config.models.review, gear_model::SeatRole::Captain => &config.models.captain };
+    let entry = model.as_deref().and_then(|model| entries.iter().find(|entry| entry.model() == model)).or_else(|| entries.first());
+    let Some(window) = entry.and_then(|e| e.context_window_k()).filter(|w| *w > 0) else { return Ok(true) };
+    let usage = binding.as_ref().and_then(|binding| cfg.profiles.get(&seat.profile).or_else(|| cfg.profiles.values().find(|p| p.kind == binding.kind)))
+        .and_then(|p| p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name)
+        .and_then(|log| session.and_then(|session| gear_usage::last_context(log, session)));
+    Ok(usage.is_none_or(|tokens| (tokens as u128) * 2 >= (window as u128) * 1000))
 }
 
 /// The facts of a lane round (design §3.3).
@@ -571,7 +591,7 @@ mod tests {
         herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         let action = Action::New;
-        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &action, now).unwrap();
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
         assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
         assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
         assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
@@ -588,10 +608,137 @@ mod tests {
             let mut herdr = FakeHerdr::new();
             herdr.add_agent("w1:p1", "codex", status);
             let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-            let prep = crate::session_runner::run(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &Action::New, T0).unwrap();
+            let prep = crate::session_runner::run(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &Action::New, false, T0).unwrap();
             assert_eq!(prep, Prep::Wait);
             assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneType { .. } | gear_herdr::fake::Call::SendKeys { .. })));
         }
+    }
+
+    fn pi_world() -> (Store, FakeHerdr, SeatRow, EngineCfg) {
+        let mut store = world();
+        store.write(|tx| {
+            testing::seed_active_seat(tx, "p", "pi-lane", gear_model::SeatRole::Lane, "pi:p1", "pi", T0)?;
+            tx.set_binding_session_ref("p:pi-lane", 1, "old-session")
+        }).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:pi-lane")).unwrap().unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("pi:p1", "pi", gear_herdr::AgentStatus::Idle);
+        let mut config = cfg();
+        config.profiles.insert("pi".into(), gear_herdr::builtin("pi").unwrap());
+        (store, herdr, seat, config)
+    }
+
+    #[test]
+    fn pi_new_waits_for_changed_session_or_thirty_second_fallback() {
+        for changed in [false, true] {
+            let (mut store, mut herdr, seat, config) = pi_world();
+            store.write(|tx| { testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "cap:p1", "codex", T0)?; Ok(()) }).unwrap();
+            let action = Action::New;
+            let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+            assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+            if changed { store.write(|tx| tx.set_binding_session_ref(&seat.id, 1, "new-session")).unwrap(); }
+            assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + if changed { 6 } else { 31 }), Prep::Ready);
+            let action = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.unwrap();
+            assert_eq!(action, if changed { "new" } else { "new-unconfirmed" });
+            let messages = store.read(|tx| tx.thread_messages("p", "session:p:pi-lane")).unwrap();
+            assert_eq!(messages.len(), if changed { 0 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn compact_uses_log_or_done_and_falls_back_after_timeout() {
+        for mode in ["log", "assistant", "done", "timeout"] {
+            let (mut store, mut herdr, seat, config) = pi_world();
+            let dir = tempfile::tempdir().unwrap();
+            let file = dir.path().join("session.jsonl");
+            std::fs::write(&file, "").unwrap();
+            store.write(|tx| tx.set_binding_session_ref(&seat.id, 1, file.to_str().unwrap())).unwrap();
+            let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &Action::Compact, false, now).unwrap();
+            assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+            herdr.set_status("pi:p1", gear_herdr::AgentStatus::Working);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+            if mode == "log" { std::fs::write(&file, "{\"type\":\"compaction\"}\n").unwrap(); }
+            if mode == "assistant" { std::fs::write(&file, format!("{{\"type\":\"message\",\"timestamp\":{},\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input\":1}}}}}}\n", T0 + 2)).unwrap(); }
+            herdr.set_status("pi:p1", if mode == "done" { gear_herdr::AgentStatus::Done } else { gear_herdr::AgentStatus::Idle });
+            assert_eq!(run(&mut store, &mut herdr, T0 + if mode == "timeout" { 301 } else { 3 }), Prep::Ready);
+            let action = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.unwrap();
+            assert_eq!(action, if mode == "timeout" { "compact-fallback" } else { "compact" });
+        }
+    }
+
+    #[test]
+    fn context_size_uses_the_configured_window_and_last_usage() {
+        let (mut store, _herdr, seat, config) = pi_world();
+        let text = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+[quota]
+lanes = 1
+temps = 1
+[captain]
+pane = "p:captain"
+kind = "pi"
+profile = "pi"
+[models]
+lanes = [{ model = "test-model", context_window_k = 100 }]
+"#;
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = text.into();
+            tx.update_project(&project)?;
+            tx.set_meta(&crate::model::model_meta_key(&seat.id), "test-model")
+        }).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let write = |input| std::fs::write(&path, format!("{{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input\":{input},\"cacheRead\":10000,\"cacheWrite\":5000}}}}}}\n")).unwrap();
+        write(34999);
+        assert!(!context_large(&mut store, &config, &seat, path.to_str()).unwrap());
+        write(35000);
+        assert!(context_large(&mut store, &config, &seat, path.to_str()).unwrap());
+        assert!(context_large(&mut store, &config, &seat, None).unwrap());
+    }
+
+    #[test]
+    fn resume_restarts_with_session_and_falls_back_if_refused() {
+        for fallback in [false, true] {
+            let (mut store, mut herdr, seat, config) = pi_world();
+            let action = Action::Resume("wanted-session".into());
+            let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+            assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+            assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+            herdr.exit_agent("pi:p1");
+            assert_eq!(run(&mut store, &mut herdr, T0 + 2), Prep::Wait);
+            if fallback { herdr.refuse_starts = Some(("failed".into(), 1)); }
+            assert_eq!(run(&mut store, &mut herdr, T0 + 3), Prep::Wait);
+            if fallback { assert_eq!(run(&mut store, &mut herdr, T0 + 4), Prep::Wait); }
+            assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Ready);
+            let args: Vec<Vec<String>> = herdr.calls.iter().filter_map(|call| match call { gear_herdr::fake::Call::AgentStart { args, .. } => Some(args.clone()), _ => None }).collect();
+            assert!(args[0].contains(&"wanted-session".to_string()));
+            if fallback { assert!(!args[1].contains(&"wanted-session".to_string())); }
+            let actual = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.unwrap();
+            assert_eq!(actual, if fallback { "resume-fallback" } else { "resume" });
+        }
+    }
+
+    #[test]
+    fn a_large_followup_compacts_after_resuming() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        let action = Action::Resume("wanted-session".into());
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, true, now).unwrap();
+        run(&mut store, &mut herdr, T0);
+        run(&mut store, &mut herdr, T0 + 1);
+        herdr.exit_agent("pi:p1");
+        run(&mut store, &mut herdr, T0 + 2);
+        run(&mut store, &mut herdr, T0 + 3);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 4), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/compact")));
+        assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::Prompt { .. })));
     }
 
     /// The facts of a lane round, with the defaults of a seat that works.

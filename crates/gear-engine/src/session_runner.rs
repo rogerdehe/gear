@@ -44,18 +44,19 @@ fn profile<'a>(cfg: &'a EngineCfg, seat: &SeatRow, kind: &str) -> Option<&'a Pro
 }
 
 /// Drive one action by at most one terminal submission or state transition.
-pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow, task: &str, attempt: i64, role: Role, action: &Action, now: Ts) -> GearResult<Prep> {
+pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow, task: &str, attempt: i64, role: Role, action: &Action, compact_after: bool, now: Ts) -> GearResult<Prep> {
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
     let Some(binding) = binding else { return Ok(Prep::Wait) };
     let Some(profile) = profile(cfg, seat, &binding.kind) else { return Ok(Prep::Wait) };
     let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
-    let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity);
+    let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity)
+        .filter(|state| !(str_field(state, "step") == "done" && str_field(state, "action") != "resume" && matches!(action, Action::Resume(_))));
     let mut state = if let Some(state) = existing { state } else {
         let target = match action { Action::Resume(s) => Some(s.as_str()), _ => None };
         let old = binding.session_ref.as_deref().filter(|s| !s.is_empty());
         let offset = old.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
-        let state = json!({"round":identity, "action":action.as_str(), "t0":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false});
+        let state = json!({"round":identity, "action":action.as_str(), "t0":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false, "compact_after":compact_after, "initial_done":occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done)});
         save(store, seat, &state)?;
         state
     };
@@ -94,6 +95,10 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     }
     if phase == "wait_action" {
         let elapsed = now.saturating_sub(time(&state, "t0"));
+        if action_name == "compact" && occupant.as_ref().is_some_and(|a| a.agent_status != AgentStatus::Done)
+            && !state["seen_not_done"].as_bool().unwrap_or(false) {
+            state["seen_not_done"] = json!(true); save(store, seat, &state)?;
+        }
         if action_name == "new" {
             let old = state.get("old_session_ref").and_then(Value::as_str);
             let changed = binding.session_ref.as_deref().filter(|s| !s.is_empty()).is_some_and(|s| Some(s) != old);
@@ -106,10 +111,10 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
             }
         } else {
             let session = state.get("old_session_ref").and_then(Value::as_str);
-            let log_new = session.is_some_and(|s| new_compaction(s, state["offset"].as_u64().unwrap_or(0)) || profile.usage_log.as_deref().and_then(gear_usage::UsageLog::from_name).and_then(|log| gear_usage::usage(log, s, time(&state,"t0"), now.saturating_add(1))).is_some_and(|u| u.records > 0));
-            let done = occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done);
+            let log_new = session.is_some_and(|s| new_compaction(s, state["offset"].as_u64().unwrap_or(0)) || profile.usage_log.as_deref().and_then(gear_usage::UsageLog::from_name).and_then(|log| gear_usage::usage(log, s, time(&state,"t0").saturating_add(1), now.saturating_add(1))).is_some_and(|u| u.records > 0));
+            let done = occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done) && (!state["initial_done"].as_bool().unwrap_or(false) || state["seen_not_done"].as_bool().unwrap_or(false));
             let small_pi = binding.kind == "pi" && elapsed >= 15 && !state["saw_working"].as_bool().unwrap_or(false);
-            if is_ready && (done || log_new || small_pi) { return record(store, seat, task, attempt, role, "compact", &mut state, now) }
+            if is_ready && (done || log_new || small_pi) { return record(store, seat, task, attempt, role, if small_pi && !done && !log_new { "keep" } else { "compact" }, &mut state, now) }
             if is_ready && elapsed >= 300 { return record(store, seat, task, attempt, role, "compact-fallback", &mut state, now) }
         }
         return Ok(Prep::Wait);
@@ -121,6 +126,28 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     }
     if phase == "fallback_exit" {
         if occupant.is_none() { step(&mut state, "start_fallback", now); save(store, seat, &state)?; }
+        else if is_ready {
+            if let Some(command) = profile.exit_command.as_deref().filter(|s| !s.is_empty()) {
+                if !matches!(herdr.pane_type(&binding.pane_id, command), Outcome::Refused { .. }) {
+                    step(&mut state, "fallback_enter", now); save(store, seat, &state)?;
+                }
+            } else if !matches!(herdr.send_keys(&binding.pane_id, &profile.exit_keys), Outcome::Refused { .. }) {
+                step(&mut state, "fallback_wait_exit", now); save(store, seat, &state)?;
+            }
+        }
+        return Ok(Prep::Wait);
+    }
+    if phase == "fallback_enter" {
+        if is_ready {
+            herdr.type_settle();
+            if !matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) {
+                step(&mut state, "fallback_wait_exit", now); save(store, seat, &state)?;
+            }
+        }
+        return Ok(Prep::Wait);
+    }
+    if phase == "fallback_wait_exit" {
+        if occupant.is_none() { step(&mut state, "start_fallback", now); save(store, seat, &state)?; }
         return Ok(Prep::Wait);
     }
     if phase == "start_resume" || phase == "start_fallback" {
@@ -131,7 +158,12 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
             let Some(resume) = profile.resume_args.as_ref().filter(|_| !target.is_empty()) else { step(&mut state, "start_fallback", now); save(store, seat, &state)?; return Ok(Prep::Wait) };
             args.extend(resume.iter().map(|s| s.replace("{session}", target)));
         }
-        if let Some(model) = store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))? {
+        let (model, project) = store.read(|tx| Ok((tx.get_meta(&crate::model::model_meta_key(&seat.id))?, tx.get_project(&seat.project)?)))?;
+        if let Some(config) = project.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) {
+            let entries = match seat.role { SeatRole::Lane => &config.models.lanes, SeatRole::Temp => &config.models.review, SeatRole::Captain => &config.models.captain };
+            let entry = model.as_deref().and_then(|model| entries.iter().find(|e| e.model() == model)).or_else(|| entries.first());
+            if let Some(start) = entry.and_then(|e| crate::model::entry_args(&binding.kind, e)) { args.extend(start); }
+        } else if let Some(model) = model {
             if let Some(start) = crate::model::model_start(&binding.kind, &model) { args.extend(start.args); }
         }
         let folder_key = if role == Role::Review { format!("engine.review_path.{}", seat.id) } else { crate::onboard::worktree_path_key(&seat.id) };
@@ -145,7 +177,15 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         save(store, seat, &state)?; return Ok(Prep::Wait);
     }
     if phase == "wait_resume" || phase == "wait_fallback" {
-        if is_ready { return record(store, seat, task, attempt, role, if phase == "wait_resume" { "resume" } else { "resume-fallback" }, &mut state, now) }
+        if is_ready {
+            if phase == "wait_resume" && state["compact_after"].as_bool().unwrap_or(false) {
+                state["action"] = json!("compact"); state["old_session_ref"] = state["target"].clone();
+                state["offset"] = json!(str_field(&state, "target").is_empty().then_some(0).unwrap_or_else(|| std::fs::metadata(str_field(&state, "target")).map(|m| m.len()).unwrap_or(0)));
+                state["saw_working"] = json!(false); state["initial_done"] = json!(occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done));
+                step(&mut state, "initial", now); save(store, seat, &state)?; return Ok(Prep::Wait);
+            }
+            return record(store, seat, task, attempt, role, if phase == "wait_resume" { "resume" } else { "resume-fallback" }, &mut state, now)
+        }
         if phase == "wait_resume" && now.saturating_sub(time(&state, "step_at")) >= 60 {
             step(&mut state, if occupant.is_none() { "start_fallback" } else { "fallback_exit" }, now); save(store, seat, &state)?;
         }
