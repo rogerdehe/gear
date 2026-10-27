@@ -1081,7 +1081,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert!(pending(&mut store,"p:heat").unwrap().is_some());
         assert!(!herdr.calls.iter().any(|c|matches!(c,Call::SendKeys {..}|Call::AgentStart {..})));
         herdr.set_status(PANE,AgentStatus::Idle); advance_pending(&mut store,&mut herdr,&cfg,T+46);
-        assert!(herdr.calls.iter().any(|c|matches!(c,Call::SendKeys {pane,..} if pane==PANE)));
+        assert!(herdr.calls.iter().any(|c|matches!(c,Call::Prompt {pane,text,..} if pane==PANE && text=="/quit")));
         herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+47);
         let start=herdr.calls.iter().find_map(|c|if let Call::AgentStart{name,kind,pane,args}=c {Some((name,kind,pane,args))} else {None}).unwrap();
         assert_eq!((start.0.as_str(),start.1.as_str(),start.2.as_str()),("p-heat","codex",PANE));
@@ -1102,7 +1102,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
         herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+2);
         let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {kind,pane,args,..}=c {assert_eq!((kind.as_str(),pane.as_str()),("pi",PANE));Some(args)} else {None}).unwrap();
-        assert!(args.windows(2).any(|w|w==["-s","old-session"]),"{args:?}");
+        assert!(args.windows(2).any(|w|w==["--session","old-session"]),"{args:?}");
         assert!(args.windows(2).any(|w|w==["--model","new-model"]),"{args:?}");
         let binding=store.read(|tx|tx.get_binding("p:heat",2)).unwrap().unwrap(); assert_eq!(binding.pane_id,PANE); assert_eq!(binding.session_ref.as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("resume"));
