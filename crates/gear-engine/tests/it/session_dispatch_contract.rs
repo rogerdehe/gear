@@ -70,3 +70,29 @@ fn refused_packet_does_not_record_sent_at() {
     advance(&mut s,&mut h,&c,7);
     assert!(s.read(|tx| tx.get_attempt("p","T-1",1)).unwrap().unwrap().sent_at.is_none());
 }
+
+#[test]
+fn freshly_onboarded_generation_uses_its_first_session() {
+    let (mut s,mut h,c)=world(false);
+    s.write(|tx| tx.set_meta("engine.session_fresh.p:heat", "1")).unwrap();
+    advance(&mut s,&mut h,&c,0);
+    let a=s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
+    assert_eq!(a.session_action.as_deref(),Some("fresh"));
+    assert_eq!(a.sent_at,Some(T));
+    assert!(!h.calls.iter().any(|x| matches!(x,Call::PaneType {text,..} if text=="/new")));
+    assert_eq!(s.read(|tx|tx.get_meta("engine.session_fresh.p:heat")).unwrap().as_deref(),Some(""));
+}
+
+#[test]
+fn freshly_onboarded_followup_still_resumes_its_earlier_session() {
+    let (mut s,mut h,c)=world(true);
+    s.write(|tx| {
+        tx.set_meta("engine.session_fresh.p:heat", "1")?;
+        tx.insert_attempt(&gear_store::AttemptRow { session_ref:Some("previous".into()), session_cli:Some("opencode".into()), session_action:None, sent_at:Some(T-100), project:"p".into(), task:"T-7".into(), n:1, seat:"p:heat".into(), generation:1, contract_version:1, adopted_version:1, pending_update:None, state:gear_model::AttemptState::Accepted, candidate:None, report:None, safe_point:None, started:T-100, updated:T-50 })
+    }).unwrap();
+    advance(&mut s,&mut h,&c,0);
+    let state=s.read(|tx|tx.get_meta("engine.session_step.p:heat")).unwrap().unwrap();
+    let state:serde_json::Value=serde_json::from_str(&state).unwrap();
+    assert_eq!(state["action"],"resume"); assert_eq!(state["target"],"previous");
+    assert!(h.prompts_to(PANE).is_empty());
+}

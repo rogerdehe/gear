@@ -79,13 +79,24 @@ fn world() -> World {
         ..Default::default()
     };
     cfg.profiles
-        .insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        .insert("opencode".into(), { let mut p = gear_herdr::builtin("opencode").unwrap(); p.new_session.clear(); p });
     World { store, herdr, cfg }
 }
 
 impl World {
     fn tick(&mut self, at: i64) {
         tick(&mut self.store, &mut self.herdr, &self.cfg, T0 + at).unwrap();
+    }
+
+    /// An S1 restart restores the round's session before a failed packet is retried.
+    fn resume_round(&mut self, at: i64, session: &str) {
+        self.tick(at); // observe the hand restart and request exit
+        self.herdr.exit_agent(LANE);
+        self.tick(at + 1); // observe exit
+        self.tick(at + 2); // start with resume arguments
+        self.herdr.set_agent_session(LANE, session);
+        self.tick(at + 3); // confirm session preparation
+        self.tick(at + 4); // the eligible retry goes once
     }
 
     /// Every Deliver op of the lane, in any state, oldest first.
@@ -251,7 +262,7 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     w.tick(1); // the prompt goes into A
     w.tick(5); // first check
     w.herdr.set_agent_session(LANE, "ses_B");
-    w.tick(9); // second check: the delivery fails
+    w.resume_round(9, "ses_A"); // the failed packet waits for S1
 
     let ops = w.deliveries();
     assert_eq!(ops.len(), 2, "{ops:?}");
@@ -262,8 +273,8 @@ fn a_restart_before_the_budget_expires_gets_the_open_attempt() {
     assert_eq!(w.stall_items().len(), 1);
 
     // B reads it: the attempt starts.
-    view(&mut w, 10);
-    w.tick(13);
+    view(&mut w, 14);
+    w.tick(17);
     let ops = w.deliveries();
     assert_eq!(ops[1].state, OpState::Confirmed, "{ops:?}");
     let attempt = w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
@@ -313,7 +324,7 @@ fn a_failed_nudge_is_not_delivered_again_in_the_same_session() {
 
     // A new session gets exactly one delivery of the same attempt.
     w.herdr.set_agent_session(LANE, "ses_B");
-    w.tick(25);
+    w.resume_round(25, "ses_A");
     let ops = w.deliveries();
     assert_eq!(ops.len(), 3, "{ops:?}");
     assert_eq!(ops[2].state, OpState::Submitted, "{ops:?}");

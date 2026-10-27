@@ -70,7 +70,7 @@ fn world(status: AgentStatus) -> World {
     herdr.add_agent(LANE, "opencode", status);
     let mut cfg = EngineCfg::default();
     cfg.profiles
-        .insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        .insert("opencode".into(), { let mut p = gear_herdr::builtin("opencode").unwrap(); p.new_session.clear(); p });
     World { store, herdr, cfg }
 }
 
@@ -112,8 +112,7 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
     ticks(&mut w, 0, 10);
 
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "one op, not one per tick: {ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "it stays pending: {ops:?}");
+    assert!(ops.is_empty(), "session setup waits until the dialog clears: {ops:?}");
     assert!(
         w.herdr.prompts_to(LANE).is_empty(),
         "nothing is typed into a blocked agent: {:?}",
@@ -164,8 +163,7 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
     // The delivery is pending: a blocked seat is not typed into.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "{ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+    assert!(ops.is_empty(), "session setup waits on the dialog: {ops:?}");
 
     // The captain retires the lane while it is blocked.
     w.store
@@ -179,8 +177,7 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
         tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
     }
     let ops = deliveries(&mut w);
-    assert_eq!(ops.len(), 1, "one pending delivery: {ops:?}");
-    assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
+    assert!(ops.is_empty(), "no delivery before the dialog clears: {ops:?}");
     let alerts = w
         .store
         .read(|tx| tx.thread_messages("p", "blocked:p:heat"))

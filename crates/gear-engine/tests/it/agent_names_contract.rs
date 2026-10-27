@@ -43,13 +43,14 @@ fn world() -> World {
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
     herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
-    let cfg = EngineCfg {
+    let mut cfg = EngineCfg {
         tick_s: 4,
         cooldown_s: 30,
         doorbell_check_budget: 3,
         profiles: gear_herdr::builtins(),
         ..Default::default()
     };
+    cfg.profiles.get_mut("opencode").unwrap().new_session.clear();
     World { store, herdr, cfg }
 }
 

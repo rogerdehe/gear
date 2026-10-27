@@ -437,7 +437,7 @@ pub fn recover_open_rounds(
             let Some(attempt) = tx.get_attempt(project, &round.task, round.attempt)? else { return Ok(None) };
             let unsent = attempt.state == AttemptState::Delivered && attempt.sent_at.is_none();
             if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped) { return Ok(None); }
-            let mismatch = round.sessions.last().is_some_and(|session| {
+            let mismatch = crate::session::round_session(tx, &round)?.as_ref().is_some_and(|session| {
                 obs.presence == crate::observe::Presence::Missing
                     || (obs.presence == crate::observe::Presence::Present
                         && obs.session.as_deref().is_some_and(|current| current != session))
@@ -448,7 +448,20 @@ pub fn recover_open_rounds(
             Ok((mismatch || running).then_some((round.task, round.attempt)))
         })?;
         if let Some((task, attempt)) = recovery {
-            crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)?;
+            if crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)? == crate::session::Prep::Ready {
+                // A restarted agent can resume the same session. It is a new
+                // recipient for the failed packet even though its session id
+                // is unchanged; allow one retry and clear the marker on send.
+                store.write(|tx| {
+                    if let Some(mut failed) = crate::delivery::failed(tx, &seat.id)? {
+                        if failed.task == task && failed.attempt == attempt {
+                            failed.retry_now = true;
+                            crate::delivery::record(tx, &seat.id, &failed)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
         }
     }
     Ok(())

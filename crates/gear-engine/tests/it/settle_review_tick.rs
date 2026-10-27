@@ -139,7 +139,9 @@ const BOARD_PANE: &str = "w1:p3";
 
 fn cfg() -> EngineCfg {
     let mut c = EngineCfg { db_path: "/state/gear.db".into(), auto_settle: true, ..Default::default() };
-    c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
+    let mut profile = builtin("opencode").unwrap();
+    profile.new_session.clear();
+    c.profiles.insert("opencode".into(), profile);
     c
 }
 
@@ -249,7 +251,11 @@ fn a_failing_settlement_does_not_abort_the_tick() {
 
 /// Automatic settlement is opt-in (L-57).
 fn auto() -> EngineCfg {
-    EngineCfg { auto_settle: true, ..Default::default() }
+    let mut cfg = EngineCfg { auto_settle: true, ..Default::default() };
+    let mut profile = gear_herdr::builtin("opencode").unwrap();
+    profile.new_session.clear();
+    cfg.profiles.insert("opencode".into(), profile);
+    cfg
 }
 
 #[test]
