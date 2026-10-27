@@ -53,6 +53,11 @@ struct State {
     at: Option<Ts>,
     /// The id of the item the engine opened.
     item: Option<String>,
+    /// The reports an item has already named (design §6.4: the ring rings
+    /// again when a **new** report arrives — a report the captain has not
+    /// been told about yet). It outlives the item, so a captain who resolved
+    /// the item does not get the same reports again.
+    listed: Vec<String>,
 }
 
 fn state_key(project: &str) -> String {
@@ -97,21 +102,32 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
                 None,
                 now,
             )?;
-            write_state(tx, project, &State { at: state.at, item: None })?;
+            write_state(tx, project, &State { at: state.at, item: None, listed: state.listed })?;
             return Ok(Some(Change::Closed));
         }
         // A report arrived while the item was open: its list changes.
         let body = body(&open);
-        if item.body != body {
+        let changed = item.body != body;
+        if changed {
             tx.update_message_body(project, &item.id, &body)?;
-            return Ok(Some(Change::Updated));
         }
-        return Ok(None);
+        // The reports the item names are the ones the captain has heard of.
+        let listed = with_listed(&state.listed, &open);
+        if listed != state.listed {
+            write_state(tx, project, &State { at: state.at, item: state.item, listed })?;
+        }
+        return Ok(if changed { Some(Change::Updated) } else { None });
     }
 
     // No item is open. A ring needs reports to name and an idle captain: it
     // has no actionable item (design §6.4).
     if open.is_empty() {
+        return Ok(None);
+    }
+    // A ring needs a report the captain has not been told about yet: it rings
+    // again when a **new** report arrives, not for the same ones again
+    // (design §6.4).
+    if !open.iter().any(|id| !state.listed.contains(id)) {
         return Ok(None);
     }
     if !tx.actionable_for(project, &captain.id, now)?.is_empty() {
@@ -143,8 +159,28 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
         state: MsgState::Open,
         created: now,
     })?;
-    write_state(tx, project, &State { at: Some(now), item: Some(message.id) })?;
+    write_state(
+        tx,
+        project,
+        &State {
+            at: Some(now),
+            item: Some(message.id),
+            listed: with_listed(&state.listed, &open),
+        },
+    )?;
     Ok(Some(Change::Opened))
+}
+
+/// The reports an item has named: the ones it already named, plus the ones it
+/// names now.
+fn with_listed(listed: &[String], open: &[String]) -> Vec<String> {
+    let mut listed = listed.to_vec();
+    for id in open {
+        if !listed.contains(id) {
+            listed.push(id.clone());
+        }
+    }
+    listed
 }
 
 /// The item's text (design §6.4): how many reports wait and which ones.
@@ -171,6 +207,16 @@ fn read_state(tx: &Tx<'_>, project: &str) -> GearResult<State> {
             .get("item")
             .and_then(|item| item.as_str())
             .map(|item| item.to_string()),
+        listed: value
+            .get("listed")
+            .and_then(|listed| listed.as_array())
+            .map(|listed| {
+                listed
+                    .iter()
+                    .filter_map(|id| id.as_str().map(|id| id.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -179,6 +225,7 @@ fn write_state(tx: &Tx<'_>, project: &str, state: &State) -> GearResult<()> {
     let value = serde_json::json!({
         "at": state.at,
         "item": state.item,
+        "listed": state.listed,
     });
     tx.set_meta(&state_key(project), &value.to_string())
 }

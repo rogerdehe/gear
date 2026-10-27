@@ -297,3 +297,53 @@ fn the_friction_item_is_not_promoted_and_does_not_ring_the_captain_again() {
     assert!(!items(&mut w.store)[0].urgent);
 }
 
+/// F2 of the review: the ring needs a report the captain has not been told
+/// about yet. A captain who resolved the item does not get the same reports
+/// again when the cooldown is over; a new report rings once, and the gate
+/// survives a restart.
+#[test]
+fn a_resolved_item_rings_again_only_for_a_new_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gear.db");
+    let mut w = world_at(&path);
+    report(&mut w.store, "T-1", "the build took forever");
+
+    // The first ring: the item names F-1.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    let first = items(&mut w.store).remove(0);
+    assert_eq!(first.body, "1 friction report: F-1. Run gear friction.");
+
+    // The captain resolves it by hand (what `gear reply M-n --resolve` does).
+    w.store
+        .write(|tx| {
+            tx.update_message_state("p", &first.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+        })
+        .unwrap();
+
+    // The cooldown is over, but no report is new: no second item.
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
+    assert!(tick_report.friction.is_empty(), "no new report, no ring: {tick_report:?}");
+    assert_eq!(items(&mut w.store).len(), 1, "no second item");
+
+    // A restart does not forget what the captain has been told: the gate
+    // holds across a reload of the store.
+    drop(w.store);
+    let store = Store::open(&path).unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    let mut w = World { store, herdr, cfg };
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1802).unwrap();
+    assert!(tick_report.friction.is_empty(), "the state survives the restart: {tick_report:?}");
+    assert_eq!(items(&mut w.store).len(), 1, "no second item");
+
+    // A new report rings once, and the item names every open report.
+    report(&mut w.store, "T-2", "a missing tool");
+    let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1803).unwrap();
+    assert_eq!(tick_report.friction, vec!["friction:opened".to_string()], "{tick_report:?}");
+    let all = items(&mut w.store);
+    assert_eq!(all.len(), 2, "exactly one new item: {all:?}");
+    assert_eq!(all[1].state, MsgState::Open);
+    assert_eq!(all[1].body, "2 friction reports: F-1 F-2. Run gear friction.");
+}
