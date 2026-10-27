@@ -515,3 +515,52 @@ fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
     assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Resolved);
     assert_eq!(s.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,AttemptState::Submitted);
 }
+
+/// T-192: a late check-in records the session the attempt ran in (design §3.2
+/// step 5): the delivery's answer was lost, the lane checks in late, and the
+/// attempt starts — with the session its binding knows. The scan reports the
+/// attempt only when it changes it: the next tick says nothing.
+#[test]
+fn a_late_check_in_records_the_session_and_is_reported_once() {
+    let (mut s, op) = world();
+    // The seat's binding knows the session its agent is in.
+    s.write(|tx| tx.set_binding_session_ref(LANE, 1, "ses_A")).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_binding(LANE, 1)).unwrap().unwrap().session_ref.as_deref(),
+        Some("ses_A")
+    );
+    // The attempt waits for its check-in and knows no session yet.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Delivered);
+    assert_eq!(attempt.session_ref, None);
+
+    // The window (180 s) is over: the delivery fails.
+    let (confirmed, _flagged) = confirm_pending_with(&mut s, "p", 3, 180, T0 + 200).unwrap();
+    assert!(confirmed.is_empty());
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
+        OpState::Failed
+    );
+
+    // The lane checks in after all — late, but it read the packet.
+    view(&mut s, T0 + 210, Some("T-7"), Some(1));
+    let late = confirm_late_views(&mut s, "p", T0 + 220).unwrap();
+    assert_eq!(late.len(), 1, "{late:?}");
+    assert!(late[0].contains("T-7/1"), "the attempt is named: {late:?}");
+
+    // The attempt is started, and it knows the session it ran in.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, AttemptState::Started);
+    assert_eq!(attempt.session_ref.as_deref(), Some("ses_A"), "{attempt:?}");
+    assert_eq!(attempt.session_cli.as_deref(), Some("opencode"), "{attempt:?}");
+
+    // The next scan changes nothing: it reports nothing (T-192).
+    let late = confirm_late_views(&mut s, "p", T0 + 230).unwrap();
+    assert!(late.is_empty(), "an attempt that is already Started is nothing new: {late:?}");
+
+    // The session is the one that is recorded: a second scan does not
+    // replace it.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
+    assert_eq!(attempt.session_ref.as_deref(), Some("ses_A"), "{attempt:?}");
+    assert_eq!(attempt.session_cli.as_deref(), Some("opencode"), "{attempt:?}");
+}

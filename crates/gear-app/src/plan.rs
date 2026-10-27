@@ -765,6 +765,16 @@ fn apply_queue(
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The review item of that attempt is settled with the verdict (T-187):
+        // the captain does not have to resolve it by hand.
+        crate::tasks::resolve_review_items(
+            tx,
+            project,
+            &line.task,
+            line.attempt,
+            &format!("settled in plan {applied_version}"),
+            now,
+        )?;
         // The decision log (design §7.4): a pass over a failed review is an
         // override, a fail is a rework.
         if line.pass {
