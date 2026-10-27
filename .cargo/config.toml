@@ -3,6 +3,7 @@
 # tests' local pushes), no credential helpers, no URL rewrites. The tests'
 # remotes are local bare repositories in the temp dir; identity is set here.
 [env]
+NEXTEST_TEST_THREADS = "4"
 GIT_CONFIG_GLOBAL = "/dev/null"
 GIT_CONFIG_NOSYSTEM = "1"
 GIT_AUTHOR_NAME = "gear-test"
@@ -22,3 +23,10 @@ GEAR_GH = { value = "/nonexistent/gear-test/gh", force = true }
 # Production is not affected: this file is read by cargo, not by the installed
 # binary.
 GIT_ALLOW_PROTOCOL = "file"
+
+# Several lanes and reviewers build and test at once on one 10-core machine
+# (M4: load 159 with four parallel builds plus another project's suite).
+# Each build and test run takes a fair share instead of every core; there is
+# no lock, so lanes still run side by side.
+[build]
+jobs = 4
