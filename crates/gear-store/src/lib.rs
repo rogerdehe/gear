@@ -1370,6 +1370,21 @@ impl<'s> Tx<'s> {
         require_written(changed, "message", &format!("{id} in project {project}"))
     }
 
+    /// Set the current urgency of an existing item.
+    pub fn set_message_urgent(&self, project: &str, id: &str, urgent: bool) -> GearResult<()> {
+        let changed = self.tx.execute("UPDATE messages SET urgent=?3 WHERE project=?1 AND id=?2", params![project, id, urgent]).map_err(map_sqlite)?;
+        require_written(changed, "message", &format!("{id} in project {project}"))
+    }
+
+    /// Progress messages for one attempt, in their recorded order.
+    pub fn progress_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self.tx.prepare(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='progress' ORDER BY created, id")).map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
+        let mut result = Vec::new();
+        for row in rows { result.push(row.map_err(map_sqlite)?); }
+        Ok(result)
+    }
+
     /// Messages to `recipient` in state Open, or Waiting with `wait_until <= now`.
     /// Ordered by created ascending.
     pub fn actionable_for(

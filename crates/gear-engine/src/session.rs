@@ -543,7 +543,7 @@ fn create_round(
         seat: seat.id.clone(),
         generation: seat.generation,
         cli: facts.current_cli.clone().unwrap_or_default(),
-        model: None,
+        model: tx.get_meta(&crate::model::model_meta_key(&seat.id))?,
         start_at: now,
     })
 }
