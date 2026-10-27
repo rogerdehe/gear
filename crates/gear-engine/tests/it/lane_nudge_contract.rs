@@ -444,6 +444,32 @@ fn a_retry_that_fails_while_it_is_sent_opens_the_stall_item() {
     assert_eq!(stall_items(&mut s).len(), 1, "one item only");
 }
 
+/// A late confirmed check-in retires the failed retry without a stale alert.
+#[test]
+fn a_failed_retry_followed_by_a_check_in_does_not_open_a_stall() {
+    let (mut s, mut h, cfg) = failed_packet_world();
+    tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+    let agents = gear_engine::observe::snapshot(&mut h).unwrap();
+    let observed = s.read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles)).unwrap();
+    gear_engine::lane_nudge::nudge_stopped_lanes(&mut s, "p", &observed, T + 130).unwrap();
+    h.add_shell(LANE);
+    gear_engine::ops::execute_intended(&mut s, &mut h, "p", T + 130).unwrap();
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+    s.write(|tx| tx.insert_view(&gear_store::ViewRecord {
+        project: "p".into(), seat: "p:heat".into(), generation: 1, ts: T + 135,
+        shown_msgs: vec![], shown_ops: vec![], shown_task: Some("T-1".into()),
+        shown_attempt: Some(1), shown_contract: Some(1),
+    })).unwrap();
+    h.set_status(LANE, AgentStatus::Working);
+    for time in [140, 160, 1000] {
+        tick(&mut s, &mut h, &cfg, T + time).unwrap();
+        assert!(stall_items(&mut s).is_empty(), "stale stall at T+{time}");
+        assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, gear_model::AttemptState::Started);
+    }
+    assert_eq!(s.read(|tx| tx.get_meta(&gear_engine::lane_nudge::retry_marker("p:heat", "T-1", 1))).unwrap().as_deref(), Some(""));
+    assert!(s.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+}
+
 /// T-218: the same ordering with the default confirmation window: the
 /// captain is not rung before the retry, and the retry's own window opens the
 /// one item.
