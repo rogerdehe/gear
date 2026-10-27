@@ -802,6 +802,28 @@ pub fn confirm_pending_with(
                             retry_now: false,
                         },
                     )?;
+                    // T-206 (F3): the first failure of a delivery may still
+                    // be retried by the lane's own path: the marker says so,
+                    // and the tick holds the captain's ring back until the
+                    // retry has had its chance.
+                    let marker = crate::lane_nudge::retry_marker(
+                        &op.seat,
+                        op.task.as_deref().unwrap_or_default(),
+                        op.attempt.unwrap_or_default(),
+                    );
+                    match tx.get_meta(&marker)?.as_deref() {
+                        None => {
+                            // The first failure: the lane's own path may
+                            // still deliver the packet again (T-206, F3).
+                            tx.set_meta(&marker, "allowed")?;
+                        }
+                        Some("pending") => {
+                            // The retry failed too: the fact stands, the
+                            // captain hears about it.
+                            tx.set_meta(&marker, "")?;
+                        }
+                        _ => {}
+                    }
                     if !flagged.contains(&op.seat) {
                         flagged.push(op.seat.clone());
                     }
