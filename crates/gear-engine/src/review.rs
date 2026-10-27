@@ -3379,6 +3379,33 @@ fn packet_text(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<
         .unwrap_or_default())
 }
 
+/// Latest progress for this review, excluding another reviewer or attempt.
+fn review_progress(tx: &Tx<'_>, project: &str, seat: &SeatRow, task: &str, attempt: i64, now: Ts) -> GearResult<Option<Ts>> {
+    Ok(tx.progress_of_attempt(project, task, attempt)?.into_iter()
+        .filter(|m| m.sender == seat.id && m.sender_gen == seat.generation && m.created <= now)
+        .map(|m| m.created).max())
+}
+
+fn review_nudges_used(ops: &[gear_store::OpRow], progress: Option<Ts>) -> i64 {
+    match progress {
+        Some(at) => ops.iter().filter(|op| op.created > at && op.payload.get("nudge").is_some()).count() as i64,
+        None => ops.last().and_then(|op| op.payload.get("nudge")).and_then(|n| n.as_i64()).unwrap_or(0),
+    }
+}
+
+/// Revalidate only a reviewer nudge-exhaustion flag, without touching flags
+/// from missing agents or delivery failures.
+pub(crate) fn nudge_flag_current(tx: &Tx<'_>, project: &str, seat_id: &str, now: Ts) -> GearResult<bool> {
+    let Some(seat) = tx.get_seat(seat_id)? else { return Ok(false) };
+    let Some(task) = seat.task_id.as_deref() else { return Ok(false) };
+    let Some(attempt) = tx.attempts_of_task(project, task)?.into_iter().last() else { return Ok(false) };
+    if attempt.state != gear_model::AttemptState::Submitted || tx.get_review_verdict(project, task, attempt.n)?.is_some() { return Ok(false) }
+    let progress = review_progress(tx, project, &seat, task, attempt.n, now)?;
+    let ops: Vec<_> = tx.ops_of_seat_kind(seat_id, OpKind::Deliver)?.into_iter()
+        .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt.n)).collect();
+    Ok(review_nudges_used(&ops, progress) >= REVIEW_NUDGE_BUDGET)
+}
+
 pub fn nudge_stopped_reviewers(
     store: &mut Store,
     project: &str,
@@ -3409,10 +3436,14 @@ pub fn nudge_stopped_reviewers(
             {
                 return Ok(None);
             }
-            let Some(last) = tx.last_op(&seat.id, OpKind::Deliver)? else {
+            let deliveries: Vec<_> = tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)?.into_iter()
+                .filter(|op| op.task.as_deref() == Some(task.as_str()) && op.attempt == Some(attempt.n))
+                .collect();
+            let Some(last) = deliveries.last() else {
                 return Ok(None); // the packet itself is not sent yet
             };
-            if now - last.created < cooldown_s {
+            let progress = review_progress(tx, project, seat, &task, attempt.n, now)?;
+            if now - last.created.max(progress.unwrap_or(last.created)) < cooldown_s {
                 return Ok(None);
             }
             // Never two deliveries in flight — but a review packet stays
@@ -3427,7 +3458,7 @@ pub fn nudge_stopped_reviewers(
             if blocking {
                 return Ok(None);
             }
-            let used = last.payload.get("nudge").and_then(|n| n.as_i64()).unwrap_or(0);
+            let used = review_nudges_used(&deliveries, progress);
             if used >= REVIEW_NUDGE_BUDGET {
                 return Ok(Some(false));
             }
