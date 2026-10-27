@@ -37,6 +37,7 @@ mod feed_contract;
 mod friction_ring_contract;
 mod lane_view_contract;
 mod onboard_contract;
+mod park_end_contract;
 mod onboard_run_contract;
 mod reviewer_nudge_contract;
 mod settle_review_tick;

@@ -4,7 +4,7 @@ use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, SeatRole, SeatState};
+use gear_model::{ErrorCode, GearCtx, SeatRole, SeatState, TaskState};
 use gear_store::{testing, Store};
 
 const T0: i64 = 1_800_000_000;
@@ -260,4 +260,137 @@ fn release_brings_a_held_lane_back() {
     // A lane that does not exist, and a seat that is not a lane, are refused.
     assert_eq!(run_at(&mut s, &mut herdr, "- release nobody\n", "release-5").unwrap_err().code, ErrorCode::BadFormat);
     assert_eq!(run_at(&mut s, &mut herdr, "- release captain\n", "release-6").unwrap_err().code, ErrorCode::BadFormat);
+}
+
+// ---- a plan park ends (T-190)
+
+/// The RFC3339 time of a moment, in the format the staff lines use.
+/// T0 is 2027-01-15T08:00:00Z; an hour later is 09:00:00Z.
+fn at(hours_later: i64) -> String {
+    match hours_later {
+        0 => "2027-01-15T08:00:00Z".to_string(),
+        1 => "2027-01-15T09:00:00Z".to_string(),
+        _ => format!("2027-01-15T{:02}:00:00Z", 8 + hours_later),
+    }
+}
+
+/// Park a lane and let the given time pass.
+fn parked(s: &mut Store, name: &str, reason: &str) {
+    s.write(|tx| {
+        tx.set_seat_state(
+            &format!("p:{name}"),
+            SeatState::Parked,
+            Some(reason),
+            T0,
+        )
+    })
+    .unwrap();
+}
+
+/// Apply a staff line with the session's agents, as the CLI does.
+fn run_with_agents(
+    s: &mut Store,
+    herdr: &mut gear_herdr::fake::FakeHerdr,
+    staff: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    use gear_herdr::HerdrRead as _;
+    let agents = herdr.agents().unwrap();
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+    let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
+    let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
+    apply(s, &env, Some(&fp), Some(&agents), &parse(&text).unwrap(), &text, rid, T0 + 10)
+}
+
+/// A session with the agent of the lane `heat` in its pane.
+fn session() -> gear_herdr::fake::FakeHerdr {
+    use gear_herdr::AgentStatus;
+    let mut herdr = gear_herdr::fake::FakeHerdr::new();
+    herdr.add_agent("w1:p2", "opencode", AgentStatus::Idle); // heat
+    herdr
+}
+
+/// T-190: a parked lane is released like a held one.
+#[test]
+fn a_parked_lane_is_released() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", "until-task=T-12");
+    run_with_agents(&mut s, &mut herdr, "- release heat\n", "r1").unwrap();
+    // The agent is still in its pane: the lane goes on working.
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
+}
+
+/// T-190: a park whose time has come ends on the apply.
+#[test]
+fn an_expired_park_ends_on_the_apply() {
+    let mut s = world();
+    let mut herdr = session();
+    // The park's time is an hour before the apply's.
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
+    assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
+}
+
+/// T-190: a park whose time has not come stays.
+#[test]
+fn an_unexpired_park_stays() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", &format!("until={}", at(1)));
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+    assert_eq!(seat(&mut s, "heat").1, Some(format!("until={}", at(1))));
+}
+
+/// T-190: a park that waits for a task ends when the task is done.
+#[test]
+fn an_until_task_park_ends_when_the_task_is_done() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_task(&gear_store::TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-12".into(),
+            rank: 12,
+            state: TaskState::Done,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: T0,
+        })
+    })
+    .unwrap();
+    let mut herdr = session();
+    parked(&mut s, "heat", "until-task=T-12");
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
+    assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
+}
+
+/// T-190: a lane parked on quota is the quota path's business.
+#[test]
+fn a_quota_park_is_untouched() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", "quota: minimax-cn 5h; resume at 1800003600");
+    // The engine's quota park carries the resume deadline.
+    s.write(|tx| tx.set_meta("resume:p:heat", "1800003600"))
+        .unwrap();
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
 }

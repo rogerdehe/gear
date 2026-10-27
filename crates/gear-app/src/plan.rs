@@ -578,6 +578,11 @@ fn apply_queue(
         not_mentioned.push(task.id);
     }
 
+    // A park whose time has come ends before this apply's staff lines (T-190):
+    // a lane the captain parked until a time that has passed works again.
+    // A park the captain writes now is not ended by the same apply.
+    end_parked_lanes(tx, project, agents, now)?;
+
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
@@ -1159,8 +1164,12 @@ fn release_seat(
     }
 }
 
-/// `- release <lane>` (T-133): only a held lane is released: any other state is
+/// `- release <lane>` (T-133): a held lane is released: any other state is
 /// a transition this line cannot mean, and it is refused with the reason.
+///
+/// A **parked** lane is released the same way (T-190): the captain's `- park
+/// <lane> until=…` has no other way out, and a park whose time has come ends
+/// by itself (see [`end_parked_lanes`]).
 fn release_lane(
     tx: &Tx<'_>,
     seat: &gear_store::SeatRow,
@@ -1170,11 +1179,11 @@ fn release_lane(
     now: Ts,
 ) -> GearResult<()> {
     let seat_id = seat.id.clone();
-    if seat.state != SeatState::Held {
+    if !matches!(seat.state, SeatState::Held | SeatState::Parked) {
         return Err(GearError::new(
             ErrorCode::BadTransition,
             format!(
-                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there)",
+                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there); a Parked lane is released the same way",
                 seat.state.as_str()
             ),
         ));
@@ -1222,6 +1231,105 @@ fn release_lane(
     )?;
     tx.set_seat_state(&seat_id, target, Some(reason), now)?;
     Ok(())
+}
+
+/// End the parks whose time has come (T-190).
+///
+/// A lane the plan parked (`- park <lane> until=…` or `until-task=T-n`) goes
+/// back to work when the park ends: **Active** when its agent is still in the
+/// pane, **Queued** when the agent is gone (the engine onboards it again, as
+/// for a released lane).
+///
+/// A lane parked on **quota** is left to the quota path: the engine's
+/// `resume:<seat>` meta says so, and the quota park ends when the provider's
+/// window starts again.
+///
+/// The plan's apply, `gear plan check` and the engine's tick call it: a park
+/// that has passed must not keep a lane standing still.
+pub fn end_parked_lanes(
+    tx: &Tx<'_>,
+    project: &str,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut ended = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane || seat.state != SeatState::Parked {
+            continue;
+        }
+        // A quota park is the quota path's business.
+        if tx.get_meta(&format!("resume:{}", seat.id))?.is_some() {
+            continue;
+        }
+        let Some(reason) = seat.state_reason.as_deref() else {
+            continue;
+        };
+        let over = if let Some(until) = reason.strip_prefix("until=") {
+            // The park ends at the time the captain wrote.
+            match parse_rfc3339(until) {
+                Some(at) => at <= now,
+                None => false,
+            }
+        } else if let Some(task) = reason.strip_prefix("until-task=") {
+            // The park ends when the task it waits for is done.
+            tx.get_task(project, task)?
+                .is_some_and(|task| task.state == TaskState::Done)
+        } else {
+            false
+        };
+        if !over {
+            continue;
+        }
+        // The seat's binding is GEAR's record of the pane it started an agent
+        // in; the session's agents say whether one is in that pane now.
+        let binding = tx
+            .get_binding(&seat.id, seat.generation)?
+            .filter(|binding| binding.status == BindingStatus::Active);
+        let running = match &binding {
+            // No live binding: the agent was ended or never bound.
+            None => false,
+            Some(binding) => {
+                let Some(agents) = agents else {
+                    // Without the session's agents nobody may say whether the
+                    // agent is there: the park stays.
+                    continue;
+                };
+                agents.iter().any(|agent| {
+                    agent.pane_id == binding.pane_id
+                        && agent.agent.as_deref() == Some(binding.kind.as_str())
+                })
+            }
+        };
+        if running {
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Active),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Active.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Active, Some("park ended"), now)?;
+        } else {
+            // The agent is gone: the lane is let go and the engine onboards it
+            // again. Parked → Held → Queued are the transitions the seat states
+            // allow.
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Held),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Held.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Held, Some("park ended"), now)?;
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, SeatState::Held, SeatState::Queued),
+                "seat",
+                SeatState::Held.as_str(),
+                SeatState::Queued.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Queued, Some("park ended"), now)?;
+        }
+        ended.push(format!("{}: the park ended", seat.name));
+    }
+    Ok(ended)
 }
 
 /// `- release <reviewer>` (T-140, design §3.6): a reviewer seat in `Standby` —
