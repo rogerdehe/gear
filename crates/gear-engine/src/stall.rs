@@ -57,20 +57,19 @@ pub fn resolve(
     now: Ts,
     before: Option<Ts>,
 ) -> GearResult<bool> {
-    let open = tx
-        .thread_messages(project, &thread(seat_id))?
-        .into_iter()
-        .find(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
-    let Some(item) = open else {
+    // The latest incident still owns the marker after the captain resolves
+    // its message. A bounded old check-in may clear only an incident that
+    // already existed when that view was recorded.
+    let latest = tx.thread_messages(project, &thread(seat_id))?.into_iter()
+        .filter(|m| m.sender == "engine" && m.kind == MsgKind::System)
+        .max_by_key(|m| (m.created, m.id.strip_prefix("M-").and_then(|n| n.parse::<u64>().ok()).unwrap_or(0)));
+    let Some(item) = latest else {
         if before.is_none() { tx.set_meta(&format!("stall-active:{seat_id}"), "")?; }
         return Ok(false);
     };
-    if let Some(before) = before {
-        if item.created > before {
-            return Ok(false);
-        }
-    }
+    if before.is_some_and(|limit| item.created > limit) { return Ok(false); }
     tx.set_meta(&format!("stall-active:{seat_id}"), "")?;
+    if !matches!(item.state, MsgState::Open | MsgState::Waiting) { return Ok(false); }
     tx.update_message_state(
         project,
         &item.id,
@@ -173,4 +172,25 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages.iter().all(|m| m.state == MsgState::Resolved));
     }
+    #[test]
+    fn old_checkin_does_not_clear_a_newer_resolved_incident() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            seed_project(tx, "p", "sess", 1000)?;
+            seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", 1000)?;
+            seed_active_seat(tx, "p", "lane", SeatRole::Lane, "w1:p1", "opencode", 1000)?;
+            Ok(())
+        }).unwrap();
+        store.write(|tx| alert(tx, "p:lane", 1010)).unwrap();
+        let first = store.read(|tx| tx.thread_messages("p", "stall:p:lane")).unwrap().remove(0);
+        store.write(|tx| tx.update_message_state("p", &first.id, MsgState::Resolved, Some("seen"), None, None, 1020)).unwrap();
+        assert!(store.write(|tx| alert(tx, "p:lane", 1920)).unwrap());
+        let second = store.read(|tx| tx.thread_messages("p", "stall:p:lane")).unwrap().pop().unwrap();
+        store.write(|tx| tx.update_message_state("p", &second.id, MsgState::Resolved, Some("seen"), None, None, 1921)).unwrap();
+        assert!(!store.write(|tx| resolve(tx, "p", "p:lane", 1922, Some(1015))).unwrap());
+        assert_eq!(store.read(|tx| tx.get_meta("stall-active:p:lane")).unwrap().as_deref(), Some("1"));
+        assert!(!store.write(|tx| alert(tx, "p:lane", 1923)).unwrap());
+        assert!(store.write(|tx| alert(tx, "p:lane", 2821)).unwrap());
+    }
+
 }
