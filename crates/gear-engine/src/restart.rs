@@ -217,7 +217,7 @@ pub(crate) fn advance(
                 )
             })?;
             let old_cli = current_cli(store, seat)?.unwrap_or_default();
-            let (resume_required, resume) = if old_cli == cli {
+            let (mut resume_required, resume) = if old_cli == cli {
                 store.read(|tx| {
                     let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok((false, None)) };
                     let session = crate::session::round_session(tx, &round)?;
@@ -225,6 +225,15 @@ pub(crate) fn advance(
                     Ok((true, session))
                 })?
             } else { (false, None) };
+            // T-209: a same-CLI agent that has already exited cannot report
+            // its session. If its bound pane is a shell and there is no
+            // recoverable round/binding session, start a fresh process in the
+            // same worktree instead of parking this restart forever.
+            if resume_required && resume.is_none() {
+                if let Some(pane) = pane_of(store, seat)? {
+                    if matches!(herdr.agent_get(&pane), Ok(None)) { resume_required = false; }
+                }
+            }
             let profile_name = gear_app::config::latest(store, project).ok()
                 .and_then(|config|config.lanes.into_iter().find(|lane|lane.name == seat.name))
                 .and_then(|lane| profiles.get(&lane.profile).filter(|p|p.kind == cli).map(|_|lane.profile));

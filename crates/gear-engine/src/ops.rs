@@ -802,20 +802,30 @@ pub fn confirm_pending_with(
                             retry_now: false,
                         },
                     )?;
-                    // T-206 (F3): the first failure of a delivery may still
-                    // be retried by the lane's own path: the marker says so,
-                    // and the tick holds the captain's ring back until the
-                    // retry has had its chance.
-                    let marker = crate::lane_nudge::retry_marker(
+                    // T-206 (F3), T-218: the first failure of a delivery may
+                    // still be retried by the lane's own path: the marker
+                    // says so, and the tick holds the captain's ring back
+                    // until the retry has had its chance. Only a lane whose
+                    // attempt waits for its check-in gets that retry; every
+                    // other seat (a reviewer, the captain) has none, so its
+                    // unconfirmed delivery reaches the captain at once.
+                    let task = op.task.clone().unwrap_or_default();
+                    let attempt = op.attempt.unwrap_or_default();
+                    let marker = crate::lane_nudge::retry_marker(&op.seat, &task, attempt);
+                    let eligible = crate::lane_nudge::retry_eligible(
+                        tx,
+                        project,
                         &op.seat,
-                        op.task.as_deref().unwrap_or_default(),
-                        op.attempt.unwrap_or_default(),
-                    );
+                        &task,
+                        attempt,
+                    )?;
                     match tx.get_meta(&marker)?.as_deref() {
                         None => {
                             // The first failure: the lane's own path may
                             // still deliver the packet again (T-206, F3).
-                            tx.set_meta(&marker, "allowed")?;
+                            if eligible {
+                                tx.set_meta(&marker, "allowed")?;
+                            }
                         }
                         Some("pending") => {
                             // The retry failed too: the fact stands, the
@@ -824,7 +834,13 @@ pub fn confirm_pending_with(
                         }
                         _ => {}
                     }
-                    if !flagged.contains(&op.seat) {
+                    // The one automatic retry is still ahead: the captain is
+                    // not rung yet. The stall item opens when the retried
+                    // delivery fails or its own window ends unconfirmed
+                    // (T-218).
+                    let retry_pending =
+                        crate::lane_nudge::retry_pending(tx, &op.seat, &task, attempt)?;
+                    if !retry_pending && !flagged.contains(&op.seat) {
                         flagged.push(op.seat.clone());
                     }
                     continue;

@@ -148,10 +148,12 @@ fn a_late_check_in_confirms_the_attempt_and_closes_the_stall() {
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0].state, MsgState::Open);
 
-    // The window (8 s) is over: the delivery fails and the seat is flagged.
+    // The window (8 s) is over: the delivery fails. The seat is not flagged:
+    // T-218 — the one automatic retry of the lane's own path may still come,
+    // and the captain hears about it when that retry fails too.
     let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 30).unwrap();
     assert!(confirmed.is_empty());
-    assert_eq!(flagged, vec![LANE.to_string()]);
+    assert!(flagged.is_empty(), "the retry may still come: {flagged:?}");
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
         OpState::Failed
@@ -395,9 +397,10 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
     // The captain's item about the lane being stuck.
     s.write(|tx| stall::alert(tx, LANE, T0 + 20)).unwrap();
 
-    // The window (8 s) is over: the delivery fails and the seat is flagged.
+    // The window (8 s) is over: the delivery fails. The seat is not flagged:
+    // T-218 — the one automatic retry of the lane's own path may still come.
     let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 30).unwrap();
-    assert_eq!(flagged, vec![LANE.to_string()]);
+    assert!(flagged.is_empty(), "the retry may still come: {flagged:?}");
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
         OpState::Failed
