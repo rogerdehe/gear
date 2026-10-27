@@ -76,6 +76,8 @@ pub struct Reviewer {
     pub reviewing: Option<String>,
     /// How long it has been standing by.
     pub standby_min: Option<i64>,
+    /// The seat's state, in words (`active`, `standby`, …).
+    pub state: String,
 }
 
 /// The queue of the caller's project (the captain's view).
@@ -101,11 +103,20 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                     .filter(|task| task.state != TaskState::Draft)
                     .collect();
                 own.sort_by_key(|task| (task.rank, task.id.clone()));
+                // Why the lane is idle (design §8.2): the one function the
+                // board uses. A lane that is idle for a reason — held, quota
+                // parked, waiting for a task — is not working, even when it
+                // still holds the attempt of its task.
+                let idle = match idle_reason(tx, project, &seat.name, now)? {
+                    Some(reason) => Some(describe(&reason, tx, project)),
+                    None => None,
+                };
                 // The task the lane works on: the one it has an attempt in
-                // flight for. The board's own idle rule says the same: a
-                // lane with an attempt in flight works, everything else is
-                // idle for a reason.
-                let working = working_of(tx, project, &seat.id, &own, now)?;
+                // flight for, and only when it is not idle for a reason.
+                let working = match idle {
+                    Some(_) => None,
+                    None => working_of(tx, project, &seat.id, &own, now)?,
+                };
                 // What is left: the tasks the lane has not finished.
                 let left: Vec<LeftTask> = own
                     .iter()
@@ -126,12 +137,6 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                     })
                     .collect();
                 let left_min = left.iter().filter_map(|task| task.estimate_min).sum();
-                // Why the lane is idle (design §8.2): the one function the
-                // board uses.
-                let idle = match idle_reason(tx, project, &seat.name, now)? {
-                    Some(reason) => Some(describe(&reason, tx, project)),
-                    None => None,
-                };
                 lanes.push(Lane {
                     lane: seat.name.clone(),
                     working,
@@ -141,6 +146,12 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                 });
             }
             SeatRole::Temp => {
+                // A released or retired reviewer is not available any more:
+                // its agent and its pane are gone (design §3.6). The captain
+                // must not see it as standing by.
+                if matches!(seat.state, SeatState::Released | SeatState::Retired) {
+                    continue;
+                }
                 // A reviewer works on one task for life (§3.8).
                 let reviewing = seat.task_id.clone();
                 let standby_min = (seat.state == SeatState::Standby)
@@ -149,6 +160,7 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                     name: seat.name.clone(),
                     reviewing,
                     standby_min,
+                    state: seat.state.as_str().to_string(),
                 });
             }
             _ => {}
@@ -187,9 +199,9 @@ fn working_of(
     }))
 }
 
-/// The minutes a task took so far: its first start until its last recorded
-/// step (its merge, or the last thing that happened to it). A task that is
-/// still running has no last step yet: the clock runs to now.
+/// The minutes a task took so far: its first start until its merge, or until
+/// now while it is still running (design §8.3: the actual minutes of a task
+/// that is in flight run to the clock, not to its last recorded step).
 fn actual_min_of(
     tx: &Tx<'_>,
     project: &str,
@@ -198,11 +210,11 @@ fn actual_min_of(
 ) -> GearResult<Option<i64>> {
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
+    // A task that is still in flight has no merge yet: the clock runs to now.
     let end = times
         .iter()
         .filter_map(|(_, times)| times.merged)
         .max()
-        .or_else(|| times.iter().filter_map(|(_, times)| times.last()).max())
         .or(Some(now));
     Ok(match (start, end) {
         (Some(start), Some(end)) if end >= start => Some((end - start) / 60),
@@ -283,10 +295,15 @@ fn lane_line(lane: &Lane) -> String {
 /// One reviewer: the task it reviews, or how long it has been standing by.
 fn reviewer_line(reviewer: &Reviewer) -> String {
     let mut line = reviewer.name.clone();
-    match (&reviewer.reviewing, reviewer.standby_min) {
-        (Some(task), _) => line.push_str(&format!(" reviewing {task}")),
-        (None, Some(minutes)) => line.push_str(&format!(" standby {minutes}m")),
-        (None, None) => line.push_str(" standby"),
+    // A seat that stands by says so, whatever task it had before (its job
+    // was released when it went back to the pool, design §3.6).
+    if let Some(minutes) = reviewer.standby_min {
+        line.push_str(&format!(" standby {minutes}m"));
+        return line;
+    }
+    match &reviewer.reviewing {
+        Some(task) => line.push_str(&format!(" reviewing {task}")),
+        None => line.push_str(&format!(" {}", reviewer.state)),
     }
     line
 }

@@ -741,7 +741,7 @@ fn cmd_queue(json: bool) -> GearResult<()> {
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
-    let out = run_queue(&mut store, &env, json)?;
+    let out = run_queue(&mut store, &env, json, now_ts())?;
     println!("{out}");
     Ok(())
 }
@@ -751,6 +751,7 @@ fn run_queue(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
     json: bool,
+    now: i64,
 ) -> GearResult<String> {
     let project = env
         .ctx
@@ -762,7 +763,7 @@ fn run_queue(
                 "no GEAR_CTX in the environment",
             )
         })?;
-    let queue = gear_app::queue::build(store, &project, now_ts())?;
+    let queue = gear_app::queue::build(store, &project, now)?;
     if json {
         return serde_json::to_string(&queue).map_err(json_error);
     }
@@ -2808,13 +2809,14 @@ path="api"
                 tx.update_task(&task)?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:hull", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                // Only the start is recorded: the round is still running, so
+                // the elapsed minutes run to the clock (T-163 rework F1).
                 tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Started, T0)?;
-                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::HandedIn, T0 + 38 * 60)?;
                 Ok(())
             })
             .unwrap();
 
-        let out = run_queue(&mut store, &env("captain", CAP_PANE), false).unwrap();
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 38 * 60).unwrap();
         let lines: Vec<&str> = out.lines().collect();
         // The working lane: the task, its actual and estimated minutes, and
         // what it has left.
@@ -2837,7 +2839,7 @@ path="api"
         assert!(last.starts_with("r-1 reviewing T-2"), "{last}");
 
         // --json has the same facts.
-        let json = run_queue(&mut store, &env("captain", CAP_PANE), true).unwrap();
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 38 * 60).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let lanes = parsed["lanes"].as_array().unwrap();
         assert_eq!(lanes.len(), 3, "{json}");
@@ -2847,6 +2849,7 @@ path="api"
         assert_eq!(heat["left"].as_array().unwrap().len(), 0);
         let hull = lanes.iter().find(|lane| lane["lane"] == "hull").unwrap();
         assert_eq!(hull["working"]["id"], "T-1");
+        assert_eq!(hull["working"]["actual_min"], 38, "the elapsed minutes of a running task");
         assert_eq!(hull["left"].as_array().unwrap().len(), 3);
         assert_eq!(hull["left_min"], 125);
         assert_eq!(parsed["reviewers"][0]["reviewing"], "T-2");
@@ -2854,6 +2857,92 @@ path="api"
 
     /// T-163: `gear plan show T-n` prints one task's block in plan-file
     /// form, and the block parses back to the same task.
+    /// T-163 rework F2: a lane that is idle for a reason (held, quota
+    /// parked, waiting for a task) is not working, and its unfinished task
+    /// stays in its left list. The text and the JSON say the same.
+    #[test]
+    fn queue_shows_a_held_lane_as_idle_with_its_reason() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut working = lane_task("T-1", "heat", gear_model::TaskState::Ready, &[]);
+                working.estimate_min = Some(60);
+                tx.insert_task(&working)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Started, T0)?;
+                // The captain holds the lane: it is idle for a reason.
+                tx.set_seat_state(
+                    "p:heat",
+                    gear_model::SeatState::Held,
+                    Some("hold: the captain paused it"),
+                    T0 + 60,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 38 * 60).unwrap();
+        let heat = out.lines().find(|line| line.starts_with("heat")).unwrap();
+        assert!(heat.contains("idle: held: the captain paused it"), "{heat}");
+        assert!(!heat.contains("working"), "{heat}");
+        assert!(heat.contains("left 1 (60m)"), "the unfinished task is left: {heat}");
+
+        // The JSON says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 38 * 60).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let heat = parsed["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["lane"] == "heat")
+            .unwrap();
+        assert!(heat["working"].is_null(), "{heat}");
+        assert_eq!(heat["idle"], "held: the captain paused it");
+        assert_eq!(heat["left"].as_array().unwrap().len(), 1);
+    }
+
+    /// T-163 rework F3: a released or retired reviewer is not in the queue;
+    /// a standby one says how long it has been standing by.
+    #[test]
+    fn queue_shows_only_the_available_reviewers() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                // A reviewer with a job.
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", TEMP_PANE, "opencode", T0)?;
+                // A standby reviewer.
+                testing::seed_temp_seat(tx, "p", "r-2", "T-2", "w1:p4", "opencode", T0)?;
+                tx.set_seat_state("p:r-2", gear_model::SeatState::Standby, None, T0)?;
+                // A released reviewer: its agent and its pane are gone (§3.6).
+                testing::seed_temp_seat(tx, "p", "r-3", "T-3", "w1:p5", "opencode", T0)?;
+                tx.set_seat_state("p:r-3", gear_model::SeatState::Released, None, T0)?;
+                // A retired one.
+                testing::seed_temp_seat(tx, "p", "r-4", "T-4", "w1:p6", "opencode", T0)?;
+                tx.set_seat_state("p:r-4", gear_model::SeatState::Retired, None, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 180).unwrap();
+        let last = out.lines().last().unwrap();
+        assert!(last.contains("r-1 reviewing T-1"), "{last}");
+        assert!(last.contains("r-2 standby 3m"), "{last}");
+        assert!(!last.contains("r-3"), "a released reviewer is not available: {last}");
+        assert!(!last.contains("r-4"), "a retired reviewer is not available: {last}");
+
+        // The JSON says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 180).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let names: Vec<&str> = parsed["reviewers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reviewer| reviewer["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["r-1", "r-2"]);
+    }
+
     #[test]
     fn plan_show_prints_a_block_that_parses_back() {
         let (mut store, _herdr) = world();
