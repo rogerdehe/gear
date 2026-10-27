@@ -1,7 +1,7 @@
 //! Contract for plan_dispatch / intend_dispatch (T-46). Needs T-41 (lane_view)
 //! and T-42 (start_attempt).
 
-use gear_engine::dispatch::{assign_text, continue_text, intend_dispatch, packet_ref, plan_dispatch, task_branch, Action, DispatchCfg};
+use gear_engine::dispatch::{continue_text, first_attempt_text, intend_dispatch, packet_ref, plan_dispatch, task_branch, Action, DispatchCfg};
 use gear_engine::observe::{Presence, SeatObs};
 use gear_herdr::AgentStatus;
 use gear_model::{AttemptState, OpKind, SeatRole, TaskState};
@@ -46,7 +46,7 @@ fn idle_lane_is_assigned_and_delivered() {
     let ops = s.write(|tx| intend_dispatch(tx, "p", &actions, T0 + 100)).unwrap();
     assert_eq!(ops.len(), 1);
     assert_eq!((ops[0].kind, ops[0].task.as_deref(), ops[0].attempt), (OpKind::Deliver, Some("T-7"), Some(1)));
-    assert_eq!(ops[0].payload["text"], assign_text("T-7", 1, "heat/t7", "`gear --show T-7`").as_str());
+    assert_eq!(ops[0].payload["text"], first_attempt_text("T-7", 1, "heat/t7", "dev", "`gear --show T-7`").as_str());
     assert_eq!(s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state, AttemptState::Delivered);
     // the pending delivery now blocks a second decision
     let again = s.read(|tx| plan_dispatch(tx, "p", &obs, &DispatchCfg::default(), T0 + 1000)).unwrap();
