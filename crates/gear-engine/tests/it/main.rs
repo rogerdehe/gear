@@ -58,6 +58,7 @@ mod pi_lane_contract;
 mod agent_names_contract;
 mod rounds_contract;
 mod waits_contract;
+mod session_dispatch_contract;
 mod delivery_grace_contract;
 mod targeting_contract;
 mod all_tail_contract;

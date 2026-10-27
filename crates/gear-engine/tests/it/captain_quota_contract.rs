@@ -86,6 +86,7 @@ quota_reset_h = 1
     for kind in ["claude", "opencode", "codex"] {
         let mut profile = gear_herdr::builtin(kind).unwrap();
         profile.confirm_rounds = 1;
+        if kind == "opencode" { profile.new_session.clear(); }
         cfg.profiles.insert(kind.into(), profile);
     }
     (store, herdr, cfg)
