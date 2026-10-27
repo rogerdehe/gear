@@ -511,6 +511,7 @@ fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
     s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
     let confirmed=confirm_late_views(&mut s,"p",T0+21).unwrap();
     assert_eq!(confirmed.len(),1);
+    assert!(confirm_late_views(&mut s,"p",T0+22).unwrap().is_empty(), "late hand-in is settled once");
     assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Resolved);
     assert_eq!(s.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,AttemptState::Submitted);
 }

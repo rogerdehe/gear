@@ -834,12 +834,14 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // it — a retry of this very delivery (design §10.3): the lane
             // recovered either way, so its stall item closes as well.
             let started_here = start_confirmed_attempt(tx, project, &op, now)?;
+            let mut late_hand_in_key = None;
             if !started_here {
-                let already = tx
-                    .get_attempt(project, task, attempt)?
-                    .map(|row| matches!(row.state, AttemptState::Started | AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected))
-                    .unwrap_or(false);
-                if !already {
+                let state = tx.get_attempt(project, task, attempt)?.map(|row| row.state);
+                if matches!(state, Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)) {
+                    let key = format!("engine.delivery_late_handin.{}.{}", project, op.id);
+                    if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) { continue }
+                    late_hand_in_key = Some(key);
+                } else if state != Some(AttemptState::Started) {
                     continue;
                 }
             }
@@ -847,6 +849,7 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // predate the check-in, so a later failure of the same lane keeps
             // its own item.
             crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
+            if let Some(key) = late_hand_in_key { tx.set_meta(&key, "1")?; }
             confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
         }
         Ok(confirmed)
