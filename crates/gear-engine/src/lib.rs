@@ -546,6 +546,17 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             // sweep must not restore it. An independent cause (a missing
             // agent, an escalation) keeps its own flag.
             if crate::lane_nudge::retry_pending(tx, seat, &failed.task, failed.attempt)? {
+                // T-218 (F1): a retry that failed while it was sent (the
+                // agent of the pane was gone) never reaches the
+                // confirmation window: it spends its marker here, and the
+                // captain hears about it now.
+                if crate::lane_nudge::retry_failed(tx, seat, &failed.task, failed.attempt)? {
+                    tx.set_meta(
+                        &crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt),
+                        "",
+                    )?;
+                    return Ok(true);
+                }
                 return Ok(false);
             }
             Ok(*present && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))

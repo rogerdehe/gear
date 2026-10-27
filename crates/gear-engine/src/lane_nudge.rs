@@ -321,6 +321,23 @@ pub fn retry_eligible(
         .is_some_and(|row| row.state == AttemptState::Delivered))
 }
 
+/// Did the one automatic retry of this delivery already fail (T-218, F1)?
+///
+/// A retry that fails while it is sent (the agent of the pane was gone)
+/// never reaches the confirmation window: the op is `Failed` at once. Such a
+/// retry spends its marker — the fact stands and the captain hears about it.
+pub fn retry_failed(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<bool> {
+    Ok(tx
+        .ops_of_seat_kind(seat, OpKind::Deliver)?
+        .into_iter()
+        .filter(|op| {
+            op.task.as_deref() == Some(task)
+                && op.attempt == Some(attempt)
+                && op.payload.get("redeliver").is_some()
+        })
+        .any(|op| op.state == gear_model::OpState::Failed))
+}
+
 /// Is a delivery of the seat still in flight (T-206, F2)? The reviewer's
 /// rule: a submitted delivery that is older than the cooldown does not block
 /// (it is exactly the case the nudge is for), anything else does.
