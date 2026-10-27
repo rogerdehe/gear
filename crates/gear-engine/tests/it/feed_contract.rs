@@ -541,3 +541,140 @@ captain_item_stale_min = 30
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3600).unwrap();
     assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 2);
 }
+
+// ---- the imbalance item and the one-task-from-dry warning (T-162)
+
+/// A task of a lane, with an estimate and a state.
+fn lane_task(
+    tx: &gear_store::Tx<'_>,
+    id: &str,
+    lane: &str,
+    rank: i64,
+    state: TaskState,
+    estimate: Option<i64>,
+    deps: Vec<&str>,
+) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
+        project: "p".into(),
+        id: id.into(),
+        rank,
+        state,
+        priority: "must".into(),
+        lane: Some(lane.into()),
+        milestone: None,
+        required: false,
+        contract_version: 1,
+        deps: deps.into_iter().map(str::to_string).collect(),
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: estimate,
+        issue: None,
+        updated: T0,
+    })
+}
+
+/// The imbalance item of the project.
+fn balance_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
+    store
+        .read(|tx| tx.thread_messages("p", "balance"))
+        .unwrap()
+}
+
+/// A project with two lanes: `mast` has nothing left, `deck` has three
+/// ready tasks of 40 minutes each.
+fn imbalance_world() -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            for n in 1..=3 {
+                lane_task(
+                    tx,
+                    &format!("T-{n}"),
+                    "deck",
+                    n as i64,
+                    TaskState::Ready,
+                    Some(40),
+                    vec![],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    // The lane with the pile of work is busy: its tasks stay queued.
+    herdr.add_agent("w1:p3", "opencode", AgentStatus::Working);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+#[test]
+fn an_idle_lane_next_to_a_pile_of_work_gives_one_balance_item() {
+    let mut w = imbalance_world();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
+    assert_eq!(items[0].thread, "balance");
+    assert_eq!(items[0].recipient, "p:captain");
+    assert_eq!(
+        items[0].body,
+        "mast has nothing left; deck has 3 tasks (120m) left: move some (lane ownership allowing) or plan more for mast."
+    );
+
+    // The next tick does not repeat the fact.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert_eq!(balance_items(&mut w.store).len(), 1, "no duplicate");
+
+    // The imbalance ends: the idle lane gets work.
+    w.store
+        .write(|tx| lane_task(tx, "T-9", "mast", 9, TaskState::Ready, Some(20), vec![]))
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved, "the item closed");
+}
+
+#[test]
+fn a_lane_one_task_from_dry_warns_once() {
+    let mut w = world(AgentStatus::Working, 0);
+    // The lane works on its last task; the one behind it waits for a
+    // dependency that is not done.
+    w.store
+        .write(|tx| {
+            lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
+            lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec!["T-3"])?;
+            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+
+    let lane_items = items(&mut w.store, "heat");
+    assert_eq!(lane_items.len(), 1, "{lane_items:?}");
+    assert_eq!(lane_items[0].state, MsgState::Open);
+    assert_eq!(
+        lane_items[0].body,
+        "lane heat has nothing to start after T-1 (1 queued behind deps: T-2)"
+    );
+
+    // The next tick does not repeat the warning: one item per state.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "no duplicate");
+}
