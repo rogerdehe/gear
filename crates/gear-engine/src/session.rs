@@ -293,6 +293,7 @@ pub fn prepare_lane(
         None => None,
     };
 
+    let rebind_fresh = round.is_none() && store.read(|tx| tx.get_meta(&crate::rebind::fresh_key(&seat.id)))?.as_deref() == Some(&seat.generation.to_string());
     let mut action = match &round {
         // A new round: the rules of §3.3 decide.
         None => choose(&facts),
@@ -303,6 +304,7 @@ pub fn prepare_lane(
             None => recorded_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
         },
     };
+    if rebind_fresh { action = Action::Fresh; }
     if round.is_none() && facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Keep)
         && context_large(store, cfg, seat, facts.current_session.as_deref())? {
         action = Action::Compact;
@@ -315,6 +317,7 @@ pub fn prepare_lane(
         // Resuming an existing round also uses this generation's fresh
         // process; it must not be reused for a later unrelated round.
         if fresh_generation { tx.set_meta(&fresh_key, "")?; }
+        if rebind_fresh { tx.set_meta(&crate::rebind::fresh_key(&seat.id), "")?; }
         if round.is_none() {
             tx.set_attempt_action(&project, task, attempt, action.as_str())?;
         }

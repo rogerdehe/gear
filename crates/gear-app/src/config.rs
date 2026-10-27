@@ -84,6 +84,28 @@ impl ProjectConfig {
         }
     }
 
+    /// A task keeps the repository, base and gate fixed at creation, even if
+    /// its lane later moves. Legacy tasks without a snapshot use the lane.
+    pub fn repo_of_task(&self, task: &gear_store::TaskRow) -> Repo {
+        let Some(path) = task.repo.as_deref() else {
+            return self.repo_of_lane(task.lane.as_deref().unwrap_or_default());
+        };
+        let mut repo = self.repos().into_iter().find(|r| r.path == path).unwrap_or_else(|| {
+            // A removed repo is still a valid historical target. Do not use a
+            // different repo's GitHub settings or worker key for it.
+            let mut hash = 0xcbf29ce484222325u64;
+            for b in path.bytes() { hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3); }
+            let mut fallback = self.root_repo();
+            fallback.name = format!("snapshot-{hash:x}");
+            fallback.path = path.to_string();
+            fallback.github = None;
+            fallback
+        });
+        if let Some(base) = &task.base { repo.integration = base.clone(); }
+        if let Some(gate) = &task.gate { repo.gate = gate.clone(); }
+        repo
+    }
+
     /// Every repo of the project (T-52): the project root first, then the
     /// `[[repos]]` entries in config order. The root's name is `""`.
     pub fn repos(&self) -> Vec<Repo> {

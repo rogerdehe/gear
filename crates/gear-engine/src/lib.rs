@@ -35,6 +35,7 @@ pub mod ops;
 pub mod overrun;
 pub mod parallel;
 pub mod quota;
+pub mod rebind;
 pub mod release;
 pub mod restart;
 pub mod rounds;
@@ -185,6 +186,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in store.read(|tx| tx.project_ids())? {
         gear_app::plan::reconcile_rebinds(store, &project)?;
     }
+
+    rebind::tick(store, herdr, cfg, now)?;
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.

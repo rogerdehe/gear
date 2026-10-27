@@ -257,7 +257,9 @@ pub fn onboard_queued(
             let resuming = seat.state == SeatState::Starting
                 && (crate::switch::pending(store, &seat.id)?.is_some()
                     || crate::start::pending(store, &seat.id)?.is_some());
-            if seat.state != SeatState::Queued && !resuming {
+            let rebound = seat.state == SeatState::Missing
+                && store.read(|tx| crate::rebind::ready_to_onboard(tx, &seat.id))?;
+            if seat.state != SeatState::Queued && !resuming && !rebound {
                 continue;
             }
             // A lane the snapshot's config does not name is not parked: the

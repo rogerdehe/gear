@@ -698,7 +698,8 @@ fn start_reviewer(
     // The repo the work is in: the repo of the lane that wrote it (T-53).
     // The reviewer's worktree, its branch and the diff the packet names all
     // belong to that repo.
-    let repo = config.repo_of_lane(&task.lane);
+    let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
+    let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
     let branch = review_branch(&task.task);
@@ -1311,7 +1312,8 @@ fn review_packet_for(
     })?;
     // The diff is against the integration branch of the repo the work is in
     // (T-53): a child repo has its own branch.
-    let repo = config.repo_of_lane(&lane);
+    let saved = store.read(|tx| tx.get_task(&config.project.id, task))?;
+    let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&lane));
     let packet = review_packet(
         task,
         attempt,
@@ -3055,6 +3057,26 @@ review = [
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
         assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+    }
+
+    #[test]
+    fn review_after_a_rebind_uses_the_tasks_original_repo_and_base() {
+        let config = config_with_repos().replace("repo = \"web\"", "");
+        let mut store = world(&config);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.repo = Some("/repo/web".into());
+            task.base = Some("original-base".into());
+            tx.update_task(&task)
+        }).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0+10).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0+20).unwrap();
+        let (repo, _, base, _) = created_worktree(&herdr);
+        assert_eq!(repo, "/repo/web");
+        assert_eq!(base, "original-base");
+        let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
+        assert!(packet.contains("Diff to review: `original-base..abc1234`"), "{packet}");
     }
 
     #[test]

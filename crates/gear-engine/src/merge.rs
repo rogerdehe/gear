@@ -1115,11 +1115,11 @@ fn repo_of_op(
     op: &OpRow,
     config: &ProjectConfig,
 ) -> GearResult<Repo> {
-    let mut lane = None;
-    if let Some(task) = op.task.as_deref() {
-        lane = store.read(|tx| Ok(tx.get_task(project, task)?.and_then(|row| row.lane.clone())))?;
-    }
-    Ok(config.repo_of_lane(lane.as_deref().unwrap_or_default()))
+    let task = match op.task.as_deref() {
+        Some(task) => store.read(|tx| tx.get_task(project, task))?,
+        None => None,
+    };
+    Ok(task.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.root_repo()))
 }
 
 /// The key of a merge worker: one worker per repo (T-53), so a merge in one
@@ -3561,6 +3561,38 @@ gate = "{project_gate}"
         assert!(!project_gate.exists(), "the project's gate must not run");
         // The project root was not touched: its dev is where it was.
         assert_eq!(scratch.dev_log(), "dev", "the root repo was not merged into");
+    }
+
+    #[test]
+    fn a_task_from_before_a_lane_rebind_merges_on_its_original_repo_and_gate() {
+        let scratch = Scratch::new("rebound-child");
+        let child = Child::new(&scratch.root, "web", "web-dev");
+        let worktree = child.merge_worktree("web-dev");
+        let candidate = child.head_of("heat/t5");
+        let child_gate = scratch.root.join("old-gate");
+        let new_gate = scratch.root.join("new-gate");
+        let config_toml = child_config(&scratch.root, &format!("touch '{}'", child_gate.display()), &format!("touch '{}'", new_gate.display()));
+        let mut store = child_world(&config_toml, &candidate);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-5")?.unwrap();
+            task.repo = Some(scratch.root.join("web").to_string_lossy().into_owned());
+            task.base = Some("web-dev".into());
+            task.gate = Some(format!("touch '{}'", child_gate.display()));
+            tx.update_task(&task)?;
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = project.config_toml.replace("repo = \"web\"", "");
+            tx.update_project(&project)
+        }).unwrap();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] { cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap()); }
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "home/merge")));
+        assert!(child_gate.exists());
+        assert!(!new_gate.exists());
+        assert!(child.log_of("web-dev").contains("task"));
+        assert_eq!(scratch.dev_log(), "dev");
     }
 
     /// T-53: the merge worktree of a repo is created in that repo, cut from
