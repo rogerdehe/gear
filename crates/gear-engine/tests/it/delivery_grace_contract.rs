@@ -112,7 +112,7 @@ fn a_view_after_a_minute_confirms_the_delivery() {
     // Three checks later the delivery is still on its way: the window is
     // 180 s, not three checks of 4 s.
     for at in [T0 + 20, T0 + 30, T0 + 40] {
-        let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 180, at).unwrap();
+        let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 180, &[], at).unwrap();
         assert!(confirmed.is_empty(), "{confirmed:?}");
         assert!(flagged.is_empty(), "the seat is not flagged: {flagged:?}");
         assert_eq!(
@@ -123,7 +123,7 @@ fn a_view_after_a_minute_confirms_the_delivery() {
 
     // The lane reads its packet 100 s after it was sent.
     view(&mut s, T0 + 111, Some("T-7"), Some(1));
-    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 180, T0 + 120).unwrap();
+    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 180, &[], T0 + 120).unwrap();
     assert_eq!(confirmed, vec![op.clone()]);
     assert!(flagged.is_empty());
     assert_eq!(
@@ -149,7 +149,7 @@ fn a_late_check_in_confirms_the_attempt_and_closes_the_stall() {
     assert_eq!(items[0].state, MsgState::Open);
 
     // The window (8 s) is over: the delivery fails and the seat is flagged.
-    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, T0 + 30).unwrap();
+    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 30).unwrap();
     assert!(confirmed.is_empty());
     assert_eq!(flagged, vec![LANE.to_string()]);
     assert_eq!(
@@ -396,7 +396,7 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
     s.write(|tx| stall::alert(tx, LANE, T0 + 20)).unwrap();
 
     // The window (8 s) is over: the delivery fails and the seat is flagged.
-    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, T0 + 30).unwrap();
+    let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 30).unwrap();
     assert_eq!(flagged, vec![LANE.to_string()]);
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
@@ -426,7 +426,7 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
 
     // The lane checks in: the retry confirms the attempt.
     view(&mut s, T0 + 50, Some("T-7"), Some(1));
-    let (confirmed, _) = confirm_pending_with(&mut s, "p", 3, 8, T0 + 60).unwrap();
+    let (confirmed, _) = confirm_pending_with(&mut s, "p", 3, 8, &[], T0 + 60).unwrap();
     assert_eq!(confirmed, vec![retry.clone()]);
     assert_eq!(
         s.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap().state,
@@ -450,7 +450,7 @@ fn hand_in_from_delivered_settles_the_pending_delivery_without_a_view() {
     let (mut s,op)=world();
     s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+15).map(|_|())).unwrap();
     s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
-    let (confirmed,flagged)=confirm_pending_with(&mut s,"p",3,5,T0+30).unwrap();
+    let (confirmed,flagged)=confirm_pending_with(&mut s,"p",3,5,&[],T0+30).unwrap();
     assert_eq!(confirmed,vec![op.clone()]); assert!(flagged.is_empty());
     let confirmed_op=s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap();
     assert_eq!(confirmed_op.state,OpState::Confirmed);
@@ -497,7 +497,7 @@ fn an_old_hand_in_does_not_close_a_newer_stall() {
     let (mut s,op)=world();
     s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
     s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+25).map(|_|())).unwrap();
-    confirm_pending_with(&mut s,"p",3,5,T0+30).unwrap();
+    confirm_pending_with(&mut s,"p",3,5,&[],T0+30).unwrap();
     assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
     assert_eq!(s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()[0].state,MsgState::Open);
 }
@@ -505,7 +505,7 @@ fn an_old_hand_in_does_not_close_a_newer_stall() {
 #[test]
 fn hand_in_after_delivery_timeout_closes_the_existing_stall() {
     let (mut s,op)=world();
-    confirm_pending_with(&mut s,"p",3,5,T0+18).unwrap();
+    confirm_pending_with(&mut s,"p",3,5,&[],T0+18).unwrap();
     assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Failed);
     s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+19).map(|_|())).unwrap();
     s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
@@ -535,7 +535,7 @@ fn a_late_check_in_records_the_session_and_is_reported_once() {
     assert_eq!(attempt.session_ref, None);
 
     // The window (180 s) is over: the delivery fails.
-    let (confirmed, _flagged) = confirm_pending_with(&mut s, "p", 3, 180, T0 + 200).unwrap();
+    let (confirmed, _flagged) = confirm_pending_with(&mut s, "p", 3, 180, &[], T0 + 200).unwrap();
     assert!(confirmed.is_empty());
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
