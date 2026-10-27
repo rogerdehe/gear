@@ -3,6 +3,11 @@
 //! can rebuild them over themselves; the test checks the layout the acceptance
 //! runs on — the repositories, their own local origins, their integration
 //! branches — and that every gate passes.
+//!
+//! The checks live in four tests (T-186), and each test builds only the
+//! fixture it checks (`make.sh <dir> multi` / `running`), so nextest runs them
+//! side by side and no test pays for the other's project. Every assertion of
+//! the former single test is kept, spread over the parts.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -15,16 +20,19 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Run the fixture script for `dir`, as the acceptance runs it.
-fn make(dir: &Path) -> Output {
+/// Run the fixture script for `dir`, as the acceptance runs it. `which` says
+/// which project to build: `multi`, `running` or `both` — and nothing at all,
+/// which is the default the acceptance runs.
+fn make(dir: &Path, which: Option<&str>) -> Output {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("scripts/fixtures/make.sh");
-    Command::new("sh")
-        .arg(script)
-        .arg(dir)
-        .output()
-        .expect("run make.sh")
+    let mut cmd = Command::new("sh");
+    cmd.arg(script).arg(dir);
+    if let Some(which) = which {
+        cmd.arg(which);
+    }
+    cmd.output().expect("run make.sh")
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -83,10 +91,12 @@ fn local_remote(repo: &Path) -> String {
     url
 }
 
+/// The multi-repo fixture: a parent on `dev` with two children of their own,
+/// and every gate passing.
 #[test]
-fn the_fixtures_build_replace_and_pass_their_gates() {
-    let dir = scratch("all");
-    let first = make(&dir);
+fn the_multi_fixture_builds_and_passes_their_gates() {
+    let dir = scratch("multi");
+    let first = make(&dir, Some("multi"));
     assert!(
         first.status.success(),
         "{}",
@@ -109,8 +119,10 @@ fn the_fixtures_build_replace_and_pass_their_gates() {
         let remote = local_remote(&child);
         assert!(remote.contains(name), "{name}'s origin is {remote}");
         assert_eq!(git(&child, &["status", "--porcelain"]), "", "{name} has uncommitted work");
-        // The parent ignores the child: it is its own repository.
-        let status = git(&multi, &["status", "--porcelain", "--ignored"]);
+    }
+    // The parent ignores the children: each is its own repository.
+    let status = git(&multi, &["status", "--porcelain", "--ignored"]);
+    for name in ["web", "api"] {
         assert!(status.contains(&format!("!! {name}/")), "the parent does not ignore {name}/: {status}");
     }
 
@@ -119,8 +131,24 @@ fn the_fixtures_build_replace_and_pass_their_gates() {
     gate(&multi.join("web"));
     gate(&multi.join("api"));
 
-    // The project that already runs: its own ways, and the exemplar next to
-    // the bad pattern.
+    // The notes carry the config of the multi-repo fixture.
+    let notes = std::fs::read_to_string(dir.join("FIXTURE.md")).expect("FIXTURE.md");
+    assert!(notes.contains("[[repos]]"), "FIXTURE.md: {notes}");
+    assert!(notes.contains("integration = \"feat\""), "FIXTURE.md: {notes}");
+}
+
+/// The fixture of the project that already runs: its own ways, and the
+/// exemplar next to the bad pattern.
+#[test]
+fn the_running_fixture_builds_and_passes_its_gate() {
+    let dir = scratch("running");
+    let first = make(&dir, Some("running"));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
     let running = dir.join("running");
     assert_eq!(git(&running, &["branch", "--show-current"]), "main");
     // T-98: the project that already runs has its own local origin, on `main`.
@@ -154,23 +182,62 @@ fn the_fixtures_build_replace_and_pass_their_gates() {
     assert!(claude.contains("straight to `main`"), "CLAUDE.md: {claude}");
     assert!(agents.contains("one change per branch"), "AGENTS.md: {agents}");
     gate(&running);
+}
 
-    // The notes carry the config of the multi-repo fixture.
-    let notes = std::fs::read_to_string(dir.join("FIXTURE.md")).expect("FIXTURE.md");
-    assert!(notes.contains("[[repos]]"), "FIXTURE.md: {notes}");
-    assert!(notes.contains("integration = \"feat\""), "FIXTURE.md: {notes}");
+/// A second run replaces the multi-repo fixture: nothing of the first one is
+/// left. The second run is the default one, as the acceptance runs it.
+#[test]
+fn the_multi_fixture_is_replaced_by_a_second_run() {
+    let dir = scratch("replace-multi");
+    let first = make(&dir, Some("multi"));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let multi = dir.join("multi");
+    assert!(multi.join(".git").exists(), "the parent is not a repository");
 
-    // A second run replaces both projects: nothing of the first one is left.
     std::fs::write(multi.join("STALE"), "gone").expect("a stale file");
-    std::fs::write(running.join("STALE"), "gone").expect("a stale file");
-    let second = make(&dir);
+    let second = make(&dir, None);
     assert!(
         second.status.success(),
         "{}",
         String::from_utf8_lossy(&second.stderr)
     );
     assert!(!multi.join("STALE").exists(), "the second run did not replace multi/");
+    // The default run builds both projects, and both pass their gates.
+    let running = dir.join("running");
+    assert!(running.join(".git").exists(), "running is not a repository");
+    gate(&multi);
+    gate(&running);
+}
+
+/// A second run replaces the fixture of the project that already runs:
+/// nothing of the first one is left.
+#[test]
+fn the_running_fixture_is_replaced_by_a_second_run() {
+    let dir = scratch("replace-running");
+    let first = make(&dir, Some("running"));
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let running = dir.join("running");
+    assert!(running.join(".git").exists(), "running is not a repository");
+
+    std::fs::write(running.join("STALE"), "gone").expect("a stale file");
+    let second = make(&dir, None);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     assert!(!running.join("STALE").exists(), "the second run did not replace running/");
+    // The default run builds both projects, and both pass their gates.
+    let multi = dir.join("multi");
+    assert!(multi.join(".git").exists(), "the parent is not a repository");
     gate(&multi);
     gate(&running);
 }

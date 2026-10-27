@@ -1,7 +1,15 @@
 #!/bin/sh
 # make.sh — the fixture projects of the live acceptance (T-87).
 #
-#   sh scripts/fixtures/make.sh <dir>
+#   sh scripts/fixtures/make.sh <dir> [both|multi|running]
+#
+# The second argument says which project(s) to build: `both` (the default)
+# builds the two projects below, `multi` builds only the multi-repo project
+# and only its origins, `running` builds only the project that already runs
+# and only its origin. A run replaces exactly what it builds; the rest of
+# <dir> is untouched. A test that checks one project pays only for that
+# project, and the two projects still build side by side when both are asked
+# for (T-186).
 #
 # Builds, from nothing and offline, two projects for one small voyage each:
 #
@@ -17,19 +25,40 @@
 #                                       pattern next to one good exemplar)
 #   <dir>/FIXTURE.md                    what each one is and the config to write
 #
-# The same <dir> can be rebuilt at any time: the two projects and the origins
-# are replaced, nothing else in <dir> is touched. No network, no real remote.
+# The same <dir> can be rebuilt at any time: the projects this run builds and
+# their origins are replaced, nothing else in <dir> is touched. No network,
+# no real remote.
 set -eu
 
 target=${1:-}
+project=${2:-both}
 if [ -z "$target" ]; then
-    echo "usage: sh scripts/fixtures/make.sh <dir>" >&2
+    echo "usage: sh scripts/fixtures/make.sh <dir> [both|multi|running]" >&2
     exit 2
 fi
+case "$project" in
+    both|multi|running) ;;
+    *)
+        echo "usage: sh scripts/fixtures/make.sh <dir> [both|multi|running]" >&2
+        exit 2
+        ;;
+esac
 
 mkdir -p "$target"
 target=$(CDPATH= cd -- "$target" && pwd)
-rm -rf "$target/multi" "$target/running" "$target/origins"
+# Only what this run builds is replaced; the rest of <dir> is untouched.
+case "$project" in
+    both)
+        rm -rf "$target/multi" "$target/running" "$target/origins"
+        ;;
+    multi)
+        rm -rf "$target/multi" "$target/origins/parent.git" \
+            "$target/origins/web.git" "$target/origins/api.git"
+        ;;
+    running)
+        rm -rf "$target/running" "$target/origins/running.git"
+        ;;
+esac
 mkdir -p "$target/origins"
 
 # Git runs here as the fixture: no identity, hooks or signing from the user's
@@ -66,15 +95,19 @@ seed_origin() {
 # parent `dev`, the children `feat`. Each gate is a shell script that runs in
 # well under a second.
 
-git_ init -q --bare -b dev "$target/origins/parent.git"
+if [ "$project" = both ] || [ "$project" = multi ]; then
+    git_ init -q --bare --template= -b dev "$target/origins/parent.git"
+    # The children's integration branch is their own (T-53): their origins start
+    # on `feat`, so a clone of one is on it.
+    for name in web api; do
+        git_ init -q --bare --template= -b feat "$target/origins/$name.git"
+    done
+fi
 # The project that already runs has its own origin too (T-98): a project has a
 # remote, as any project does.
-git_ init -q --bare -b main "$target/origins/running.git"
-# The children's integration branch is their own (T-53): their origins start on
-# `feat`, so a clone of one is on it.
-for name in web api; do
-    git_ init -q --bare -b feat "$target/origins/$name.git"
-done
+if [ "$project" = both ] || [ "$project" = running ]; then
+    git_ init -q --bare --template= -b main "$target/origins/running.git"
+fi
 
 # The three repositories of `multi` are independent once the parent's
 # directory exists, and the two projects share nothing: they are built side by
@@ -82,7 +115,7 @@ done
 # ones that wait on nothing wait together.
 write_parent() {
     parent="$target/multi"
-    git_ init -q -b dev "$parent"
+    git_ init -q --template= -b dev "$parent"
 
 cat > "$parent/README.md" <<'EOF'
 # fixture: multi
@@ -134,7 +167,7 @@ commit_parent() {
 build_child() {
     name=$1
     child="$target/multi/$name"
-    git_ init -q -b feat "$child"
+    git_ init -q --template= -b feat "$child"
     cat > "$child/README.md" <<EOF
 # fixture: $name
 
@@ -184,7 +217,7 @@ build_multi() {
 
 build_running() {
     running="$target/running"
-    git_ init -q -b main "$running"
+    git_ init -q --template= -b main "$running"
 
 mkdir -p "$running/.github/workflows" "$running/.claude/skills/release-check" \
     "$running/docs" "$running/src"
@@ -330,12 +363,18 @@ EOF
 }
 
 # The two projects are built together: neither reads the other.
-build_multi &
-multi=$!
-build_running &
-running=$!
-wait "$multi"
-wait "$running"
+if [ "$project" = both ]; then
+    build_multi &
+    multi=$!
+    build_running &
+    running=$!
+    wait "$multi"
+    wait "$running"
+elif [ "$project" = multi ]; then
+    build_multi
+else
+    build_running
+fi
 
 # ---------------------------------------------------------------- notes
 
