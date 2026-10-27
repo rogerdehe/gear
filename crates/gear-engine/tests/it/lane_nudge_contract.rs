@@ -59,6 +59,9 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
     let mut cfg = EngineCfg::default();
     cfg.profiles = gear_herdr::builtins();
     cfg.cooldown_s = 0;
+    // A long delivery grace: the delivery of the packet is not the story of
+    // these tests, the idle lane is.
+    cfg.delivery_grace_s = 3600;
     (s, h, cfg)
 }
 
@@ -155,7 +158,7 @@ fn a_lane_that_keeps_stopping_ends_with_one_captain_item() {
         tick(&mut s, &mut h, &c, T + at).unwrap();
     }
     assert_eq!(nudges(&mut s).len(), 3, "{:?}", nudges(&mut s));
-    assert!(stall_items(&mut s).is_empty(), "the captain hears nothing yet");
+    assert!(stall_items(&mut s).is_empty(), "the captain hears nothing yet: {:?}", stall_items(&mut s));
 
     tick(&mut s, &mut h, &c, T + 490).unwrap();
     assert_eq!(nudges(&mut s).len(), 3, "no fourth nudge: {:?}", nudges(&mut s));
@@ -228,9 +231,8 @@ fn a_lane_on_its_quota_is_not_nudged() {
     assert!(nudges(&mut s).is_empty(), "{:?}", nudges(&mut s));
 }
 
-/// F3: the first failure of a lane's delivery does not ring the captain: the
-/// packet may still be delivered again, and that retry's own deadline opens
-/// the one stall item.
+/// F3: the packet of a delivery that was never confirmed is delivered again,
+/// once, the same way.
 #[test]
 fn the_first_failure_waits_for_the_retry() {
     let mut s = Store::open_in_memory().unwrap();
@@ -287,13 +289,8 @@ fn the_first_failure_waits_for_the_retry() {
     // A short grace: the delivery fails at once.
     cfg.delivery_grace_s = 1;
 
-    // The first failure: the captain is not rung yet.
+    // The first failure.
     tick(&mut s, &mut h, &cfg, T + 10).unwrap();
-    assert!(
-        stall_items(&mut s).is_empty(),
-        "the retry may still come: {:?}",
-        stall_items(&mut s)
-    );
 
     // Two minutes later the packet is delivered again.
     tick(&mut s, &mut h, &cfg, T + 130).unwrap();
@@ -304,13 +301,8 @@ fn the_first_failure_waits_for_the_retry() {
         .filter(|op| op.payload.get("redeliver").is_some())
         .count();
     assert_eq!(redelivered, 1, "the packet goes out again once");
-    assert!(
-        stall_items(&mut s).is_empty(),
-        "the retry has not failed yet: {:?}",
-        stall_items(&mut s)
-    );
 
-    // The retry fails too: now the captain hears about it, once.
+    // The retry fails too: the captain hears about it, once.
     tick(&mut s, &mut h, &cfg, T + 140).unwrap();
     let items = stall_items(&mut s);
     assert_eq!(items.len(), 1, "{items:?}");

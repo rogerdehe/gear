@@ -124,7 +124,12 @@ pub fn nudge_stopped_lanes(
                 }
                 // The retry is allowed once (F3): the marker says the first
                 // failure may still be retried; the retry itself is pending.
-                if !store.read(|tx| retry_allowed(tx, &seat.id, &attempt.task, attempt.attempt))? {
+                // The retry happens once: a delivery that already carries
+                // the marker was delivered again (F2, F3).
+                if deliveries
+                    .iter()
+                    .any(|op| op.payload.get("redeliver").is_some())
+                {
                     continue;
                 }
                 let Some(text) = last.payload.get("text").and_then(|text| text.as_str()) else {
@@ -145,6 +150,7 @@ pub fn nudge_stopped_lanes(
                         created: now,
                     })?;
                     tx.set_meta(&retry_marker(&seat.id, &attempt.task, attempt.attempt), "pending")?;
+
                     Ok(())
                 })?;
                 nudged.push(seat.id.clone());
@@ -267,6 +273,16 @@ pub fn retry_marker(seat: &str, task: &str, attempt: i64) -> String {
 /// May this attempt's delivery still be retried once (T-206, F3)?
 pub fn retry_allowed(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<bool> {
     Ok(tx.get_meta(&retry_marker(seat, task, attempt))?.as_deref() == Some("allowed"))
+}
+
+/// May this seat's delivery still be retried once (T-206, F3)? The marker
+/// says the first failure may come again: the tick holds the captain's ring
+/// back until the retry has had its chance.
+pub fn may_retry(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
+    let Some(failed) = crate::delivery::failed(tx, seat)? else {
+        return Ok(false);
+    };
+    Ok(tx.get_meta(&retry_marker(seat, &failed.task, failed.attempt))?.is_some())
 }
 
 /// Is a delivery of the seat still in flight (T-206, F2)? The reviewer's
