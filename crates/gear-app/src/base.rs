@@ -107,6 +107,39 @@ pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearRes
     ))
 }
 
+/// Whether `candidate` contains `base`: `git merge-base --is-ancestor base
+/// candidate` in `worktree`.
+///
+/// Git that cannot place a commit is an error, never a "no": a check that
+/// cannot answer must not pass silently (T-19's rule).
+pub fn contains(worktree: &Path, base: &str, candidate: &str) -> GearResult<bool> {
+    let where_ = worktree.display();
+    let checked = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-base", "--is-ancestor", base, candidate])
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot check whether {candidate} contains {base} in {where_}: {error}"),
+            )
+        })?;
+    match checked.status.code() {
+        // 0: the base is an ancestor of the candidate — the candidate carries it.
+        Some(0) => Ok(true),
+        // 1: the base is not an ancestor of the candidate — it does not carry it.
+        Some(1) => Ok(false),
+        _ => Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot check whether {candidate} contains {base} in {where_}: {}",
+                excerpt(&checked.stderr)
+            ),
+        )),
+    }
+}
+
 /// Refuse unless `candidate` contains the current `origin/<integration>`:
 /// `git fetch origin`, then `git merge-base --is-ancestor origin/<integration>
 /// <candidate>` in `worktree`. Nothing is written here; the caller runs this

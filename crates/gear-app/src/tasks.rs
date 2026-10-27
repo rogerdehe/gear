@@ -183,6 +183,47 @@ pub fn adopt_contract(
     Ok(Some(shown))
 }
 
+/// The candidate of the attempt before `n` — the work a rework must build on
+/// (design §10.7, row B03-08). `None` for a first attempt: there is no
+/// earlier work to keep.
+pub fn rework_base_candidate(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+) -> GearResult<Option<String>> {
+    if n <= 1 {
+        return Ok(None);
+    }
+    Ok(tx
+        .get_attempt(project, task, n - 1)?
+        .and_then(|attempt| attempt.candidate))
+}
+
+/// Refuse a rework hand-in whose candidate does not contain the candidate of
+/// the attempt before it (design §10.7, row B03-08): a rework keeps the work
+/// the reviewer read, so the new candidate carries the old one. The refusal
+/// names that commit — the one the lane has to merge in.
+///
+/// Git answers outside the store transaction (the worktree is the lane's), so
+/// the caller runs this before it writes anything.
+pub fn require_rework_contains(
+    worktree: &std::path::Path,
+    previous: &str,
+    candidate: &str,
+) -> GearResult<()> {
+    if crate::base::contains(worktree, previous, candidate)? {
+        return Ok(());
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!(
+            "the rework candidate {candidate} does not contain {previous}: a rework keeps the work \
+             the reviewer read (merge {previous} into your branch)"
+        ),
+    ))
+}
+
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
