@@ -302,7 +302,8 @@ fn under_review(
             return Ok(false);
         }
         // A newer attempt handed in means this reviewer read an older one.
-        if seat.task_id.as_deref() == Some(task) {
+        let pending = tx.get_meta(&format!("engine.review_pending.{}", seat.id))?.filter(|value| !value.is_empty());
+        if pending.as_deref() != Some(task) && seat.task_id.as_deref() == Some(task) {
             if let Some(job) = tx.last_op(&seat.id, OpKind::Deliver)? {
                 if job.task.as_deref() == Some(task) && job.attempt != Some(latest.n) {
                     return Ok(false);

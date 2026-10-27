@@ -3182,6 +3182,25 @@ profile = "opencode"
     }
 
     #[test]
+    fn pending_same_task_rereview_ignores_the_previous_delivery() {
+        let mut store=world(CONFIG); let mut herdr=FakeHerdr::new();
+        start_reviews(&mut store,&mut herdr,&cfg(),&cfg().profiles,"p",T0+10).unwrap();
+        store.write(|tx| {
+            let mut first=tx.get_attempt("p","T-1",1)?.unwrap(); first.state=AttemptState::Rejected; tx.update_attempt(&first)?;
+            let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Ready; tx.update_task(&task)?;
+            gear_app::tasks::start_attempt(tx,"p","T-1","p:heat",1,T0+11)?;
+            gear_app::tasks::on_delivery_confirmed(tx,"p","T-1",2,T0+11)?;
+            gear_app::tasks::submit_result(tx,"p","T-1",2,1,"def5678","report",T0+11)?;
+            tx.set_seat_state("p:review-1",SeatState::Starting,Some("legacy start"),T0+11)?;
+            tx.set_meta(&pending_review_key("p:review-1"),"T-1")
+        }).unwrap();
+        crate::release::release_finished_reviews(&mut store,&mut herdr,"p",T0+12).unwrap();
+        let seat=store.read(|tx|tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Starting);
+        assert_eq!(store.read(|tx|tx.get_meta(&pending_review_key(&seat.id))).unwrap().as_deref(),Some("T-1"));
+    }
+
+    #[test]
     fn standby_reviewer_after_model_restart_restores_the_selected_model() {
         use gear_app::config::{ModelEntry, ModelSpec};
         let chain="review = [{ model = \"gpt-6.1-sol\", cli = \"codex\" }, { model = \"gpt-6-astra\", cli = \"codex\" }]";
