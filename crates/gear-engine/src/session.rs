@@ -326,7 +326,21 @@ pub fn prepare_lane(
 
     let compact_after = facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Resume(_))
         && context_large(store, cfg, seat, facts.earlier_session.as_deref())?;
-    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, compact_after, now)
+    let compact_key = crate::quiet::compact_key(&seat.id);
+    let pending = store.read(|tx| tx.get_meta(&compact_key))?.unwrap_or_default();
+    if pending != "running" {
+        let prep = crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, compact_after, now)?;
+        if prep != Prep::Ready || pending != "pending" { return Ok(prep); }
+        // The previous round action is complete. Start a separate durable
+        // compaction before allowing this delivery, including across restarts.
+        store.write(|tx| {
+            tx.set_meta(&format!("engine.session_step.{}", seat.id), "")?;
+            tx.set_meta(&compact_key, "running")
+        })?;
+    }
+    let prep = crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &Action::Compact, false, now)?;
+    if prep == Prep::Ready { store.write(|tx| tx.set_meta(&compact_key, ""))?; }
+    Ok(prep)
 }
 
 /// The session step of a **review** round (design §3.2 steps 2-3, §13.4):
@@ -624,6 +638,37 @@ mod tests {
     use gear_store::testing;
 
     const T0: i64 = 1_800_000_000;
+
+    #[test]
+    fn loop_guard_compacts_before_the_next_delivery_is_ready() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.set_agent_session("w1:p1", "round-session");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        store.write(|tx| {
+            tx.set_binding_session_ref(&seat.id, 1, "round-session")?;
+            let key = gear_store::RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()};
+            tx.insert_round(&gear_store::NewRound {key:key.clone(),seat:seat.id.clone(),generation:1,cli:"codex".into(),model:None,start_at:T0})?;
+            tx.add_round_session(&key, "round-session")?;
+            tx.set_attempt_action("p", "T-1", 1, "keep")?;
+            tx.set_meta(&crate::quiet::compact_key(&seat.id), "pending")?;
+            tx.insert_op(&gear_store::NewOp { project:"p".into(), seat:seat.id.clone(), generation:1,
+                kind:gear_model::OpKind::Deliver, task:Some("T-1".into()), attempt:Some(1), ref_msg:None,
+                plan_version:None, payload:serde_json::json!({"text":"packet"}), created:T0 })?;
+            Ok(())
+        }).unwrap();
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| prepare_lane(store, herdr, &cfg(), &seat, "T-1", 1, now).unwrap();
+        assert_eq!(run(&mut store, &mut herdr, T0+1), Prep::Wait);
+        assert!(herdr.calls.iter().any(|c| matches!(c, gear_herdr::fake::Call::PaneType {text,..} if text == "/compact")));
+        assert!(crate::ops::execute_intended(&mut store, &mut herdr, "p", T0+1).unwrap().is_empty(), "the already-intended packet must wait");
+        assert_eq!(store.read(|tx| tx.ops_in_state("p", gear_model::OpState::Intended)).unwrap().len(), 1);
+        assert_eq!(run(&mut store, &mut herdr, T0+2), Prep::Wait);
+        assert!(herdr.calls.iter().any(|c| matches!(c, gear_herdr::fake::Call::SendKeys {keys,..} if keys == &["enter"])));
+        herdr.set_status("w1:p1", gear_herdr::AgentStatus::Done);
+        assert_eq!(run(&mut store, &mut herdr, T0+3), Prep::Ready);
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::quiet::compact_key(&seat.id))).unwrap().as_deref(), Some(""));
+    }
 
     #[test]
     fn completed_step_resumes_the_round_after_an_idle_replacement() {
