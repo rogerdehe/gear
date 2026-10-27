@@ -161,7 +161,11 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                 });
                 tx.set_meta(&key, &info.to_string())?;
             }
-            for pair in previous.iter().filter(|pair| !conflicts.pairs.contains_key(*pair)) {
+            for pair in previous
+                .iter()
+                .chain(previous_integration.iter())
+                .filter(|pair| !conflicts.pairs.contains_key(*pair))
+            {
                 let key = format!("{prefix}:pair:{pair}");
                 // An overlap with the integration branch was an item before
                 // (T-188): it closes with its own reason.
