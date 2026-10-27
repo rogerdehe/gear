@@ -750,3 +750,117 @@ fn now_epoch() -> Ts {
 fn home() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
 }
+
+/// One usage-bearing record, retaining its model for per-record pricing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageRecord {
+    pub model: Option<String>,
+    pub usage: Usage,
+}
+
+/// Records in the same half-open window as [`usage`], or None for an unreadable log.
+pub fn usage_records(log: UsageLog, session: &str, from: Ts, to: Ts) -> Option<Vec<UsageRecord>> {
+    usage_records_in(log, session, from, to, &home())
+}
+
+/// The record-level reader with an explicit home directory.
+pub fn usage_records_in(log: UsageLog, session: &str, from: Ts, to: Ts, home: &Path) -> Option<Vec<UsageRecord>> {
+    let mut result = Vec::new();
+    if log == UsageLog::OpencodeDb {
+        for (data, time) in opencode_messages(home, session)? {
+            let Some(time) = time else { continue };
+            if time < from || time >= to { continue }
+            let Some(tokens) = data.get("tokens") else { continue };
+            let cache = tokens.get("cache");
+            let model = model_name(&data);
+            result.push(UsageRecord { model, usage: Usage { input: number(tokens,"input"), output: number(tokens,"output"), reasoning: number(tokens,"reasoning"), cache_read: cache.map(|c|number(c,"read")).unwrap_or(0), cache_write: cache.map(|c|number(c,"write")).unwrap_or(0), cost_usd: data.get("cost").and_then(Value::as_f64), records: 1 } });
+        }
+        return Some(result);
+    }
+    let path = match log {
+        UsageLog::PiJsonl => PathBuf::from(session),
+        UsageLog::CodexRollout => codex_rollout_path(home, session)?,
+        UsageLog::ClaudeJsonl => claude_json_path(home, session)?,
+        UsageLog::OpencodeDb => unreachable!(),
+    };
+    let mut previous = CodexTokens::zero();
+    let mut seen = HashSet::new();
+    let mut current_model = None;
+    for line in read_lines(&path)? {
+        let Some(value) = parse(&line) else { continue };
+        match log {
+            UsageLog::PiJsonl => {
+                if value.get("type").and_then(Value::as_str) != Some("message") { continue }
+                let Some(message) = value.get("message") else { continue };
+                if message.get("role").and_then(Value::as_str) != Some("assistant") { continue }
+                let Some(u) = message.get("usage") else { continue };
+                let Some(t) = record_time(&value, message) else { continue };
+                if t < from || t >= to { continue }
+                result.push(UsageRecord { model: model_name(message), usage: Usage { input:number(u,"input"), output:number(u,"output"), cache_read:number(u,"cacheRead"), cache_write:number(u,"cacheWrite"), reasoning:number(u,"reasoning"), cost_usd:u.get("cost").and_then(|c|c.get("total")).and_then(Value::as_f64), records:1 } });
+            }
+            UsageLog::ClaudeJsonl => {
+                if value.get("type").and_then(Value::as_str) != Some("assistant") { continue }
+                let Some(message) = value.get("message") else { continue };
+                let Some(u) = message.get("usage") else { continue };
+                if let Some(id) = message.get("id").and_then(Value::as_str).or_else(||value.get("uuid").and_then(Value::as_str)) { if !seen.insert(id.to_owned()) { continue } }
+                let Some(t) = record_time(&value, &value) else { continue };
+                if t < from || t >= to { continue }
+                result.push(UsageRecord { model:model_name(message), usage:Usage {input:number(u,"input_tokens"), output:number(u,"output_tokens"), cache_read:number(u,"cache_read_input_tokens"), cache_write:number(u,"cache_creation_input_tokens"), reasoning:0, cost_usd:None, records:1} });
+            }
+            UsageLog::CodexRollout => {
+                if value.get("type").and_then(Value::as_str) == Some("turn_context") { current_model = value.get("payload").and_then(model_name).or(current_model); continue }
+                if value.get("type").and_then(Value::as_str) != Some("event_msg") { continue }
+                let Some(payload) = value.get("payload") else { continue };
+                if payload.get("type").and_then(Value::as_str) != Some("token_count") { continue }
+                let Some(current) = payload.get("info").and_then(CodexTokens::of) else { continue };
+                let delta = current.difference(previous); previous = current;
+                let Some(t) = record_time(&value, &value) else { continue };
+                if t < from || t >= to { continue }
+                result.push(UsageRecord { model:model_name(payload).or_else(||current_model.clone()), usage:Usage {input:delta.input_tokens-delta.cached_input_tokens, output:delta.output_tokens, cache_read:delta.cached_input_tokens, cache_write:delta.cache_write_input_tokens, reasoning:delta.reasoning_output_tokens, cost_usd:None, records:1} });
+            }
+            UsageLog::OpencodeDb => unreachable!(),
+        }
+    }
+    Some(result)
+}
+
+fn model_name(value: &Value) -> Option<String> {
+    let model = value.get("model").and_then(Value::as_str).or_else(|| value.get("modelID").and_then(Value::as_str))?;
+    let provider = value.get("provider").and_then(Value::as_str).or_else(||value.get("providerID").and_then(Value::as_str));
+    Some(match provider { Some(p) if !model.contains('/') => format!("{p}/{model}"), _ => model.to_owned() })
+}
+
+/// Prices in USD per million tokens for one model.
+#[derive(Debug, Clone, Copy)]
+pub struct Price { pub input: f64, pub output: f64, pub cache_read: f64, pub cache_write: f64 }
+
+/// Aggregate tokens and their complete cost for a round window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundUsage { pub usage: Usage, pub cost_source: &'static str }
+
+/// Count a round without persistence; suitable for live board and report reads.
+/// Any missing session makes the entire token count unknown. A missing price
+/// makes the complete cost unknown while preserving the token totals.
+pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default_model: Option<&str>, prices: &std::collections::BTreeMap<String, Price>) -> Option<RoundUsage> {
+    if sessions.is_empty() { return None }
+    let mut seen = HashSet::new();
+    let mut total = Usage {input:0,output:0,cache_read:0,cache_write:0,reasoning:0,cost_usd:None,records:0};
+    let (mut cost, mut any_cost, mut known, mut priced) = (0.0, false, true, false);
+    for session in sessions {
+        if !seen.insert(session) { continue }
+        let u = usage(log, session, from, to)?;
+        total.input += u.input; total.output += u.output; total.cache_read += u.cache_read; total.cache_write += u.cache_write; total.reasoning += u.reasoning; total.records += u.records;
+        for record in usage_records(log, session, from, to)? {
+            let u = record.usage;
+            if let Some(amount) = u.cost_usd { cost += amount; any_cost = true; continue }
+            let model = record.model.as_deref().or(default_model);
+            let price = model.and_then(|m| prices.get(m));
+            if let Some(p) = price {
+                cost += (u.input as f64*p.input + u.output as f64*p.output + u.cache_read as f64*p.cache_read + u.cache_write as f64*p.cache_write) / 1_000_000.0;
+                any_cost = true; priced = true;
+            } else { known = false; }
+        }
+    }
+    let cost_source = if any_cost && known { total.cost_usd = Some(cost); if priced { "prices" } else { "agent" } } else { "none" };
+    Some(RoundUsage {usage:total,cost_source})
+}

@@ -361,3 +361,81 @@ fn a_review_confirmation_leaves_the_writers_session_alone() {
         "the writer keeps its CLI"
     );
 }
+
+#[test]
+fn token_windows_cover_rework_followups_compaction_reviews_and_model_changes() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, lines: Vec<serde_json::Value>| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, lines.into_iter().map(|v|v.to_string()+"\n").collect::<String>()).unwrap();
+        path.to_string_lossy().to_string()
+    };
+    let rec = |time, input, model: &str| json!({"type":"message", "timestamp":time, "message":{"role":"assistant", "model":model, "usage":{"input":input,"output":10,"cacheRead":20,"cacheWrite":5}}});
+    let a = file("a",vec![rec(T0+10,100,"p/m1"),rec(T0+40,200,"p/m1"),rec(T0+80,300,"p/m1")]);
+    let b = file("b",vec![rec(T0+50,400,"p/m1"),rec(T0+60,500,"p/m1")]);
+    let r = file("r",vec![rec(T0+10,600,"p/m1"),rec(T0+80,700,"p/m1")]);
+    let q = file("q",vec![rec(T0+50,800,"p/m1")]);
+    let switched = file("switch",vec![rec(T0+10,100,"p/m1"),rec(T0+20,200,"p/m2")]);
+    let mut store = world();
+    store.write(|tx| {
+        let mut project=tx.get_project("p")?.unwrap();
+        project.config_toml="[prices.\"p/m1\"]\ninput=1\noutput=0\ncache_read=0\ncache_write=0\n[prices.\"p/m2\"]\ninput=3\noutput=0\ncache_read=0\ncache_write=0\n".into();
+        tx.update_project(&project)
+    }).unwrap();
+    let mut cfg=gear_engine::EngineCfg::default();
+    let mut profile=gear_herdr::builtin("opencode").unwrap(); profile.usage_log=Some("pi-jsonl".into()); cfg.profiles.insert("opencode".into(),profile);
+    let cases = [
+        ("T-1",1,"dev",T0,T0+40,vec![a.clone()],100),
+        ("T-2",1,"dev",T0+40,T0+70,vec![b.clone()],900),
+        ("T-1",2,"dev",T0+70,T0+100,vec![a.clone()],300),
+        ("T-3",1,"dev",T0+10,T0+40,vec![a.clone()],100),
+        ("T-4",1,"dev",T0+40,T0+70,vec![a.clone(),b.clone()],1100),
+        ("T-5",1,"review",T0,T0+40,vec![r.clone()],600),
+        ("T-6",1,"review",T0+40,T0+70,vec![q.clone()],800),
+        ("T-5",2,"review",T0+70,T0+100,vec![r.clone()],700),
+        ("T-7",1,"dev",T0,T0+30,vec![switched.clone()],300),
+    ];
+    for (task,attempt,role,start,end,sessions,expected) in cases {
+        round(&mut store,task,attempt,role,start);
+        let key=RoundKey{project:"p".into(),task:task.into(),attempt,role:role.into()};
+        store.write(|tx| { for session in &sessions {tx.add_round_session(&key,session)?;} tx.close_round(&key,end) }).unwrap();
+        let row=round_of(&mut store,task,attempt,role);
+        let tokens=gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+200).unwrap();
+        assert_eq!(tokens.input,Some(expected),"{task}/{attempt}");
+        if task=="T-7" { assert!((tokens.cost_usd.unwrap()-0.0007).abs()<1e-10); assert_eq!(tokens.cost_source,"prices"); }
+    }
+    // An open round is counted on demand without writing its columns.
+    round(&mut store,"T-8",1,"dev",T0);
+    let key=RoundKey{project:"p".into(),task:"T-8".into(),attempt:1,role:"dev".into()};
+    store.write(|tx|tx.add_round_session(&key,&a)).unwrap();
+    let row=round_of(&mut store,"T-8",1,"dev");
+    assert_eq!(gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+40).unwrap().input,Some(100));
+    assert_eq!(round_of(&mut store,"T-8",1,"dev").input,None);
+    let missing=file("unpriced",vec![rec(T0+10,30,"p/unknown")]);
+    round(&mut store,"T-9",1,"dev",T0);
+    let key=RoundKey{project:"p".into(),task:"T-9".into(),attempt:1,role:"dev".into()};
+    store.write(|tx|tx.add_round_session(&key,&missing)).unwrap();
+    let row=round_of(&mut store,"T-9",1,"dev");
+    let tokens=gear_engine::rounds::count_round(&mut store,&cfg,&row,T0+40).unwrap();
+    assert_eq!(tokens.input,Some(30)); assert_eq!(tokens.cost_usd,None); assert_eq!(tokens.cost_source,"none");
+}
+
+#[test]
+fn closed_round_waits_for_late_logs_and_missing_logs_stay_unknown() {
+    let dir=tempfile::tempdir().unwrap();
+    let path=dir.path().join("later.jsonl");
+    let mut store=world(); round(&mut store,"T-1",1,"dev",T0);
+    let key=RoundKey{project:"p".into(),task:"T-1".into(),attempt:1,role:"dev".into()};
+    store.write(|tx| {tx.add_round_session(&key,path.to_str().unwrap())?;tx.close_round(&key,T0+100)}).unwrap();
+    let mut cfg=gear_engine::EngineCfg::default(); let mut p=gear_herdr::builtin("opencode").unwrap(); p.usage_log=Some("pi-jsonl".into()); cfg.profiles.insert("opencode".into(),p);
+    let mut h=FakeHerdr::new();
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+159).unwrap();
+    assert_eq!(round_of(&mut store,"T-1",1,"dev").counted_at,None);
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+160).unwrap();
+    assert_eq!(round_of(&mut store,"T-1",1,"dev").input,None);
+    std::fs::write(path,format!("{}\n",serde_json::json!({"type":"message","timestamp":T0+20,"message":{"role":"assistant","usage":{"input":42,"cost":{"total":0.25}}}}))).unwrap();
+    gear_engine::rounds::tick(&mut store,&mut h,&cfg,T0+161).unwrap();
+    let row=round_of(&mut store,"T-1",1,"dev");
+    assert_eq!(row.input,Some(42)); assert_eq!(row.cost_usd,Some(0.25)); assert_eq!(row.cost_source.as_deref(),Some("agent")); assert_eq!(row.counted_at,Some(T0+161));
+}
