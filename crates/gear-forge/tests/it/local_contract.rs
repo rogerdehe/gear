@@ -16,7 +16,7 @@ fn a_local_forge_opens_nothing_and_says_so() {
     assert!(!pr.is_open());
 
     forge.comment(&pr, "a comment").expect("nothing to comment on");
-    let merged = forge.merge(&pr, MergeMethod::Squash).expect("nothing to merge");
+    let merged = forge.merge(&pr, MergeMethod::Squash, "abc1234").expect("nothing to merge");
     assert!(!merged.merged, "{merged:?}");
     assert_eq!(merged.message, "the project has no forge");
     forge.close_issue("owner/name", 12, "nothing to close").expect("nothing to close");

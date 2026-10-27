@@ -2477,6 +2477,18 @@ impl<'s> Tx<'s> {
         )
     }
 
+    /// Refresh the attempt's session from its current binding, including an
+    /// unknown session after a replacement has not reported one yet.
+    pub fn refresh_attempt_session(
+        &self, project: &str, task: &str, n: i64, session_ref: Option<&str>, cli: &str,
+    ) -> GearResult<()> {
+        let changed = self.tx.execute(
+            "UPDATE attempts SET session_ref=?4, session_cli=?5 WHERE project=?1 AND task=?2 AND n=?3",
+            params![project, task, n, session_ref, cli],
+        ).map_err(map_sqlite)?;
+        require_written(changed, "attempt", &format!("{task} attempt {n} in project {project}"))
+    }
+
     /// What the engine did before the packet (§3.2): keep | new | compact |
     /// resume | fresh | new-unconfirmed | compact-fallback | resume-fallback.
     pub fn set_attempt_action(
