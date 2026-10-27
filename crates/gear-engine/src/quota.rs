@@ -1610,20 +1610,20 @@ fn wake_from_source(
     if wait.until > now {
         return Ok(None);
     }
-    // The pause row ends (§5.4).
+    // The pause row ends (§5.4) and the round's clock pauses for the whole
+    // wait (§5.1): the round clocks take their pauses from these rows.
     if wait.pause {
         let _ = store.write(|tx| tx.close_pause(project, &seat.id, "quota", now));
-    }
-    // The round's clock pauses for the whole wait (§5.1).
-    if let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? {
-        let key = RoundKey {
-            project: project.to_string(),
-            task: round.task.clone(),
-            attempt: round.attempt,
-            role: round.role.clone(),
-        };
-        let secs = (now - wait.started_at).max(0);
-        let _ = store.write(|tx| tx.add_round_pause(&key, secs));
+        if let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? {
+            let key = RoundKey {
+                project: project.to_string(),
+                task: round.task.clone(),
+                attempt: round.attempt,
+                role: round.role.clone(),
+            };
+            let secs = (now - wait.started_at).max(0);
+            let _ = store.write(|tx| tx.add_round_pause(&key, secs));
+        }
     }
     // The seat works again.
     store.write(|tx| {
