@@ -59,10 +59,35 @@ struct Branch {
     files: BTreeSet<String>,
 }
 
+#[derive(Debug)]
 struct Conflict {
     left: String,
     right: String,
     files: Vec<String>,
+}
+
+/// What one scan found: the pairs of tasks that share a file (the captain is
+/// told about them) and the tasks that overlap the integration branch (an
+/// information line, never a captain item).
+#[derive(Debug, Default)]
+struct Findings {
+    pairs: BTreeMap<String, Conflict>,
+    integration: BTreeMap<String, Conflict>,
+}
+
+/// Is this path a test file? Two tasks that touch only tests do not conflict
+/// (T-188): a test file is not a source file, and a test that is written
+/// twice is not a merge conflict.
+fn is_test_file(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    path.split('/').any(|part| part == "tests")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_contract.rs")
+}
+
+/// The shared files that count: the ones that are not test files.
+fn real_files(files: &[String]) -> Vec<String> {
+    files.iter().filter(|file| !is_test_file(file)).cloned().collect()
 }
 
 pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
@@ -87,17 +112,25 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                     };
                     return Ok(Check { opened: vec![], problems: vec![error] });
                 }
-            };
-            let Some(captain) = tx.captain_of(project)? else { return Ok(Check::default()); };
-            let previous = tx.get_meta(&format!("{prefix}:pairs"))?
+            };            let Some(captain) = tx.captain_of(project)? else { return Ok(Check::default()); };
+            let previous: Vec<String> = tx.get_meta(&format!("{prefix}:pairs"))?
                 .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok()).unwrap_or_default();
+            // An older engine kept the overlaps with the integration branch in
+            // the same list: they are separated here, so their items close.
+            let (previous_integration, previous): (Vec<String>, Vec<String>) =
+                previous.into_iter().partition(|pair| pair.starts_with("integration:"));
+            // The information lines of the last scan: the ones that are gone
+            // are cleared.
+            let previous_lines: Vec<String> = tx.get_meta(&format!("{prefix}:integrations"))?
+                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                .unwrap_or_default();
             let mut opened = Vec::new();
             // The repo the overlap is in: the captain must know which one.
             let where_ = match input.name() {
                 Some(name) => format!(" in {name}"),
                 None => String::new(),
             };
-            for (pair, conflict) in conflicts {
+            for (pair, conflict) in &conflicts.pairs {
                 let key = format!("{prefix}:pair:{pair}");
                 let files = serde_json::json!(conflict.files).to_string();
                 if tx.get_meta(&format!("{key}:files"))?.as_deref() == Some(&files) { continue; }
@@ -114,12 +147,47 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                 tx.set_meta(&format!("{key}:item"), &message.id)?;
                 opened.push(message.id);
             }
-            for pair in previous.iter().filter(|pair| !conflicts.contains_key(*pair)) {
+            // An overlap with the integration branch is an information line
+            // (the board and `gear queue` show it), never a captain item:
+            // the lane merges dev in and the merge gate catches a conflict
+            // (T-188).
+            for (pair, conflict) in &conflicts.integration {
+                let task = pair.strip_prefix("integration:").unwrap_or(pair);
+                let key = format!("{prefix}:integration:{task}");
+                let info = serde_json::json!({
+                    "task": task,
+                    "integration": input.integration,
+                    "files": conflict.files,
+                });
+                tx.set_meta(&key, &info.to_string())?;
+            }
+            for pair in previous.iter().filter(|pair| !conflicts.pairs.contains_key(*pair)) {
                 let key = format!("{prefix}:pair:{pair}");
-                close(tx, project, &key, "the branches no longer share changed files", now)?;
+                // An overlap with the integration branch was an item before
+                // (T-188): it closes with its own reason.
+                let reason = if pair.starts_with("integration:") {
+                    "an overlap with the integration branch is an information line now"
+                } else {
+                    "the branches no longer share changed files"
+                };
+                close(tx, project, &key, reason, now)?;
                 tx.set_meta(&format!("{key}:files"), "[]")?;
             }
-            tx.set_meta(&format!("{prefix}:pairs"), &serde_json::json!(conflicts.keys().collect::<Vec<_>>()).to_string())?;
+            // The integration lines that are gone: the board shows none.
+            for task in &previous_lines {
+                let key = format!("{prefix}:integration:{task}");
+                if !conflicts.integration.contains_key(&format!("integration:{task}")) {
+                    tx.set_meta(&key, "")?;
+                }
+            }
+            tx.set_meta(
+                &format!("{prefix}:integrations"),
+                &serde_json::json!(conflicts.integration.keys()
+                    .filter_map(|pair| pair.strip_prefix("integration:"))
+                    .collect::<Vec<_>>())
+                .to_string(),
+            )?;
+            tx.set_meta(&format!("{prefix}:pairs"), &serde_json::json!(conflicts.pairs.keys().collect::<Vec<_>>()).to_string())?;
             Ok(Check { opened, problems: vec![] })
         })?;
         report.opened.extend(result.opened);
@@ -231,7 +299,7 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
     Ok(())
 }
 
-fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
+fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
     let remote = revision(&input.repo, &format!("refs/remotes/origin/{}", input.integration))?;
@@ -244,7 +312,7 @@ fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
         _ => return Err(format!("integration branch {} is unavailable", input.integration)),
     };
     let mut branches = Vec::new();
-    let mut conflicts = BTreeMap::new();
+    let mut findings = Findings::default();
     for task in &input.tasks {
         // A task whose candidate is already in the integration branch has
         // landed: the engine merged that commit, and whatever its branch still
@@ -267,8 +335,9 @@ fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
         if files.is_empty() { continue; } // includes already integrated Done branches
         let integration_files = changed(&input.repo, &head, &integration)?;
         let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
+        let shared = real_files(&shared);
         if !shared.is_empty() {
-            conflicts.insert(format!("integration:{}", task.task), Conflict {
+            findings.integration.insert(format!("integration:{}", task.task), Conflict {
                 left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
             });
         }
@@ -278,15 +347,16 @@ fn scan(input: &Input) -> Result<BTreeMap<String, Conflict>, String> {
     for (index, left) in branches.iter().enumerate() {
         for right in branches.iter().skip(index + 1).filter(|b| b.lane != left.lane) {
             let files: Vec<_> = left.files.intersection(&right.files).cloned().collect();
+            let files = real_files(&files);
             if !files.is_empty() {
-                conflicts.insert(format!("tasks:{}:{}", left.task, right.task), Conflict {
+                findings.pairs.insert(format!("tasks:{}:{}", left.task, right.task), Conflict {
                     left: format!("{} ({})", left.task, left.lane),
                     right: format!("{} ({})", right.task, right.lane), files,
                 });
             }
         }
     }
-    Ok(conflicts)
+    Ok(findings)
 }
 
 fn revision(repo: &Path, reference: &str) -> Result<Option<String>, String> {
