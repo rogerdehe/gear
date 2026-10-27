@@ -120,7 +120,12 @@ pub fn send(
             let candidate = args.candidate.as_deref().ok_or_else(|| {
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
-            crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+            crate::base::require_current_base(
+                &gate.worktree,
+                &gate.integration,
+                candidate,
+                gate.window_min,
+            )?;
             // A rework keeps the work the reviewer read (design §10.7, row
             // B03-08): the new candidate carries the previous attempt's
             // candidate. The refusal names that commit. It comes before the

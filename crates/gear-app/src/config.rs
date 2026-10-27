@@ -603,6 +603,11 @@ pub struct Timing {
     /// Working with no attempt in development while ready work waits.
     pub lane_busy_idle_min: u32,
     pub delivery_grace_s: u32,
+    /// How many minutes a hand-in may be behind the integration branch and
+    /// still be accepted (T-221): a base that moved while the lane merged and
+    /// ran its suite is not a stale base. `0` = a hand-in must contain the
+    /// current tip (the strict rule).
+    pub handin_base_window_min: u32,
 }
 
 impl Default for Timing {
@@ -615,6 +620,7 @@ impl Default for Timing {
             captain_item_stale_min: 15,
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
+            handin_base_window_min: 30,
         }
     }
 }

@@ -45,6 +45,46 @@ fn commit(dir: &Path, name: &str, text: &str) -> String {
     git(dir, &["rev-parse", "HEAD"])
 }
 
+/// The wall clock in seconds since the epoch.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `git` with a commit time: the gate reads commit times (T-221), so a
+/// fixture can place a commit in the past.
+fn git_at(dir: &Path, args: &[&str], when: i64) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "gate")
+        .env("GIT_AUTHOR_EMAIL", "gate@example.com")
+        .env("GIT_COMMITTER_NAME", "gate")
+        .env("GIT_COMMITTER_EMAIL", "gate@example.com")
+        .env("GIT_AUTHOR_DATE", format!("@{when}"))
+        .env("GIT_COMMITTER_DATE", format!("@{when}"))
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run git: {e}"));
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A commit whose committer time is `minutes_ago` minutes ago.
+fn commit_minutes_ago(dir: &Path, name: &str, text: &str, minutes_ago: i64) -> String {
+    let when = now_secs() - minutes_ago * 60;
+    std::fs::write(dir.join(name), text).unwrap();
+    git_at(dir, &["add", name], when);
+    git_at(dir, &["commit", "-q", "-m", text], when);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
 /// A scratch directory, removed when it goes.
 struct Scratch {
     path: PathBuf,
@@ -179,21 +219,119 @@ impl Repos {
     }
 }
 
+/// A `dev` history whose commits have the given ages in minutes: the commits
+/// are made in the seed, published as `dev` and fetched by the lane. The ages
+/// are what the gate reads (the committer time, T-221).
+fn dev_with_ages(r: &Repos, ages: &[i64]) -> Vec<String> {
+    git(&r.seed, &["switch", "-q", "--orphan", "fresh"]);
+    let mut shas = Vec::new();
+    for (index, age) in ages.iter().enumerate() {
+        shas.push(commit_minutes_ago(
+            &r.seed,
+            &format!("d{index}.txt"),
+            &format!("dev {index}"),
+            *age,
+        ));
+    }
+    publish(&r.origin, &r.seed, "refs/heads/fresh", "dev");
+    git(
+        &r.lane,
+        &["fetch", "-q", "origin", "+refs/heads/dev:refs/remotes/origin/dev"],
+    );
+    shas
+}
+
 // ---------------------------------------------------------------- the gate
 
 #[test]
 fn a_candidate_that_contains_the_integration_branch_is_accepted() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
-    require_current_base(&r.lane, "dev", &candidate).unwrap();
+    require_current_base(&r.lane, "dev", &candidate, 30).unwrap();
 }
 
+/// T-221: a base that moved during the lane's own suite is not a stale base.
+/// A candidate that is behind the tip, but based on a commit of `dev` that is
+/// only ten minutes old and merges cleanly into the tip, is accepted.
+#[test]
+fn a_candidate_behind_a_recent_base_that_merges_clean_is_accepted() {
+    let r = repos();
+    // dev: a base an hour old, a commit ten minutes old, and the tip now.
+    let shas = dev_with_ages(&r, &[60, 10, 0]);
+    // The lane worked on the ten-minute-old commit; the tip landed meanwhile.
+    let candidate = r.candidate("heat/t1", &shas[1], "my work");
+
+    // The candidate does not contain the tip: it is accepted because of the
+    // window, not because it is current.
+    let err = require_current_base(&r.lane, "dev", &candidate, 0).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    require_current_base(&r.lane, "dev", &candidate, 30).unwrap();
+}
+
+/// T-221: a base that is old is a stale base: a candidate that is only based
+/// on a forty-minute-old commit of `dev` is refused, as before.
 #[test]
 fn a_candidate_behind_the_integration_branch_is_refused() {
     let r = repos();
-    // Branched from the commit before the current origin/dev tip.
-    let stale = r.candidate("data/stale", &r.older, "old work");
-    let err = require_current_base(&r.lane, "dev", &stale).unwrap_err();
+    // dev: a base an hour old, a commit forty minutes old, and the tip now.
+    let shas = dev_with_ages(&r, &[60, 40, 0]);
+    // The lane worked on the forty-minute-old commit.
+    let stale = r.candidate("data/stale", &shas[1], "old work");
+
+    let err = require_current_base(&r.lane, "dev", &stale, 30).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
+        "{}",
+        err.detail
+    );
+}
+
+/// T-221: a recent base is not enough — the tip must merge into the candidate
+/// without a conflict. A candidate that changed the same file as the tip is
+/// refused.
+#[test]
+fn a_recent_base_with_a_conflicting_change_is_refused() {
+    let r = repos();
+    // dev: a base an hour old, a commit ten minutes old, and the tip now.
+    let shas = dev_with_ages(&r, &[60, 10, 0]);
+    // The tip changed the file the ten-minute-old commit made...
+    std::fs::write(r.seed.join("d1.txt"), "tip").unwrap();
+    git_at(&r.seed, &["add", "d1.txt"], now_secs());
+    git_at(&r.seed, &["commit", "-q", "-m", "tip"], now_secs());
+    publish(&r.origin, &r.seed, "refs/heads/fresh", "dev");
+    git(
+        &r.lane,
+        &["fetch", "-q", "origin", "+refs/heads/dev:refs/remotes/origin/dev"],
+    );
+    // ...and the lane changed it differently.
+    git(&r.lane, &["switch", "-q", "-c", "heat/t1", &shas[1]]);
+    std::fs::write(r.lane.join("d1.txt"), "mine").unwrap();
+    git(&r.lane, &["add", "d1.txt"]);
+    git(&r.lane, &["commit", "-q", "-m", "mine"]);
+    let candidate = git(&r.lane, &["rev-parse", "HEAD"]);
+    // The candidate does carry the ten-minute-old commit: the refusal is the
+    // conflict, not an old base.
+    git(&r.lane, &["merge-base", "--is-ancestor", &shas[1], &candidate]);
+
+    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
+        "{}",
+        err.detail
+    );
+}
+
+/// T-221: the window is a setting, not a rule — with no window (0) a
+/// candidate that is behind the tip is refused, as it was.
+#[test]
+fn a_candidate_behind_the_integration_branch_is_refused_without_a_window() {
+    let r = repos();
+    let shas = dev_with_ages(&r, &[60, 10, 0]);
+    let candidate = r.candidate("heat/t1", &shas[1], "my work");
+
+    let err = require_current_base(&r.lane, "dev", &candidate, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains("merge origin/dev into your branch, build, then hand in again"),
@@ -207,7 +345,7 @@ fn a_failing_fetch_is_refused_not_ignored() {
     let r = repos();
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     git(&r.lane, &["remote", "set-url", "origin", "/nonexistent/nowhere.git"]);
-    let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
+    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
     // The reason, not only git's boilerplate last line (review F4).
@@ -221,7 +359,7 @@ fn a_failing_fetch_is_refused_not_ignored() {
 #[test]
 fn a_candidate_git_cannot_place_is_refused() {
     let r = repos();
-    let err = require_current_base(&r.lane, "dev", "no-such-commit").unwrap_err();
+    let err = require_current_base(&r.lane, "dev", "no-such-commit", 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot check"), "{}", err.detail);
 }
@@ -315,7 +453,7 @@ fn a_stale_hand_in_stores_nothing() {
     let stale = r.candidate("data/stale", &r.older, "old work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 0 });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&stale, gate), T0 + 5).unwrap_err();
 
@@ -337,7 +475,7 @@ fn an_unpushed_candidate_is_refused() {
     let unpushed = commit(&r.lane, "work.txt", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&unpushed, gate), T0 + 5).unwrap_err();
 
@@ -349,7 +487,7 @@ fn an_unpushed_candidate_is_refused() {
     // refusal: the branch is there, this commit is not on it.
     publish(&r.origin, &r.lane, "refs/remotes/origin/dev", "heat/t1");
     let other = commit(&r.lane, "other.txt", "somewhere else");
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
     let err = mail::send(&mut s, &env, Some(&fp), &result(&other, gate), T0 + 5).unwrap_err();
     assert!(err.detail.contains("is not on refs/remotes/origin/heat/t1"), "{}", err.detail);
     // Nothing was written: no message, the attempt is still being worked on.
@@ -392,7 +530,7 @@ fn a_rework_off_the_earlier_candidate_is_refused() {
     })
     .unwrap();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
     let mut args = result(&second, gate);
     args.attempt = Some(2);
 
@@ -437,7 +575,7 @@ fn a_rework_that_keeps_the_earlier_candidate_is_accepted() {
     })
     .unwrap();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
     let mut args = result(&second, gate);
     args.attempt = Some(2);
 
@@ -457,7 +595,7 @@ fn a_current_candidate_is_accepted() {
     let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
 
     let sent = mail::send(&mut s, &env, Some(&fp), &result(&current, gate), T0 + 5).unwrap();
 
@@ -485,7 +623,10 @@ fn a_restricted_fetch_refspec_cannot_hide_a_stale_candidate() {
         &["config", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"],
     );
 
-    let err = require_current_base(&r.lane, "dev", &stale).unwrap_err();
+    // The strict rule (no window): the candidate does not contain the tip the
+    // remote has, so it is refused (T-221: with a window a base that moved
+    // only just is accepted).
+    let err = require_current_base(&r.lane, "dev", &stale, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("merge origin/dev into your branch"), "{}", err.detail);
 }
@@ -498,7 +639,7 @@ fn a_deleted_remote_integration_branch_is_refused() {
     let candidate = r.candidate("heat/t1", "origin/dev", "my work");
     unpublish(&r.origin, "dev");
 
-    let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
+    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
 }
@@ -511,7 +652,7 @@ fn a_committed_hand_in_replays_its_receipt_after_a_fetch_failure() {
     let current = r.candidate("heat/t1", "origin/dev", "my work");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
 
     let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
     assert!(!first.replayed);
@@ -548,7 +689,7 @@ fn a_long_multibyte_fetch_failure_is_a_bad_format_not_a_panic() {
     );
     git(&r.lane, &["remote", "set-url", "origin", &remote]);
 
-    let err = require_current_base(&r.lane, "dev", &candidate).unwrap_err();
+    let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(err.detail.contains("cannot fetch origin/dev"), "{}", err.detail);
     assert!(
@@ -570,7 +711,7 @@ fn a_replay_needs_the_live_seat() {
     // (a) no fingerprint: the pane hosts no agent, so there is no seat.
     let mut s = world();
     let (env, fp) = lane();
-    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = || Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
     let first = mail::send(&mut s, &env, Some(&fp), &result(&current, gate()), T0 + 5).unwrap();
     let err = mail::send(&mut s, &env, None, &result(&current, gate()), T0 + 6).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered, "{err:?}");
@@ -695,7 +836,7 @@ fn a_branch_deleted_on_the_remote_is_refused() {
     unpublish(&r.origin, "heat/t1");
     let mut s = world();
     let (env, fp) = lane();
-    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into(), window_min: 30 });
 
     let err = mail::send(&mut s, &env, Some(&fp), &result(&candidate, gate), T0 + 5).unwrap_err();
 
