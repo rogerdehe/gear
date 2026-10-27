@@ -448,10 +448,15 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
 #[test]
 fn hand_in_from_delivered_settles_the_pending_delivery_without_a_view() {
     let (mut s,op)=world();
+    s.write(|tx|gear_engine::stall::alert(tx,LANE,T0+15).map(|_|())).unwrap();
     s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
     let (confirmed,flagged)=confirm_pending_with(&mut s,"p",3,5,T0+30).unwrap();
     assert_eq!(confirmed,vec![op.clone()]); assert!(flagged.is_empty());
-    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
+    let confirmed_op=s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap();
+    assert_eq!(confirmed_op.state,OpState::Confirmed);
+    assert!(confirmed_op.result.as_deref().unwrap_or("").contains("hand-in"));
+    let items=s.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
+    assert_eq!(items.len(),1); assert_eq!(items[0].state,MsgState::Resolved);
 }
 
 #[test]

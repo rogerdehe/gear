@@ -692,6 +692,9 @@ pub fn confirm_pending_with(
                             op.task.as_deref().unwrap_or("-"),
                             op.attempt.unwrap_or(0)
                         )
+                    } else if op.kind == OpKind::Deliver && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
+                        view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt) {
+                        format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else {
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
@@ -706,8 +709,10 @@ pub fn confirm_pending_with(
                             // §3.2 step 5: at the check-in the attempt records
                             // the session it ran in.
                             record_attempt_session(tx, project, &op)?;
-                            // The lane is not stuck any more (design §10.3):
-                            // its stall item closes with the confirmation.
+                        }
+                        // A hand-in is evidence too, even if it already moved
+                        // the attempt out of Delivered before confirmation.
+                        if !is_reviewer(tx, &op.seat)? {
                             crate::stall::resolve(tx, project, &op.seat, now, None)?;
                         }
                     }
