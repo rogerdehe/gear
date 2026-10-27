@@ -62,6 +62,8 @@ fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
     advance(&mut s,&mut h,&c,150);
     assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().wait_on.as_deref(),Some("T-2"),"Done alone is not a merge");
     s.write(|tx|tx.set_attempt_time("p","T-2",1,AttemptStep::Merged,T+200)).unwrap();
+    advance(&mut s,&mut h,&c,199);
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().wait_on.as_deref(),Some("T-2"),"a future merge has not landed");
     advance(&mut s,&mut h,&c,230); advance(&mut s,&mut h,&c,240);
     let task=s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap(); assert!(task.wait_on.is_none());
     let pauses=s.read(|tx|tx.pauses_of_project("p")).unwrap(); let pause=pauses.iter().find(|p|p.kind=="wait" && p.seat=="p:heat").unwrap(); assert_eq!((pause.start_at,pause.end_at),(T+10,Some(T+200)));

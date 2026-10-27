@@ -45,8 +45,10 @@ fn reconcile(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
         let mut landed = None;
         for candidate in tx.attempts_of_task(project, on)?.into_iter().rev() {
             if let (Some(at), Some(sha)) = (tx.attempt_times(project, on, candidate.n)?.merged, candidate.candidate.as_deref()) {
-                landed = Some((at, sha.to_string()));
-                break;
+                if at <= now && !sha.is_empty() {
+                    landed = Some((at, sha.to_string()));
+                    break;
+                }
             }
         }
         if let Some((at, sha)) = landed {
