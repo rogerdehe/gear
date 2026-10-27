@@ -69,3 +69,16 @@ fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
     assert!(h.prompts_to(LANE).iter().any(|p|p.contains(&wake[0].id)),"{:?}",h.calls);
     assert_eq!(s.read(|tx|tx.get_binding("p:heat",1)).unwrap().unwrap().session_ref.as_deref(),Some("existing-session"));
 }
+
+#[test]
+fn declared_wait_stops_the_live_overrun_clock() {
+    let (mut s,mut h,c)=world(); block(&mut s);
+    advance(&mut s,&mut h,&c,1000);
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0);
+    assert_eq!((r.active_s,r.paused_s),(10,990));
+    advance(&mut s,&mut h,&c,2000);
+    let r=s.read(|tx|tx.rounds_of_task("p","T-1")).unwrap().remove(0);
+    assert_eq!((r.active_s,r.paused_s),(10,1990));
+    assert!(s.read(|tx|tx.thread_messages("p","overrun-question:T-1:1:dev")).unwrap().is_empty());
+    assert!(h.prompts_to(LANE).is_empty());
+}
