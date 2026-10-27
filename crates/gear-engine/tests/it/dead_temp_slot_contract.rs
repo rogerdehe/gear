@@ -7,11 +7,11 @@
 //! opens the review instead of leaving the seat unknown.
 
 use gear_app::tasks;
-use gear_engine::release::release_dead_temps;
+use gear_engine::release::{release_dead_temps, release_finished_reviews};
 use gear_engine::review::start_reviews;
 use gear_engine::EngineCfg;
 use gear_herdr::fake::{Call, FakeHerdr};
-use gear_model::{SeatRole, SeatState};
+use gear_model::{SeatRole, SeatState, TaskState};
 use gear_store::testing;
 use gear_store::{BindingStatus, ContractRow, ProjectRow, Store, TaskRow};
 
@@ -344,6 +344,24 @@ fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
         herdr.calls
     );
     assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
+}
+
+#[test]
+fn cancelled_pending_start_frees_the_slot_for_the_next_review() {
+    let mut store = handed_in_world(2);
+    let mut herdr = FakeHerdr::new();
+    herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+    let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+    assert_eq!(seat.state, SeatState::Starting);
+    assert_eq!(seat.task_id, None);
+    store.write(|tx| { let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Done; tx.update_task(&task) }).unwrap();
+    release_finished_reviews(&mut store, &mut herdr, "p", T0 + 11).unwrap();
+    assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Released);
+    assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:review-1")).unwrap().as_deref(), Some(""));
+    let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
+    assert_eq!(report.started, vec!["p:review-1"]);
+    assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-2"));
 }
 
 /// T-116: the engine's tick releases a dead seat **before** the reviews start,
