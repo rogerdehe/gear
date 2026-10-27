@@ -426,7 +426,7 @@ pub fn release_dead_temps(
 /// Whether the seat's reviewer is still there: its binding ended (nothing runs
 /// in it), or its pane still holds an agent. A pane that cannot be read is an
 /// observation failure, not an absence: the seat keeps its slot.
-fn runs_a_reviewer(
+pub(crate) fn runs_a_reviewer(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
     seat: &SeatRow,
