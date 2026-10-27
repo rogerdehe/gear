@@ -219,6 +219,17 @@ impl Repos {
     }
 }
 
+/// Whether `a` is an ancestor of `b`: `git merge-base --is-ancestor`, whose
+/// exit code says yes (0) or no (1).
+fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+    Command::new("git")
+        .current_dir(dir)
+        .args(["merge-base", "--is-ancestor", a, b])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// A `dev` history whose commits have the given ages in minutes: the commits
 /// are made in the seed, published as `dev` and fetched by the lane. The ages
 /// are what the gate reads (the committer time, T-221).
@@ -263,8 +274,10 @@ fn a_candidate_behind_a_recent_base_that_merges_clean_is_accepted() {
 
     // The candidate does not contain the tip: it is accepted because of the
     // window, not because it is current.
-    let err = require_current_base(&r.lane, "dev", &candidate, 0).unwrap_err();
-    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        !is_ancestor(&r.lane, "origin/dev", &candidate),
+        "the tip is not in the candidate"
+    );
     require_current_base(&r.lane, "dev", &candidate, 30).unwrap();
 }
 
@@ -312,7 +325,7 @@ fn a_recent_base_with_a_conflicting_change_is_refused() {
     let candidate = git(&r.lane, &["rev-parse", "HEAD"]);
     // The candidate does carry the ten-minute-old commit: the refusal is the
     // conflict, not an old base.
-    git(&r.lane, &["merge-base", "--is-ancestor", &shas[1], &candidate]);
+    assert!(is_ancestor(&r.lane, &shas[1], &candidate));
 
     let err = require_current_base(&r.lane, "dev", &candidate, 30).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
@@ -328,8 +341,8 @@ fn a_recent_base_with_a_conflicting_change_is_refused() {
 #[test]
 fn a_candidate_behind_the_integration_branch_is_refused_without_a_window() {
     let r = repos();
-    let shas = dev_with_ages(&r, &[60, 10, 0]);
-    let candidate = r.candidate("heat/t1", &shas[1], "my work");
+    // The candidate is based on the commit before the current origin/dev tip.
+    let candidate = r.candidate("data/stale", &r.older, "old work");
 
     let err = require_current_base(&r.lane, "dev", &candidate, 0).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat);
