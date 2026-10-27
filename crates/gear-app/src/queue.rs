@@ -13,6 +13,7 @@
 //! (`gear_board::idle::describe`), and the reviewers are on the last line.
 
 use gear_board::idle::{describe, idle_reason};
+use gear_board::Overlap;
 use gear_model::{AttemptState, GearResult, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{Store, Tx};
 
@@ -28,6 +29,9 @@ pub struct Queue {
     pub lanes: Vec<Lane>,
     /// The reviewers (the temp seats), in seat order.
     pub reviewers: Vec<Reviewer>,
+    /// The tasks that overlap the integration branch of their repo (T-188):
+    /// information lines, never items that wait for the captain.
+    pub overlaps: Vec<Overlap>,
 }
 
 /// One lane of the queue.
@@ -170,6 +174,9 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
         project: project.to_string(),
         lanes,
         reviewers,
+        // The overlaps with the integration branch (T-188): the same
+        // information lines the board shows.
+        overlaps: gear_board::integration_overlaps_of(tx, project)?,
     })
 }
 
@@ -227,6 +234,11 @@ pub fn render(queue: &Queue) -> String {
     let mut lines: Vec<String> = Vec::new();
     for lane in &queue.lanes {
         lines.push(lane_line(lane));
+    }
+    // The overlaps with the integration branch (T-188): the same lines the
+    // board shows, after the lanes.
+    for overlap in &queue.overlaps {
+        lines.push(gear_board::overlap_line(overlap));
     }
     // The reviewers are on the last line.
     let reviewers: Vec<String> = queue
