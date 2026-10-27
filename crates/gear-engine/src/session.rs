@@ -230,12 +230,12 @@ fn review_action(facts: &Facts) -> Action {
 }
 
 /// The action of a rule that says `resume`: the agent starts again on the
-/// session of the earlier work. A seat with no session to resume starts
-/// plainly (L1).
+/// session of the earlier work. Without a recorded session, start a new one;
+/// L1 converts this to fresh when the agent is absent.
 fn resume(facts: &Facts) -> Action {
     match facts.earlier_session.as_deref() {
         Some(session) => Action::Resume(session.to_string()),
-        None => Action::Fresh,
+        None => Action::New,
     }
 }
 
@@ -631,6 +631,12 @@ mod tests {
         facts.earlier_seat = Some("p:heat".into());
         facts.earlier_cli = Some("opencode".into());
         assert_eq!(choose(&facts), Action::New);
+
+        facts.earlier_cli = Some("codex".into());
+        facts.earlier_session = None;
+        assert_eq!(choose(&facts), Action::New);
+        facts.agent_live = false;
+        assert_eq!(choose(&facts), Action::Fresh);
     }
 
     /// L5: a follow-up whose earlier attempt ran on this seat, on the same
@@ -673,6 +679,12 @@ mod tests {
         facts.earlier_cli = Some("codex".into());
         facts.earlier_session = Some("session-a".into());
         assert_eq!(choose(&facts), Action::New);
+
+        facts.earlier_seat = Some("p:heat".into());
+        facts.earlier_session = None;
+        assert_eq!(choose(&facts), Action::New);
+        facts.agent_live = false;
+        assert_eq!(choose(&facts), Action::Fresh);
     }
 
     /// L1: a seat without a live agent has its agent started plainly, and the
