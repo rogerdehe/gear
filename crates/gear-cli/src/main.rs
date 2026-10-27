@@ -192,6 +192,9 @@ enum PlanOp {
         /// The task to show (T-n).
         task: String,
     },
+    /// End the parks whose time has come (T-190): a lane the plan parked
+    /// until a time that has passed works again.
+    Check {},
     /// Print `## NEW` blocks for the open issues the plan does not carry yet.
     ImportIssues {
         /// The voyage file to check against; default: the plan the store holds.
@@ -312,6 +315,7 @@ fn run(cli: Cli) -> GearResult<()> {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
             PlanOp::Show { task } => cmd_plan_show(&task),
+            PlanOp::Check {} => cmd_plan_check(cli.json),
             PlanOp::ImportIssues { path, label } => {
                 cmd_import_issues(path, label, cli.json)
             }
@@ -1127,6 +1131,57 @@ fn cmd_plan(
     )?;
     println!("{out}");
     Ok(())
+}
+
+/// `gear plan check`: end the parks whose time has come (T-190).
+///
+/// A lane the captain parked until a time that has passed works again: its
+/// agent continues (Active) or the engine onboards it again (Queued). A lane
+/// parked on quota is left to the quota path.
+///
+/// It prints one line per lane that was let go.
+fn cmd_plan_check(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let out = run_plan_check(&mut store, &env)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "ended": out })).map_err(json_error)?
+        );
+    } else {
+        for line in &out {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// `gear plan check` body, over injected state.
+///
+/// The session's agents say whether a lane's agent is still in its pane.
+/// Without them nothing is guessed: a park stays (fail-closed, T-190) and the
+/// command says so.
+fn run_plan_check(store: &mut gear_store::Store, env: &gear_app::Env) -> GearResult<Vec<String>> {
+    let Some(ctx) = env.ctx.as_ref() else {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NotRegistered,
+            "the project is not known: run gear inside the project's pane",
+        ));
+    };
+    let agents = {
+        use gear_herdr::HerdrRead as _;
+        open_herdr().ok().and_then(|mut herdr| herdr.agents().ok())
+    };
+    let ended = store.write(|tx| {
+        gear_app::plan::end_parked_lanes(tx, &ctx.project, agents.as_deref(), now_ts())
+    })?;
+    if ended.is_empty() && agents.is_none() {
+        return Ok(vec![
+            "the session's agents could not be read: no park was ended".to_string(),
+        ]);
+    }
+    Ok(ended)
 }
 
 /// `gear plan import-issues`: the open issues a GitHub-mode project has not

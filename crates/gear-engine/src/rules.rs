@@ -85,8 +85,11 @@ mod tests {
         assert_eq!(review[0], "-c");
         let value: toml::Table = toml::from_str(&review[1]).unwrap();
         let text = value.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
-        assert!(text.starts_with(REVIEW.trim_end()));
-        assert!(text.ends_with("Voyage done: land the fleet\nBar: stable\n"));
+        let review_path = dir.path().join("rules/review.md");
+        assert!(text.contains(review_path.to_str().unwrap()), "{text}");
+        let written = std::fs::read_to_string(&review_path).unwrap();
+        assert!(written.starts_with(REVIEW.trim_end()));
+        assert!(written.ends_with("Voyage done: land the fleet\nBar: stable\n"));
         assert!(arguments(&mut store, "p", SeatRole::Captain, db.to_str().unwrap(), &codex).unwrap().is_empty());
         let opencode = gear_herdr::builtin("opencode").unwrap();
         assert!(arguments(&mut store, "p", SeatRole::Lane, db.to_str().unwrap(), &opencode).unwrap().is_empty());

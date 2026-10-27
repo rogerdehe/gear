@@ -23,12 +23,14 @@ No `GEAR_CTX` in your environment and no seat bound to your pane → GEAR did no
   - `question` — you need a decision (`gear --skill conventions` §6), then continue with other ready work if there is any;
   - `result` — the exact command in your task packet. **Then end your turn.** Your next task is delivered as soon as you are idle; never wait for the review, never investigate GEAR to see why nothing came yet.
 - Answer a captain instruction with `gear send --kind progress --reply-to M-<n> "<text>"`.
+- Answer an estimate question with `gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done; left>"`, then keep working. When another task must merge first, send `gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<done; what waits>"`; the clock pauses until it merges.
+- For a result or review, add `--friction "<what cost time the captain could fix>"` when a permission, slow build or test, unclear contract, missing tool or fixture, or other step cost time. The flag is required when the round exceeds its budget.
 - If a command prints `UNCONFIRMED`, run it again with the same `--request-id`; never resend it reworded.
 - Do not edit the plan or the packets GEAR renders; do not start background jobs that keep writing after your turn ends.
 
 ## 4. Reviewers
 
-A temp reviewer judges one task and hands in with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`. What to deliver: `gear --skill review`.
+A temp reviewer judges one task and hands in with `gear send --kind review --task T-<n> --attempt <a> --verdict pass|fail "<findings path or text>"`, adding `--friction "<what cost time>"` when over budget. What to deliver: `gear --skill review`.
 
 ## 5. Captain
 

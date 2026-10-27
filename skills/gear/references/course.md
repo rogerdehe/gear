@@ -6,7 +6,7 @@ For the captain. A fleet of agents never runs out of things to do: every reviewe
 
 - Each voyage (milestone) carries three lines in the plan, agreed with the user at kickoff: `done:` (the one checkable sentence that says it is finished), `bar:` (what blocks a task, what is only logged) and `eta:` (the user's expectation of style, see §3). Every packet and every reviewer sees them.
 - The bar is the user's choice. Nobody — you, a lane, a reviewer — raises it mid-voyage.
-- New ideas found on the way go into the next voyage, with one line in `# Decisions`. Never widen the current one.
+- Log each decision in `# Decisions` as `- <YYYY-MM-DD HH:MM> <kind>: <what> | why: <reason> | else: <alternative> | changes: <scope/time/quality/risk>`; `else` and `changes` are optional. Put `★` after the dash only for a changed deliverable, accepted defect in delivered behavior, user resources or contract not set at kickoff, or eta change over 20%. New ideas go into the next voyage.
 
 ## 2. Reviewers are screws; you mind the ship
 
@@ -69,4 +69,4 @@ Lanes only execute; when a task comes back, ask what the task did not say. Write
 
 ## 9. Land the voyage
 
-When the engine says every task is done: write the voyage report as `# Decisions` lines (what shipped, time against eta, rework, what the `done:` sentence says — honestly, met or not), close the item with `station <id>: land`, freeze the voyage file, then **report it in chat** and ask the user once whether to reclaim the lanes — as a plain question in the conversation, never through a dialog tool (`AskUserQuestion` or the like): the user reads the voyage, and answers in their own words. The next voyage starts with its own kickoff.
+When every task is done, run `gear report voyage` and write the voyage report in `# Decisions`. Review the report, ★ decisions and friction reports that led to change with the user first; record corrections as `- <date> user: <text>`. Then ask about reclaiming the lanes and release, close the item with `station <id>: land`, and freeze the voyage file. The next voyage starts with its own kickoff.
