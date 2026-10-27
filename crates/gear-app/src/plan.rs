@@ -523,6 +523,16 @@ fn apply_queue(
                         };
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
+                        if task.wait_on.take().is_some() {
+                            task.wait_cond = None;
+                            let pauses = tx.pauses_of_project(project)?;
+                            let seats: std::collections::BTreeSet<_> = tx.attempts_of_task(project, id)?.into_iter().filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)).map(|a| a.seat).collect();
+                            for seat in seats {
+                                if pauses.iter().any(|p| p.seat == seat && p.kind == "wait" && p.end_at.is_none()) {
+                                    tx.close_pause(project, &seat, "wait", now)?;
+                                }
+                            }
+                        }
                         contract_changed.push((id.clone(), version));
 
                         // An attempt that is working on the task hears about the

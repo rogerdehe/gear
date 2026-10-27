@@ -90,7 +90,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     let Some(binding) = binding else { return Ok(Prep::Wait) };
     let Some(profile) = profile(store, cfg, seat, &binding.kind)? else { return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
-    let stored = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity);
+    let stored = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity && s["generation"].as_i64() == Some(seat.generation));
     let occupant = match herdr.agent_get(&binding.pane_id) {
         Ok(value) => value,
         Err(_) => {
@@ -126,7 +126,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         let target = match action { Action::Resume(s) => Some(s.as_str()), _ => None };
         let old = binding.session_ref.as_deref().filter(|s| !s.is_empty());
         let offset = old.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
-        let state = json!({"round":identity, "action":action.as_str(), "t0":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false, "compact_after":compact_after, "initial_done":occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done)});
+        let state = json!({"round":identity, "generation":seat.generation, "action":action.as_str(), "t0":now, "step_at":now, "old_session_ref":old, "target":target, "step":"initial", "offset":offset, "saw_working":false, "compact_after":compact_after, "initial_done":occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Done)});
         save(store, seat, &state)?;
         state
     };

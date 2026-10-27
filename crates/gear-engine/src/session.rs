@@ -243,9 +243,10 @@ fn resume(facts: &Facts) -> Action {
 /// history can also contain the transient session observed before recovery.
 pub(crate) fn round_session(tx: &gear_store::Tx<'_>, round: &gear_store::RoundRow) -> GearResult<Option<String>> {
     let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let generation = tx.get_seat(&round.seat)?.map(|seat| seat.generation);
     let resumed = tx.get_meta(&format!("engine.session_step.{}", round.seat))?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .filter(|s| s["round"] == identity && s["action"] == "resume" && s["step"] == "done" && s["result"] == "resume")
+        .filter(|s| s["round"] == identity && s["generation"].as_i64() == generation && s["action"] == "resume" && s["step"] == "done" && s["result"] == "resume")
         .and_then(|s| s["target"].as_str().map(str::to_string));
     Ok(resumed.or_else(|| round.sessions.last().cloned()))
 }
@@ -817,6 +818,40 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
     }
 
     #[test]
+    fn retry_restarts_failed_session_step_for_the_new_generation() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let key = gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "dev".into() };
+        store.write(|tx| {
+            tx.insert_round(&gear_store::NewRound { key: key.clone(), seat: seat.id.clone(), generation: 1, cli: "codex".into(), model: None, start_at: T0 - 1 })?;
+            tx.add_round_session(&key, "wanted")
+        }).unwrap();
+        for n in [0, 1, 31, 32, 33, 63] {
+            assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + n).unwrap(), Prep::Wait);
+        }
+        assert_eq!(store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state, SeatState::NeedsCheck);
+        let calls = herdr.calls.len();
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 64).unwrap(), Prep::Wait);
+        assert_eq!(herdr.calls.len(), calls, "failure remains sticky in its generation");
+        store.write(|tx| {
+            tx.set_seat_state(&seat.id, SeatState::Queued, Some("retried by the captain"), T0 + 65)?;
+            let generation = gear_app::seats::begin_onboard(tx, &seat.id, "w1:p2", "codex", T0 + 66)?;
+            gear_app::seats::finish_onboard(tx, &seat.id, generation, Some("wanted"), T0 + 67)
+        }).unwrap();
+        herdr.exit_agent("w1:p1");
+        herdr.add_agent("w1:p2", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(seat.generation, 2);
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 68).unwrap(), Prep::Ready);
+        let state = store.read(|tx| tx.get_meta("engine.session_step.p:heat")).unwrap().unwrap();
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["generation"], 2);
+        assert_eq!(state["step"], "done");
+    }
+
+    #[test]
     fn fallback_starts_plain_if_the_agent_exits_before_deadline() {
         let (mut store, mut herdr, seat, config) = pi_world();
         let action = Action::Resume("wanted".into());
@@ -853,7 +888,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
         store.write(|tx| {
             testing::seed_active_seat(tx, "p", "review-9", gear_model::SeatRole::Temp, "pi:review", "pi", T0)?;
             tx.set_seat_state("p:review-9", SeatState::Starting, None, T0)?;
-            tx.set_meta("engine.session_step.p:review-9", &serde_json::json!({"round":"p:T-1:1:review", "action":"resume", "step":"fallback_wait_exit", "step_at":T0, "target":"wanted"}).to_string())
+            tx.set_meta("engine.session_step.p:review-9", &serde_json::json!({"round":"p:T-1:1:review", "generation":1, "action":"resume", "step":"fallback_wait_exit", "step_at":T0, "target":"wanted"}).to_string())
         }).unwrap();
         herdr.add_agent("pi:review", "pi", gear_herdr::AgentStatus::Working);
         let seat = store.read(|tx| tx.get_seat("p:review-9")).unwrap().unwrap();
@@ -865,7 +900,7 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
     #[test]
     fn unobservable_fallback_is_still_bounded() {
         let (mut store, mut herdr, seat, config) = pi_world();
-        store.write(|tx| tx.set_meta("engine.session_step.p:pi-lane", &serde_json::json!({"round":"p:T-1:1:dev", "action":"resume", "step":"wait_fallback", "step_at":T0, "target":"wanted"}).to_string())).unwrap();
+        store.write(|tx| tx.set_meta("engine.session_step.p:pi-lane", &serde_json::json!({"round":"p:T-1:1:dev", "generation":1, "action":"resume", "step":"wait_fallback", "step_at":T0, "target":"wanted"}).to_string())).unwrap();
         herdr.observe_fails = true;
         assert_eq!(crate::session_runner::run(&mut store, &mut herdr, &config, &seat, "T-1", 1, Role::Dev, &Action::Resume("wanted".into()), false, T0 + 60).unwrap(), Prep::Wait);
         let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
