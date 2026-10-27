@@ -38,6 +38,9 @@ fn advance(s:&mut Store,h:&mut FakeHerdr,c:&EngineCfg,at:i64) {tick(s,h,c,T+at).
 fn wait_pauses_clock_suppresses_nudges_and_wakes_once_when_merged() {
     let (mut s,mut h,c)=world(); block(&mut s);
     s.write(|tx| {
+        // Overlapping quota and declared waits count only once in the round.
+        tx.open_pause("p","p:heat","quota","quota",T+20)?;
+        tx.close_pause("p","p:heat","quota",T+50)?;
         tx.insert_message(&NewMessage {project:"p".into(),thread:"overrun-question:T-1:1:dev".into(),task:Some("T-1".into()),attempt:Some(1),sender:"engine".into(),sender_gen:0,recipient:"p:heat".into(),kind:MsgKind::Instruction,urgent:true,body:"old overrun question".into(),reply_to:None,needs_ack:false,state:MsgState::Open,created:T+11,meta:None})?;
         tx.insert_op(&NewOp {project:"p".into(),seat:"p:heat".into(),generation:1,kind:OpKind::Deliver,task:Some("T-1".into()),attempt:Some(1),ref_msg:None,plan_version:None,payload:serde_json::json!({"text":"old nudge"}),created:T+12})?;
         Ok(())
