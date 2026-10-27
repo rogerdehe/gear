@@ -327,8 +327,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 report.flagged.push(seat.id.clone());
             }
         }
-        // … then the attempts and their deliveries in one write transaction.
-        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
+        // Session setup may take several ticks; no packet goes before Ready.
+        dispatch::recover_open_rounds(store, herdr, cfg, &project, &observed, &planned, now)?;
+        let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
+        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
         // 6. feed: a lane running dry gets one item in the captain's inbox,
@@ -396,7 +398,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
-        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+        let executed = ops::execute_intended(store, herdr, &project, now)?;
+        store.write(|tx| {
+            for (id, state) in &executed {
+                if state != "submitted" { continue; }
+                let Some(op) = tx.get_op(&project, id)? else { continue };
+                if op.kind != gear_model::OpKind::Deliver { continue; }
+                let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+                if seat.role != gear_model::SeatRole::Lane { continue; }
+                if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                    if tx.get_attempt(&project, task, n)?.is_some_and(|a| a.sent_at.is_none()) {
+                        tx.set_attempt_sent(&project, task, n, now)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        report.executed.extend(executed);
 
         // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).

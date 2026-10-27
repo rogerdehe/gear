@@ -7,7 +7,7 @@ use crate::observe::SeatObs;
 use gear_herdr::{AgentStatus, ScreenFlag};
 use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
-use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, TaskRow, Tx};
+use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, Store, TaskRow, Tx};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneView {
@@ -145,7 +145,8 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                 // before any continue (T-8, design/06). The marker holds the
                 // newest version, so two bumps still give one delivery.
                 if let Some(version) = attempt.pending_update {
-                    if version > attempt.adopted_version {
+                    if version > attempt.adopted_version
+                        && !(attempt.state == AttemptState::Delivered && attempt.sent_at.is_none()) {
                         return Action::Adopt {
                             task: attempt.task.clone(),
                             version,
@@ -378,6 +379,81 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
     Ok(decisions)
 }
 
+/// Create the attempt before preparing its session. An unsent attempt is
+/// retained across ticks, including engine restarts, while preparation waits.
+pub fn prepare_dispatch(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &crate::EngineCfg,
+    project: &str,
+    planned: &[(SeatRow, Action)],
+    now: Ts,
+) -> GearResult<Vec<(SeatRow, Action)>> {
+    let mut ready = Vec::new();
+    for (seat, action) in planned {
+        let task = match action {
+            Action::Assign { task } | Action::Continue { task } => task,
+            _ => { ready.push((seat.clone(), action.clone())); continue; }
+        };
+        let attempt = store.write(|tx| {
+            if let Some(existing) = tx.open_attempts_of_seat(&seat.id)?.into_iter()
+                .find(|a| a.task == *task && a.state == AttemptState::Delivered) {
+                return Ok(existing);
+            }
+            if matches!(action, Action::Assign { .. }) {
+                return gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now);
+            }
+            tx.open_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.task == *task)
+                .ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
+        })?;
+        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
+            let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
+                Action::Assign { task: task.clone() }
+            } else { action.clone() };
+            ready.push((seat.clone(), action));
+        }
+    }
+    Ok(ready)
+}
+
+/// Resume an open lane round after its agent disappears or is restarted.
+/// Preparing never sends another task packet for an already-started attempt.
+pub fn recover_open_rounds(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &crate::EngineCfg,
+    project: &str,
+    observed: &[SeatObs],
+    planned: &[(SeatRow, Action)],
+    now: Ts,
+) -> GearResult<()> {
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Lane || seat.state != SeatState::Active { continue; }
+        if planned.iter().any(|(s, action)| s.id == seat.id && matches!(action, Action::Assign { .. } | Action::Continue { .. })) { continue; }
+        let recovery = store.read(|tx| {
+            if !tx.slot_ops(&seat.id)?.is_empty() { return Ok(None); }
+            let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(None) };
+            let Some(attempt) = tx.get_attempt(project, &round.task, round.attempt)? else { return Ok(None) };
+            let unsent = attempt.state == AttemptState::Delivered && attempt.sent_at.is_none();
+            if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped) { return Ok(None); }
+            let mismatch = round.sessions.last().is_some_and(|session| {
+                obs.presence == crate::observe::Presence::Missing
+                    || (obs.presence == crate::observe::Presence::Present
+                        && obs.session.as_deref().is_some_and(|current| current != session))
+            });
+            let running = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .is_some_and(|s| (unsent || s["action"] == "resume") && s["step"] != "done" && s["step"] != "failed");
+            Ok((mismatch || running).then_some((round.task, round.attempt)))
+        })?;
+        if let Some((task, attempt)) = recovery {
+            crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)?;
+        }
+    }
+    Ok(())
+}
+
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
 ///   then a delivery with `assign_text(task, contract_version, task_branch(seat.name, task), packet_ref(task))`;
@@ -393,23 +469,25 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
             Action::Assign { task } => {
                 if tx.captain_quota_paused(project)? { continue; }
                 // The attempt exists before the delivery that announces it.
-                let attempt =
-                    gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?;
+                let attempt = match tx.open_attempts_of_seat(&seat.id)?.into_iter()
+                    .find(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none()) {
+                    Some(attempt) => attempt,
+                    None => gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?,
+                };
+                let mut text = assign_text(task, attempt.contract_version, &task_branch(&seat.name, task), &packet_ref(task));
+                let action = attempt.session_action.as_deref().unwrap_or("");
+                if attempt.n == 1 && (action.starts_with("new") || action == "fresh" || action == "resume-fallback") {
+                    if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of) {
+                        text.push_str(&format!("\nThis task follows {followup}; read its report: gear --show {followup}"));
+                    }
+                }
                 deliveries.push(DeliverAction {
                     project: project.to_string(),
                     seat: seat.id.clone(),
                     generation: seat.generation,
                     task: task.clone(),
                     attempt: attempt.n,
-                    text: with_standard(
-                        assign_text(
-                            task,
-                            attempt.contract_version,
-                            &task_branch(&seat.name, task),
-                            &packet_ref(task),
-                        ),
-                        &standard,
-                    ),
+                    text: with_standard(text, &standard),
                 });
             }
             Action::Continue { task } => {
