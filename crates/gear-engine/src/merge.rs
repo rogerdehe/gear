@@ -3028,6 +3028,69 @@ gate = "{gate}"
         queued_merge_candidate(scratch, gate, &candidate)
     }
 
+    /// T-165 (review F2, design §10.7 row B03-01): a task whose work is
+    /// already on the integration branch — it landed with another task's
+    /// merge — is not merged again: no merge op is queued for it, and a merge
+    /// op that was queued before is voided instead of run.
+    #[test]
+    fn a_task_already_merged_by_another_task_is_not_merged_again() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        store
+            .write(|tx| {
+                // T-5's attempt was accepted and carries the merge time of
+                // the merge that landed it (another task's merge).
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                attempt.candidate = Some("abc1234".into());
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Verifying;
+                tx.update_task(&task)?;
+                tx.set_attempt_time("p", "T-5", 1, gear_store::AttemptStep::Merged, 5)?;
+                // A merge op was queued in an earlier tick, before the
+                // attribution arrived.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t5",
+                        "candidate": "abc1234",
+                        "review": "review/t5",
+                    }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty(), "the work was already merged: {merged:?}");
+        // The queued op is void, not run: no worker was launched.
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "{op:?}");
+        assert!(!cfg.merges.running("p"), "no merge worker was launched");
+        // And no second merge op was queued for the same attempt.
+        let merges = store
+            .read(|tx| tx.ops_in_state("p", OpState::Void))
+            .unwrap()
+            .iter()
+            .filter(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some("T-5"))
+            .count();
+        assert_eq!(merges, 1, "one merge op for the task, not two");
+    }
+
     /// A project with a handed-in task and a queued merge op for it, whose
     /// candidate is the given commit (T-61: it may sit on any pushed ref).
     fn queued_merge_candidate(
