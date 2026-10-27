@@ -656,6 +656,7 @@ fn doorbell_inputs(
             // Only a seat that may receive work is rung, even if its agent is
             // idle (a parked/held seat must not be woken by a doorbell).
             idle: seat_obs.idle && observe::reachable(seat.state),
+            status: if observe::reachable(seat.state) { seat_obs.status } else { None },
             slot_busy,
             last_settled_at,
             // Design §10.4: a lane with no open attempt gets the text that
