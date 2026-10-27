@@ -365,7 +365,10 @@ pub fn merge_passed(
                 return Ok(merged);
             }
         };
-        if op.state == OpState::Intended {
+        // A merge op the engine recovered (Unknown) runs again: it is
+        // Executing while its worker runs, so the completion writes the
+        // Submitted result (design §11.2 step 3).
+        if matches!(op.state, OpState::Intended | OpState::Unknown) {
             store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
         }
         // The other tasks of the project with a candidate: the merge waits for
@@ -1863,6 +1866,20 @@ fn pr_head(
             )))
         }
     };
+    // A push that was made and not confirmed (the engine stopped, the answer
+    // was lost) leaves the branch with a head that is the engine's own merge
+    // of the candidate and the review, but with another sha (the commit's
+    // timestamp is the clock). Such a head is the head the gate checked: it
+    // is reused, and nothing is pushed (a push would not be a fast-forward).
+    // A head that is anything else is refused: the branch moved on, and the
+    // engine never forces a push.
+    let branch_ref = format!("origin/{}", pr.branch);
+    if let Some(pushed) = git(dir, &["rev-parse", "--verify", &branch_ref]).ok() {
+        let pushed = pushed.trim().to_string();
+        if pushed != head && is_own_head(dir, &pushed, &head) {
+            return Step::Pr { pr: pr.number, head: pushed };
+        }
+    }
     // The head goes onto the pull request's branch (a fast-forward of it).
     if let Err(reason) = remote.push(dir, &pr.branch) {
         if reason.contains("non-fast-forward")
@@ -1874,6 +1891,35 @@ fn pr_head(
         return Step::Failed(Failed::clear(format!("push failed: {reason}")));
     }
     Step::Pr { pr: pr.number, head }
+}
+
+/// Is the commit `pushed` the engine's own merge that `head` is? The two
+/// must have the same parents and the same tree: the engine's merge of the
+/// candidate and the review, built twice (the commit's timestamp is the
+/// clock, so the two shas differ). A head that holds anything else — another
+/// commit on the branch — is not the engine's and is never reused.
+fn is_own_head(dir: &Path, pushed: &str, head: &str) -> bool {
+    let parents = |commit: &str| -> Vec<String> {
+        git(dir, &["rev-list", "--parents", "-n", "1", commit])
+            .ok()
+            .map(|line| {
+                line.split_whitespace()
+                    .skip(1)
+                    .map(|parent| parent.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tree = |commit: &str| -> String {
+        git(dir, &["rev-parse", &format!("{commit}^{{tree}}")])
+            .map(|tree| tree.trim().to_string())
+            .unwrap_or_default()
+    };
+    let pushed_parents = parents(pushed);
+    let head_parents = parents(head);
+    !pushed_parents.is_empty()
+        && pushed_parents == head_parents
+        && tree(pushed) == tree(head)
 }
 
 /// Is `a` an ancestor of `b`? (`git merge-base --is-ancestor`.)
@@ -1906,11 +1952,16 @@ fn insert_land_op(
     let key = format!("{task}:{attempt}:land");
     let seat = format!("{project}:forge");
     // One land op per task and attempt: the op the sync runs is the one the
-    // engine inserted.
+    // engine inserted. A failed or void land op is followed by a new one: the
+    // captain's `- remerge` retries the landing (design §11.3, row 2), and
+    // the new op carries the head and the method of this attempt.
     if tx
         .ops_of_seat_kind(&seat, OpKind::Forge)?
         .iter()
-        .any(|op| op.payload.get("key").and_then(|key| key.as_str()) == Some(key.as_str()))
+        .any(|op| {
+            op.payload.get("key").and_then(|key| key.as_str()) == Some(key.as_str())
+                && !matches!(op.state, OpState::Failed | OpState::Void)
+        })
     {
         return Ok(());
     }
@@ -3527,19 +3578,34 @@ gate = "{gate}"
     }
 
     /// A forge that merges the pull request (design §11.2 step 4), or refuses
-    /// it with the message `gh` gave.
+    /// it with the message `gh` gave. It counts its merge calls: a second
+    /// call is the retry a `- remerge` line asks for.
     struct FakeForge {
         refuse: Option<String>,
         commit: String,
+        calls: std::sync::atomic::AtomicUsize,
     }
 
     impl FakeForge {
         fn merging() -> FakeForge {
-            FakeForge { refuse: None, commit: "cafe1234".to_string() }
+            FakeForge {
+                refuse: None,
+                commit: "cafe1234".to_string(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
         }
 
         fn refusing(reason: &str) -> FakeForge {
-            FakeForge { refuse: Some(reason.to_string()), commit: "cafe1234".to_string() }
+            FakeForge {
+                refuse: Some(reason.to_string()),
+                commit: "cafe1234".to_string(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        /// How many times the forge was asked to merge.
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -3573,6 +3639,7 @@ gate = "{gate}"
             _method: gear_forge::MergeMethod,
             _head: &str,
         ) -> gear_forge::ForgeResult<gear_forge::MergeResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match &self.refuse {
                 Some(reason) => Err(gear_forge::Error::Failed(reason.clone())),
                 None => Ok(gear_forge::MergeResult { merged: true, message: "merged".to_string() }),
@@ -5359,5 +5426,274 @@ gate = "{project_gate}"
         assert!(herdr.prompts_to("w9:p1").is_empty(), "the unavailable captain is not rung");
     }
 
+
+/// The three regressions of the review of attempt 1 (F1-F3): the landing must
+/// survive a restart, a refusal the captain retries, and a push whose answer
+/// was lost.
+use gear_herdr::fake::FakeHerdr;
+use gear_model::OpKind;
+
+/// A project in pull-request mode with one passed task (T-5) whose
+/// candidate is `candidate`, and the claim pull request #7.
+fn pr_setup(candidate: &str) -> (Store, FakeHerdr, EngineCfg) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            tx.insert_project(&gear_store::ProjectRow {
+                id: "p".into(),
+                herdr_session: "sess".into(),
+                config_toml: pr_config_text("true"),
+                config_version: 1,
+                quota_lanes: 1,
+                quota_temps: 0,
+                quota_includes_captain: false,
+                plan_version: 0,
+                created: 0,
+            })?;
+            gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
+            gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
+            tx.insert_task(&gear_store::TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-5".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: Some(3),
+                updated: 0,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+            gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, candidate, "report", 0)?;
+            tx.insert_verdict(&gear_store::VerdictRow {
+                project: "p".into(),
+                task: "T-5".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: candidate.into(),
+                passed: true,
+                evidence: Some("ops/reviews/T-5.md".into()),
+                by_seat: "p:captain".into(),
+                created: 10,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    claim_op(&mut store, "T-5", 7);
+    let herdr = FakeHerdr::new();
+    let mut cfg = EngineCfg {
+        remote: std::sync::Arc::new(FetchRemote),
+        merge_retry_wait: RetryWait::immediate(),
+        ..Default::default()
+    };
+    for kind in ["opencode", "claude"] {
+        cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+    }
+    (store, herdr, cfg)
 }
 
+/// A merge op for the task, in the state a restart leaves it in.
+fn merge_op_in(store: &mut Store, candidate: &str, state: OpState) -> String {
+    let op = store
+        .write(|tx| {
+            tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-5".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "branch": "heat/t5",
+                    "candidate": candidate,
+                    "review": "review/t5",
+                }),
+                created: 0,
+            })
+        })
+        .unwrap();
+    store
+        .write(|tx| tx.set_op_state("p", &op.id, state, None, 0))
+        .unwrap();
+    op.id
+}
+
+/// The land ops of the task: the forge ops that merge its pull request.
+fn land_ops(store: &mut Store) -> Vec<gear_store::OpRow> {
+    store
+        .read(|tx| tx.ops_of_seat_kind("p:forge", OpKind::Forge))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.payload.get("forge").and_then(|forge| forge.as_str()) == Some("land"))
+        .collect()
+}
+
+/// The state of a merge op.
+fn state_of(store: &mut Store, id: &str) -> OpState {
+    store.read(|tx| tx.get_op("p", id)).unwrap().unwrap().state
+}
+
+/// The result of a merge op.
+fn result_of(store: &mut Store, id: &str) -> String {
+    store.read(|tx| tx.get_op("p", id)).unwrap().unwrap().result.unwrap_or_default()
+}
+
+/// One merge step and the wait for the worker it launched.
+fn pr_tick(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg, now: Ts) {
+    let seen = cfg.merges.progress();
+    merge_passed(store, herdr, cfg, "p", now).unwrap();
+    if cfg.merges.running("p") {
+        assert!(
+            cfg.merges.wait_progress(seen, std::time::Duration::from_secs(60)),
+            "the merge worker did not report"
+        );
+    }
+}
+
+/// F1: a refused land is retried by the captain's `- remerge T-5`: a new
+/// land op is inserted (the old one failed), the forge is called again,
+/// and the merge is confirmed.
+#[test]
+fn a_refused_land_is_retried_by_a_remerge() {
+    let scratch = Scratch::new("pr-remerge");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    // The merge runs and the pull request's head is pushed.
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+    let first = merge_op_in(&mut store, &candidate, OpState::Unknown);
+    let _ = first;
+
+    // The forge refuses the landing.
+    let refusing = FakeForge::refusing("not mergeable: required checks are missing");
+    gear_forge::sync_with(&mut store, "p", &refusing, 30).unwrap();
+    assert_eq!(refusing.calls(), 1, "the forge was asked once");
+    assert_eq!(land_ops(&mut store).len(), 1);
+    assert_eq!(land_ops(&mut store)[0].state, OpState::Failed);
+
+    // The captain remerges: a new merge op for the same attempt (what
+    // `- remerge T-5` in the plan queues).
+    let remerge = merge_op_in(&mut store, &candidate, OpState::Intended);
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    pr_tick(&mut store, &mut herdr, &cfg, 41);
+
+    // A new land op was inserted: the old one failed.
+    let lands = land_ops(&mut store);
+    assert_eq!(lands.len(), 2, "a new land op: {lands:?}");
+    assert_eq!(lands[1].state, OpState::Intended, "{lands:?}");
+
+    // The forge merges this time, and the merge is confirmed.
+    let merging = FakeForge::merging();
+    gear_forge::sync_with(&mut store, "p", &merging, 50).unwrap();
+    assert_eq!(merging.calls(), 1, "the forge was asked again");
+    pr_tick(&mut store, &mut herdr, &cfg, 60);
+    assert_eq!(state_of(&mut store, &remerge), OpState::Confirmed, "{:?}", result_of(&mut store, &remerge));
+    assert!(
+        result_of(&mut store, &remerge).contains("by PR #7"),
+        "{}",
+        result_of(&mut store, &remerge)
+    );
+    assert!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged.is_some());
+}
+
+/// F2: a merge op the engine recovered (Unknown) becomes Submitted after
+/// the worker, and the merge is confirmed when the land op is.
+#[test]
+fn a_recovered_merge_op_becomes_submitted_and_confirms() {
+    let scratch = Scratch::new("pr-recovered");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    // The op is Unknown: the engine stopped while its worker ran.
+    let id = merge_op_in(&mut store, &candidate, OpState::Unknown);
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+
+    // The recovered op carries the result of a pull-request merge.
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["mode"], "pr", "{result}");
+    assert_eq!(result["pr"], 7, "{result}");
+    // One land op: the one the merge inserted.
+    assert_eq!(land_ops(&mut store).len(), 1);
+
+    // The forge merges, and the next tick confirms the merge.
+    gear_forge::sync_with(&mut store, "p", &FakeForge::merging(), 30).unwrap();
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    assert_eq!(state_of(&mut store, &id), OpState::Confirmed, "{:?}", result_of(&mut store, &id));
+    assert!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged.is_some());
+}
+
+/// F3: a head that was pushed and whose answer was lost is reused: the
+/// retry does not build a sibling merge commit and does not fail with a
+/// non-fast-forward.
+#[test]
+fn a_pushed_head_is_reused_after_a_restart() {
+    let scratch = Scratch::new("pr-reuse");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    let id = merge_op_in(&mut store, &candidate, OpState::Intended);
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let pushed = scratch.head_of("heat/t5");
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["head"], pushed.as_str(), "{result}");
+
+    // The head on the branch is rewritten with another timestamp: the same
+    // tree and the same parents, another sha — what a lost answer leaves
+    // behind.
+    let older = sh(
+        &scratch.root,
+        "set -e\n\
+         tree=$(git -C origin.git rev-parse 'heat/t5^{tree}')\n\
+         p1=$(git -C origin.git rev-parse 'heat/t5^1')\n\
+         p2=$(git -C origin.git rev-parse 'heat/t5^2')\n\
+         new=$(GIT_AUTHOR_DATE='2001-01-01T00:00:00Z' GIT_COMMITTER_DATE='2001-01-01T00:00:00Z' \
+           git -C origin.git commit-tree $tree -p $p1 -p $p2 -m 'merge(T-5): origin/review/t5')\n\
+         git -C origin.git update-ref refs/heads/heat/t5 $new\n\
+         echo $new",
+    );
+    let older = older.trim().to_string();
+    assert_ne!(older, pushed, "the head on the branch has another sha");
+
+    // The engine starts again: the op is Unknown, the merge runs again.
+    store
+        .write(|tx| tx.set_op_state("p", &id, OpState::Unknown, None, 30))
+        .unwrap();
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    pr_tick(&mut store, &mut herdr, &cfg, 41);
+
+    // The head on the branch is reused: no non-fast-forward, no new sha.
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["head"], older.as_str(), "the head on the branch is reused: {result}");
+    assert_eq!(scratch.head_of("heat/t5"), older, "nothing was pushed");
+}
+}
