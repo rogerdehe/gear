@@ -3087,6 +3087,30 @@ path="api"
     }
 
     #[test]
+    fn direction_result_after_lane_submission_preserves_submitted_state() {
+        let (mut store, mut herdr) = review_world();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"checked123"
+        }).to_string())).unwrap();
+        let mut lane = send_cmd("result");
+        lane.task=Some("T-7".into()); lane.attempt=Some(1); lane.contract=Some(1);
+        lane.candidate=Some("candidate123".into()); lane.request_id=Some("lane-result".into());
+        run_send(&mut store,&env("heat",LANE_PANE),&mut herdr,&lane,"done".into(),None,T0+1,false).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(task_before,gear_model::TaskState::Verifying);
+        let mut direction=send_cmd("result");
+        direction.task=Some("T-7".into()); direction.attempt=Some(1); direction.direction=Some("ok".into());
+        run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&direction,"ok".into(),None,T0+2,false).unwrap();
+        let history=store.read(|tx|tx.thread_messages("p","T-7:2")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(history[0].meta.as_deref().unwrap()).unwrap(),serde_json::json!({"direction":true,"sha":"checked123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
+    }
+
+    #[test]
     fn send_review_stores_the_verdict_and_reaches_the_captain() {
         let (mut store, mut herdr) = review_world();
 

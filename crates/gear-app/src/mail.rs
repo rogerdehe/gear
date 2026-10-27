@@ -406,7 +406,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                         && j["generation"].as_i64() == Some(ctx.generation) && j["state"].as_str() == Some("running"));
                 if !valid { return Err(GearError::new(ErrorCode::Forbidden, "this seat does not hold the direction job for that attempt")); }
                 let attempt = tx.get_attempt(&ctx.project, task_id, attempt_n)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "direction attempt not found"))?;
-                if attempt.state != AttemptState::Started { return Err(GearError::new(ErrorCode::BadTransition, "direction attempt is not Started")); }
+                if !matches!(attempt.state, AttemptState::Started | AttemptState::Submitted) { return Err(GearError::new(ErrorCode::BadTransition, "direction attempt is neither Started nor Submitted")); }
                 direction_sha = job.and_then(|j| j["sha"].as_str().filter(|s| !s.is_empty()).map(str::to_owned));
                 if direction_sha.is_none() { return Err(GearError::new(ErrorCode::BadFormat, "direction job has no checked sha")); }
             } else if args.kind == MsgKind::Result {
