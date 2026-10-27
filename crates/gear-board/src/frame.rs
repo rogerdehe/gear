@@ -383,12 +383,157 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
             ViewRows { heading, rows, rest }
         }
         Tab::Workload => view_workload(project, selected),
-        Tab::Decisions | Tab::Tokens => ViewRows {
-            heading: format!("{}: the next task", tab.title()),
-            rows: Vec::new(),
-            rest: Vec::new(),
-        },
+        Tab::Decisions => view_decisions(project, selected),
+        Tab::Tokens => view_tokens(project, selected),
     }
+}
+
+/// The fourth view: the captain's decisions (★ = worth a look at landing) and
+/// the agents' friction reports (the prototype).
+fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let mut rows = Vec::new();
+    // The starred decisions are the ones the user reads in full (F1): the
+    // others are counted by kind below.
+    let starred: Vec<&crate::DecisionBoard> =
+        project.decisions.iter().filter(|decision| decision.star).collect();
+    for (index, decision) in starred.iter().enumerate() {
+        let mark = if index == selected { "›" } else { " " };
+        rows.push(format!(
+            "{mark} {} ★ {:<9} {}",
+            clock_of(&decision.at),
+            decision.kind,
+            decision.what
+        ));
+        // The reason stands on its own line, as the prototype draws it: a
+        // decision line with the reason appended loses it on a narrow screen
+        // (F2).
+        if let Some(why) = &decision.why {
+            rows.push(format!("{:22}why: {why}", ""));
+        }
+    }
+    // The count of the decisions by kind (§7.2): the landing review shows it
+    // next to the starred lines.
+    if !project.decisions.is_empty() {
+        rows.push(String::new());
+        rows.push(format!("by kind: {}", counts_of_kind(project)));
+    }
+    // The friction reports the agents left (§6.1).
+    rows.push(String::new());
+    rows.push("FRICTION REPORTS FROM AGENTS".to_string());
+    for friction in &project.frictions {
+        rows.push(format!(
+            "  {} {:<6}{:<8}{}",
+            friction.task,
+            friction.lane,
+            if friction.closed { "closed" } else { "open" },
+            friction.body
+        ));
+    }
+    ViewRows {
+        heading: "DECISIONS MADE  (★ = worth a look at landing)".to_string(),
+        rows,
+        rest: Vec::new(),
+    }
+}
+
+/// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
+///
+/// The starred ones are read in full above; this is the count of the others
+/// (§7.2).
+fn counts_of_kind(project: &ProjectBoard) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for decision in &project.decisions {
+        if decision.star {
+            continue;
+        }
+        *counts.entry(decision.kind.as_str()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{count} {kind}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The fifth view: the time and the tokens of every task that ran (the
+/// prototype).
+fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let mut rows = Vec::new();
+    let mut tokens_total = 0;
+    let mut cost_total = 0.0;
+    let mut unknown = 0;
+    for (index, (lane, task)) in token_tasks(project).into_iter().enumerate() {
+        let mark = if index == selected { "›" } else { " " };
+        let estimate = task.est_min.unwrap_or(0);
+        let actual = task.actual_min.unwrap_or(0);
+        let ratio = if estimate > 0 {
+            actual as f64 / estimate as f64
+        } else {
+            0.0
+        };
+        // The tokens and the cost are unknown when no round counted them
+        // (F5): they are not a measured zero.
+        let tokens = task.tokens;
+        let cost = task.cost_usd;
+        if tokens.is_none() {
+            unknown += 1;
+        } else {
+            tokens_total += tokens.unwrap_or(0);
+        }
+        if cost.is_none() {
+            unknown += 1;
+        } else {
+            cost_total += cost.unwrap_or(0.0);
+        }
+        let tokens_text = match tokens {
+            Some(tokens) => format!("{}k", tokens / 1000),
+            None => "?".to_string(),
+        };
+        let cost_text = match cost {
+            Some(cost) => format!("${cost:>6.2}"),
+            None => "      ?".to_string(),
+        };
+        rows.push(format!(
+            "{mark} {:<7}{:<6}{estimate:>4}m{actual:>5}m{ratio:>7.1}x{:>8}{tokens_text:>9}  {cost_text}",
+            task.id,
+            lane,
+            task.stored_rounds,
+        ));
+    }
+    let mut total = format!(
+        "so far: {:.1}M tokens, ${cost_total:.2}",
+        tokens_total as f64 / 1_000_000.0
+    );
+    if unknown > 0 {
+        // The total is what is known: the unknown parts are named (F5).
+        total.push_str(&format!(" (known so far; {unknown} unknown)"));
+    }
+    let rest = vec![total];
+    ViewRows {
+        heading: "task    lane     est    act   ratio  rounds   tokens     cost".to_string(),
+        rows,
+        rest,
+    }
+}
+
+/// The tasks of the Time & tokens view, in the order of its rows: the tasks
+/// that ran, lane by lane.
+pub fn token_tasks(project: &ProjectBoard) -> Vec<(&str, &TaskBoard)> {
+    let mut tasks = Vec::new();
+    for lane in &project.lanes {
+        for task in &lane.tasks {
+            if task.actual_min.is_some() {
+                tasks.push((lane.lane.as_str(), task));
+            }
+        }
+    }
+    tasks
+}
+
+/// The clock of a decision: the time of its line (`2026-10-27 10:05` →
+/// `10:05`).
+fn clock_of(at: &str) -> &str {
+    at.rsplit(' ').next().unwrap_or(at)
 }
 
 /// The third view: the work done and left, per lane, and the burn-up.
