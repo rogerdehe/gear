@@ -95,19 +95,27 @@ seed_origin() {
 # parent `dev`, the children `feat`. Each gate is a shell script that runs in
 # well under a second.
 
+# The bare origins wait on nothing, so they are built together.
+origins_pids=""
 if [ "$project" = both ] || [ "$project" = multi ]; then
-    git_ init -q --bare --template= -b dev "$target/origins/parent.git"
+    git_ init -q --bare --template= -b dev "$target/origins/parent.git" &
+    origins_pids="$origins_pids $!"
     # The children's integration branch is their own (T-53): their origins start
     # on `feat`, so a clone of one is on it.
     for name in web api; do
-        git_ init -q --bare --template= -b feat "$target/origins/$name.git"
+        git_ init -q --bare --template= -b feat "$target/origins/$name.git" &
+        origins_pids="$origins_pids $!"
     done
 fi
 # The project that already runs has its own origin too (T-98): a project has a
 # remote, as any project does.
 if [ "$project" = both ] || [ "$project" = running ]; then
-    git_ init -q --bare --template= -b main "$target/origins/running.git"
+    git_ init -q --bare --template= -b main "$target/origins/running.git" &
+    origins_pids="$origins_pids $!"
 fi
+for pid in $origins_pids; do
+    wait "$pid"
+done
 
 # The three repositories of `multi` are independent once the parent's
 # directory exists, and the two projects share nothing: they are built side by
@@ -434,4 +442,8 @@ Every remote is a path under `origins/`; nothing clones, fetches or pushes
 anywhere else.
 EOF
 
-echo "fixtures: $target/multi and $target/running"
+case "$project" in
+    both) echo "fixtures: $target/multi and $target/running" ;;
+    multi) echo "fixtures: $target/multi" ;;
+    running) echo "fixtures: $target/running" ;;
+esac
