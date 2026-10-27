@@ -316,6 +316,8 @@ The engine fills `<a>` and `<c>` with the open attempt's numbers, so the lane co
 - A progress reply counts as progress for the stall logic: an asked and answering lane is never "stuck".
 - The captain helps through the item (`gear reply M-n -m …`, which reaches the lane at once): split the task, make the contract clearer, give a permission, or raise the estimate (a plan edit of `estimate:`; a raised estimate moves the next question).
 
+- The overrun item is written with sender = the lane's seat and its generation (recipient the captain), so `gear reply` reaches the lane; the engine reads the lane's answer from its progress messages for that task and attempt carrying `left` (M4 T-160: the sender was unspecified).
+
 ### 5.3 A declared wait (B03-09)
 
 A lane whose task cannot finish until another task lands says so:
