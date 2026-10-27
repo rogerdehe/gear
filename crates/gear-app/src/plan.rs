@@ -2746,6 +2746,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if row.contract_version > adopted {
         text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
     }
+    text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     Ok(text)
 }
 
