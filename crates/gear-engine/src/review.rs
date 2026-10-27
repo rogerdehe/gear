@@ -162,6 +162,7 @@ pub fn start_reviews(
             entry,
             &kind,
             profile,
+            false,
             now,
         )? {
             Started::Yes => report.started.push(seat.id.clone()),
@@ -171,7 +172,103 @@ pub fn start_reviews(
             Started::NotYet => report.waiting.push(task.task.clone()),
         }
     }
+    finish_direction_results(store, project, now)?;
+    if report.waiting.is_empty() {
+        start_direction_checks(store, herdr, cfg, profiles, project, &config, &mut report, now)?;
+    }
     Ok(report)
+}
+
+fn direction_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.direction.{project}.{task}.{attempt}")
+}
+
+fn prepare_job_session(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow, task: &ReviewTask, direction: bool, now: Ts) -> GearResult<crate::session::Prep> {
+    let role = if direction { crate::session::Role::Direction } else { crate::session::Role::Review };
+    crate::session::prepare_review_role(store, herdr, cfg, seat, &task.task, task.attempt, role, now)
+}
+
+fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, direction: bool) -> GearResult<String> {
+    if !direction { return review_packet_for(store, config, &task.task, task.attempt, &task.candidate) }
+    let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
+    let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
+    let branch = format!("{}/{}", task.lane, task.task.to_lowercase().replace('-', ""));
+    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"<ok, or up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+}
+
+fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        for task in tx.tasks_of_project(project)? {
+            for attempt in tx.attempts_of_task(project, &task.id)? {
+                let key = direction_key(project, &task.id, attempt.n);
+                let Some(job) = tx.get_meta(&key)?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) else { continue };
+                if job["state"] != "running" { continue }
+                let (Some(seat_id), Some(sha), Some(generation)) = (job["seat"].as_str(), job["sha"].as_str(), job["generation"].as_i64()) else { continue };
+                let result = tx.direction_results_of_attempt(project, &task.id, attempt.n)?.into_iter().find(|m| {
+                    m.sender == seat_id && m.sender_gen == generation && m.meta.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["direction"] == true && v["sha"] == sha)
+                });
+                let Some(result) = result else { continue };
+                if result.body.trim().to_lowercase() != "ok" {
+                    let captain = tx.captain_of(project)?;
+                    for (recipient, kind, urgent, state) in [(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)] {
+                        if let Some(recipient) = recipient {
+                            tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient, kind, urgent, body: format!("Direction check of {} attempt {}: {}", task.id, attempt.n, result.body), reply_to: None, needs_ack: false, state, created: now })?;
+                        }
+                    }
+                }
+                tx.set_meta(&key, &serde_json::json!({"checked_sha":sha}).to_string())?;
+                if tx.get_seat(seat_id)?.is_some_and(|s| s.state == SeatState::Active && s.generation == generation && s.task_id.as_deref() == Some(task.id.as_str())) {
+                    tx.set_seat_state(seat_id, SeatState::Standby, Some("direction check done"), now)?;
+                    tx.clear_seat_task(seat_id)?;
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, profiles: &std::collections::BTreeMap<String, Profile>, project: &str, config: &ProjectConfig, report: &mut ReviewReport, now: Ts) -> GearResult<()> {
+    let Some(temps) = config.temps.as_ref() else { return Ok(()) };
+    for row in store.read(|tx| tx.tasks_of_project(project))? {
+        let Some(attempt) = store.read(|tx| tx.attempts_of_task(project, &row.id))?.into_iter().last() else { continue };
+        if attempt.state != AttemptState::Started { continue }
+        let Some(lane) = row.lane.clone() else { continue };
+        let key = direction_key(project, &row.id, attempt.n);
+        let existing = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
+        if existing.as_ref().is_some_and(|v| v["state"] == "running") { continue }
+        let repo = config.repo_of_task(&row);
+        let branch = format!("{}/{}", lane, row.id.to_lowercase().replace('-', ""));
+        let sha = if let Some(sha) = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["sha"].as_str()) { sha.to_string() } else {
+            let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")]) else { continue };
+            let sha = sha.trim().to_string();
+            if sha.is_empty() || existing.as_ref().and_then(|v| v["checked_sha"].as_str()) == Some(sha.as_str()) { continue }
+            let Ok(base) = review_git(cfg.review_git.as_ref(), &repo.path, &["merge-base", &format!("origin/{}", repo.integration), &sha]) else { continue };
+            let Ok(diff) = review_git(cfg.review_git.as_ref(), &repo.path, &["diff", "--name-only", base.trim(), &sha]) else { continue };
+            if !diff.lines().any(|p| !p.is_empty() && !p.starts_with("ops/")) { continue }
+            sha
+        };
+        let writer = writer_current_model(store, config, &attempt.seat)?;
+        let entry = crate::model::review_entry(config, writer.as_deref());
+        if entry.is_none() && !config.models.review.is_empty() { continue }
+        let kind = entry.and_then(ModelEntry::cli).unwrap_or(temps.kind.as_str()).to_string();
+        let selected = if kind == temps.kind { profiles.get(&temps.profile).map(|p| (temps.profile.as_str(), p)) } else { crate::restart::profile_for_kind(profiles, &kind) };
+        let Some((profile_name, profile)) = selected.filter(|(_, p)| p.verified) else { continue };
+        let existing_seat = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["seat"].as_str());
+        let seat = if let Some(id) = existing_seat { store.read(|tx| tx.get_seat(id))? } else { None };
+        let seat = match seat {
+            Some(seat) => seat,
+            None => match free_seat(store, project, &row.id, &kind)? {
+                Some(seat) => take_seat(store, &seat, &row.id, profile_name, now)?,
+                None if seats_free_for_new(store, project, i64::from(config.quota.temps))? => create_temp_seat(store, project, &row.id, profile_name, now)?,
+                None => continue,
+            }
+        };
+        if !occupies_quota(seat.state) && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))? { continue }
+        store.write(|tx| tx.set_meta(&key, &serde_json::json!({"seat":seat.id,"sha":sha,"state":"starting"}).to_string()))?;
+        let task = ReviewTask { task: row.id.clone(), attempt: attempt.n, writer: attempt.seat, lane, candidate: sha };
+        if matches!(start_reviewer(store, herdr, cfg, config, &seat, &task, entry, &kind, profile, true, now)?, Started::Yes) { report.started.push(seat.id); }
+    }
+    Ok(())
 }
 
 /// The reviewers whose verdict is in go to `Standby` (design §3.6).
@@ -297,14 +394,19 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
             // still this task's reviewer: the tick starts it when it can.
             // A released (or retired) reviewer is finished: a rework attempt,
             // or a task whose reviewer was lost, gets a new one.
-            if seats.iter().any(|seat| {
+            let mut already_reviewing = false;
+            for seat in &seats {
+                if direction_seat(tx, project, &task.id, attempt.n, seat)? { continue }
+                if
                 seat.role == SeatRole::Temp
                     && seat.task_id.as_deref() == Some(task.id.as_str())
                     && !matches!(
                         seat.state,
                         SeatState::Queued | SeatState::Starting | SeatState::Released | SeatState::Retired
                     )
-            }) {
+                { already_reviewing = true; break }
+            }
+            if already_reviewing {
                 continue;
             }
             wanted.push(ReviewTask {
@@ -322,7 +424,9 @@ fn tasks_to_review(store: &mut Store, project: &str) -> GearResult<Vec<ReviewTas
 /// The temp seat bound to `task`, if there is one.
 fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
+        let attempt = tx.attempts_of_task(project, task)?.into_iter().last().map(|a| a.n).unwrap_or_default();
         for seat in tx.seats_of_project(project)? {
+            if direction_seat(tx, project, task, attempt, &seat)? { continue }
             let pending = tx.get_meta(&pending_review_key(&seat.id))?.filter(|v| !v.is_empty());
             let job = pending.as_deref().or(seat.task_id.as_deref());
             if seat.role == SeatRole::Temp && seat.state != SeatState::Retired
@@ -332,6 +436,11 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
         }
         Ok(None)
     })
+}
+
+fn direction_seat(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, seat: &SeatRow) -> GearResult<bool> {
+    Ok(tx.get_meta(&direction_key(project, task, attempt))?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|job| matches!(job["state"].as_str(), Some("starting" | "running")) && job["seat"] == seat.id))
 }
 
 /// A seat that finished its last job and holds no live one: a warm worktree
@@ -693,6 +802,7 @@ fn start_reviewer(
     entry: Option<&ModelEntry>,
     kind: &str,
     profile: &Profile,
+    direction: bool,
     now: Ts,
 ) -> GearResult<Started> {
     // The repo the work is in: the repo of the lane that wrote it (T-53).
@@ -702,7 +812,7 @@ fn start_reviewer(
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
-    let branch = review_branch(&task.task);
+    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&task.task) };
     let seat_branch = format!("home/{}", seat.name);
     let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
@@ -801,13 +911,14 @@ fn start_reviewer(
         }
         let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
         if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
-        if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
+        if prepare_job_session(store, herdr, cfg, seat, task, direction, now)? != crate::session::Prep::Ready {
             return Ok(Started::NotYet);
         }
-        let packet = review_packet_for(store, config, &task.task, task.attempt, &task.candidate)?;
+        let packet = job_packet(store, config, task, direction)?;
         store.write(|tx| {
             tx.set_seat_state(&seat.id, SeatState::Active, Some("review assigned"), now)?;
             tx.set_seat_task(&seat.id, &task.task)?;
+            if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":seat.generation,"sha":task.candidate,"state":"running"}).to_string())?; }
             tx.set_meta(&pending_review_key(&seat.id), "")?;
             tx.set_meta(&branch_key(&seat.id, &repo.path), &branch)?;
             tx.insert_op(&NewOp { project: config.project.id.clone(), seat: seat.id.clone(), generation: seat.generation,
@@ -882,7 +993,7 @@ fn start_reviewer(
     if store.read(|tx| tx.get_meta(&format!("engine.review_released.{}.{generation}", seat.id)))?.as_deref() == Some("1") {
         current_seat.state = SeatState::Released;
     }
-    if crate::session::prepare_review(store, herdr, cfg, &current_seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
+    if prepare_job_session(store, herdr, cfg, &current_seat, task, direction, now)? != crate::session::Prep::Ready {
         return Ok(Started::NotYet);
     }
 
@@ -970,10 +1081,11 @@ fn start_reviewer(
     //    the two would leave a live reviewer that every later tick skips (an
     //    Active temp is not started again) and that never gets a job.
     let session_ref = started.agent_session.as_ref().map(|session| session.value.as_str());
-    let packet = review_packet_for(store, config, &task.task, task.attempt, &task.candidate)?;
+    let packet = job_packet(store, config, task, direction)?;
     store.write(|tx| {
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.set_seat_task(&seat.id, &task.task)?;
+        if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":generation,"sha":task.candidate,"state":"running"}).to_string())?; }
         tx.set_meta(&pending_review_key(&seat.id), "")?;
         tx.set_meta(&review_model_key(&seat.id), &review_model_entry(kind, entry))?;
         if let Some(model) = model { tx.set_meta(&crate::model::model_meta_key(&seat.id), model)?; }
@@ -1226,6 +1338,14 @@ pub(crate) fn job_for_seat(
     else {
         return Ok(None);
     };
+    let direction = store.read(|tx| tx.get_meta(&direction_key(project, &task, attempt.n)))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .filter(|job| job["seat"] == seat.id && job["generation"] == seat.generation && job["state"] == "running");
+    if let Some(sha) = direction.as_ref().and_then(|job| job["sha"].as_str()) {
+        let row = store.read(|tx| tx.get_task(project, &task))?;
+        let job = ReviewTask { task: task.clone(), attempt: attempt.n, writer: attempt.seat.clone(), lane: row.and_then(|r| r.lane).unwrap_or_default(), candidate: sha.to_string() };
+        return Ok(Some(ReviewJob { task, attempt: attempt.n, packet: job_packet(store, &config, &job, true)? }));
+    }
     if store.read(|tx| tx.get_review_verdict(project, &task, attempt.n))?.is_some() {
         return Ok(None);
     }
@@ -2019,6 +2139,98 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[derive(Debug)]
+    struct DirectionFixtureGit;
+    impl ReviewGit for DirectionFixtureGit {
+        fn run(&self, path: &str, args: &[&str]) -> Result<String, String> {
+            if matches!(args.first(), Some(&"rev-parse" | &"merge-base" | &"diff")) {
+                RealReviewGit.run(path, args)
+            } else { Ok(String::new()) }
+        }
+    }
+
+    #[test]
+    fn direction_checks_follow_pushes_and_report_results() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        fn job(store: &mut Store, key: &str) -> String { store.read(|tx| tx.get_meta(key)).unwrap().unwrap() }
+        let initial: serde_json::Value = serde_json::from_str(&job(&mut store, &key)).unwrap();
+        assert_eq!(initial["state"], "running");
+        assert_eq!(initial["sha"], first);
+        assert_eq!(store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().iter().filter(|r| r.role == "direction").count(), 1);
+        let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap().payload["text"].as_str().unwrap().to_string();
+        assert!(packet.contains("Direction check of T-1 attempt 1"));
+        std::fs::write(work.join("src/base"), "two").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
+        publish(&work, "heat/t1");
+        let second = sh(&work, "git rev-parse HEAD");
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 11).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], first);
+        let result = |tx: &Tx<'_>, sha: &str, body: &str, time| tx.insert_message(&NewMessage { meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()), project:"p".into(), thread:format!("result:{time}"), task:Some("T-1".into()), attempt:Some(1), sender:"p:review-1".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Result, urgent:false, body:body.into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:time }).map(|_| ());
+        store.write(|tx| result(tx, &first, "ok", T0 + 12)).unwrap();
+        finish_direction_results(&mut store, "p", T0 + 13).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], first);
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], second);
+        store.write(|tx| result(tx, &second, "use the required approach", T0 + 15)).unwrap();
+        finish_direction_results(&mut store, "p", T0 + 16).unwrap();
+        finish_direction_results(&mut store, "p", T0 + 17).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 17)).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1);
+        sh(&work, "git checkout -q -B ops-only origin/dev && mkdir -p ops && echo report > ops/report && git add -A && git -c user.name=a -c user.email=a@b commit -qm ops");
+        publish(&work, "heat/t1");
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 18).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], second);
+    }
+
+    #[test]
+    fn direction_check_yields_the_free_seat_to_a_waiting_hand_in() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "change").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm change");
+        publish(&work, "heat/t2");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.id = "T-2".into(); task.state = TaskState::Ready; tx.insert_task(&task)?;
+            let mut contract = tx.get_contract("p", "T-1", 1)?.unwrap(); contract.task = "T-2".into(); tx.insert_contract(&contract)?;
+            gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0 + 1)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0 + 1)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().task_id.as_deref(), Some("T-1"));
+        assert!(store.read(|tx| tx.get_meta(&direction_key("p", "T-2", 1))).unwrap().is_none());
     }
 
     #[test]
@@ -3657,6 +3869,7 @@ pub fn nudge_stopped_reviewers(
             let Some(attempt) = tx.attempts_of_task(project, &task)?.into_iter().last() else {
                 return Ok(None);
             };
+            if direction_seat(tx, project, &task, attempt.n, seat)? { return Ok(None) }
             if attempt.state != gear_model::AttemptState::Submitted
                 || tx.get_review_verdict(project, &task, attempt.n)?.is_some()
             {

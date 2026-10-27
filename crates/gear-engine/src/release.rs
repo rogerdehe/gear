@@ -293,6 +293,14 @@ fn under_review(
         let Some(row) = tx.get_task(project, task)? else {
             return Ok(false);
         };
+        if let Some(attempt) = tx.attempts_of_task(project, task)?.into_iter().last() {
+            let key = format!("engine.direction.{project}.{task}.{}", attempt.n);
+            let direction = tx.get_meta(&key)?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            if matches!(attempt.state, AttemptState::Started | AttemptState::Submitted)
+                && direction.is_some_and(|job| job["seat"] == seat.id && (job["state"] == "starting" || (job["state"] == "running" && job["generation"] == seat.generation))) {
+                return Ok(true);
+            }
+        }
         if row.state != TaskState::Verifying {
             return Ok(false);
         }
