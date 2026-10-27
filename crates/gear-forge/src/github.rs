@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use crate::{Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef};
+use crate::{Error, Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef, PrState};
 
 /// How long one `gh` call may take before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -283,7 +283,7 @@ impl Forge for GitHub {
         self.run(&args).map(|_| ())
     }
 
-    fn merge(&self, pr: &PrRef, method: MergeMethod) -> ForgeResult<MergeResult> {
+    fn merge(&self, pr: &PrRef, method: MergeMethod, head: &str) -> ForgeResult<MergeResult> {
         if !pr.is_open() {
             return Ok(MergeResult {
                 merged: false,
@@ -294,7 +294,7 @@ impl Forge for GitHub {
         // the merge turns it ready first (T-78, F1). The ordinary path is
         // claim → hand-in → verdict → merge, and it must need no hand.
         self.make_ready(pr)?;
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "pr".into(),
             "merge".into(),
             pr.number.to_string(),
@@ -302,11 +302,54 @@ impl Forge for GitHub {
             pr.repo.clone(),
             method.flag().into(),
         ];
+        // The gate checked this head: GitHub merges exactly it, never a head
+        // that landed in between (design §11.2).
+        let head = head.trim();
+        if !head.is_empty() {
+            args.push("--match-head-commit".into());
+            args.push(head.to_string());
+        }
         let out = self.run(&args)?;
         Ok(MergeResult {
             merged: true,
             message: out.trim().to_string(),
         })
+    }
+
+    fn pr_state(&self, pr: &PrRef) -> ForgeResult<PrState> {
+        let args: Vec<String> = vec![
+            "pr".into(),
+            "view".into(),
+            pr.number.to_string(),
+            "--repo".into(),
+            pr.repo.clone(),
+            "--json".into(),
+            "state,mergeCommit,headRefOid".into(),
+        ];
+        let out = self.run(&args)?;
+        serde_json::from_str::<PrState>(&out)
+            .map_err(|e| Error::Unreadable(format!("the pull request's state: {e}")))
+    }
+
+    fn pr_by_head(&self, repo: &str, branch: &str) -> ForgeResult<Option<PrRef>> {
+        let args: Vec<String> = vec![
+            "pr".into(),
+            "list".into(),
+            "--repo".into(),
+            repo.into(),
+            "--head".into(),
+            branch.into(),
+            "--json".into(),
+            "number,url".into(),
+        ];
+        let out = self.run(&args)?;
+        let list: Vec<PrListItem> = serde_json::from_str(&out)
+            .map_err(|e| Error::Unreadable(format!("the pull requests of {branch}: {e}")))?;
+        Ok(list.into_iter().next().map(|item| PrRef {
+            repo: repo.to_string(),
+            number: item.number,
+            url: item.url,
+        }))
     }
 
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> ForgeResult<()> {
@@ -328,4 +371,12 @@ impl Forge for GitHub {
 struct DraftState {
     #[serde(rename = "isDraft")]
     is_draft: bool,
+}
+
+/// One pull request of `gh pr list --json number,url`.
+#[derive(Debug, Deserialize)]
+struct PrListItem {
+    number: u64,
+    #[serde(default)]
+    url: String,
 }

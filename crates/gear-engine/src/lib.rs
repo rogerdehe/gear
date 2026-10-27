@@ -306,8 +306,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.quota.extend(quota.events);
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+        let delivery_grace = gear_app::config::latest(store, &project)
+            .map(|config| i64::from(config.timing.delivery_grace_s))
+            .unwrap_or(cfg.delivery_grace_s);
         let (confirmed, flagged) =
-            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, cfg.delivery_grace_s, now)?;
+            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 

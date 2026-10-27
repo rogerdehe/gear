@@ -28,7 +28,7 @@ use gear_store::{NewOp, OpRow, Store, Tx};
 use serde::Deserialize;
 
 use crate::marker;
-use crate::{Forge, ForgeResult, PrRef};
+use crate::{Forge, ForgeResult, MergeMethod, PrRef};
 
 /// The most forge calls one project's sync makes in one tick (T-91): a backlog
 /// catches up over the next ticks instead of holding the tick for every call's
@@ -75,13 +75,28 @@ pub fn sync_with(
     let seat = forge_seat(project);
     // The forge ops so far, by their key: the record of what has been called.
     let mut ops: BTreeMap<String, Vec<OpRow>> = BTreeMap::new();
+    // The land ops the engine inserted (design §11.2 step 4): the sync runs
+    // them, because the engine only knows the head the gate checked.
+    let mut land_ops: Vec<OpRow> = Vec::new();
     for op in store.read(|tx| tx.ops_of_seat_kind(&seat, OpKind::Forge))? {
+        if op.payload.get("forge").and_then(|forge| forge.as_str()) == Some("land") {
+            land_ops.push(op.clone());
+        }
         ops.entry(key_of(&op)).or_default().push(op);
     }
     let mut done = Vec::new();
     let mut budget = MAX_CALLS_PER_TICK;
     for fact in &facts {
-        done.extend(run_task(store, project, forge, fact, &mut ops, &mut budget, now)?);
+        done.extend(run_task(
+            store,
+            project,
+            forge,
+            fact,
+            &mut ops,
+            &land_ops,
+            &mut budget,
+            now,
+        )?);
     }
     Ok(done)
 }
@@ -170,6 +185,7 @@ fn run_task(
     forge: &dyn Forge,
     fact: &Fact,
     ops: &mut BTreeMap<String, Vec<OpRow>>,
+    land_ops: &[OpRow],
     budget: &mut usize,
     now: Ts,
 ) -> GearResult<Vec<String>> {
@@ -178,6 +194,13 @@ fn run_task(
     //    task's first delivery, not before, and it keeps being tried while the
     //    branch is not there yet (T-91, F3).
     let mut pr = claim_of(fact, ops);
+    // A claim whose outcome is unknown (T-91 F4): the pull request may be
+    // there after all — the branch names it.
+    if pr.is_none() {
+        if let Some(op) = unknown_claim_of(fact, ops) {
+            pr = adopt_claim(store, project, forge, fact, &op, budget, now)?;
+        }
+    }
     let delivered = fact
         .attempts
         .first()
@@ -194,6 +217,19 @@ fn run_task(
         }
     }
     let Some(pr) = pr else { return Ok(done) };
+    // 1a. The land op the engine inserted (design §11.2 step 4): the pull
+    //     request is merged here, with the head the gate checked.
+    if let Some(land) = land_op_of(fact, land_ops, &pr) {
+        match run_land(store, project, forge, &land, budget, now)? {
+            Outcome::Done(_) => done.push(format!(
+                "{project}:{}:{}:land",
+                fact.task,
+                land.op.attempt.unwrap_or_default()
+            )),
+            Outcome::Already => {}
+            Outcome::Pending => return Ok(done),
+        }
+    }
     // 2. The rest of the task's life, against that pull request. A call that
     //    waits holds back every later one: a close never runs before its merge,
     //    and a verdict never overtakes a hand-in (T-91, F2).
@@ -217,6 +253,16 @@ fn claim_of(fact: &Fact, ops: &BTreeMap<String, Vec<OpRow>>) -> Option<PrRef> {
         .and_then(pr_of)
 }
 
+/// A claim whose outcome is unknown (T-91 F4): the pull request may be there
+/// after all.
+fn unknown_claim_of(fact: &Fact, ops: &BTreeMap<String, Vec<OpRow>>) -> Option<OpRow> {
+    ops.get(&format!("{}:claim", fact.task))?
+        .iter()
+        .rev()
+        .find(|op| op.state == OpState::Unknown)
+        .cloned()
+}
+
 /// The pull request inside a claim's result.
 fn pr_of(result: &str) -> Option<PrRef> {
     let value: serde_json::Value = serde_json::from_str(result).ok()?;
@@ -225,6 +271,210 @@ fn pr_of(result: &str) -> Option<PrRef> {
         number: value.get("number")?.as_u64()?,
         url: value.get("url")?.as_str()?.to_string(),
     })
+}
+
+/// Adopt the pull request of an interrupted claim (T-91 F4): the branch says
+/// which one it is, so the claim is confirmed by it.
+fn adopt_claim(
+    store: &mut Store,
+    project: &str,
+    forge: &dyn Forge,
+    fact: &Fact,
+    op: &OpRow,
+    budget: &mut usize,
+    now: Ts,
+) -> GearResult<Option<PrRef>> {
+    if *budget == 0 {
+        // This tick's calls are spent: the adoption waits for the next one.
+        return Ok(None);
+    }
+    *budget -= 1;
+    let branch = branch_of(&fact.lane, &fact.task);
+    // A forge that cannot answer keeps the claim unknown: the next tick
+    // tries again.
+    let pr = match forge.pr_by_head(&fact.github.repo, &branch) {
+        Ok(Some(pr)) => pr,
+        Ok(None) => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+    let result =
+        serde_json::json!({ "repo": pr.repo, "number": pr.number, "url": pr.url }).to_string();
+    store.write(|tx| tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&result), now))?;
+    Ok(Some(pr))
+}
+
+/// The land op of a task, with what it says (design §11.2 step 4): the pull
+/// request to merge, the head the gate checked and the method.
+struct LandOp {
+    op: OpRow,
+    pr: PrRef,
+    head: String,
+    method: MergeMethod,
+}
+
+/// The land op of a task, if the engine inserted one.
+fn land_op_of(fact: &Fact, land_ops: &[OpRow], pr: &PrRef) -> Option<LandOp> {
+    land_ops
+        .iter()
+        .filter(|op| op.task.as_deref() == Some(fact.task.as_str()))
+        .max_by_key(|op| op.attempt.unwrap_or_default())
+        .and_then(|op| {
+            let head = op.payload.get("head")?.as_str()?.trim().to_string();
+            if head.is_empty() {
+                return None;
+            }
+            let method = match op.payload.get("method").and_then(|method| method.as_str()) {
+                Some("merge") => MergeMethod::Merge,
+                _ => MergeMethod::Squash,
+            };
+            // The engine names the pull request it merged; the claim's is the
+            // same one.
+            let number = op
+                .payload
+                .get("pr")
+                .and_then(|number| number.as_u64())
+                .unwrap_or(pr.number);
+            Some(LandOp {
+                op: op.clone(),
+                pr: PrRef {
+                    // The confirmed claim's pull request: its repo and its
+                    // number are the ones the claim names (F4).
+                    repo: pr.repo.clone(),
+                    number,
+                    url: pr.url.clone(),
+                },
+                head,
+                method,
+            })
+        })
+}
+
+/// Run the land op, or reconcile one whose outcome is unknown (design §11.2
+/// step 5, §11.3).
+fn run_land(
+    store: &mut Store,
+    project: &str,
+    forge: &dyn Forge,
+    land: &LandOp,
+    budget: &mut usize,
+    now: Ts,
+) -> GearResult<Outcome> {
+    match land.op.state {
+        // The merge happened: nothing to do.
+        OpState::Confirmed => return Ok(Outcome::Already),
+        // It failed: the captain hears about it (the engine's item).
+        OpState::Failed => return Ok(Outcome::Pending),
+        // The call may have happened: the pull request says what did.
+        OpState::Unknown | OpState::Executing | OpState::Submitted => {
+            return reconcile_land(store, project, forge, land, budget, now);
+        }
+        _ => {}
+    }
+    merge_and_record(store, project, forge, land, budget, now)
+}
+
+/// Reconcile a land op whose outcome is unknown (design §11.3): the pull
+/// request's own state says what happened.
+fn reconcile_land(
+    store: &mut Store,
+    project: &str,
+    forge: &dyn Forge,
+    land: &LandOp,
+    budget: &mut usize,
+    now: Ts,
+) -> GearResult<Outcome> {
+    if *budget == 0 {
+        // This tick's calls are spent: the reconciliation waits for the next
+        // one.
+        return Ok(Outcome::Pending);
+    }
+    *budget -= 1;
+    // A forge that cannot answer keeps the op as it is: the next tick
+    // reconciles it again.
+    let Ok(state) = forge.pr_state(&land.pr) else {
+        return Ok(Outcome::Pending);
+    };
+    if let Some(result) = merged_result(&state) {
+        store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
+        return Ok(Outcome::Done(result));
+    }
+    if state.is_open() && state.head_ref_oid.as_deref() == Some(land.head.as_str()) {
+        // The merge did not happen: run it again.
+        return merge_and_record(store, project, forge, land, budget, now);
+    }
+    // Any other state: the op fails and the captain hears about it.
+    let reason = if state.state.is_empty() {
+        "the pull request is in another state".to_string()
+    } else {
+        format!("the pull request is {}", state.state)
+    };
+    store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Failed, Some(&reason), now))?;
+    Ok(Outcome::Pending)
+}
+
+/// Merge the pull request with the gated head and write what the op says.
+fn merge_and_record(
+    store: &mut Store,
+    project: &str,
+    forge: &dyn Forge,
+    land: &LandOp,
+    budget: &mut usize,
+    now: Ts,
+) -> GearResult<Outcome> {
+    if *budget == 0 {
+        // This tick's calls are spent: the merge waits for the next one.
+        return Ok(Outcome::Pending);
+    }
+    *budget -= 1;
+    // The op is Executing before the call: an engine that stops here leaves
+    // an op whose outcome is unknown, never one that looks untouched (F3).
+    store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Executing,
+        Some("the merge runs"), now))?;
+    match forge.merge(&land.pr, land.method, &land.head) {
+        Ok(_) => {
+            // The merge commit is read from the pull request (§11.2 step 5).
+            // A pull request that is not merged yet leaves the op unknown: the
+            // next tick reconciles it by the pull request's own state (F2).
+            if *budget == 0 {
+                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
+                    Some("the merge ran; its commit is not read yet"), now))?;
+                return Ok(Outcome::Pending);
+            }
+            *budget -= 1;
+            let Ok(state) = forge.pr_state(&land.pr) else {
+                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
+                    Some("the merge ran; its commit is not read yet"), now))?;
+                return Ok(Outcome::Pending);
+            };
+            let Some(result) = merged_result(&state) else {
+                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
+                    Some("the merge was accepted; the pull request is not merged yet"), now))?;
+                return Ok(Outcome::Pending);
+            };
+            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
+            Ok(Outcome::Done(result))
+        }
+        Err(crate::Error::Timeout(_)) => {
+            // The forge may have taken it: the next tick reconciles.
+            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown, Some(TIMED_OUT), now))?;
+            Ok(Outcome::Pending)
+        }
+        Err(why) => {
+            let reason = why.to_string();
+            store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Failed, Some(&reason), now))?;
+            Ok(Outcome::Pending)
+        }
+    }
+}
+
+/// The result of a merged pull request: its merge commit. None when the pull
+/// request is not merged yet or names no commit (F2).
+fn merged_result(state: &crate::PrState) -> Option<String> {
+    if !state.is_merged() {
+        return None;
+    }
+    let commit = state.merge_commit.clone().filter(|commit| !commit.trim().is_empty())?;
+    Some(serde_json::json!({ "merge_commit": commit }).to_string())
 }
 
 /// The claim of a task whose first attempt was delivered (T-91): a draft pull
