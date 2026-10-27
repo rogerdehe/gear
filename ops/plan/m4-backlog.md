@@ -84,6 +84,7 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 
 ## For M5 (user, 2026-10-26)
 - **A captain that only relays (user, 2026-10-27, discuss at M5 kickoff).** Lanes think little so the captain must think: design, decide, write exact contracts, judge findings. Seen in another GEAR project: a captain that only splits messages into tasks, passes them on and acknowledges reports, deciding nothing. M5 settles how GEAR prevents and detects this.
+- A merge loses a push race to the captain's plan commits on the same branch (M4 03:40, T-187: three retries, then failed until a hand remerge). The captain's plan commits must not fail a merge.
 - A lane with no task that stays busy blocks its next delivery: the engine delivers only to an idle agent (§10.2), and Flash lanes keep tidying instead of ending their turn (M4 21:12 and 23:53, keel, ~10 min each). After 5 min busy with no task and ready work waiting, the engine interrupts the turn (esc) and delivers.
 - **Machine health watch (user, 2026-10-26 22:21: a long-term feature; "the ship must not break without us knowing").** M4 evidence: load 46 then 159 on 10 cores; two `find /` scans from an aborted lane turn ran 14+ min; four parallel builds plus another project's Go suite; fseventsd at 100% CPU and 3-4 GB for days; the user felt the lag before GEAR did. The engine samples every minute, as facts, not screen text:
   - load average vs cores, memory pressure, swap, free disk on the state and worktree volumes;
