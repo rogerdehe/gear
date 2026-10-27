@@ -200,6 +200,19 @@ enum ReportOp {
         #[arg(long)]
         voyage: Option<String>,
     },
+    /// The voyage report of the project (design §7.5): the voyage's lines,
+    /// its `done:` sentence clause by clause, its time and tokens, the ★
+    /// decisions, the friction reports and the tasks that took more than one
+    /// round.
+    Voyage {
+        /// The voyage (milestone) to report on, e.g. M4. The project's
+        /// current voyage when it is not given.
+        #[arg(long)]
+        voyage: Option<String>,
+        /// Print every decision, not only the ★ ones.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 /// `gear friction`: the friction reports of the project (design §6.3, §6.4).
@@ -303,6 +316,7 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+            ReportOp::Voyage { voyage, all } => cmd_report_voyage(voyage, all, cli.json),
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
@@ -781,6 +795,80 @@ fn run_friction(
         }
         None => gear_app::friction::list(store, &project, c.all),
     }
+}
+
+/// `gear report voyage`: the captain's landing report of the project (design
+/// §7.5) — the voyage's lines, its `done:` sentence clause by clause, its
+/// time and tokens, the ★ decisions, the friction reports and the tasks that
+/// took more than one round.
+///
+/// Read-only, so it starts no engine.
+fn cmd_report_voyage(voyage: Option<String>, all: bool, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_report_voyage(&mut store, &env, &mut herdr, voyage.as_deref(), all, json)?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear report voyage` body, over injected state.
+fn run_report_voyage(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    voyage: Option<&str>,
+    all: bool,
+    json: bool,
+) -> GearResult<String> {
+    let fp = observe_identity(store, env, herdr)?;
+    // The voyage to report on: the one named, else the project's current one
+    // (the voyage with open work first, then by id — the home page's order).
+    let milestone = match voyage {
+        Some(milestone) => milestone.to_string(),
+        None => current_voyage(store, env)?,
+    };
+    let report = gear_app::voyage::build(store, env, fp.as_ref(), &milestone, all, now_ts())?;
+    if json {
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    Ok(gear_app::voyage::render(&report))
+}
+
+/// The project's current voyage: the one with open work, else the first by id
+/// (the home page's order).
+fn current_voyage(store: &mut gear_store::Store, env: &gear_app::Env) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    store.read(|tx| {
+        let open: std::collections::BTreeSet<String> = tx
+            .tasks_of_project(&project)?
+            .into_iter()
+            .filter(|task| !task.state.is_terminal())
+            .filter_map(|task| task.milestone)
+            .collect();
+        let mut voyages = tx.voyages_of_project(&project)?;
+        voyages.sort_by_key(|voyage| (!open.contains(&voyage.milestone), voyage.milestone.clone()));
+        voyages
+            .into_iter()
+            .next()
+            .map(|voyage| voyage.milestone)
+            .ok_or_else(|| {
+                GearError::new(
+                    gear_model::ErrorCode::NoTarget,
+                    format!("the project {project} has no voyage"),
+                )
+            })
+    })
 }
 
 /// `gear report time`: where the time went (T-38). The captain's view of the

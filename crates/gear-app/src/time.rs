@@ -25,8 +25,58 @@ use crate::Env;
 use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
 use gear_store::{AttemptTimes, Store, Tx};
 
+/// The tokens and the cost of a round (design §4.3-§4.4).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct Tokens {
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
+    /// The cost of the round in USD; None when it is not known.
+    pub cost_usd: Option<f64>,
+    /// `agent` | `prices` | `none` — where the cost came from.
+    pub cost_source: Option<String>,
+}
+
+impl Tokens {
+    /// The tokens of two rounds, added up (the known ones only).
+    pub fn add(&mut self, other: &Tokens) {
+        self.input = add(self.input, other.input);
+        self.output = add(self.output, other.output);
+        self.cache_read = add(self.cache_read, other.cache_read);
+        self.cache_write = add(self.cache_write, other.cache_write);
+        self.reasoning = add(self.reasoning, other.reasoning);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+    }
+
+    /// The tokens in and out, as the report shows them.
+    pub fn line(&self) -> String {
+        let input = self.input.unwrap_or(0);
+        let output = self.output.unwrap_or(0);
+        let mut line = format!("tokens {input} in / {output} out");
+        if let Some(cost) = self.cost_usd {
+            line.push_str(&format!(" · cost ${cost:.4}"));
+        }
+        line
+    }
+}
+
+/// The sum of two known values; None when neither is known.
+fn add(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 /// One round of a task (one attempt) and what its steps took, in minutes.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct Round {
     /// The attempt number.
     pub n: i64,
@@ -44,10 +94,12 @@ pub struct Round {
     pub merge: Option<i64>,
     /// start → the last step of the round that happened.
     pub span: Option<i64>,
+    /// The tokens and the cost of this round (design §4.3-§4.4).
+    pub tokens: Tokens,
 }
 
 /// The time of one task.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct TaskTime {
     pub id: String,
     /// The voyage (milestone) the task sails on.
@@ -62,6 +114,8 @@ pub struct TaskTime {
     pub rework_min: Option<i64>,
     /// The first start → the last step that happened.
     pub actual_min: Option<i64>,
+    /// The tokens and the cost of the task's rounds.
+    pub tokens: Tokens,
 }
 
 impl TaskTime {
@@ -95,7 +149,7 @@ impl TaskTime {
 ///
 /// Every duration is the sum of what is known: None when no task of the voyage
 /// has it (a task from before the times existed has none).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct VoyageTime {
     /// The milestone; None for the tasks that sail on no voyage.
     pub milestone: Option<String>,
@@ -112,6 +166,8 @@ pub struct VoyageTime {
     pub rework_min: Option<i64>,
     /// The time the voyage's tasks took.
     pub actual_min: Option<i64>,
+    /// The tokens and the cost of the voyage's tasks.
+    pub tokens: Tokens,
 }
 
 impl VoyageTime {
@@ -122,7 +178,7 @@ impl VoyageTime {
 }
 
 /// The time report of a project.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct Report {
     pub project: String,
     /// The tasks, in the order of the plan.
@@ -186,18 +242,22 @@ pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report>
                 continue;
             }
         }
-        let rounds: Vec<Round> = tx
+        let mut rounds: Vec<Round> = tx
             .attempt_times_of_task(project, &task.id)?
             .into_iter()
             .map(|(n, times)| round(n, &times))
             .collect();
+        // The tokens and the cost of every attempt's own round (design §4.3):
+        // the lane's dev round (or its rework round) is the work of that
+        // attempt; the reviewer's round is the reviewer's, not the task's.
+        let tokens = tokens_of_attempts(tx, project, &task.id, &mut rounds)?;
         // A task with neither an estimate nor an attempt has nothing to
         // account for; it is not in the report.
         let estimate = estimate_of(tx, project, &task)?;
         if rounds.is_empty() && task.estimate_min.is_none() && estimate.is_none() {
             continue;
         }
-        tasks.push(task_time(task, rounds, estimate));
+        tasks.push(task_time(task, rounds, estimate, tokens));
     }
 
     let voyages = voyages_of(&tasks);
@@ -225,6 +285,7 @@ fn task_time(
     task: gear_store::TaskRow,
     rounds: Vec<Round>,
     estimate_min: Option<i64>,
+    tokens: Tokens,
 ) -> TaskTime {
     let rework: Vec<&Round> = rounds.iter().skip(1).collect();
     let rework_rounds = rework.len() as i64;
@@ -253,6 +314,7 @@ fn task_time(
         rework_min,
         actual_min,
         rounds,
+        tokens,
     }
 }
 
@@ -268,7 +330,43 @@ fn round(n: i64, times: &AttemptTimes) -> Round {
         wait: between(times.verdict, times.settled),
         merge: between(times.settled, times.merged),
         span: between(times.started, last),
+        tokens: Tokens::default(),
     }
+}
+
+/// The tokens and the cost of every attempt's own round (design §4.3-§4.4):
+/// the lane's dev round (attempt 1) or rework round (attempt n ≥ 2). The
+/// reviewer's round is the reviewer's work, not the task's.
+///
+/// The rounds are filled in place: every round carries its own tokens.
+fn tokens_of_attempts(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    rounds: &mut [Round],
+) -> GearResult<Tokens> {
+    let stored = tx.rounds_of_task(project, task)?;
+    let mut tokens = Tokens::default();
+    for round in rounds.iter_mut() {
+        let role = if round.n >= 2 { "rework" } else { "dev" };
+        let Some(row) = stored
+            .iter()
+            .find(|row| row.attempt == round.n && row.role == role)
+        else {
+            continue;
+        };
+        round.tokens = Tokens {
+            input: row.input,
+            output: row.output,
+            cache_read: row.cache_read,
+            cache_write: row.cache_write,
+            reasoning: row.reasoning,
+            cost_usd: row.cost_usd,
+            cost_source: row.cost_source.clone(),
+        };
+        tokens.add(&round.tokens);
+    }
+    Ok(tokens)
 }
 
 /// The minutes between two steps, when both happened.
@@ -314,6 +412,11 @@ fn voyages_of(tasks: &[TaskTime]) -> Vec<VoyageTime> {
         voyage.wait = sum_known(voyage.tasks.iter().map(|task| task.wait()));
         voyage.merge = sum_known(voyage.tasks.iter().map(|task| task.merge()));
         voyage.actual_min = sum_known(voyage.tasks.iter().map(|task| task.actual_min));
+        let mut tokens = Tokens::default();
+        for task in &voyage.tasks {
+            tokens.add(&task.tokens);
+        }
+        voyage.tokens = tokens;
         voyage.rework_rounds = voyage.tasks.iter().map(|task| task.rework_rounds).sum();
         // The voyage's rework time is known only when every task's is.
         voyage.rework_min = if voyage.tasks.iter().all(|task| task.rework_min.is_some()) {
@@ -338,6 +441,11 @@ fn sum_known(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------- rendering
+
+/// The tokens and the cost of a voyage, as the report shows them.
+pub fn voyage_tokens_line(voyage: &VoyageTime) -> String {
+    voyage.tokens.line()
+}
 
 /// The report as the captain reads it: one line per task, one line per voyage.
 pub fn render(report: &Report) -> String {
@@ -386,6 +494,7 @@ fn task_line(task: &TaskTime) -> String {
     if let Some(ratio) = task.ratio() {
         line.push_str(&format!(" · ratio {ratio:.2}"));
     }
+    line.push_str(&format!(" · {}", task.tokens.line()));
     line
 }
 
@@ -427,6 +536,7 @@ fn voyage_line(voyage: &VoyageTime) -> String {
     if let Some(ratio) = voyage.ratio() {
         line.push_str(&format!(" · ratio {ratio:.2}"));
     }
+    line.push_str(&format!(" · {}", voyage.tokens.line()));
     line
 }
 
