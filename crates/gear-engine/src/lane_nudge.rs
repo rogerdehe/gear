@@ -275,14 +275,50 @@ pub fn retry_allowed(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearR
     Ok(tx.get_meta(&retry_marker(seat, task, attempt))?.as_deref() == Some("allowed"))
 }
 
+/// Is the one automatic retry of this delivery still ahead (T-218, F3)?
+///
+/// `allowed` means the retry may still come, `pending` means it is on its
+/// way. The cleared empty value means the one retry is spent: the fact
+/// stands and the captain hears about it (T-218).
+pub fn retry_pending(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<bool> {
+    Ok(matches!(
+        tx.get_meta(&retry_marker(seat, task, attempt))?.as_deref(),
+        Some("allowed") | Some("pending")
+    ))
+}
+
 /// May this seat's delivery still be retried once (T-206, F3)? The marker
 /// says the first failure may come again: the tick holds the captain's ring
-/// back until the retry has had its chance.
+/// back until the retry has had its chance. The cleared empty value is not
+/// permission (T-218): the one retry is spent.
 pub fn may_retry(tx: &Tx<'_>, seat: &str) -> GearResult<bool> {
     let Some(failed) = crate::delivery::failed(tx, seat)? else {
         return Ok(false);
     };
-    Ok(tx.get_meta(&retry_marker(seat, &failed.task, failed.attempt))?.is_some())
+    retry_pending(tx, seat, &failed.task, failed.attempt)
+}
+
+/// May this delivery still get the one automatic retry of the lane's own path
+/// (T-218, F3)? Only a lane seat whose attempt waits for its check-in
+/// (`Delivered`) is delivered again by [`nudge_stopped_lanes`]; every other
+/// seat (a reviewer, the captain) has no such retry, so its unconfirmed
+/// delivery reaches the captain at once.
+pub fn retry_eligible(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<bool> {
+    let Some(row) = tx.get_seat(seat)? else {
+        return Ok(false);
+    };
+    if row.role != SeatRole::Lane {
+        return Ok(false);
+    }
+    Ok(tx
+        .get_attempt(project, task, attempt)?
+        .is_some_and(|row| row.state == AttemptState::Delivered))
 }
 
 /// Is a delivery of the seat still in flight (T-206, F2)? The reviewer's

@@ -291,6 +291,13 @@ fn the_first_failure_waits_for_the_retry() {
 
     // The first failure.
     tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+    // T-218: the captain is not rung yet: the one automatic retry of the
+    // lane's own path may still come.
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing before the retry: {:?}",
+        stall_items(&mut s)
+    );
 
     // Two minutes later the packet is delivered again.
     tick(&mut s, &mut h, &cfg, T + 130).unwrap();
@@ -301,9 +308,19 @@ fn the_first_failure_waits_for_the_retry() {
         .filter(|op| op.payload.get("redeliver").is_some())
         .count();
     assert_eq!(redelivered, 1, "the packet goes out again once");
+    // The retry is on its way: the captain still hears nothing.
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing while the retry is on its way: {:?}",
+        stall_items(&mut s)
+    );
 
     // The retry fails too: the captain hears about it, once.
     tick(&mut s, &mut h, &cfg, T + 140).unwrap();
     let items = stall_items(&mut s);
     assert_eq!(items.len(), 1, "{items:?}");
+
+    // And the item is not repeated.
+    tick(&mut s, &mut h, &cfg, T + 160).unwrap();
+    assert_eq!(stall_items(&mut s).len(), 1, "one item only");
 }
