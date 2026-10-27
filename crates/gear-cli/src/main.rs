@@ -3255,6 +3255,120 @@ path="api"
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
     }
 
+    /// T-171 rework F1: the landing's default command names no voyage: the
+    /// report must show the voyage that departed last, so a finished voyage
+    /// never hands the captain an older one.
+    #[test]
+    fn report_voyage_without_a_name_shows_the_last_departed_voyage() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                for (milestone, departure) in [("M1", T0 - 10 * 86400), ("M4", T0)] {
+                    tx.upsert_voyage(&gear_store::VoyageRow {
+                        project: "p".into(),
+                        milestone: milestone.into(),
+                        title: format!("the {milestone} station"),
+                        done: Some(format!("(1) the {milestone} clause")),
+                        bar: Some("STABLE".into()),
+                        eta: Some("12h".into()),
+                        departure: Some(departure),
+                        departure_tasks: Some(1),
+                        departure_estimate_min: Some(30),
+                        updated: T0,
+                    })
+                    .unwrap();
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            None,
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(out.contains("Done (M4)"), "the voyage that departed last: {out}");
+        assert!(!out.contains("Done (M1)"), "{out}");
+    }
+
+    /// T-171 rework F6: the text report prints each round's own tokens and
+    /// cost, not only the task's total.
+    #[test]
+    fn report_time_prints_a_round_own_tokens() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&lane_task("T-7", "heat", gear_model::TaskState::Ready, &[]))
+                    .unwrap();
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })
+                .unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0).unwrap();
+                for (role, seat, input, cost) in [
+                    ("dev", "p:heat", 100i64, 0.10f64),
+                    ("review", "p:r-1", 200, 0.20),
+                ] {
+                    let key = gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-7".into(),
+                        attempt: 1,
+                        role: role.into(),
+                    };
+                    tx.insert_round(&gear_store::NewRound {
+                        key: key.clone(),
+                        seat: seat.into(),
+                        generation: 1,
+                        cli: "opencode".into(),
+                        model: None,
+                        start_at: T0,
+                    })
+                    .unwrap();
+                    tx.set_round_tokens(
+                        &key,
+                        &gear_store::RoundTokens {
+                            input: Some(input),
+                            output: Some(10),
+                            cache_read: Some(0),
+                            cache_write: Some(0),
+                            reasoning: Some(0),
+                            cost_usd: Some(cost),
+                            cost_source: "prices".into(),
+                        },
+                        T0 + 60,
+                    )
+                    .unwrap();
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("T-7 attempt 1 dev · tokens 100 in / 10 out"), "{out}");
+        assert!(out.contains("T-7 attempt 1 review · tokens 200 in / 10 out"), "{out}");
+    }
+
     #[test]
     fn send_candidate_reaches_mail() {
         let (mut store, mut herdr) = world();
