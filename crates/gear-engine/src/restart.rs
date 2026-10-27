@@ -77,6 +77,7 @@ pub struct Plan {
     /// Original CLI and same-CLI session, retained across engine restarts.
     pub old_cli: String,
     pub resume: Option<String>,
+    pub profile_name: Option<String>,
 }
 
 /// How many ticks a phase may wait before the seat needs a human. A pane
@@ -132,6 +133,7 @@ pub fn pending(store: &mut Store, seat_id: &str) -> GearResult<Option<Plan>> {
         phase,
         old_cli: text("old_cli"),
         resume: record.get("resume").and_then(|v|v.as_str()).map(str::to_string),
+        profile_name: record.get("profile_name").and_then(|v|v.as_str()).map(str::to_string),
         waited: record
             .get("waited")
             .and_then(|value| value.as_i64())
@@ -219,9 +221,13 @@ pub(crate) fn advance(
                     crate::session::round_session(tx, &round)
                 })?
             } else { None };
+            let profile_name = gear_app::config::latest(store, project).ok()
+                .and_then(|config|config.lanes.into_iter().find(|lane|lane.name == seat.name))
+                .and_then(|lane| profiles.get(&lane.profile).filter(|p|p.kind == cli).map(|_|lane.profile));
             let plan = Plan {
                 old_cli,
                 resume,
+                profile_name,
                 model: entry.model().to_string(),
                 cli: cli.to_string(),
                 args: entry.args().to_vec(),
@@ -433,7 +439,10 @@ fn start(
         clear_pending(store, &seat.id)?;
         return Ok(false);
     };
-    let Some((profile_name, profile)) = profile_for_kind(profiles, &plan.cli) else {
+    let selected = plan.profile_name.as_deref().and_then(|name|
+        profiles.get(name).filter(|profile|profile.kind == plan.cli).map(|profile|(name,profile)))
+        .or_else(||profile_for_kind(profiles, &plan.cli));
+    let Some((profile_name, profile)) = selected else {
         flag(
             store,
             seat,
@@ -619,7 +628,9 @@ fn finish(
             .read(|tx| tx.get_project(project))?
             .ok_or_else(|| GearError::new(ErrorCode::NoTarget, "project missing"))?;
         let config = gear_app::config::parse(&config.config_toml)?;
-        let (_, profile) = profile_for_kind(profiles, &plan.cli)
+        let (_, profile) = plan.profile_name.as_deref().and_then(|name|
+            profiles.get(name).filter(|profile|profile.kind == plan.cli).map(|profile|(name,profile)))
+            .or_else(||profile_for_kind(profiles, &plan.cli))
             .ok_or_else(|| GearError::new(ErrorCode::NoTarget, "restart profile missing"))?;
         match crate::switch::ensure_model(store, herdr, seat, profile, &config, &plan.model, now)? {
             crate::switch::ModelGate::Ready => {}
@@ -947,6 +958,7 @@ fn set_pending(store: &mut Store, seat_id: &str, plan: &Plan) -> GearResult<()> 
         "waited": plan.waited,
         "old_cli": plan.old_cli,
         "resume": plan.resume,
+        "profile_name": plan.profile_name,
     });
     meta_set(store, &plan_key(seat_id), &record.to_string())
 }
@@ -1072,9 +1084,16 @@ lanes = [{{model="{model}", cli="{kind}"}}]
     fn config_kind_change_waits_for_busy_agent_then_starts_fresh_in_same_worktree() {
         let dir=tempfile::tempdir().unwrap(); std::fs::create_dir(dir.path().join("target")).unwrap();
         std::fs::write(dir.path().join("target/keep"),"unchanged").unwrap();
-        let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap());
+        let (mut store,mut herdr,mut cfg)=world(dir.path().to_str().unwrap());
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
-        change(&mut store,"codex","new-model"); herdr.set_status(PANE,AgentStatus::Working);
+        change(&mut store,"codex","new-model");
+        store.write(|tx| { let mut p=tx.get_project("p")?.unwrap();
+            p.config_toml=p.config_toml.replace("profile = \"codex\"", "profile = \"custom-codex\"");
+            p.config_toml.push_str("\n[profiles.custom-codex]\nkind='codex'\nunattended_args=['--custom', '{repo_root}']\n"); tx.update_project(&p)
+        }).unwrap();
+        let project_config=gear_app::config::latest(&mut store,"p").unwrap();
+        cfg.profiles=gear_app::config::profile_table(&cfg.profiles,&project_config).unwrap();
+        herdr.set_status(PANE,AgentStatus::Working);
         reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
         for n in 2..45 { advance_pending(&mut store,&mut herdr,&cfg,T+n); }
         assert_eq!(store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap().state,SeatState::Active);
@@ -1086,6 +1105,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let start=herdr.calls.iter().find_map(|c|if let Call::AgentStart{name,kind,pane,args}=c {Some((name,kind,pane,args))} else {None}).unwrap();
         assert_eq!((start.0.as_str(),start.1.as_str(),start.2.as_str()),("p-heat","codex",PANE));
         assert!(start.3.iter().any(|s|s.contains(dir.path().to_str().unwrap())));
+        assert!(start.3.iter().any(|s|s=="--custom"));
         assert!(!start.3.iter().any(|s|s.contains("old-session")));
         assert!(!herdr.calls.iter().any(|c|matches!(c,Call::WorktreeCreate {..}|Call::WorktreeOpen {..}|Call::WorktreeOpenPath {..}|Call::WorktreeRemove {..}|Call::PaneClose {..})));
         assert_eq!(std::fs::read_to_string(dir.path().join("target/keep")).unwrap(),"unchanged");
