@@ -289,6 +289,15 @@ pub fn merge_passed(
     // resets to origin before doing any merges, and adopts a completed push.
     for op in merge_order(ready_merges(store, project)?) {
         let task = op.task.clone().unwrap_or_default();
+        // The work of this attempt is already on the integration branch: it
+        // landed with another task's merge (design §10.7, row B03-01). The
+        // queued merge is voided instead of run — a second gate and push would
+        // merge the same work twice.
+        let already_merged = store.read(|tx| attempt_already_merged(tx, project, &op))?;
+        if already_merged {
+            store.write(|tx| void_merged_op(tx, project, &op.id, now))?;
+            continue;
+        }
         let valid_task = store.read(|tx| {
             Ok(tx
                 .get_task(project, &task)?
@@ -848,8 +857,47 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
     Ok(())
 }
 
+/// Void a queued merge whose work is already on the integration branch
+/// (design §10.7, row B03-01): the attempt carries the merge time of the
+/// merge that landed it, so this merge has nothing left to do.
+///
+/// A merge that is already running (Executing) is left alone: its worker
+/// finishes on its own and the completion is kept.
+fn void_merged_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    id: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let from = tx.get_op(project, id)?.map(|op| op.state).unwrap_or(OpState::Intended);
+    match from {
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some("the work is already merged"), now)?,
+        OpState::Unknown => tx.set_op_state(project, id, OpState::Failed, Some("the work is already merged"), now)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Has the attempt of this merge op already landed on the integration branch?
+/// (design §10.7, row B03-01: the attempt carries the merge time of the
+/// merge that landed it.)
+fn attempt_already_merged(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    op: &OpRow,
+) -> GearResult<bool> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(false);
+    };
+    Ok(tx.attempt_times(project, task, attempt)?.merged.is_some())
+}
+
 /// The tasks of the project whose **current** attempt has a passing verdict:
 /// (task, lane, candidate, attempt, the attempt's candidate).
+///
+/// An attempt that already carries a merge time is left out (design §10.7, row
+/// B03-01): its work is on the integration branch — it landed with another
+/// task's merge — so the engine must not merge it again.
 fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String)>> {
     store.read(|tx| {
         let mut passed = Vec::new();
@@ -866,6 +914,11 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
                 continue;
             };
+            // The work is already on the integration branch (it landed with
+            // another task's merge): no merge of its own.
+            if tx.attempt_times(project, &task.id, latest.n)?.merged.is_some() {
+                continue;
+            }
             let Some(verdict) = tx
                 .verdicts_of_task(project, &task.id)?
                 .into_iter()
