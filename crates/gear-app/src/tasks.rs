@@ -1075,7 +1075,11 @@ fn rework_rank(tx: &Tx<'_>, task: &gear_store::TaskRow) -> GearResult<i64> {
 /// handled now) and leave one silent System/Info line for the captain in the
 /// first item's thread, or a fresh line when no item is there any more. A
 /// duplicate review submission must not survive as an action item (R-67 P1).
-fn resolve_review_items(
+///
+/// The plan's apply uses it too (T-187): a `# Verdicts` line that settles an
+/// attempt closes the review item of that attempt, so the captain does not
+/// have to resolve it by hand.
+pub fn resolve_review_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,

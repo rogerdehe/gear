@@ -1904,7 +1904,7 @@ quota_reset_h = 5
     }
 
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["opencode", "claude", "codex"] {
             cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
@@ -2283,6 +2283,8 @@ quota_reset_h = 5
                 // the seat's worktree is not recorded in this fixture).
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
+                "-c".to_string(),
+                format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/lane.md")).unwrap())),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),
