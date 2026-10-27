@@ -2726,6 +2726,154 @@ mod tests {
         }
     }
 
+    /// T-163: `gear queue` is the captain's plain view of the work (design
+    /// §8.3): every lane, what it does now, why an idle lane is idle, and
+    /// what it has left — read from the store.
+    #[test]
+    fn queue_prints_the_lanes_and_the_reviewers() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                // Two lanes beside the ones the world seeds.
+                testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p5", "opencode", T0)?;
+                testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p6", "opencode", T0)?;
+                // The hull lane works on T-1 and has two tasks left.
+                let mut working = lane_task("T-1", "hull", gear_model::TaskState::Running, &[]);
+                working.estimate_min = Some(60);
+                working.rank = 1;
+                tx.insert_task(&working)?;
+                let mut queued = lane_task("T-2", "hull", gear_model::TaskState::Ready, &[]);
+                queued.estimate_min = Some(35);
+                queued.rank = 2;
+                tx.insert_task(&queued)?;
+                let mut waiting = lane_task("T-3", "hull", gear_model::TaskState::Ready, &["T-9"]);
+                waiting.estimate_min = Some(30);
+                waiting.rank = 3;
+                tx.insert_task(&waiting)?;
+                let mut queued = lane_task("T-4", "hull", gear_model::TaskState::Ready, &[]);
+                queued.estimate_min = Some(60);
+                queued.rank = 4;
+                tx.insert_task(&queued)?;
+                // The keel lane waits for a task of another lane: its next
+                // task is queued, but the dependency is not done.
+                let mut waiting = lane_task("T-9", "keel", gear_model::TaskState::Ready, &["T-1"]);
+                waiting.estimate_min = Some(40);
+                waiting.rank = 9;
+                tx.insert_task(&waiting)?;
+                // A reviewer works on T-2; another one stands by.
+                testing::seed_temp_seat(tx, "p", "r-1", "T-2", TEMP_PANE, "opencode", T0)?;
+                Ok(())
+            })
+            .unwrap();
+        // The hull lane's attempt: 38 minutes of work.
+        store
+            .write(|tx| {
+                // The task is ready when the attempt starts, then runs.
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = gear_model::TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:hull", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Started, T0)?;
+                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::HandedIn, T0 + 38 * 60)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        // The working lane: the task, its actual and estimated minutes, and
+        // what it has left.
+        let hull = lines.iter().find(|line| line.starts_with("hull")).unwrap();
+        assert!(hull.contains("working T-1 38/60m"), "{hull}");
+        assert!(hull.contains("· left 3 (125m):"), "{hull}");
+        assert!(hull.contains("T-2 35m"), "{hull}");
+        assert!(hull.contains("T-3 30m needs T-9"), "{hull}");
+        assert!(
+            hull.contains("T-2 35m, T-3 30m needs T-9, T-4 60m"),
+            "the queue is in the order of the plan: {hull}"
+        );
+        assert!(hull.contains("T-4 60m"), "{hull}");
+        // The idle lane: why it is idle, through the board's own function.
+        let keel = lines.iter().find(|line| line.starts_with("keel")).unwrap();
+        assert!(keel.contains("idle: next T-9 waits for T-1 (hull, in progress)"), "{keel}");
+        assert!(keel.contains("· left 1 (40m)"), "{keel}");
+        // The reviewers are on the last line.
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("r-1 reviewing T-2"), "{last}");
+
+        // --json has the same facts.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let lanes = parsed["lanes"].as_array().unwrap();
+        assert_eq!(lanes.len(), 3, "{json}");
+        // The lane with nothing planned says so.
+        let heat = lanes.iter().find(|lane| lane["lane"] == "heat").unwrap();
+        assert_eq!(heat["idle"], "nothing left planned");
+        assert_eq!(heat["left"].as_array().unwrap().len(), 0);
+        let hull = lanes.iter().find(|lane| lane["lane"] == "hull").unwrap();
+        assert_eq!(hull["working"]["id"], "T-1");
+        assert_eq!(hull["left"].as_array().unwrap().len(), 3);
+        assert_eq!(hull["left_min"], 125);
+        assert_eq!(parsed["reviewers"][0]["reviewing"], "T-2");
+    }
+
+    /// T-163: `gear plan show T-n` prints one task's block in plan-file
+    /// form, and the block parses back to the same task.
+    #[test]
+    fn plan_show_prints_a_block_that_parses_back() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut task = lane_task("T-7", "heat", gear_model::TaskState::Ready, &["T-8"]);
+                task.priority = "must".into();
+                task.milestone = Some("M2".into());
+                task.required = true;
+                task.estimate_min = Some(60);
+                task.followup_of = Some("T-6".into());
+                tx.insert_task(&task)?;
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    version: 1,
+                    goal: "the goal of T-7".into(),
+                    accept: "the acceptance of T-7".into(),
+                    evidence_files: vec!["ops/reports/T-7.md".into()],
+                    evidence_due_min: Some(90),
+                    body: String::new(),
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = store
+            .read(|tx| gear_app::plan::show(tx, "p", "T-7"))
+            .unwrap();
+        assert!(out.starts_with("## T-7 [must] lane=heat milestone=M2 required"), "{out}");
+        assert!(out.contains("goal: the goal of T-7"), "{out}");
+        assert!(out.contains("accept: the acceptance of T-7"), "{out}");
+        assert!(out.contains("evidence-files: ops/reports/T-7.md"), "{out}");
+        assert!(out.contains("evidence-due: 90"), "{out}");
+        assert!(out.contains("estimate: 60"), "{out}");
+        assert!(out.contains("deps: T-8"), "{out}");
+        assert!(out.contains("followup-of: T-6"), "{out}");
+
+        // The block parses back to the same task.
+        let text = format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{out}\n");
+        let draft = gear_app::draft::parse(&text).unwrap();
+        let item = &draft.queue[0];
+        assert_eq!(item.id.as_deref(), Some("T-7"));
+        assert_eq!(item.lane.as_deref(), Some("heat"));
+        assert_eq!(item.milestone.as_deref(), Some("M2"));
+        assert!(item.required);
+        assert_eq!(item.goal.as_deref(), Some("the goal of T-7"));
+        assert_eq!(item.accept.as_deref(), Some("the acceptance of T-7"));
+        assert_eq!(item.estimate, Some(60));
+        assert_eq!(item.deps, vec!["T-8".to_string()]);
+        assert_eq!(item.followup_of.as_deref(), Some("T-6"));
+    }
+
     #[test]
     fn plan_apply_without_path_names_the_voyage_file() {
         let (mut store, mut herdr) = world();
