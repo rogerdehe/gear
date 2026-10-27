@@ -82,36 +82,24 @@ fn a_repo_github_section_replaces_the_projects_and_absent_means_local_only() {
     assert_eq!(cfg.repo_of_lane("heat").github, None);
 }
 
-/// F2 of the review: a `[[repos]]` entry without its own `[github]` is
-/// local-only — it never inherits the root's repository identity, which would
-/// write in the wrong place.
-/// T-91, F1: landing through a pull request is not in this release. The config
-/// refuses it rather than let a project be configured for a landing that cannot
-/// work (the engine's merge still lands locally and consumes the branch).
 #[test]
-fn a_pull_request_landing_is_refused_until_m4() {
-    for (field, text) in [
-        (
-            "github.merge",
-            format!("{BASE}\n[github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"),
-        ),
-        (
-            "repos[0].github.merge",
-            format!(
-                "{BASE}\n[[repos]]\nname = \"api\"\npath = \"api\"\n\n[repos.github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"
-            ),
-        ),
-    ] {
-        let cfg = config::parse(&text).unwrap();
-        let issues = config::validate(&cfg);
-        assert!(
-            issues.iter().any(|issue| issue.field == field
-                && issue.problem.contains("not in this release")),
-            "{field}: {issues:?}"
-        );
-    }
+fn a_project_can_land_through_a_pull_request() {
+    let cfg = config::parse(&format!("{BASE}\n[github]\nrepo = \"a/b\"\nmerge = \"pr\"\n")).unwrap();
+    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    assert_eq!(cfg.root_repo().github.unwrap().merge, config::MergeMode::Pr);
 }
 
+#[test]
+fn a_child_repo_can_land_through_a_pull_request() {
+    let cfg = config::parse(&format!(
+        "{BASE}\n[[repos]]\nname = \"api\"\npath = \"api\"\n\n[repos.github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"
+    )).unwrap();
+    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    let api = cfg.repos().into_iter().find(|repo| repo.name == "api").unwrap();
+    assert_eq!(api.github.unwrap().merge, config::MergeMode::Pr);
+}
+
+/// A child without its own GitHub section remains local-only.
 #[test]
 fn a_child_repo_without_a_section_is_local_only() {
     let text = format!(
