@@ -63,6 +63,12 @@ pub struct Profile {
     /// stops on a permission dialog cannot be driven unattended, so a profile
     /// with this empty is never `verified`.
     pub unattended_args: Vec<String>,
+    /// The CLI flags that carry the role rules into the agent as a system
+    /// prompt (T-195): the rules of the role the seat works in, given at
+    /// every start. `{rules_file}` is the rules file's absolute path,
+    /// `{rules_toml}` the rules text as one TOML basic string. Empty for the
+    /// kinds that take the rules another way (their packets carry them).
+    pub instructions_args: Vec<String>,
     /// Herdr reports `agent_session` for this kind.
     pub session_ref: bool,
     /// Args to resume a session; `{session}` is replaced. None = unsupported.
@@ -244,6 +250,9 @@ pub struct ProfilePatch {
     pub kind: Option<String>,
     /// The CLI flags that turn off interactive permission prompts.
     pub unattended_args: Option<Vec<String>>,
+    /// The CLI flags that carry the role rules into the agent as a system
+    /// prompt (T-195).
+    pub instructions_args: Option<Vec<String>>,
     pub busy_markers: Option<Vec<String>>,
     pub quota_markers: Option<Vec<String>>,
     pub quota_bar: Option<crate::QuotaBar>,
@@ -286,6 +295,9 @@ impl Profile {
         }
         if let Some(args) = &patch.unattended_args {
             profile.unattended_args = args.clone();
+        }
+        if let Some(args) = &patch.instructions_args {
+            profile.instructions_args = args.clone();
         }
         if let Some(markers) = &patch.busy_markers {
             profile.busy_markers = markers.clone();
@@ -355,6 +367,21 @@ pub fn builtins() -> BTreeMap<String, Profile> {
     table
 }
 
+/// The args that carry the role rules into a start (T-195).
+///
+/// `{rules_file}` is the rules file's absolute path; `{rules_toml}` is the
+/// rules text as one TOML basic string — the form a `codex -c` value takes, so
+/// a text with a quote or a newline survives the round trip.
+pub fn render_rules(args: &[String], rules_file: &str, rules_text: &str) -> Vec<String> {
+    let rules_toml = toml::Value::String(rules_text.to_string()).to_string();
+    args.iter()
+        .map(|arg| {
+            arg.replace("{rules_file}", rules_file)
+                .replace("{rules_toml}", &rules_toml)
+        })
+        .collect()
+}
+
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
         "opencode" => Some(Profile {
@@ -378,6 +405,9 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--auto".into()],
+            // T-195: opencode takes the rules in its packet, not as a system
+            // prompt.
+            instructions_args: vec![],
             session_ref: false,
             resume_args: Some(vec!["-s".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into()],
@@ -403,6 +433,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--dangerously-skip-permissions".into()],
+            // T-195: claude reads the rules from a file.
+            instructions_args: vec!["--append-system-prompt-file".into(), "{rules_file}".into()],
             session_ref: true,
             resume_args: Some(vec!["--resume".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
@@ -488,6 +520,9 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "-c".into(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".into(),
             ],
+            // T-195: codex takes the rules as a developer instruction, in one
+            // TOML value.
+            instructions_args: vec!["-c".into(), "developer_instructions={rules_toml}".into()],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
             // M4 §12 item 4: the typed command `/quit` exits Codex, and
@@ -520,6 +555,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--always-approve".into()],
+            // T-195: grok takes the rules in its packet.
+            instructions_args: vec![],
             session_ref: true,
             resume_args: Some(vec!["-r".into(), "{session}".into()]),
             exit_keys: vec![],
@@ -582,6 +619,8 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--approve".into()],
+            // T-195: pi reads the rules from a file.
+            instructions_args: vec!["--append-system-prompt".into(), "{rules_file}".into()],
             session_ref: true,
             resume_args: Some(vec!["--session".into(), "{session}".into()]),
             exit_keys: vec![],
@@ -603,6 +642,85 @@ mod tests {
     /// the TUI renders it as the status header, above the composer.
     const CODEX_RETRYING: &str =
         "• Working (12s • esc to interrupt)\n• Reconnecting... 2/5 (14s • esc to interrupt)";
+
+    /// T-195: the rules of the role go into the agent as a system prompt
+    /// where the CLI allows it; the kinds that take them another way carry
+    /// none.
+    #[test]
+    fn the_built_in_profiles_carry_the_rules_where_the_cli_allows_it() {
+        assert_eq!(
+            builtin("pi").unwrap().instructions_args,
+            vec!["--append-system-prompt".to_string(), "{rules_file}".to_string()]
+        );
+        assert_eq!(
+            builtin("claude").unwrap().instructions_args,
+            vec![
+                "--append-system-prompt-file".to_string(),
+                "{rules_file}".to_string()
+            ]
+        );
+        assert_eq!(
+            builtin("codex").unwrap().instructions_args,
+            vec!["-c".to_string(), "developer_instructions={rules_toml}".to_string()]
+        );
+        assert!(builtin("opencode").unwrap().instructions_args.is_empty());
+        assert!(builtin("grok").unwrap().instructions_args.is_empty());
+    }
+
+    /// T-195: the rules file's path goes into the args.
+    #[test]
+    fn the_rules_file_is_rendered_into_the_args() {
+        let pi = builtin("pi").unwrap();
+        let args = render_rules(
+            &pi.instructions_args,
+            "/tmp/gear/rules.md",
+            "the rules of the lane",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--append-system-prompt".to_string(),
+                "/tmp/gear/rules.md".to_string()
+            ]
+        );
+    }
+
+    /// T-195: the codex value is one TOML string: a text with a quote and a
+    /// newline comes back as the same text.
+    #[test]
+    fn the_rules_text_is_rendered_as_one_toml_value() {
+        let codex = builtin("codex").unwrap();
+        let text = "the lane reports:\n  \"progress\" and \"blocked\"";
+        let args = render_rules(&codex.instructions_args, "/tmp/gear/rules.md", text);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        // The argument is one TOML `key = value` pair: it parses back to the
+        // same text.
+        let parsed: toml::Table = toml::from_str(&args[1]).expect("the argument is TOML");
+        assert_eq!(
+            parsed.get("developer_instructions").and_then(toml::Value::as_str),
+            Some(text),
+            "the same text comes back"
+        );
+    }
+
+    /// T-195: a project's config may set the args.
+    #[test]
+    fn a_config_patch_overrides_the_rules_args() {
+        let pi = builtin("pi").unwrap();
+        let patch = ProfilePatch {
+            instructions_args: Some(vec!["--system-prompt".to_string(), "{rules_file}".to_string()]),
+            ..ProfilePatch::default()
+        };
+        let patched = pi.patched(&patch, "pi");
+        assert_eq!(
+            patched.instructions_args,
+            vec!["--system-prompt".to_string(), "{rules_file}".to_string()]
+        );
+        // A patch without the field keeps the profile's own.
+        let untouched = pi.patched(&ProfilePatch::default(), "pi");
+        assert_eq!(untouched.instructions_args, pi.instructions_args);
+    }
 
     #[test]
     fn the_codex_back_off_is_recognised() {
