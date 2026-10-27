@@ -2,9 +2,10 @@
 //! not by `gear reply … --resolve`.
 //!
 //! M3: the captain resolved two fails by reply; the items closed and nothing
-//! was settled. The home page now names the line to write, a reply that would
-//! close a fail is refused with that line, and once the plan settles it the
-//! item is an ordinary one again.
+//! was settled. The home page now names the line to write and a reply that
+//! would close a fail is refused with that line. T-187: the plan that
+//! settles the attempt closes the item with it, so the captain does not have
+//! to resolve it by hand (M-2412).
 
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
@@ -159,8 +160,10 @@ fn resolving_the_fail_by_reply_is_refused_and_leaves_it_verifying() {
     assert!(s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
 }
 
+/// T-187: the verdict that settles the attempt closes the review item too:
+/// the captain does not have to resolve it by hand (M-2412).
 #[test]
-fn after_the_plan_settles_it_resolving_works() {
+fn after_the_plan_settles_it_the_item_is_closed() {
     let mut s = world();
     assert_eq!(resolve(&mut s, "M-1").unwrap_err().code, ErrorCode::BadFormat);
 
@@ -176,10 +179,13 @@ fn after_the_plan_settles_it_resolving_works() {
         Some("handle the edge case")
     );
 
-    // The item is an ordinary one now: a reply resolves it.
-    let handled = resolve(&mut s, "M-1").unwrap();
-    assert_eq!(handled.handled, vec![("M-1".to_string(), MsgState::Resolved.as_str().to_string())]);
-    assert_eq!(s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state, MsgState::Resolved);
+    // The item is closed with the plan that settled it.
+    let item = s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Resolved);
+    assert_eq!(item.result.as_deref(), Some("settled in plan 2"));
+    // And a reply to it is refused: it is handled.
+    let error = resolve(&mut s, "M-1").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
 }
 
 #[test]

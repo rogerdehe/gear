@@ -347,6 +347,8 @@ fn onboard_seat(
         &cfg.db_path,
         None,
     )?;
+    let rules = crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile).map_err(|e| e.detail)?;
+    plan.args.splice(profile.unattended_args.len()..profile.unattended_args.len(), rules);
     // The lane's model goes into the environment line, so the agent GEAR
     // starts runs on the model GEAR chose (17 §0), and the entry's own
     // arguments follow the model flag (T-35).
@@ -559,7 +561,10 @@ fn resume_busy_start(
             pending.pane, pending.generation, binding.pane_id, seat.generation
         ));
     }
-    match herdr.agent_start(&pending.agent_name, &pending.kind, &pending.pane, &pending.args) {
+    let mut args = pending.args.clone();
+    let rules = crate::rules::arguments(store, &seat.project, seat.role, &cfg.db_path, profile).map_err(|e| e.detail)?;
+    crate::rules::refresh_args(&mut args, profile, rules);
+    match herdr.agent_start(&pending.agent_name, &pending.kind, &pending.pane, &args) {
         Outcome::Ok(started) => finish_start(
             store,
             herdr,
@@ -964,7 +969,7 @@ repo = "web"
 
     /// An engine that knows the opencode profile.
     fn cfg() -> crate::EngineCfg {
-        let mut cfg = crate::EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+        let mut cfg = crate::EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
         cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
         cfg
     }
@@ -1483,7 +1488,7 @@ repo = "web"
             env.contains(r#"OPENCODE_CONFIG_CONTENT='{"model":"minimax-cn/MiniMax-M3.1-Flash"}'"#),
             "the environment line must carry the lane's model: {env}"
         );
-        assert!(env.starts_with("export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db"), "{env}");
+        assert!(env.starts_with(&format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path)), "{env}");
         // The model is only read by a process that inherits the pane's
         // environment, so the agent gets a private server.
         assert!(!start_args(&herdr).contains(&"--standalone".to_string()), "no --standalone (L-56): {:?}", start_args(&herdr));
@@ -1575,6 +1580,17 @@ repo = "web"
     }
 
     #[test]
+    fn opencode_start_keeps_its_original_args_without_rule_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        let mut config = cfg(); config.db_path = dir.path().join("gear.db").to_string_lossy().into();
+        assert_eq!(onboard_queued(&mut store, &mut herdr, &config, T0+1).unwrap(), ["toy:heat"]);
+        assert_eq!(start_args(&herdr), ["--auto"]);
+        assert!(dir.path().join("rules/lane.md").is_file());
+    }
+
+    #[test]
     fn without_a_model_chain_the_environment_line_stays_as_it_was() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
@@ -1582,7 +1598,7 @@ repo = "web"
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
         assert_eq!(active, vec!["toy:heat".to_string()]);
-        assert_eq!(env_line(&herdr), "export GEAR_CTX=toy:heat:1; export GEAR_DB=/state/gear.db");
+        assert_eq!(env_line(&herdr), format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path));
         assert_eq!(start_args(&herdr), vec!["--auto".to_string()]);
     }
 

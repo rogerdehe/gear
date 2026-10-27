@@ -66,7 +66,7 @@ fn world() -> Store {
 }
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }

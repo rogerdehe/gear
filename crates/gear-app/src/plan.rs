@@ -765,6 +765,16 @@ fn apply_queue(
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The review item of that attempt is settled with the verdict (T-187):
+        // the captain does not have to resolve it by hand.
+        crate::tasks::resolve_review_items(
+            tx,
+            project,
+            &line.task,
+            line.attempt,
+            &format!("settled in plan {applied_version}"),
+            now,
+        )?;
         // The decision log (design §7.4): a pass over a failed review is an
         // override, a fail is a rework.
         if line.pass {
@@ -2791,6 +2801,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if row.contract_version > adopted {
         text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
     }
+    text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     Ok(text)
 }
 
