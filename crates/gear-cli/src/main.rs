@@ -1144,10 +1144,17 @@ fn cmd_plan(
 /// parked on quota is left to the quota path.
 ///
 /// It prints one line per lane that was let go.
+///
+/// The caller is the captain, proved as for `gear plan apply` (T-216, F2):
+/// the caller's seat is resolved (its pane, or its `GEAR_CTX`) and its
+/// identity is checked against the store inside the write transaction, so a
+/// stale or unknown captain cannot end a park.
 fn cmd_plan_check(json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let out = run_plan_check(&mut store, &env)?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_plan_check(&mut store, &env, &mut herdr)?;
     if json {
         println!(
             "{}",
@@ -1163,21 +1170,29 @@ fn cmd_plan_check(json: bool) -> GearResult<()> {
 
 /// `gear plan check` body, over injected state.
 ///
+/// The caller's identity is observed first (as `gear plan apply` does) and
+/// checked inside the write transaction: only the captain, at the generation
+/// the store holds, may end a park (T-216, F2). A caller that cannot be
+/// proved is refused, and nothing is written.
+///
 /// The session's agents say whether a lane's agent is still in its pane.
 /// Without them nothing is guessed: a park stays (fail-closed, T-190) and the
 /// command says so.
-fn run_plan_check(store: &mut gear_store::Store, env: &gear_app::Env) -> GearResult<Vec<String>> {
-    let Some(ctx) = env.ctx.as_ref() else {
-        return Err(GearError::new(
-            gear_model::ErrorCode::NotRegistered,
-            "the project is not known: run gear inside the project's pane",
-        ));
-    };
-    let agents = {
-        use gear_herdr::HerdrRead as _;
-        open_herdr().ok().and_then(|mut herdr| herdr.agents().ok())
-    };
+fn run_plan_check(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+) -> GearResult<Vec<String>> {
+    let fp = observe_identity(store, env, herdr)?;
+    let agents = herdr.agents().ok();
     let ended = store.write(|tx| {
+        let (ctx, _seat) = gear_app::identity::require_seat(
+            tx,
+            env,
+            fp.as_ref(),
+            Some(&[gear_model::SeatRole::Captain]),
+            Some(&[gear_model::SeatState::Active]),
+        )?;
         gear_app::plan::end_parked_lanes(tx, &ctx.project, agents.as_deref(), now_ts())
     })?;
     if ended.is_empty() && agents.is_none() {
@@ -1366,18 +1381,26 @@ fn run_plan(
             .map(|seat| seat.role == gear_model::SeatRole::Lane)
             .unwrap_or(false)
     });
-    let agents = if releasing {
-        Some(herdr.agents().map_err(|e| {
-            GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!(
-                    "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
-                    e.0
-                ),
-            )
-        })?)
-    } else {
-        None
+    // T-216 (F4): the agents are read for **every** apply, not only for a
+    // release: an ordinary apply ends the parks whose time has come, and that
+    // needs the same fact (is the lane's agent still in its pane?). A read
+    // that fails refuses a release (the release cannot be carried out
+    // unchecked) and leaves the automatic expiry fail-closed: a park whose
+    // lane has a live binding stays, a park whose lane has none still ends.
+    let agents = match herdr.agents() {
+        Ok(agents) => Some(agents),
+        Err(e) => {
+            if releasing {
+                return Err(GearError::new(
+                    gear_model::ErrorCode::BadFormat,
+                    format!(
+                        "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
+                        e.0
+                    ),
+                ));
+            }
+            None
+        }
     };
     let result = gear_app::plan::apply(
         store,
@@ -2226,7 +2249,7 @@ mod tests {
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
     use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
-    use gear_store::{testing, ContractRow, Store, TaskRow};
+    use gear_store::{testing, BindingRow, ContractRow, SeatRow, Store, TaskRow};
     use std::collections::BTreeMap;
 
     const T0: i64 = 1_800_000_000;
@@ -2646,6 +2669,153 @@ mod tests {
         assert!(out.contains("plan version 1"), "{out}");
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.state, gear_model::SeatState::Releasing);
+    }
+
+    /// T-216 (F2): the captain seat was replaced (the store holds generation
+    /// 2); a caller that still carries generation 1 is stale and may not end
+    /// a park.
+    fn world_with_a_replaced_captain() -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                tx.insert_seat(&SeatRow {
+                    id: "p:captain".into(),
+                    project: "p".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "codex".into(),
+                    generation: 2,
+                    state: gear_model::SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:captain".into(),
+                    generation: 2,
+                    session: "sess".into(),
+                    pane_id: CAP_PANE.into(),
+                    kind: "codex".into(),
+                    session_ref: None,
+                    status: gear_store::BindingStatus::Active,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    /// A lane parked until a time that has passed, with its agent still in its
+    /// pane.
+    fn park_heat_until_the_past(store: &mut Store) {
+        store
+            .write(|tx| {
+                tx.set_seat_state(
+                    "p:heat",
+                    gear_model::SeatState::Parked,
+                    Some("until=2020-01-01T00:00:00Z"),
+                    T0,
+                )
+            })
+            .unwrap();
+    }
+
+    /// T-216 (F2): `gear plan check` proves its caller as `gear plan apply`
+    /// does: a stale captain (an older generation) is refused and nothing is
+    /// written.
+    #[test]
+    fn plan_check_refuses_a_stale_captain_and_writes_nothing() {
+        let (mut store, mut herdr) = world_with_a_replaced_captain();
+        park_heat_until_the_past(&mut store);
+        let stale = gear_app::Env {
+            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        };
+
+        let error = run_plan_check(&mut store, &stale, &mut herdr).unwrap_err();
+
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::StaleGeneration,
+            "the stale caller is refused: {error}"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(
+            seat.state,
+            gear_model::SeatState::Parked,
+            "nothing was written: the park stays"
+        );
+    }
+
+    /// T-216 (F2): a captain found from its own pane, without `GEAR_CTX`, may
+    /// end a park: the seat is resolved from the pane and proved.
+    #[test]
+    fn plan_check_from_the_captains_pane_without_geom_ctx_ends_an_expired_park() {
+        let (mut store, mut herdr) = world();
+        park_heat_until_the_past(&mut store);
+        // The caller runs in the captain's pane; there is no GEAR_CTX.
+        let anonymous = gear_app::Env {
+            ctx: None,
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        };
+        let env = resolve_caller(&mut store, &mut herdr, anonymous).unwrap();
+        assert!(env.ctx.is_some(), "the captain is found in its pane");
+
+        let out = run_plan_check(&mut store, &env, &mut herdr).unwrap();
+
+        assert!(
+            out.iter().any(|line| line.contains("heat")),
+            "the park ended: {out:?}"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, gear_model::SeatState::Active, "its agent continues");
+        assert_eq!(seat.state_reason.as_deref(), Some("park ended"));
+    }
+
+    /// T-216 (F4): an ordinary apply ends an expired park whose lane's agent
+    /// is still running — the apply reads the session's agents, not only for a
+    /// release.
+    #[test]
+    fn an_ordinary_apply_ends_an_expired_park_with_a_live_agent() {
+        let (mut store, mut herdr) = world();
+        park_heat_until_the_past(&mut store);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p3", "opencode", T0)
+            })
+            .unwrap();
+        // An ordinary apply: the captain holds another lane.
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold wire reason=wait\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(
+            seat.state,
+            gear_model::SeatState::Active,
+            "the expired park ended: its agent continues"
+        );
+        assert_eq!(seat.state_reason.as_deref(), Some("park ended"));
     }
 
     /// T-58: after a successful apply the captain hears about a lane that
