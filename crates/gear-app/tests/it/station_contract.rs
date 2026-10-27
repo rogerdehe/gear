@@ -139,6 +139,13 @@ fn each_third_completion_is_a_station_including_the_final_task() {
     assert!(bodies.iter().any(|b| b.contains("[6 done]")), "{bodies:?}");
     let land = ids.iter().find(|id| item(&mut store, id).body.contains("ready to land")).unwrap().clone();
     assert!(item(&mut store, &land).urgent);
+    // T-171: the landing item points at the three steps of the landing
+    // (design §7.5): the report first, the user before the lanes.
+    let land_body = item(&mut store, &land).body.clone();
+    assert!(land_body.contains("Run `gear report voyage`"), "{land_body}");
+    assert!(land_body.contains("Review it with the user first"), "{land_body}");
+    assert!(land_body.contains("Only then ask about reclaiming the lanes"), "{land_body}");
+    assert!(land_body.contains("station <id>: land"), "{land_body}");
     apply(&mut store, &format!("- station {land}: land"), "land", T0 + 7300).unwrap();
     assert_eq!(item(&mut store, &land).state, MsgState::Resolved);
     assert!(check(&mut store, 14400).is_empty(), "landed voyages do not keep producing time stations");
