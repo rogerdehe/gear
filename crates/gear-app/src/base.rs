@@ -1,6 +1,15 @@
 //! The hand-in gate (T-19): a result may only be handed in from a branch that
 //! contains the project's current integration branch.
 //!
+//! T-221 relaxes that rule for a base that moved *during* the lane's own
+//! work: M4's T-175 was refused twice because `dev` advanced while the lane
+//! merged and ran its 12-minute suite, and merges land every ten minutes — a
+//! lane could race `dev` forever. A candidate that does not contain the
+//! current tip is accepted when it is based on a commit of the integration
+//! branch that is at most `timing.handin_base_window_min` minutes old and the
+//! tip merges into the candidate without a conflict. The merge gate still runs
+//! the full suite on the merged result.
+//!
 //! Two reworks (T-13, T-15) came only from hand-ins that had not merged `dev`:
 //! the candidate was fine on its own base and could not pass the merge gate.
 //! A mechanical check beats a written rule, so [`require_current_base`] fetches
@@ -23,6 +32,9 @@ use std::process::Command;
 pub struct BaseGate {
     pub worktree: PathBuf,
     pub integration: String,
+    /// How many minutes a hand-in may be behind the integration branch and
+    /// still be accepted (T-221): `timing.handin_base_window_min`.
+    pub window_min: u32,
 }
 
 /// The gate for a `gear send --kind result` in this process: the lane's working
@@ -42,13 +54,18 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     // The lane's own repo: a lane in a child repo is checked against that
     // repo's integration branch, not the root's (T-54).
     let integration = config.repo_of_lane(&ctx.seat).integration;
+    let window_min = config.timing.handin_base_window_min;
     let worktree = std::env::current_dir().map_err(|e| {
         GearError::new(
             ErrorCode::BadFormat,
             format!("cannot read the working directory for the hand-in check: {e}"),
         )
     })?;
-    Ok(BaseGate { worktree, integration })
+    Ok(BaseGate {
+        worktree,
+        integration,
+        window_min,
+    })
 }
 
 /// The task branch of a lane: `<lane>/t<n>` (conventions 17 §3).
@@ -178,7 +195,19 @@ pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<Strin
 /// `git fetch origin`, then `git merge-base --is-ancestor origin/<integration>
 /// <candidate>` in `worktree`. Nothing is written here; the caller runs this
 /// before its transaction, so a stale hand-in stores nothing at all.
-pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str) -> GearResult<()> {
+///
+/// `window_min` is the window in which a base that moved during the lane's
+/// own work is still accepted (T-221): a candidate that does not contain the
+/// current tip is accepted when it is based on a commit of the integration
+/// branch that is at most `window_min` minutes old (committer time) and the
+/// tip merges into the candidate without a conflict. `0` is the strict rule:
+/// only a candidate that contains the current tip is accepted.
+pub fn require_current_base(
+    worktree: &Path,
+    integration: &str,
+    candidate: &str,
+    window_min: u32,
+) -> GearResult<()> {
     let where_ = worktree.display();
     // 1. the fetch: the configured source explicitly, into its own tracking ref.
     //    A plain `git fetch origin` follows `remote.origin.fetch`, which a lane's
@@ -221,14 +250,30 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
     match checked {
         // 0: the reference is an ancestor of the candidate — current.
         Ok(out) if out.status.success() => Ok(()),
-        // 1: it is not — the hand-in is stale. The instruction names the remote
-        //    ref: a lane's local branch may lag behind the fetch (review F3).
-        Ok(out) if out.status.code() == Some(1) => Err(GearError::new(
-            ErrorCode::BadFormat,
-            format!(
-                "{candidate} does not contain the current {short}: merge {short} into your branch, build, then hand in again"
-            ),
-        )),
+        // 1: it is not — the hand-in is behind the tip. The instruction names
+        //    the remote ref: a lane's local branch may lag behind the fetch
+        //    (review F3).
+        //
+        //    The tip may have moved while the lane merged and ran its suite
+        //    (T-221): a base that is only just behind is not a stale base.
+        //    Such a candidate is accepted when it is based on a commit of the
+        //    integration branch that is at most `window_min` minutes old and
+        //    the tip merges into it without a conflict — the merge gate still
+        //    runs the full suite on the merged result.
+        Ok(out) if out.status.code() == Some(1) => {
+            if window_min > 0
+                && based_on_recent_base(worktree, &reference, candidate, window_min)?
+                && merges_clean(worktree, &reference, candidate)?
+            {
+                return Ok(());
+            }
+            Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "{candidate} does not contain the current {short}: merge {short} into your branch, build, then hand in again"
+                ),
+            ))
+        }
         // Anything else (unknown revision, not a repository, …): unverifiable.
         Ok(out) => Err(GearError::new(
             ErrorCode::BadFormat,
@@ -242,6 +287,111 @@ pub fn require_current_base(worktree: &Path, integration: &str, candidate: &str)
             format!("cannot run git in {where_}, so the hand-in cannot be checked: {e}"),
         )),
     }
+}
+
+/// Whether the candidate is based on a commit of the integration branch that
+/// is at most `window_min` minutes old (committer time): the base moved
+/// during the lane's own work, but only just (T-221).
+///
+/// The commits are the ones of the integration branch that git itself finds
+/// in the window (`--since`), so the list is short: a branch that lands a
+/// merge every ten minutes has a handful.
+fn based_on_recent_base(
+    worktree: &Path,
+    reference: &str,
+    candidate: &str,
+    window_min: u32,
+) -> GearResult<bool> {
+    let where_ = worktree.display();
+    let now = now_secs();
+    let since = now - i64::from(window_min) * 60;
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args([
+            "log",
+            "--format=%H %ct",
+            &format!("--since=@{since}"),
+            reference,
+        ])
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read the commits of {reference} in {where_}: {error}"),
+            )
+        })?;
+    if !listed.status.success() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot read the commits of {reference} in {where_}: {}",
+                excerpt(&listed.stderr)
+            ),
+        ));
+    }
+    for line in String::from_utf8_lossy(&listed.stdout).lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(sha), Some(when)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let Ok(when) = when.parse::<i64>() else {
+            continue;
+        };
+        // "At most `window_min` minutes older than now": a commit of the
+        // future (a skewed clock) is not older than now, and is inside the
+        // window too.
+        if now - when > i64::from(window_min) * 60 {
+            continue;
+        }
+        if contains(worktree, sha, candidate)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the tip of the integration branch merges into the candidate
+/// without a conflict: `git merge-tree --write-tree` says so (git 2.38 and
+/// later). It writes the merged tree's objects and touches neither the index
+/// nor the worktree.
+fn merges_clean(worktree: &Path, reference: &str, candidate: &str) -> GearResult<bool> {
+    let where_ = worktree.display();
+    let merged = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-tree", "--write-tree", reference, candidate])
+        .output()
+        .map_err(|error| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot run git in {where_}, so the hand-in cannot be checked: {error}"),
+            )
+        })?;
+    match merged.status.code() {
+        // 0: the merge is clean — the suite runs on the merged result.
+        Some(0) => Ok(true),
+        // 1: the merge conflicts — the tip does not fit into the candidate.
+        Some(1) => Ok(false),
+        // Anything else (an unknown revision, a git without `--write-tree`):
+        // unverifiable, never a pass.
+        _ => Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "cannot check whether {candidate} merges with {reference} in {where_}: {}",
+                excerpt(&merged.stderr)
+            ),
+        )),
+    }
+}
+
+/// The wall clock in seconds since the epoch: the clock the commit times are
+/// compared with.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A bounded excerpt of a command's stderr: the `fatal:`/`error:` lines (the
