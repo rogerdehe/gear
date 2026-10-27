@@ -529,3 +529,39 @@ fn owns_overlap_is_checked_between_lanes_of_the_same_repo() {
         "two lanes of one repo own the same paths"
     );
 }
+
+// ---- [[quota.sources]] (design §9.1)
+
+const SOURCES: &str = r#"
+[[quota.sources]]
+provider = "minimax-cn"
+reader = "minimax"
+key_file = "~/.pi/agent/auth.json"
+key_path = "minimax-cn.key"
+"#;
+
+#[test]
+fn the_quota_sources_parse() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert!(cfg.quota.sources.is_empty(), "no source without the section");
+    let cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
+    assert_eq!(cfg.quota.sources.len(), 1);
+    assert_eq!(cfg.quota.sources[0].provider, "minimax-cn");
+    assert_eq!(cfg.quota.sources[0].reader, "minimax");
+    assert_eq!(cfg.quota.sources[0].key_file, "~/.pi/agent/auth.json");
+    assert_eq!(cfg.quota.sources[0].key_path, "minimax-cn.key");
+    assert_eq!(validate(&cfg), vec![], "a source the engine knows is valid");
+}
+
+#[test]
+fn an_unknown_reader_is_a_finding() {
+    let text = SOURCES.replace("reader = \"minimax\"", "reader = \"zen\"");
+    let cfg = parse(&format!("{MINIMAL}{text}")).unwrap();
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["quota.sources.minimax-cn.reader"]
+    );
+    let mut cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
+    cfg.quota.sources[0].provider = "  ".into();
+    assert_eq!(fields(&validate(&cfg)), vec!["quota.sources.provider"]);
+}

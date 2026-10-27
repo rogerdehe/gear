@@ -13,7 +13,6 @@ gear-board = { workspace = true }
 gear-forge = { workspace = true }
 gear-usage = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]

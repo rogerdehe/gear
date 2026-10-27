@@ -134,6 +134,36 @@ pub struct Quota {
     pub temps: u32,
     #[serde(default)]
     pub includes_captain: bool,
+    /// The quota sources of §9.1: the providers whose quota the engine
+    /// reads. Empty = the quota comes from the screen alone.
+    #[serde(default)]
+    pub sources: Vec<QuotaSource>,
+}
+
+/// One quota source of §9.1: a provider whose quota the engine reads.
+///
+/// ```toml
+/// [[quota.sources]]
+/// provider = "minimax-cn"            # the provider part of the model ids
+/// reader = "minimax"                 # minimax | opencode-go | codex
+/// key_file = "~/.pi/agent/auth.json" # the file the key is in
+/// key_path = "minimax-cn.key"        # the dotted path of the key in it
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaSource {
+    /// The provider part of the model ids this source is about.
+    pub provider: String,
+    /// The reader that knows the provider's API: `minimax`, `opencode-go`
+    /// or `codex`.
+    pub reader: String,
+    /// The file the API key is in (`~` is the home folder). The `codex`
+    /// reader reads the rollout of a session and needs no key.
+    #[serde(default)]
+    pub key_file: String,
+    /// The dotted path of the key inside that file.
+    #[serde(default)]
+    pub key_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -654,6 +684,8 @@ pub fn profile_table(
 ///   `src/a` vs `src/ab` do not) — only between lanes of the **same** repo
 ///   (T-52): the same paths in two repos are two different files;
 /// - number of lanes ≤ `quota.lanes`;
+/// - every `[[quota.sources]]`: a provider name and a reader the engine knows
+///   (`minimax`, `opencode-go`, `codex`);
 /// - every `[[repos]]` name: `[a-z][a-z0-9-]*` and unique;
 /// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
@@ -695,6 +727,28 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 format!(
                     "on_quota is \"fallback\" but {field} has no next model: a quota stop would park for {}h. Add a fallback model, or set on_quota to \"wait\"",
                     cfg.models.quota_reset_h
+                ),
+            ));
+        }
+    }
+
+    // ---- quota sources (§9.1): the engine reads the quota of these
+    // providers; a reader it does not know is a finding, not a silent skip.
+    for source in &cfg.quota.sources {
+        let provider = source.provider.trim();
+        if provider.is_empty() {
+            issues.push(issue(
+                "quota.sources.provider",
+                "a quota source needs the provider it is about".to_string(),
+            ));
+            continue;
+        }
+        if gear_usage::QuotaReader::from_name(&source.reader).is_none() {
+            issues.push(issue(
+                &format!("quota.sources.{provider}.reader"),
+                format!(
+                    "the reader {:?} is not one of them: minimax, opencode-go, codex",
+                    source.reader
                 ),
             ));
         }

@@ -101,19 +101,12 @@ pub fn apply_quota_policy_with(
     };
     let config = match gear_app::config::parse(&row.config_toml) {
         Ok(config) => config,
-        // The config struct of gear-app does not know the quota sources yet
-        // (T-147) and it refuses unknown fields: the `[[quota.sources]]`
-        // tables are cut out of the text the strict parse sees. The sources
-        // themselves are read from the raw text below.
-        Err(_) => match gear_app::config::parse(&without_sources(&row.config_toml)) {
-            Ok(config) => config,
-            // A config that does not parse: no policy can be applied.
-            Err(_) => return Ok(report),
-        },
+        // A config that does not parse: no policy can be applied.
+        Err(_) => return Ok(report),
     };
     // §9.1: the sources of the project and their last readings. Every source
     // is read every 5 min; a reading older than 15 min is stale.
-    let sources = sources_of(&row.config_toml);
+    let sources = sources_of(&config);
     report.events.extend(refresh_readings(store, api, &sources, now)?);
 
     for obs in observed {
@@ -921,87 +914,41 @@ const WAIT_AFTER_ERROR_S: i64 = 300;
 /// a minute.
 const SIGNAL_MIN_AGE_S: i64 = 60;
 
-/// A quota source of §9.1: the provider, the reader and where its key is.
+/// A source of §9.1 with the reader the engine uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuotaSource {
+struct Source {
     /// The provider part of the model ids this source is about.
-    pub provider: String,
+    provider: String,
     /// The reader that knows the provider's API.
-    pub reader: QuotaReader,
-    /// The file the key is in (`~` is the home folder).
-    pub key_file: String,
+    reader: QuotaReader,
+    /// The file the key is in.
+    key_file: String,
     /// The dotted path of the key inside that file.
-    pub key_path: String,
+    key_path: String,
 }
 
-/// The config text without the `[[quota.sources]]` tables (§9.1).
+/// The sources of the project config (§9.1): `[[quota.sources]]`.
 ///
-/// The config struct of gear-app does not know the sources yet (T-147) and
-/// it refuses unknown fields, so the tables are cut out of the text the
-/// strict parse sees. The sources themselves are read from the raw text.
-fn without_sources(config_toml: &str) -> String {
-    let mut out = String::new();
-    let mut in_sources = false;
-    for line in config_toml.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_sources = trimmed.starts_with("[[quota.sources]]");
-        }
-        if !in_sources {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-/// The sources of a project config: `[[quota.sources]]` (§9.1).
-///
-/// The engine reads them from the project's raw config text: §9.1 fixes the
-/// shape, and the config struct of gear-app (T-147) can take this parse over
-/// without changing what the engine does.
-pub fn sources_of(config_toml: &str) -> Vec<QuotaSource> {
-    let Ok(value) = config_toml.parse::<toml::Value>() else {
-        return Vec::new();
-    };
-    let Some(list) = value
-        .get("quota")
-        .and_then(|quota| quota.get("sources"))
-        .and_then(toml::Value::as_array)
-    else {
-        return Vec::new();
-    };
-    list.iter()
-        .filter_map(|entry| {
-            let provider = entry
-                .get("provider")
-                .and_then(toml::Value::as_str)?
-                .trim()
-                .to_string();
-            if provider.is_empty() {
-                return None;
-            }
-            let reader = QuotaReader::from_name(entry.get("reader").and_then(toml::Value::as_str)?)?;
-            Some(QuotaSource {
-                provider,
-                reader,
-                key_file: entry
-                    .get("key_file")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                key_path: entry
-                    .get("key_path")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+/// A source whose reader the engine does not know is skipped — the config
+/// names it as a finding, so the captain sees it.
+fn sources_of(config: &ProjectConfig) -> Vec<Source> {
+    config
+        .quota
+        .sources
+        .iter()
+        .filter_map(|source| {
+            Some(Source {
+                provider: source.provider.trim().to_string(),
+                reader: QuotaReader::from_name(&source.reader)?,
+                key_file: source.key_file.clone(),
+                key_path: source.key_path.clone(),
             })
         })
         .collect()
 }
 
 /// The key of a source: the file it is in, then the dotted path in it (§9.1).
-fn key_of(source: &QuotaSource) -> Result<String, String> {
+fn key_of(source: &Source) -> Result<String, String> {
     let path = expand_home(&source.key_file);
     let text = std::fs::read_to_string(&path)
         .map_err(|error| format!("{}: {error}", path.display()))?;
@@ -1163,7 +1110,7 @@ fn store_reading(store: &mut Store, reading: &StoredReading) -> GearResult<()> {
 fn read_source(
     store: &mut Store,
     api: &dyn QuotaApi,
-    source: &QuotaSource,
+    source: &Source,
     now: Ts,
     min_age_s: i64,
 ) -> Result<Reading, String> {
@@ -1212,7 +1159,7 @@ fn read_source(
 fn refresh_readings(
     store: &mut Store,
     api: &dyn QuotaApi,
-    sources: &[QuotaSource],
+    sources: &[Source],
     now: Ts,
 ) -> GearResult<Vec<String>> {
     let mut events = Vec::new();
@@ -1300,11 +1247,11 @@ fn provider_of(model: &str) -> Option<String> {
 /// The source of the seat's provider (§9.1): None when the project has no
 /// source for it.
 fn source_of(
-    sources: &[QuotaSource],
+    sources: &[Source],
     chain: &[&ModelEntry],
     store: &mut Store,
     seat: &SeatRow,
-) -> GearResult<Option<QuotaSource>> {
+) -> GearResult<Option<Source>> {
     if sources.is_empty() {
         return Ok(None);
     }
