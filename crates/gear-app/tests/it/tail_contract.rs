@@ -9,6 +9,7 @@
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::{apply, lane_in_tail, lane_in_tail_at, parse_rfc3339, tailed_lanes, tail_until};
+use gear_app::tasks::{on_delivery_confirmed, settle, start_attempt, submit_result, Verdict};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
 use gear_store::{testing, Store, TaskRow};
@@ -64,8 +65,15 @@ fn cap() -> (Env, Fingerprint) {
 
 /// Apply a plan whose only content is the given decision line.
 fn apply_decision(s: &mut Store, decision: &str, rid: &str) -> gear_model::GearResult<()> {
+    apply_decisions(s, &[decision], rid)
+}
+
+/// Apply a plan whose `# Decisions` carries the given lines — the history the
+/// captain's plan file keeps.
+fn apply_decisions(s: &mut Store, decisions: &[&str], rid: &str) -> gear_model::GearResult<()> {
     let base = s.read(|tx| tx.plan_version("p")).unwrap();
-    let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n- {decision}\n");
+    let lines: String = decisions.iter().map(|d| format!("- {d}\n")).collect();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n{lines}");
     let (env, fp) = cap();
     apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, NOW).map(|_| ())
 }
@@ -202,16 +210,25 @@ fn the_twenty_ninth_of_february_needs_a_leap_year() {
 #[test]
 fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
     let mut s = world();
-    apply_decision(&mut s, "tail: heat until=T-1", "r1").unwrap();
+    // The captain's `# Decisions` history: the lane is tailed, then the tail
+    // gets an end. Both lines stay in the plan file.
+    apply_decisions(&mut s, &["tail: heat", "tail: heat until=T-1"], "r1").unwrap();
     assert!(in_tail(&mut s, "heat", NOW));
 
-    // T-1 is done: the tail ends.
+    // The lane works on T-1 and hands its work in.
     s.write(|tx| {
-        let mut task = tx.get_task("p", "T-1")?.unwrap();
-        task.state = TaskState::Done;
-        tx.update_task(&task)
+        start_attempt(tx, "p", "T-1", "p:heat", 1, NOW)?;
+        on_delivery_confirmed(tx, "p", "T-1", 1, NOW + 1)?;
+        submit_result(tx, "p", "T-1", 1, 1, "c1", "report", NOW + 2)
     })
     .unwrap();
+
+    // The captain passes it: T-1 is done, and the tail it waited for is over.
+    s.write(|tx| settle(tx, &verdict(true), NOW + 3)).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+        TaskState::Done
+    );
     // The path the engine reads the tail through writes the end once.
     assert!(!s.write(|tx| lane_in_tail(tx, "p", "heat")).unwrap());
     assert_eq!(
@@ -220,24 +237,31 @@ fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
         "the end is written"
     );
 
-    // The task is reopened for a rework (a failed merge): the tail stays off.
-    s.write(|tx| {
-        let mut task = tx.get_task("p", "T-1")?.unwrap();
-        task.state = TaskState::Ready;
-        tx.update_task(&task)
-    })
-    .unwrap();
+    // The captain's fail verdict reopens the task for a rework: the tail
+    // stays off.
+    s.write(|tx| settle(tx, &verdict(false), NOW + 4)).unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+        TaskState::Ready,
+        "the task is reopened for a rework"
+    );
     assert!(
         !in_tail(&mut s, "heat", NOW),
         "a reopened task does not revive a tail that ended"
     );
 
-    // The same declaration, replayed (its line is still in the plan file),
-    // does not revive it either.
-    apply_decision(&mut s, "tail: heat until=T-1", "r2").unwrap();
+    // The same decisions, replayed (their lines are still in the plan file),
+    // do not revive it either: the earlier line in the retained history never
+    // clears the marker of the tail that ended.
+    apply_decisions(&mut s, &["tail: heat", "tail: heat until=T-1"], "r2").unwrap();
     assert!(
         !in_tail(&mut s, "heat", NOW),
-        "the same declaration does not revive the tail"
+        "the retained history does not revive the tail"
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_meta("lane-tail:p:heat")).unwrap().as_deref(),
+        Some("0"),
+        "the lane stays untailed"
     );
 
     // A new declaration is a new tail.
@@ -269,4 +293,20 @@ fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
     .unwrap();
     apply_decision(&mut s, "tail: heat until=T-2", "r3").unwrap();
     assert!(in_tail(&mut s, "heat", NOW), "a new declaration is a new tail");
+}
+
+/// The verdict the captain settles an attempt with.
+fn verdict(pass: bool) -> Verdict {
+    Verdict {
+        project: "p".into(),
+        task: "T-1".into(),
+        attempt: 1,
+        contract_version: 1,
+        candidate: "c1".into(),
+        pass,
+        evidence: pass.then(|| "logs/v.md".to_string()),
+        rework: (!pass).then(|| "edge cases".to_string()),
+        integrated_by: None,
+        by_seat: "p:captain".into(),
+    }
 }

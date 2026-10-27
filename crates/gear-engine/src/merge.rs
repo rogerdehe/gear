@@ -1671,13 +1671,21 @@ fn merge_one_locked(
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         let tail = tail(&combined, 12);
+        // T-219: the tail is often slow-test timings, and the captain cannot
+        // see what failed in it. The lines that name a failure come first.
+        let failures = failure_lines(&combined, 20);
         let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
         // not the work. That can clear, so it is retried; every other exit
         // status is the project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
-        let reason = format!("gate failed ({gate}):\n{tail}");
+        let mut reason = format!("gate failed ({gate}):\n");
+        if !failures.is_empty() {
+            reason.push_str(&failures.join("\n"));
+            reason.push('\n');
+        }
+        reason.push_str(&tail);
         return Step::Failed(if status == 126 || status == 127 {
             Failed::clear(reason)
         } else {
@@ -2093,6 +2101,28 @@ fn tail(text: &str, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
+}
+
+/// The lines of a gate's output that name a failure (T-219). A line counts
+/// when it starts (after spaces) with `FAIL`, `TIMEOUT` or `SIGSEGV`, or when
+/// it holds `panicked at`, `error[` or `error:`. The lines keep their order,
+/// and at most `max` of them come back: a gate that fails on everything names
+/// nothing in particular.
+fn failure_lines(text: &str, max: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let starts = trimmed.starts_with("FAIL")
+            || trimmed.starts_with("TIMEOUT")
+            || trimmed.starts_with("SIGSEGV");
+        let holds = line.contains("panicked at")
+            || line.contains("error[")
+            || line.contains("error:");
+        if (starts || holds) && out.len() < max {
+            out.push(line.to_string());
+        }
+    }
+    out
 }
 
 /// Why a Herdr step did not succeed.
@@ -5093,6 +5123,75 @@ gate = "{project_gate}"
         // for the next run).
         let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
         assert_eq!(head, "dev", "{head}");
+    }
+
+    /// T-219: a gate that failed names the failing tests. The tail of a long
+    /// test run is slow-test timings, and the captain could not see what
+    /// failed in it.
+    #[test]
+    fn a_failing_gate_names_the_failing_tests_before_the_tail() {
+        let scratch = Scratch::new("gate-failures");
+        // The FAIL line is far above 40 slow-test lines: the tail alone
+        // would say nothing about what failed.
+        let gate = "printf 'FAIL [t] the_broken_test\\n'; \
+                   i=0; while [ $i -lt 40 ]; do printf 'test slow_%s ... ok (4.2s)\\n' $i; \
+                   i=$((i+1)); done; \
+                   printf 'error: the build failed\\n' >&2; exit 1";
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, gate);
+        accept(&mut store, "T-5", 0);
+
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert!(merged.is_empty(), "{merged:?}");
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let reason = op.result.clone().unwrap_or_default();
+        assert!(reason.contains("FAIL [t] the_broken_test"), "{reason}");
+        // The tail is still there, after the failure lines.
+        assert!(reason.contains("test slow_39 ... ok (4.2s)"), "{reason}");
+        let failure = reason.find("FAIL [t] the_broken_test").unwrap();
+        let tail_line = reason.find("test slow_39 ... ok (4.2s)").unwrap();
+        assert!(failure < tail_line, "the failing line comes before the tail: {reason}");
+
+        // The captain's item carries the same reason.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(
+            inbox[0].body.contains("FAIL [t] the_broken_test"),
+            "{}",
+            inbox[0].body
+        );
+    }
+
+    /// T-219: the failure lines are the ones that name a failure: a line that
+    /// starts (after spaces) with FAIL, TIMEOUT or SIGSEGV, or one that holds
+    /// `panicked at`, `error[` or `error:`.
+    #[test]
+    fn the_failure_lines_are_the_lines_that_name_a_failure() {
+        let text = "running 3 tests\n  FAIL [t] one_test\n\
+                   test ok ... ok (4.2s)\n\
+                   TIMEOUT [t] other_test\n\
+                   SIGSEGV [t] third_test\n\
+                   thread panicked at src/lib.rs:12:5\n\
+                   error[E0308]: mismatched types\n\
+                   error: could not compile\n\
+                   not a failure line\n";
+        let failures = failure_lines(text, 20);
+        assert_eq!(
+            failures,
+            vec![
+                "  FAIL [t] one_test",
+                "TIMEOUT [t] other_test",
+                "SIGSEGV [t] third_test",
+                "thread panicked at src/lib.rs:12:5",
+                "error[E0308]: mismatched types",
+                "error: could not compile",
+            ]
+        );
+        // At most `max` of them come back.
+        let many: String = (0..30)
+            .map(|n| format!("FAIL [t] test_{n}\n"))
+            .collect();
+        assert_eq!(failure_lines(&many, 20).len(), 20);
     }
 
     /// T-41: the gate is the project's build and test command. It must not

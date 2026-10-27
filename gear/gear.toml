@@ -10,8 +10,11 @@ repo = "/Volumes/Data/myai/gear"
 lanes = 4
 temps = 4
 
-# v0.4.0 (M4 05:10): quota from the providers' own APIs (design §9.1). The codex
-# reader is not listed: Codex model ids have no provider part, so no source can match them.
+# v0.4.0 (M4 05:10): quota from the providers' own APIs (design §9.1).
+[[quota.sources]]
+provider = "codex"
+reader = "codex"
+
 [[quota.sources]]
 provider = "minimax-cn"
 reader = "minimax"
