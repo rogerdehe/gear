@@ -501,7 +501,7 @@ fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) 
     let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
     let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-    if let Some(state) = state.filter(|s| s["round"] == identity) {
+    if let Some(state) = state.filter(|s| s["round"] == identity && s["generation"].as_i64() == Some(seat.generation)) {
         match state["step"].as_str() {
             Some("failed") => return Ok(false),
             Some("done") => {},
