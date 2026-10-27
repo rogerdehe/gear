@@ -773,9 +773,15 @@ fn signal_start(
         meta_set(store, &key, &now.to_string())?;
         return Ok(now);
     }
-    Ok(meta_get(store, &key)?
+    if let Some(start) = meta_get(store, &key)?
         .and_then(|value| value.trim().parse::<Ts>().ok())
-        .unwrap_or(now))
+        .filter(|start| *start > 0) {
+        return Ok(start);
+    }
+    // A restart or upgrade can preserve the counter without its new episode
+    // key. Seed it now rather than treating zero as an ancient fresh reading.
+    meta_set(store, &key, &now.to_string())?;
+    Ok(now)
 }
 
 /// A key of the engine's own state in the store's meta.
@@ -3201,12 +3207,25 @@ quota_reset_h = 5
     }
 
     #[test]
+    fn active_episode_with_missing_or_zero_start_is_seeded_and_retained() {
+        let dir=tempfile::tempdir().unwrap(); let key=key_file(dir.path());
+        let mut store=source_world(&key);
+        meta_set(&mut store,&meta_key("quota","p:heat"),"1").unwrap();
+        meta_set(&mut store,&meta_key("quota_signal","p:heat"),"0").unwrap();
+        assert_eq!(count_quota_tick(&mut store,"p:heat",true,T0+4).unwrap().1,T0+4);
+        assert_eq!(count_quota_tick(&mut store,"p:heat",true,T0+8).unwrap().1,T0+4);
+        meta_set(&mut store,&meta_key("quota_error_ticks","p:heat"),"1").unwrap();
+        assert_eq!(count_error_tick(&mut store,"p:heat",true,T0+12).unwrap().1,T0+12);
+        assert_eq!(count_error_tick(&mut store,"p:heat",true,T0+16).unwrap().1,T0+12);
+    }
+
+    #[test]
     fn failed_signal_reads_never_reuse_a_pre_episode_reading() {
         for (quota,error) in [(true,false),(false,true)] {
             for cached_percent in [30.0,100.0] {
                 let dir=tempfile::tempdir().unwrap(); let key=key_file(dir.path());
                 let mut store=source_world(&key);
-                let mut herdr=FakeHerdr::new(); herdr.add_agent(PANE,"opencode",AgentStatus::Idle);
+                let mut herdr=FakeHerdr::new(); herdr.add_agent(PANE,"opencode",gear_herdr::AgentStatus::Idle);
                 let api=FakeQuota::reading(reading_with(cached_percent,Some(T0+1800)));
                 tick_source(&mut store,&mut herdr,&api,false,false,T0);
                 assert_eq!(api.calls(),1);
