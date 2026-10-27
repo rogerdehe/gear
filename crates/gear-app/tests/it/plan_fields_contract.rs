@@ -306,19 +306,25 @@ fn a_pass_over_a_passed_review_needs_no_why() {
     );
 }
 
-/// §10.7 row B03-01: a pass may name the task whose merge landed the work.
+/// §10.7 row B03-01: a pass may name the task whose merge landed the work,
+/// but only a task that is merged: the named task is the merge that landed
+/// this work. (The accepted case and the git side live in
+/// `integrated_by_contract.rs`.)
 #[test]
-fn a_pass_may_name_the_task_that_landed_it() {
+fn a_pass_naming_a_task_that_is_not_merged_is_refused() {
     let mut s = world_with_a_failed_review();
-    run_at(
+    let err = run_at(
         &mut s,
         "# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=ops/reports/T-1.md integrated-by=T-2 why=\"the review missed the edge case\"\n",
         "r2",
     )
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
+    assert!(err.detail.contains("T-2"), "{}", err.detail);
+    // Nothing settled: the attempt is still handed in.
     assert_eq!(
         s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
-        AttemptState::Accepted
+        AttemptState::Submitted
     );
 }
 

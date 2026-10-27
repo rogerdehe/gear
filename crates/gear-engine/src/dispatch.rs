@@ -309,10 +309,8 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         safe_for_next,
         // The plan is durable in meta (T-33): a switch in progress is not
         // forgotten while the quota line is gone.
-        switch_pending: tx
-            .get_meta(&format!("engine.switch.{}", seat.id))?
-            .map(|value| !value.is_empty())
-            .unwrap_or(false),
+        switch_pending: tx.get_meta(&format!("engine.switch.{}", seat.id))?.is_some_and(|value| !value.is_empty())
+            || tx.get_meta(&crate::restart::pending_meta_key(&seat.id))?.is_some_and(|value| !value.is_empty()),
         failed_delivery: crate::delivery::failed(tx, &seat.id)?,
     })
 }

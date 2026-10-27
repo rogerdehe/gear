@@ -98,6 +98,9 @@ pub fn apply(
     // before the write transaction (the store is never held while a subprocess
     // runs) and only for the done tasks this draft cancels.
     let cancellable = cancellable_done_tasks(store, draft)?;
+    // The verdicts that name the merge that landed their work are checked
+    // before anything is written (git runs outside the store transaction).
+    require_integrated_by(store, draft)?;
 
     store.write(|tx| {
         // 1. identity: only the captain applies a plan.
@@ -833,6 +836,55 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
 /// a fetch that fails, a candidate git cannot place — is an error: a
 /// cancellation is never accepted unchecked. A done task with no accepted
 /// candidate has no landed work, so it may be cancelled too.
+/// The verdicts that name the task whose merge landed the work
+/// (design §10.7, row B03-01): the named task must be merged, and the
+/// candidate's tree has to be in the integration branch — otherwise the work
+/// is not there and the verdict is refused.
+///
+/// The store is asked first, so the refusal names the task that is not
+/// merged. Git runs before the write transaction, like the cancellation
+/// check: a fetch comes first, and any doubt — a fetch that fails, a
+/// candidate git cannot place — is an error: a verdict is never accepted
+/// unchecked.
+fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
+    let wanted: Vec<(&String, &String, &String)> = draft
+        .verdicts
+        .iter()
+        .filter(|line| line.pass)
+        .filter_map(|line| {
+            line.integrated_by
+                .as_ref()
+                .map(|by| (&line.task, &line.candidate, by))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let project = draft.project.clone();
+    for (task, candidate, by) in wanted {
+        // The named task must be merged: its merge is the one that landed
+        // this work.
+        let merged = store.read(|tx| crate::tasks::require_merged_at(tx, &project, by))?;
+        let _ = merged;
+        let config = crate::config::latest(store, &project)?;
+        let lane = store.read(|tx| tx.get_task(&project, task))?.and_then(|row| row.lane);
+        let repo = match lane.as_deref() {
+            Some(lane) => config.repo_of_lane(lane),
+            None => config.root_repo(),
+        };
+        if !crate::base::tree_on_integration(&repo.path, &repo.integration, candidate)? {
+            return Err(bad(
+                0,
+                format!(
+                    "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
+                    repo.integration
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeSet<String>> {
     let wanted: Vec<&String> = draft
         .queue
