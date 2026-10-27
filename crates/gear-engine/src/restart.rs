@@ -1004,10 +1004,10 @@ pub(crate) fn reconcile_config(
         // an explicit configuration change.
         let reapply = previous.is_some() || version > 1;
         let kind_changed = reapply && current_cli != target_cli && !quota_fallback && (changed || previous.is_none());
-        let model_changed = reapply && !model.is_empty() && ((changed && previous.as_ref().is_some_and(|old|
-            (old["model"] != desired["model"] && current_model.as_deref() != Some(model))
+        let model_changed = reapply && ((changed && previous.as_ref().is_some_and(|old|
+            (old["model"] != desired["model"] && (model.is_empty() || current_model.as_deref() != Some(model)))
                 || old["args"] != desired["args"]))
-            || (previous.is_none() && current_model.is_some() && current_model.as_deref() != Some(model) && !quota_fallback));
+            || (previous.is_none() && !model.is_empty() && current_model.is_some() && current_model.as_deref() != Some(model) && !quota_fallback));
         if !kind_changed && !model_changed { meta_set(store, &key, &desired.to_string())?; continue }
         let target = ModelEntry::Entry(gear_app::config::ModelSpec {model:model.into(),cli:Some(target_cli.into()),args:args.to_vec(),context_window_k:first.and_then(|e|e.context_window_k())});
         // Persist the request before any terminal action. A crash resumes the
@@ -1113,6 +1113,20 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let round=store.read(|tx|tx.open_round_of_seat("p:heat")).unwrap().unwrap();
         assert_ne!(store.read(|tx|crate::session::round_session(tx,&round)).unwrap().as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("fresh"));
+    }
+    #[test]
+    fn removing_the_model_chain_restarts_without_a_model_flag() {
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap());
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        store.write(|tx| {let mut p=tx.get_project("p")?.unwrap();
+            p.config_toml=p.config_toml.replace("lanes = [{model=\"old-model\", cli=\"pi\"}]", "lanes = []");
+            p.config_version+=1;tx.update_project(&p)}).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some());
+        herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
+        assert!(!args.iter().any(|s|s=="--model"),"{args:?}");
+        assert!(args.windows(2).any(|w|w==["--session","old-session"]),"{args:?}");
     }
     #[test]
     fn config_model_change_resumes_open_session_on_the_same_cli() {
