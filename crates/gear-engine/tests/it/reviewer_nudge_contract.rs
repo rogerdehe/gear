@@ -149,3 +149,20 @@ fn overrun_answer_resets_reviewer_stall_and_starts_a_new_nudge_budget() {
     let stalls=s.read(|tx|tx.thread_messages("p","stall:p:r-1")).unwrap();
     assert!(stalls.iter().any(|m|m.state==MsgState::Open),"{stalls:?}");
 }
+
+#[test]
+fn progress_from_an_earlier_generation_of_the_same_review_still_counts() {
+    let (mut s,mut seat)=world();
+    s.write(|tx| tx.set_seat_generation(&seat.id,2)).unwrap();
+    seat.generation=2;
+    s.write(|tx| {
+        let op=tx.insert_op(&NewOp {project:"p".into(),seat:seat.id.clone(),generation:1,kind:OpKind::Deliver,task:Some("T-7".into()),attempt:Some(1),ref_msg:None,plan_version:None,payload:serde_json::json!({"nudge":3}),created:T0+100})?;
+        tx.set_op_state("p",&op.id,OpState::Confirmed,None,T0+101)?;
+        tx.insert_message(&gear_store::NewMessage {project:"p".into(),thread:"T-7:1".into(),task:Some("T-7".into()),attempt:Some(1),sender:seat.id.clone(),sender_gen:1,recipient:"p:captain".into(),kind:gear_model::MsgKind::Progress,urgent:false,body:"progress".into(),reply_to:None,needs_ack:false,state:gear_model::MsgState::Info,created:T0+200,meta:Some(serde_json::json!({"left":15,"blocker":"none"}).to_string())})?;
+        Ok(())
+    }).unwrap();
+    let (nudged,flagged)=nudge_stopped_reviewers(&mut s,"p",&idle(&seat),COOLDOWN,T0+291).unwrap();
+    assert_eq!((nudged,flagged),(vec![seat.id.clone()],vec![]));
+    let op=s.read(|tx|tx.last_op(&seat.id,OpKind::Deliver)).unwrap().unwrap();
+    assert_eq!(op.payload["nudge"],1);
+}

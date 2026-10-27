@@ -3382,7 +3382,7 @@ fn packet_text(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearResult<
 /// Latest progress for this review, excluding another reviewer or attempt.
 fn review_progress(tx: &Tx<'_>, project: &str, seat: &SeatRow, task: &str, attempt: i64, now: Ts) -> GearResult<Option<Ts>> {
     Ok(tx.progress_of_attempt(project, task, attempt)?.into_iter()
-        .filter(|m| m.sender == seat.id && m.sender_gen == seat.generation && m.created <= now)
+        .filter(|m| m.sender == seat.id && m.created <= now)
         .map(|m| m.created).max())
 }
 
