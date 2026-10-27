@@ -107,7 +107,11 @@ pub fn apply_quota_policy_with(
     // §9.1: the sources of the project and their last readings. Every source
     // is read every 5 min; a reading older than 15 min is stale.
     let sources = sources_of(&config);
-    report.events.extend(refresh_readings(store, api, &sources, now)?);
+    // The codex reader reads the rollout of the reviewer's session (§9.1).
+    let codex_session = codex_session(store, project)?;
+    report
+        .events
+        .extend(refresh_readings(store, api, &sources, now, codex_session.as_deref())?);
 
     for obs in observed {
         let seat = &obs.seat;
@@ -201,11 +205,11 @@ pub fn apply_quota_policy_with(
         //    tail) is not a new fact, and a working agent is never parked on
         //    screen text (M-266): only a stopped agent counts.
         let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;
-        let ticks = count_quota_tick(store, &seat.id, quota)?;
+        let (ticks, quota_start) = count_quota_tick(store, &seat.id, quota, now)?;
         // A provider error is a signal too (§9.2): the source tells a spent
         // quota from an error, and the error is not a quota stop.
         let error = obs.flags.contains(&ScreenFlag::Error) && obs.idle;
-        let error_ticks = count_error_tick(store, &seat.id, error)?;
+        let (error_ticks, error_start) = count_error_tick(store, &seat.id, error, now)?;
         let confirmed = (quota && ticks >= i64::from(profile.confirm_rounds))
             || (error && error_ticks >= i64::from(profile.confirm_rounds));
         // §9.2: the source of the seat's provider decides. Without a source
@@ -214,9 +218,12 @@ pub fn apply_quota_policy_with(
         if !reviewer && (quota || error) {
             let chain = crate::model::role_chain(&config, &seat.name);
             if let Some(source) = source_of(&sources, &chain, store, seat)? {
-                // The signal reads the source at once; the decision waits for
-                // the confirmation of the signal.
-                let read = read_source(store, api, &source, now, SIGNAL_MIN_AGE_S);
+                // A new signal reads the source at once (F1): the reading of
+                // the signal's episode is the one that decides. A read made
+                // after the signal began is shared by the confirmation ticks
+                // and the other seats of the same provider.
+                let since = quota_start.max(error_start);
+                let read = read_source(store, api, &source, now, since, codex_session.as_deref());
                 if confirmed {
                     match read {
                         Ok(reading) => {
@@ -733,14 +740,41 @@ pub fn seats_on_quota(store: &mut Store, project: &str) -> GearResult<Vec<String
 
 /// Count this tick's quota observation: `previous + 1` while the screen shows
 /// a quota flag, back to 0 when it does not.
-fn count_quota_tick(store: &mut Store, seat: &str, quota: bool) -> GearResult<i64> {
+///
+/// The time the episode began is kept too: a **new** signal reads the source
+/// at once (F1), and the reading of that episode is the one that decides.
+fn count_quota_tick(store: &mut Store, seat: &str, quota: bool, now: Ts) -> GearResult<(i64, Ts)> {
     let key = meta_key("quota", seat);
     let previous = meta_get(store, &key)?
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
     let ticks = if quota { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok(ticks)
+    Ok((ticks, signal_start(store, seat, quota, previous == 0, now)?))
+}
+
+/// The time the signal episode of a seat began: `now` when the signal is new,
+/// the time it began when it continues, none when there is no signal.
+fn signal_start(
+    store: &mut Store,
+    seat: &str,
+    signal: bool,
+    fresh: bool,
+    now: Ts,
+) -> GearResult<Ts> {
+    let key = meta_key("quota_signal", seat);
+    if !signal {
+        meta_set(store, &key, "0")?;
+        return Ok(0);
+    }
+    if fresh {
+        // A new signal: the episode begins now, so the source is read at once.
+        meta_set(store, &key, &now.to_string())?;
+        return Ok(now);
+    }
+    Ok(meta_get(store, &key)?
+        .and_then(|value| value.trim().parse::<Ts>().ok())
+        .unwrap_or(now))
 }
 
 /// A key of the engine's own state in the store's meta.
@@ -910,9 +944,6 @@ const READ_EVERY_S: i64 = 300;
 const STALE_AFTER_S: i64 = 900;
 /// How long a seat waits after a provider error (§9.2): 5 min.
 const WAIT_AFTER_ERROR_S: i64 = 300;
-/// How old a reading may be when a signal reads the source at once (§9.2):
-/// a minute.
-const SIGNAL_MIN_AGE_S: i64 = 60;
 
 /// A source of §9.1 with the reader the engine uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1039,6 +1070,38 @@ fn reading_meta_key(provider: &str) -> String {
     format!("quota.reading.{provider}")
 }
 
+/// The meta key of a provider's last **attempt** (§9.1): the last read, be
+/// it a success or a failure. The next periodic read is due five minutes
+/// after it (F2).
+fn attempt_meta_key(provider: &str) -> String {
+    format!("quota.attempt.{provider}")
+}
+
+/// When the source was last read, be it a success or a failure (F2).
+fn load_attempt(store: &mut Store, provider: &str) -> GearResult<Option<Ts>> {
+    Ok(meta_get(store, &attempt_meta_key(provider))?
+        .and_then(|value| value.trim().parse::<Ts>().ok()))
+}
+
+/// The session of the project's codex reviewer: the codex reader reads the
+/// rollout of that session (§9.1, F4).
+fn codex_session(store: &mut Store, project: &str) -> GearResult<Option<String>> {
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if seat.profile != "codex" {
+            continue;
+        }
+        let session = store
+            .read(|tx| tx.get_binding(&seat.id, seat.generation))?
+            .and_then(|binding| binding.session_ref)
+            .filter(|session| !session.trim().is_empty());
+        if session.is_some() {
+            return Ok(session);
+        }
+    }
+    Ok(None)
+}
+
 /// The reading of a provider as it is stored (None when there is none).
 fn load_reading(store: &mut Store, provider: &str) -> GearResult<Option<StoredReading>> {
     let Some(raw) = meta_get(store, &reading_meta_key(provider))? else {
@@ -1105,17 +1168,22 @@ fn store_reading(store: &mut Store, reading: &StoredReading) -> GearResult<()> {
 /// Read the quota of a source (§9.1): the key out of its file, then the
 /// reader of the provider.
 ///
-/// A reading younger than `min_age_s` is kept — the provider is not asked
-/// twice in a minute. `Err` is the reason the source cannot be read.
+/// A reading taken at or after `since` is fresh enough and is kept: the
+/// signal that asks for it is answered by it (F1). `Err` is the reason the
+/// source cannot be read.
+///
+/// The attempt is timed whether it succeeds or not (F2): a provider that
+/// does not answer is not asked again before the next window.
 fn read_source(
     store: &mut Store,
     api: &dyn QuotaApi,
     source: &Source,
     now: Ts,
-    min_age_s: i64,
+    since: Ts,
+    codex_session: Option<&str>,
 ) -> Result<Reading, String> {
     if let Some(stored) = load_reading(store, &source.provider).map_err(|error| error.to_string())? {
-        if !stored.windows.is_empty() && now - stored.read_at < min_age_s {
+        if !stored.windows.is_empty() && stored.read_at >= since {
             return Ok(Reading {
                 provider: stored.provider,
                 windows: stored
@@ -1131,8 +1199,17 @@ fn read_source(
             });
         }
     }
-    let key = key_of(source)?;
-    let reading = api.read(source.reader, &key, None, now)?;
+    // The attempt counts, success or failure (F2).
+    store
+        .write(|tx| tx.set_meta(&attempt_meta_key(&source.provider), &now.to_string()))
+        .map_err(|error| error.to_string())?;
+    // The codex reader needs no key: it reads the rollout of the reviewer's
+    // session (§9.1, F4). The other readers need the key of the provider.
+    let (key, session) = match source.reader {
+        QuotaReader::Codex => (String::new(), codex_session.map(str::to_string)),
+        _ => (key_of(source)?, None),
+    };
+    let reading = api.read(source.reader, &key, session.as_deref(), now)?;
     store_reading(
         store,
         &StoredReading {
@@ -1154,22 +1231,25 @@ fn read_source(
     Ok(reading)
 }
 
-/// Read every source whose reading is older than 5 min (§9.1) and mark a
-/// reading older than 15 min as stale (§9.1).
+/// Read every source that is due (every 5 min after its last attempt, §9.1)
+/// and mark a reading older than 15 min as stale (§9.1).
 fn refresh_readings(
     store: &mut Store,
     api: &dyn QuotaApi,
     sources: &[Source],
     now: Ts,
+    codex_session: Option<&str>,
 ) -> GearResult<Vec<String>> {
     let mut events = Vec::new();
     for source in sources {
-        let stored = load_reading(store, &source.provider)?;
-        let due = stored
-            .as_ref()
-            .map_or(true, |reading| now - reading.read_at >= READ_EVERY_S);
+        // The next read is due five minutes after the last attempt. A
+        // failure is an attempt too (F2): an outage does not make the engine
+        // call the provider on every tick.
+        let attempt = load_attempt(store, &source.provider)?;
+        let due = attempt.map_or(true, |at| now - at >= READ_EVERY_S);
         if due {
-            match read_source(store, api, source, now, READ_EVERY_S) {
+            let since = attempt.map(|at| at + READ_EVERY_S).unwrap_or(now);
+            match read_source(store, api, source, now, since, codex_session) {
                 Ok(_) => {}
                 Err(reason) => events.push(format!(
                     "the quota of {} could not be read: {reason}",
@@ -1331,8 +1411,9 @@ fn load_wait(store: &mut Store, seat: &str) -> GearResult<Option<Wait>> {
     }))
 }
 
-/// Write the wait of a seat.
-fn store_wait(store: &mut Store, seat: &str, wait: &Wait) -> GearResult<()> {
+/// Write the wait of a seat (in the caller's transaction: a park and its
+/// deadline are one fact, F3).
+fn write_wait(tx: &Tx<'_>, seat: &str, wait: &Wait) -> GearResult<()> {
     let value = serde_json::json!({
         "kind": wait.kind,
         "until": wait.until,
@@ -1342,19 +1423,22 @@ fn store_wait(store: &mut Store, seat: &str, wait: &Wait) -> GearResult<()> {
         "task": wait.task,
         "pause": wait.pause,
     });
-    meta_set(store, &wait_meta_key(seat), &value.to_string())
+    tx.set_meta(&wait_meta_key(seat), &value.to_string())
 }
 
 /// Count this tick's provider error: `previous + 1` while the screen shows
 /// an error, back to 0 when it does not.
-fn count_error_tick(store: &mut Store, seat: &str, error: bool) -> GearResult<i64> {
+/// Count this tick's provider error: `previous + 1` while the screen shows
+/// an error, back to 0 when it does not. The start of the episode is kept,
+/// as for the quota marker (F1).
+fn count_error_tick(store: &mut Store, seat: &str, error: bool, now: Ts) -> GearResult<(i64, Ts)> {
     let key = meta_key("quota_error_ticks", seat);
     let previous = meta_get(store, &key)?
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(0);
     let ticks = if error { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok(ticks)
+    Ok((ticks, signal_start(store, seat, error, previous == 0, now)?))
 }
 
 /// Count the provider errors of a seat in a row (§9.2): the second one is a
@@ -1374,14 +1458,19 @@ fn reset_error_episodes(store: &mut Store, seat: &str) -> GearResult<()> {
     meta_set(store, &meta_key("quota_errors", seat), "0")
 }
 
-/// Park a seat and open its pause row (§5.4). False when the seat's state
-/// does not allow the park (a retiring lane, for instance).
+/// Park a seat, open its pause row and write its deadline — **one**
+/// transaction (F3): a restart between two writes left a parked lane without
+/// a deadline, and it never woke up.
+///
+/// False when the seat's state does not allow the park (a retiring lane, for
+/// instance).
 fn park_seat(
     store: &mut Store,
     project: &str,
     seat: &SeatRow,
     reason: &str,
     pause_reason: Option<&str>,
+    wait: &Wait,
     now: Ts,
 ) -> GearResult<bool> {
     let parked = store.write(|tx| {
@@ -1398,6 +1487,8 @@ fn park_seat(
         // The prompt the provider killed is retired: the policy handles this
         // seat, and the Continue at the reset is its delivery again.
         retire_unconfirmed_deliveries(tx, project, seat, now)?;
+        // The deadline of the wait, with the park (F3).
+        write_wait(tx, &seat.id, wait)?;
         Ok(true)
     })?;
     Ok(parked)
@@ -1419,12 +1510,22 @@ fn park_for_quota(
 ) -> GearResult<String> {
     let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
     let reason = format!("quota: {provider} {window}; resume at {until}");
+    let wait = Wait {
+        kind: "quota".to_string(),
+        until,
+        started_at: now,
+        provider: provider.to_string(),
+        window: window.to_string(),
+        task,
+        pause: true,
+    };
     let parked = park_seat(
         store,
         project,
         seat,
         &reason,
         Some(&format!("{provider} {window}")),
+        &wait,
         now,
     )?;
     if !parked {
@@ -1433,19 +1534,6 @@ fn park_for_quota(
             seat.id
         ));
     }
-    store_wait(
-        store,
-        &seat.id,
-        &Wait {
-            kind: "quota".to_string(),
-            until,
-            started_at: now,
-            provider: provider.to_string(),
-            window: window.to_string(),
-            task,
-            pause: true,
-        },
-    )?;
     reset_error_episodes(store, &seat.id)?;
     Ok(format!(
         "{}: parked until {until} (quota: {provider} {window})",
@@ -1468,26 +1556,22 @@ fn wait_for_provider(
     let until = now + WAIT_AFTER_ERROR_S;
     let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
     let reason = format!("provider error, not quota; try again at {until}");
-    let parked = park_seat(store, project, seat, &reason, None, now)?;
+    let wait = Wait {
+        kind: "error".to_string(),
+        until,
+        started_at: now,
+        provider: provider.to_string(),
+        window: String::new(),
+        task,
+        pause: false,
+    };
+    let parked = park_seat(store, project, seat, &reason, None, &wait, now)?;
     if !parked {
         return Ok(format!(
             "{}: the provider of {provider} errors, but the seat cannot park",
             seat.id
         ));
     }
-    store_wait(
-        store,
-        &seat.id,
-        &Wait {
-            kind: "error".to_string(),
-            until,
-            started_at: now,
-            provider: provider.to_string(),
-            window: String::new(),
-            task,
-            pause: false,
-        },
-    )?;
     if second {
         // The second time in a row: the captain hears about it (§9.2).
         alert_provider_error(store, project, seat, now)?;
@@ -1510,12 +1594,22 @@ fn park_unreadable(
     let until = now + i64::from(reset_h.max(1)) * 3600;
     let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
     let reason = format!("quota: the source of {provider} cannot be read; resume at {until}");
+    let wait = Wait {
+        kind: "unreadable".to_string(),
+        until,
+        started_at: now,
+        provider: provider.to_string(),
+        window: String::new(),
+        task,
+        pause: true,
+    };
     let parked = park_seat(
         store,
         project,
         seat,
         &reason,
         Some(&format!("{provider} unreadable")),
+        &wait,
         now,
     )?;
     if !parked {
@@ -1524,19 +1618,6 @@ fn park_unreadable(
             seat.id
         ));
     }
-    store_wait(
-        store,
-        &seat.id,
-        &Wait {
-            kind: "unreadable".to_string(),
-            until,
-            started_at: now,
-            provider: provider.to_string(),
-            window: String::new(),
-            task,
-            pause: true,
-        },
-    )?;
     reset_error_episodes(store, &seat.id)?;
     Ok(format!(
         "{}: parked until {until} (the source of {provider} cannot be read)",
@@ -1546,6 +1627,11 @@ fn park_unreadable(
 
 /// A wait that ended: the seat continues its task in the same session (§9.2,
 /// §3.3 S4).
+///
+/// The whole wake is **one** transaction (F3): the pause row ends, the round's
+/// clock takes its pause, the seat works again, the Continue is delivered and
+/// the wait is cleared — all of it or none of it. A restart between two of
+/// these writes left a lane awake without its Continue, or paused twice.
 fn wake_from_source(
     store: &mut Store,
     project: &str,
@@ -1558,23 +1644,36 @@ fn wake_from_source(
     if wait.until > now {
         return Ok(None);
     }
-    // The pause row ends (§5.4) and the round's clock pauses for the whole
-    // wait (§5.1): the round clocks take their pauses from these rows.
-    if wait.pause {
-        let _ = store.write(|tx| tx.close_pause(project, &seat.id, "quota", now));
-        if let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? {
-            let key = RoundKey {
-                project: project.to_string(),
-                task: round.task.clone(),
-                attempt: round.attempt,
-                role: round.role.clone(),
-            };
-            let secs = (now - wait.started_at).max(0);
-            let _ = store.write(|tx| tx.add_round_pause(&key, secs));
-        }
-    }
-    // The seat works again.
+    // The Continue: the same session, the same task (§9.2).
+    let open = open_attempt(store, &seat.id)?;
+    let text = match wait.task.as_deref() {
+        Some(task) => format!("Continue {task}: your quota is back."),
+        None => "Continue: your quota is back.".to_string(),
+    };
     store.write(|tx| {
+        // The pause row ends (§5.4) and the round's clock pauses for the
+        // whole wait (§5.1): the round clocks take their pauses from these
+        // rows.
+        if wait.pause {
+            let open_pause = tx
+                .pauses_of_project(project)?
+                .into_iter()
+                .any(|pause| pause.seat == seat.id && pause.kind == "quota" && pause.end_at.is_none());
+            if open_pause {
+                tx.close_pause(project, &seat.id, "quota", now)?;
+            }
+            if let Some(round) = tx.open_round_of_seat(&seat.id)? {
+                let key = RoundKey {
+                    project: project.to_string(),
+                    task: round.task.clone(),
+                    attempt: round.attempt,
+                    role: round.role.clone(),
+                };
+                let secs = (now - wait.started_at).max(0);
+                tx.add_round_pause(&key, secs)?;
+            }
+        }
+        // The seat works again.
         let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
         })?;
@@ -1592,36 +1691,8 @@ fn wake_from_source(
                 now,
             )?;
         }
-        Ok(())
-    })?;
-    // The Continue: the same session, the same task (§9.2).
-    let text = match wait.task.as_deref() {
-        Some(task) => format!("Continue {task}: your quota is back."),
-        None => "Continue: your quota is back.".to_string(),
-    };
-    deliver_continue(store, project, seat, &text, now)?;
-    // The wait is over: the counters of the next signal start again.
-    meta_set(store, &wait_meta_key(&seat.id), "")?;
-    meta_set(store, &quota_meta_key(&seat.id), "0")?;
-    meta_set(store, &meta_key("quota_error_ticks", &seat.id), "0")?;
-    Ok(Some(format!(
-        "{}: continues after the wait ({})",
-        seat.id, wait.kind
-    )))
-}
-
-/// The Continue of §9.2: the seat continues its task, in the same session.
-fn deliver_continue(
-    store: &mut Store,
-    project: &str,
-    seat: &SeatRow,
-    text: &str,
-    now: Ts,
-) -> GearResult<()> {
-    let open = open_attempt(store, &seat.id)?;
-    store.write(|tx| {
-        // The delivery the provider killed is retired: the Continue below is
-        // the seat's delivery again.
+        // The Continue: the delivery the provider killed is retired, and the
+        // Continue is the seat's delivery again.
         retire_unconfirmed_deliveries(tx, project, seat, now)?;
         tx.insert_op(&NewOp {
             project: project.to_string(),
@@ -1635,8 +1706,16 @@ fn deliver_continue(
             payload: serde_json::json!({ "text": text }),
             created: now,
         })?;
+        // The wait is over: the counters of the next signal start again.
+        tx.set_meta(&wait_meta_key(&seat.id), "")?;
+        tx.set_meta(&quota_meta_key(&seat.id), "0")?;
+        tx.set_meta(&meta_key("quota_error_ticks", &seat.id), "0")?;
         Ok(())
-    })
+    })?;
+    Ok(Some(format!(
+        "{}: continues after the wait ({})",
+        seat.id, wait.kind
+    )))
 }
 
 /// The captain item of a parked lane (§9.2): the lane waits for the provider.
@@ -2753,6 +2832,7 @@ quota_reset_h = 5
     struct FakeQuota {
         answer: std::cell::RefCell<Result<gear_usage::Reading, String>>,
         calls: std::cell::RefCell<Vec<String>>,
+        sessions: std::cell::RefCell<Vec<Option<String>>>,
     }
 
     impl FakeQuota {
@@ -2761,6 +2841,7 @@ quota_reset_h = 5
             FakeQuota {
                 answer: std::cell::RefCell::new(Ok(reading)),
                 calls: std::cell::RefCell::new(Vec::new()),
+                sessions: std::cell::RefCell::new(Vec::new()),
             }
         }
 
@@ -2769,7 +2850,24 @@ quota_reset_h = 5
             FakeQuota {
                 answer: std::cell::RefCell::new(Err(reason.to_string())),
                 calls: std::cell::RefCell::new(Vec::new()),
+                sessions: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        /// The provider answers differently from now on (a quota that ran out
+        /// between two readings).
+        fn set_answer(&self, reading: gear_usage::Reading) {
+            *self.answer.borrow_mut() = Ok(reading);
+        }
+
+        /// How many times the provider was asked.
+        fn calls(&self) -> usize {
+            self.calls.borrow().len()
+        }
+
+        /// The sessions the reader was given.
+        fn sessions(&self) -> Vec<Option<String>> {
+            self.sessions.borrow().clone()
         }
     }
 
@@ -2778,12 +2876,15 @@ quota_reset_h = 5
             &self,
             reader: QuotaReader,
             key: &str,
-            _codex_session: Option<&str>,
+            codex_session: Option<&str>,
             now: Ts,
         ) -> Result<gear_usage::Reading, String> {
             self.calls
                 .borrow_mut()
                 .push(format!("{}:{key}", reader.name()));
+            self.sessions
+                .borrow_mut()
+                .push(codex_session.map(str::to_string));
             let mut answer = self.answer.borrow_mut();
             match &mut *answer {
                 Ok(reading) => {
@@ -2924,6 +3025,12 @@ quota_reset_h = 5
         assert_eq!(pauses[0].kind, "quota");
         assert_eq!(pauses[0].reason.as_deref(), Some("minimax-cn MiniMax-M3.1-Flash 5h"));
         assert_eq!(pauses[0].end_at, None);
+        // The park and its deadline are one fact (F3): a parked lane always
+        // has the time it wakes up.
+        let wait = load_wait(&mut store, "p:heat")
+            .unwrap()
+            .expect("the deadline of the wait");
+        assert_eq!(wait.until, until);
 
         // At the reset the lane continues in the same session (§9.2, §3.3 S4).
         tick_source(&mut store, &mut herdr, &api, false, false, until);
@@ -2931,6 +3038,12 @@ quota_reset_h = 5
         let delivered = deliveries(&mut store);
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0], "Continue T-1: your quota is back.");
+        // The wake and its Continue are one fact too (F3): an awake lane has
+        // its Continue and no wait.
+        assert!(
+            load_wait(&mut store, "p:heat").unwrap().is_none(),
+            "the wait is over"
+        );
         // The pause row ends and the round's clock pauses for the wait (§5.1).
         let pauses = store.read(|tx| tx.pauses_of_project("p")).unwrap();
         assert_eq!(pauses[0].end_at, Some(until));
@@ -3049,5 +3162,106 @@ quota_reset_h = 5
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["stale"], true, "{value}");
         assert_eq!(value["read_at"], T0 - 1200, "the old reading is kept");
+    }
+
+    /// F1: a new signal reads the source at once. The periodic reading said
+    /// quota is left; the provider ran out before the signal came: the
+    /// decision must be the fresh reading.
+    #[test]
+    fn a_new_signal_reads_the_source_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(30.0, Some(T0 + 1800)));
+
+        // The periodic read (no signal yet).
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 10);
+        assert_eq!(api.calls(), 1, "the periodic read");
+
+        // The provider is spent now.
+        api.set_answer(reading_with(100.0, Some(T0 + 1800)));
+
+        // The signal comes: the source is read again, at once.
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 20);
+        assert_eq!(api.calls(), 2, "the signal reads the source at once");
+        // The confirmation tick shares that reading: no second call.
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 30);
+        assert_eq!(api.calls(), 2, "the confirmation shares the reading");
+        // The lane parks until the reset of the spent window plus a minute.
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked, "{seat:?}");
+        let until = T0 + 1800 + 60;
+        assert!(
+            seat.state_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&until.to_string()),
+            "{seat:?}"
+        );
+    }
+
+    /// F2: a source that cannot be read is read again in the next window,
+    /// not on every tick: an outage does not stall the engine.
+    #[test]
+    fn an_unreadable_source_is_read_every_five_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::failing("the provider does not answer");
+
+        // No signal, no lane on a limit: the engine reads the source on its
+        // own schedule.
+        tick_source(&mut store, &mut herdr, &api, false, false, T0);
+        assert_eq!(api.calls(), 1, "the first read");
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 4);
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 8);
+        assert_eq!(api.calls(), 1, "no read before the window is over");
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 300);
+        assert_eq!(api.calls(), 2, "the next window reads again");
+    }
+
+    /// F4: a codex source needs no key file: the reader is given the session
+    /// of the codex reviewer, and its reading is kept.
+    #[test]
+    fn a_codex_source_reads_the_session_of_the_reviewer() {
+        let mut store = codex_world();
+        let mut herdr = FakeHerdr::new();
+        let api = FakeQuota::reading(reading_with(10.0, None));
+
+        // The periodic read of the codex source.
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 10);
+        assert_eq!(api.calls(), 1, "the source was read");
+        assert_eq!(
+            api.sessions(),
+            vec![Some("ses_codex".to_string())],
+            "the reader got the session of the reviewer"
+        );
+        let raw = meta_get(&mut store, "quota.reading.codex")
+            .unwrap()
+            .expect("the reading is kept");
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["provider"], "codex");
+        assert_eq!(value["read_at"], T0 + 10);
+    }
+
+    /// A project with a codex reviewer and a codex source without a key file
+    /// (§9.1, F4).
+    fn codex_world() -> Store {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        text.push_str(
+            "\n[[quota.sources]]\nprovider = \"codex\"\nreader = \"codex\"\n",
+        );
+        let mut store = world(&text);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "codex-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
+                tx.set_binding_session_ref("p:codex-1", 1, "ses_codex")
+            })
+            .unwrap();
+        store
     }
 }
