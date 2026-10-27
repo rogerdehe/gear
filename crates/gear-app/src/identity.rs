@@ -564,6 +564,13 @@ impl std::fmt::Display for WhoAmI {
 /// It never fails: the answer to "who am I" is a report, not a refusal. The
 /// pane comes from the process ancestry (T-104) and the seat from the store's
 /// bindings (T-126), so an agent that claims a seat it does not own sees why.
+///
+/// The reason is the one the commands themselves give: the effective
+/// environment is resolved the way every command resolves it (a caller
+/// without `GEAR_CTX` that runs in a bound pane **is** the seat of that pane,
+/// T-126) and the claim is then checked read-only — the observation and the
+/// seat check. `prove_seat` is never used: it writes a claim report, and
+/// `whoami` only reports.
 pub fn whoami(
     store: &mut Store,
     env: &Env,
@@ -576,7 +583,23 @@ pub fn whoami(
         .filter(|pid| **pid >= 0)
         .map(|pid| *pid as u32)
         .collect();
-    let pane = caller_pane(herdr, &ancestors, env.pane_id.as_deref());
+    let store_path = std::env::var(gear_model::ctx::ENV_DB).unwrap_or_default();
+    // The effective environment: the same resolution every command does, so
+    // whoami explains the commands (a caller in a bound pane without a
+    // context is the seat of that pane).
+    let effective = match resolve_env(store, env, herdr, &ancestors) {
+        Ok(env) => env,
+        Err(error) => {
+            let pane = caller_pane(herdr, &ancestors, env.pane_id.as_deref());
+            return WhoAmI {
+                pane,
+                seat: None,
+                store: store_path,
+                reason: Some(error.detail),
+            };
+        }
+    };
+    let pane = caller_pane(herdr, &ancestors, effective.pane_id.as_deref());
     let seat = pane.as_deref().and_then(|pane| {
         store
             .read(|tx| seat_bound_to(tx, pane))
@@ -584,26 +607,44 @@ pub fn whoami(
             .flatten()
             .map(|seat| seat.id)
     });
-
-    let store_path = std::env::var(gear_model::ctx::ENV_DB).unwrap_or_default();
-    let reason = match (&env.ctx, &pane, &seat) {
-        (None, _, _) => Some("no GEAR_CTX in the environment".to_string()),
-        (Some(_), None, _) => Some(
-            "this session does not know the pane the caller runs in".to_string(),
-        ),
-        (Some(_), Some(_), None) => {
-            Some("no seat is bound to the pane the caller runs in".to_string())
-        }
-        (Some(ctx), Some(pane), Some(seat)) => {
-            let claimed = ctx.seat_id();
-            if claimed != *seat {
-                Some(format!(
-                    "the seat {claimed} is not the seat of the pane {pane} ({seat})"
-                ))
-            } else {
-                None
-            }
-        }
+    // The claim, checked the way every command checks it and read-only: the
+    // observation of the pane, then the seat check (the generation, the
+    // binding, the pane, the kind).
+    let reason = match observe(&effective, herdr, &ancestors) {
+        Err(error) => Some(error.detail),
+        Ok(fingerprint) => match effective.ctx.as_ref() {
+            // No seat at all: the user’s own shell, or a pane that hosts no
+            // seat of this project.
+            None => Some(match pane.as_deref() {
+                Some(pane) => {
+                    format!("no seat is bound to the pane the caller runs in ({pane})")
+                }
+                None => "no GEAR_CTX in the environment".to_string(),
+            }),
+            Some(_) if seat.is_none() => Some(match pane.as_deref() {
+                Some(pane) => {
+                    format!("no seat is bound to the pane the caller runs in ({pane})")
+                }
+                None => "the seat of the caller is not bound to a pane".to_string(),
+            }),
+            Some(ctx) => match store.read(|tx| {
+                require_seat(tx, &effective, fingerprint.as_ref(), None, None)
+            }) {
+                Ok(_) => None,
+                Err(error) => {
+                    // The claim failed: name the seat the pane really has, so
+                    // the caller sees both what it claimed and what is true.
+                    let claimed = ctx.seat_id();
+                    Some(match seat.as_deref() {
+                        Some(real) if real != claimed => format!(
+                            "{} (the seat of that pane is {real})",
+                            error.detail
+                        ),
+                        _ => error.detail,
+                    })
+                }
+            },
+        },
     };
     WhoAmI {
         pane,
