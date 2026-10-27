@@ -15,7 +15,7 @@
 
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, GearResult, OpKind, SeatRole, SeatState, TaskState, Ts};
+use gear_model::{AttemptState, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{BindingStatus, SeatRow, Store};
 
 /// What the release step did in one tick.
@@ -36,7 +36,9 @@ pub struct ReleaseReport {
 ///    alive, the pane stays open, the job binding ends;
 /// 2. a reviewer whose job is gone (the task was cancelled, a newer attempt
 ///    was handed in) leaves;
-/// 3. the Standby reviewers that the rule of §3.6 releases are released.
+/// 3. a reviewer that is still starting and whose job is gone is cancelled:
+///    its start op is voided, its pane is closed, the seat is free;
+/// 4. the Standby reviewers that the rule of §3.6 releases are released.
 pub fn release_finished_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -76,6 +78,23 @@ pub fn release_finished_reviews(
                     continue;
                 }
                 match release_one(store, herdr, project, &seat, Some(&task), now) {
+                    Ok(true) => report.released.push(seat.id.clone()),
+                    Ok(false) => {}
+                    Err(_) => report.failed.push(seat.id.clone()),
+                }
+            }
+            // A reviewer that is still starting and whose job is gone: the
+            // start is cancelled (design §3.6, B03-05). A Queued reviewer
+            // waits for a slot and a seat a human has to look at is left
+            // alone.
+            SeatState::Starting => {
+                let Some(task) = seat.task_id.clone() else {
+                    continue;
+                };
+                if under_review(store, project, &seat, &task)? {
+                    continue;
+                }
+                match cancel_start(store, herdr, project, &seat, now) {
                     Ok(true) => report.released.push(seat.id.clone()),
                     Ok(false) => {}
                     Err(_) => report.failed.push(seat.id.clone()),
@@ -152,6 +171,74 @@ fn working_lanes(store: &mut Store, project: &str) -> GearResult<i64> {
         }
         Ok(working)
     })
+}
+
+/// Cancel the start of a reviewer whose job is gone (design §3.6, B03-05):
+/// the ops of the seat that are still live are voided, its pane is closed, its
+/// binding ends and the seat is free.
+///
+/// The transition `Starting → Released` is not in the model's table yet (§3.6
+/// is new): the captain's own `- release <reviewer>` states its transition
+/// the same way (`gear-app/src/plan.rs`).
+fn cancel_start(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> Result<bool, String> {
+    // 1. nothing goes to a reviewer that has no job: the ops of the seat that
+    //    are still live are voided.
+    let live = store
+        .read(|tx| tx.slot_ops(&seat.id))
+        .map_err(|e| e.detail)?;
+    if !live.is_empty() {
+        store
+            .write(|tx| {
+                for op in tx.slot_ops(&seat.id)? {
+                    tx.set_op_state(
+                        project,
+                        &op.id,
+                        OpState::Void,
+                        Some("the review it was started for is gone"),
+                        now,
+                    )?;
+                }
+                Ok(())
+            })
+            .map_err(|e| e.detail)?;
+    }
+
+    // 2. the pane goes: the agent that was starting has nothing to do.
+    if let Some(pane) = bound_pane(store, seat)?.as_deref() {
+        match herdr.pane_close(pane) {
+            Outcome::Ok(()) => {}
+            Outcome::Refused { code, .. } if code == "pane_not_found" => {}
+            Outcome::Refused { code, message } => {
+                return Err(format!("pane_close: refused ({code}): {message}"))
+            }
+            Outcome::Uncertain { reason } => return Err(format!("pane_close: {reason}")),
+        }
+    }
+
+    // 3. the seat is free: its binding ends with the start, and it waits for
+    //    the next review as a free seat.
+    store
+        .write(|tx| {
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding.status != BindingStatus::Void {
+                    tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                }
+            }
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Released,
+                Some("the review it was started for is gone"),
+                now,
+            )
+        })
+        .map_err(|e| e.detail)?;
+    Ok(true)
 }
 
 /// Whether the reviewer still has work: its task is `Verifying`, its attempt is
@@ -519,11 +606,24 @@ fn binding_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, Str
         .map_err(|e| e.detail)
 }
 
+/// The pane of the seat's binding, whatever its status: a seat that is still
+/// starting has a pending binding, and its pane is the one that has to go.
+fn bound_pane(store: &mut Store, seat: &SeatRow) -> Result<Option<String>, String> {
+    let (id, generation) = (seat.id.clone(), seat.generation);
+    store
+        .read(|tx| {
+            Ok(tx
+                .get_binding(&id, generation)?
+                .map(|binding| binding.pane_id))
+        })
+        .map_err(|e| e.detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
-    use gear_store::{testing, ProjectRow, TaskRow};
+    use gear_store::{testing, NewOp, ProjectRow, TaskRow};
 
     const T0: i64 = 1_800_000_000;
 
@@ -1077,25 +1177,106 @@ profile = "codex"
     }
 
     #[test]
-    fn a_queued_or_starting_reviewer_is_never_released() {
-        // R1 of the review: a reviewer waiting for a slot (Queued) or one that
-        // is starting holds no worktree, and releasing it would throw away the
-        // review it is about to do — even when its task is already cancelled.
+    fn a_queued_reviewer_is_never_released() {
+        // R1 of the review: a reviewer waiting for a slot (Queued) holds no
+        // worktree, and releasing it would throw away the review it is waiting
+        // to do — even when its task is already cancelled. A reviewer that is
+        // *starting* is cancelled instead (design §3.6, B03-05).
         let mut herdr = FakeHerdr::new();
         let mut store = world(TaskState::Cancelled, "w1:p1", "codex");
-        for state in [SeatState::Queued, SeatState::Starting] {
-            store
-                .write(|tx| tx.set_seat_state("p:r-1", state, Some("waiting"), T0))
-                .unwrap();
-            let report =
-                release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
-            assert!(report.released.is_empty(), "{state:?}: {report:?}");
-            assert!(report.failed.is_empty(), "{state:?}: {report:?}");
-            assert_eq!(exits(&herdr), 0, "{state:?}: no exit");
-            assert!(removes(&herdr).is_empty(), "{state:?}: no removal");
-            let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-            assert_eq!(seat.state, state, "left exactly as it was");
-        }
+        store
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Queued, Some("waiting"), T0))
+            .unwrap();
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(exits(&herdr), 0, "no exit");
+        assert!(removes(&herdr).is_empty(), "no removal");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Queued, "left exactly as it was");
+    }
+
+    /// T-143 (design §3.6, B03-05): a reviewer that is still starting and
+    /// whose job is gone is cancelled: its start op is voided, its pane is
+    /// closed, the seat is free.
+    #[test]
+    fn a_starting_reviewer_whose_job_is_gone_is_cancelled() {
+        let mut herdr = FakeHerdr::new();
+        let mut store = world(TaskState::Ready, "w2:p2", "codex");
+        // The reviewer is starting its review, and the packet is on its way.
+        store
+            .write(|tx| {
+                tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:r-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "the packet" }),
+                    created: T0,
+                })
+            })
+            .unwrap();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the seat is free");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+        assert!(removes(&herdr).is_empty(), "its worktree is kept");
+        let op = store.read(|tx| tx.last_op("p:r-1", OpKind::Deliver)).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "its start op is voided");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
+    }
+
+    /// T-143 (design §3.6): a reviewer that is still starting and whose job
+    /// is alive goes on starting.
+    #[test]
+    fn a_starting_reviewer_whose_job_is_alive_keeps_starting() {
+        let mut herdr = FakeHerdr::new();
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        store
+            .write(|tx| {
+                tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })
+            })
+            .unwrap();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting, "it goes on");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
 
     #[test]
