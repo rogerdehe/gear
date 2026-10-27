@@ -839,41 +839,46 @@ fn actual_min_of(
 /// The finished voyages are not in `voyages` (the home page and the station
 /// watch the active ones only), but their measurements are still true: a
 /// landed voyage keeps its burn-up and its lanes.
-/// The tokens of a task's rounds (§4.3): None when no round counted them.
+/// The tokens of a task's rounds (§4.3): None when a round counted none of
+/// them, so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0;
-    let mut counted = false;
     for round in &rounds {
         // The fields' presence says what was counted: a round that counted
-        // nothing is a measured zero, not an unknown (F5).
-        if round.input.is_some()
-            || round.output.is_some()
-            || round.cache_read.is_some()
-            || round.cache_write.is_some()
+        // nothing is a measured zero, not an unknown (F5). A round that has
+        // none of the four counted fields counted nothing at all: the sum
+        // hides it, so the sum is unknown (F5 of the T-166 review). The
+        // fields that are absent on a measured round stay absent.
+        if round.input.is_none()
+            && round.output.is_none()
+            && round.cache_read.is_none()
+            && round.cache_write.is_none()
         {
-            counted = true;
+            return Ok(None);
         }
         total += round.input.unwrap_or(0)
             + round.output.unwrap_or(0)
             + round.cache_read.unwrap_or(0)
             + round.cache_write.unwrap_or(0);
     }
-    Ok(counted.then_some(total))
+    Ok((!rounds.is_empty()).then_some(total))
 }
 
-/// The cost of a task's rounds (§4.4): None when no round priced them.
+/// The cost of a task's rounds (§4.4): None when a round priced none of them,
+/// so a sum is never a total that hides an unknown part (F5).
 fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0.0;
-    let mut priced = false;
     for round in &rounds {
-        if let Some(cost) = round.cost_usd {
-            priced = true;
-            total += cost;
-        }
+        // A round that was never priced is unknown, not a price of zero:
+        // the sum that hides it is not a total (F5 of the T-166 review).
+        let Some(cost) = round.cost_usd else {
+            return Ok(None);
+        };
+        total += cost;
     }
-    Ok(priced.then_some(total))
+    Ok((!rounds.is_empty()).then_some(total))
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).
