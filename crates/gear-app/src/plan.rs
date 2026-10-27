@@ -1258,6 +1258,13 @@ fn retry_lane(
             ),
         )
     })?;
+    let rebind_key = format!("engine.rebind.{seat_id}");
+    if let Some(mut phase) = tx.get_meta(&rebind_key)?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) {
+        if phase["phase"] == "exiting" {
+            phase["phase"] = serde_json::Value::String("retry".into());
+            tx.set_meta(&rebind_key, &phase.to_string())?;
+        }
+    }
     tx.set_seat_state(
         &seat_id,
         SeatState::Queued,
