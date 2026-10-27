@@ -692,12 +692,13 @@ pub fn confirm_pending_with(
                     // review delivery is settled by a verdict row, not by a
                     // view: say so, so the stored explanation can be traced
                     // (P3 of the T-5 review).
-                    let evidence = if op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)? {
-                        format!(
-                            "verdict {} attempt {} @ {view_ts}",
-                            op.task.as_deref().unwrap_or("-"),
-                            op.attempt.unwrap_or(0)
-                        )
+                    let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
+                    let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
+                        view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
+                    let evidence = if review_delivery {
+                        format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
+                    } else if hand_in {
+                        format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else {
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
@@ -712,9 +713,11 @@ pub fn confirm_pending_with(
                             // §3.2 step 5: at the check-in the attempt records
                             // the session it ran in.
                             record_attempt_session(tx, project, &op)?;
-                            // The lane is not stuck any more (design §10.3):
-                            // its stall item closes with the confirmation.
                             crate::stall::resolve(tx, project, &op.seat, now, None)?;
+                        } else if hand_in {
+                            // A result already started and submitted the
+                            // attempt. A newer stall belongs to later work.
+                            crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
                         }
                     }
                     confirmed.push(op.id.clone());
@@ -837,12 +840,14 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // it — a retry of this very delivery (design §10.3): the lane
             // recovered either way, so its stall item closes as well.
             let started_here = start_confirmed_attempt(tx, project, &op, now)?;
+            let mut late_hand_in_key = None;
             if !started_here {
-                let already = tx
-                    .get_attempt(project, task, attempt)?
-                    .map(|row| row.state == AttemptState::Started)
-                    .unwrap_or(false);
-                if !already {
+                let state = tx.get_attempt(project, task, attempt)?.map(|row| row.state);
+                if matches!(state, Some(AttemptState::Submitted | AttemptState::Accepted | AttemptState::Rejected)) {
+                    let key = format!("engine.delivery_late_handin.{}.{}", project, op.id);
+                    if tx.get_meta(&key)?.is_some_and(|value| !value.is_empty()) { continue }
+                    late_hand_in_key = Some(key);
+                } else if state != Some(AttemptState::Started) {
                     continue;
                 }
             }
@@ -850,6 +855,7 @@ pub fn confirm_late_views(store: &mut Store, project: &str, now: Ts) -> GearResu
             // predate the check-in, so a later failure of the same lane keeps
             // its own item.
             crate::stall::resolve(tx, project, &op.seat, now, Some(view_ts))?;
+            if let Some(key) = late_hand_in_key { tx.set_meta(&key, "1")?; }
             confirmed.push(format!("{task}/{attempt} @ {view_ts}"));
         }
         Ok(confirmed)
@@ -910,12 +916,16 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         return Ok(None);
     };
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    Ok(views
-        .iter()
-        .find(|view| {
-            view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
-        })
-        .map(|view| view.ts))
+    if let Some(view) = views.iter().find(|view| view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)) {
+        return Ok(Some(view.ts));
+    }
+    // A hand-in from this seat proves it received the attempt even when no
+    // check-in view was recorded. Do not flag its delivery as unconfirmed.
+    let row = tx.get_attempt(&op.project, task, attempt)?;
+    if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
+        return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
+    }
+    Ok(None)
 }
 
 /// The session the attempt ran in (design §3.2 step 5): at the check-in the
