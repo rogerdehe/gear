@@ -444,7 +444,12 @@ pub fn recover_open_rounds(
             });
             let running = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .is_some_and(|s| (unsent || s["action"] == "resume") && s["step"] != "done" && s["step"] != "failed");
+                .is_some_and(|s| {
+                    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+                    s["round"] == identity && (unsent || s["action"] == "resume")
+                        && (s["generation"].as_i64() != Some(seat.generation)
+                            || (s["step"] != "done" && s["step"] != "failed"))
+                });
             Ok((mismatch || running).then_some((round.task, round.attempt)))
         })?;
         if let Some((task, attempt)) = recovery {
