@@ -27,6 +27,8 @@ pub struct DoorbellInput {
     pub pane_id: String,
     /// From observe: present, reachable state, idle with no Busy flag.
     pub idle: bool,
+    /// Live agent state; None means the seat is not reachable.
+    pub status: Option<gear_herdr::AgentStatus>,
     /// Seat holds a delivery slot (Intended/Executing/Submitted/Unknown deliver/doorbell op).
     pub slot_busy: bool,
     /// When the last doorbell op for this seat was settled (Confirmed/Failed/Void), if any.
@@ -156,6 +158,11 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
         return false; // a delivery already occupies the seat
     }
     let at_once = input.waiting.iter().any(|item| item.at_once);
+    match input.status {
+        Some(gear_herdr::AgentStatus::Blocked) | None => return false,
+        Some(gear_herdr::AgentStatus::Unknown) => return input.waiting.iter().any(|item| item.urgent && item.at_once),
+        _ => {}
+    }
     if !input.idle {
         // A working agent is only interrupted for a message that must reach
         // it now (T-130).
@@ -176,5 +183,5 @@ fn named(input: &DoorbellInput) -> Vec<DoorbellItem> {
     if input.idle {
         return input.waiting.clone();
     }
-    input.waiting.iter().filter(|item| item.at_once).cloned().collect()
+    input.waiting.iter().filter(|item| item.at_once && (input.status != Some(gear_herdr::AgentStatus::Unknown) || item.urgent)).cloned().collect()
 }

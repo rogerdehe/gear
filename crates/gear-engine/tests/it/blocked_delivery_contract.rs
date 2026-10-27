@@ -1,9 +1,10 @@
 //! T-68: a blocked seat is not re-delivered every tick (trial G09).
 //!
 //! While Herdr reports a seat blocked, the engine kept creating a delivery op
-//! that the blocked agent refused, every ~4 s. Now a blocked seat gets no new
-//! delivery: at most one stays pending, the blocked-seat alert (T-57) carries
-//! it, and when the seat works or is idle again it is delivered once.
+//! that the blocked agent refused, every ~4 s. Now a blocked seat gets no
+//! delivery at all (design §10.2: only `idle` and `done` are ready, and a
+//! blocked agent is never ready), the blocked-seat alert (T-57) carries it,
+//! and when the seat works or is idle again it is delivered once.
 
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
@@ -106,7 +107,7 @@ fn ticks(w: &mut World, from: i64, to: i64) {
 }
 
 #[test]
-fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
+fn a_blocked_seat_gets_no_delivery_and_one_after_it_clears() {
     let mut w = world(AgentStatus::Blocked);
     // Ten ticks while the agent sits on its dialog.
     ticks(&mut w, 0, 10);
@@ -158,7 +159,7 @@ fn a_blocked_seat_keeps_one_pending_delivery_and_gets_one_after_it_clears() {
 /// alerted (its pane is a dialog nobody may ignore), and session preparation
 /// waits; when the dialog clears the assignment is delivered once.
 #[test]
-fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
+fn a_retiring_blocked_lane_is_alerted_and_gets_no_delivery() {
     let mut w = world(AgentStatus::Blocked);
     // The session is not prepared while the lane is blocked.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
@@ -203,19 +204,17 @@ fn a_retiring_blocked_lane_is_alerted_and_its_delivery_waits() {
             })
         })
         .unwrap();
-    // The next tick confirms it. (A later Continue is the normal nudge of a
-    // lane that never worked; the assignment itself went once.)
+    // The dialog is dismissed, but the lane is retiring: the dispatch never
+    // assigns to a retiring seat, so no delivery goes out (design/09).
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 180).unwrap();
     let ops = deliveries(&mut w);
-    let assignment = ops
-        .iter()
-        .find(|op| op.payload.get("text").and_then(|v| v.as_str()).is_some_and(|t| t.starts_with("New task T-1")))
-        .expect("the task was delivered");
-    assert_eq!(assignment.state, OpState::Confirmed, "{ops:?}");
-    assert_eq!(
-        w.herdr.prompts_to(LANE).iter().filter(|prompt| prompt.contains("New task T-1")).count(),
-        1,
-        "the assignment went once: {:?}",
+    assert!(
+        ops.is_empty(),
+        "a retiring seat is never handed a task: {ops:?}"
+    );
+    assert!(
+        w.herdr.prompts_to(LANE).is_empty(),
+        "nothing was typed into it: {:?}",
         w.herdr.prompts_to(LANE)
     );
 }
