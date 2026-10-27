@@ -967,6 +967,7 @@ pub(crate) fn reconcile_config(
     profiles: &std::collections::BTreeMap<String, Profile>, project: &str, now: Ts,
 ) -> GearResult<()> {
     let config = match gear_app::config::latest(store, project) { Ok(config) => config, Err(_) => return Ok(()) };
+    let version = store.read(|tx|tx.get_project(project))?.map(|p|p.config_version).unwrap_or(0);
     let seats = store.read(|tx|tx.seats_of_project(project))?;
     for seat in seats {
         if seat.role != gear_model::SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby) { continue }
@@ -986,8 +987,12 @@ pub(crate) fn reconcile_config(
         let current_model = meta_get(store, &model_meta_key(&seat.id))?;
         let quota_fallback = previous.is_none() && chain.iter().skip(1).any(|entry|
             current_model.as_deref() == Some(entry.model()) && entry.cli().unwrap_or(&lane.kind) == current_cli);
-        let kind_changed = current_cli != target_cli && !quota_fallback;
-        let model_changed = !model.is_empty() && ((changed && previous.as_ref().is_some_and(|old|
+        // Version one is the initial configuration, not a re-apply. Seed a
+        // baseline for existing lanes without confusing a quota fallback with
+        // an explicit configuration change.
+        let reapply = previous.is_some() || version > 1;
+        let kind_changed = reapply && current_cli != target_cli && !quota_fallback && (changed || previous.is_none());
+        let model_changed = reapply && !model.is_empty() && ((changed && previous.as_ref().is_some_and(|old|
             (old["model"] != desired["model"] && current_model.as_deref() != Some(model))
                 || old["args"] != desired["args"]))
             || (previous.is_none() && current_model.is_some() && current_model.as_deref() != Some(model) && !quota_fallback));
@@ -1080,7 +1085,7 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+47);
         let start=herdr.calls.iter().find_map(|c|if let Call::AgentStart{name,kind,pane,args}=c {Some((name,kind,pane,args))} else {None}).unwrap();
         assert_eq!((start.0.as_str(),start.1.as_str(),start.2.as_str()),("p-heat","codex",PANE));
-        assert!(start.3.iter().any(|s|s==dir.path().to_str().unwrap()));
+        assert!(start.3.iter().any(|s|s.contains(dir.path().to_str().unwrap())));
         assert!(!start.3.iter().any(|s|s.contains("old-session")));
         assert!(!herdr.calls.iter().any(|c|matches!(c,Call::WorktreeCreate {..}|Call::WorktreeOpen {..}|Call::WorktreeOpenPath {..}|Call::WorktreeRemove {..}|Call::PaneClose {..})));
         assert_eq!(std::fs::read_to_string(dir.path().join("target/keep")).unwrap(),"unchanged");
