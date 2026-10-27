@@ -482,10 +482,11 @@ fn the_merge_passes_the_head_it_must_merge() {
 #[test]
 fn the_state_of_a_pull_request_is_read() {
     let (dir, forge) = forge_with("pr-state", None);
+    // `gh` names the merge commit as an object.
     answer_for(
         &dir,
         "pr-view",
-        r#"{"state":"MERGED","mergeCommit":"sha99","headRefOid":"abc1234"}"#,
+        r#"{"state":"MERGED","mergeCommit":{"oid":"sha99"},"headRefOid":"abc1234"}"#,
     );
     let pr = PrRef {
         repo: "owner/name".to_string(),
@@ -509,6 +510,27 @@ fn the_state_of_a_pull_request_is_read() {
             "state,mergeCommit,headRefOid"
         ]
     );
+}
+
+/// Design §11.3: a pull request that is not merged yet names no commit.
+#[test]
+fn an_open_pull_request_names_no_merge_commit() {
+    let (dir, forge) = forge_with("pr-state-open", None);
+    answer_for(
+        &dir,
+        "pr-view",
+        r#"{"state":"OPEN","mergeCommit":null,"headRefOid":"abc1234"}"#,
+    );
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    let state = forge.pr_state(&pr).expect("the state");
+    assert_eq!(state.state, "OPEN");
+    assert!(state.is_open(), "{state:?}");
+    assert_eq!(state.merge_commit, None, "no commit yet");
+    assert_eq!(state.head_ref_oid.as_deref(), Some("abc1234"));
 }
 
 /// Design §11.3: an interrupted claim is adopted by its branch.

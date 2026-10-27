@@ -198,7 +198,7 @@ fn run_task(
     // there after all — the branch names it.
     if pr.is_none() {
         if let Some(op) = unknown_claim_of(fact, ops) {
-            pr = adopt_claim(store, project, forge, fact, &op, now)?;
+            pr = adopt_claim(store, project, forge, fact, &op, budget, now)?;
         }
     }
     let delivered = fact
@@ -281,8 +281,14 @@ fn adopt_claim(
     forge: &dyn Forge,
     fact: &Fact,
     op: &OpRow,
+    budget: &mut usize,
     now: Ts,
 ) -> GearResult<Option<PrRef>> {
+    if *budget == 0 {
+        // This tick's calls are spent: the adoption waits for the next one.
+        return Ok(None);
+    }
+    *budget -= 1;
     let branch = branch_of(&fact.lane, &fact.task);
     // A forge that cannot answer keeps the claim unknown: the next tick
     // tries again.
@@ -331,7 +337,9 @@ fn land_op_of(fact: &Fact, land_ops: &[OpRow], pr: &PrRef) -> Option<LandOp> {
             Some(LandOp {
                 op: op.clone(),
                 pr: PrRef {
-                    repo: fact.github.repo.clone(),
+                    // The confirmed claim's pull request: its repo and its
+                    // number are the ones the claim names (F4).
+                    repo: pr.repo.clone(),
                     number,
                     url: pr.url.clone(),
                 },
@@ -375,13 +383,18 @@ fn reconcile_land(
     budget: &mut usize,
     now: Ts,
 ) -> GearResult<Outcome> {
+    if *budget == 0 {
+        // This tick's calls are spent: the reconciliation waits for the next
+        // one.
+        return Ok(Outcome::Pending);
+    }
+    *budget -= 1;
     // A forge that cannot answer keeps the op as it is: the next tick
     // reconciles it again.
     let Ok(state) = forge.pr_state(&land.pr) else {
         return Ok(Outcome::Pending);
     };
-    if state.is_merged() {
-        let result = serde_json::json!({ "merge_commit": state.merge_commit }).to_string();
+    if let Some(result) = merged_result(&state) {
         store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
         return Ok(Outcome::Done(result));
     }
@@ -413,17 +426,31 @@ fn merge_and_record(
         return Ok(Outcome::Pending);
     }
     *budget -= 1;
+    // The op is Executing before the call: an engine that stops here leaves
+    // an op whose outcome is unknown, never one that looks untouched (F3).
+    store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Executing,
+        Some("the merge runs"), now))?;
     match forge.merge(&land.pr, land.method, &land.head) {
         Ok(_) => {
             // The merge commit is read from the pull request (§11.2 step 5).
-            // A forge that cannot answer leaves the op unknown: the next
-            // tick reconciles it by the pull request's own state.
+            // A pull request that is not merged yet leaves the op unknown: the
+            // next tick reconciles it by the pull request's own state (F2).
+            if *budget == 0 {
+                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
+                    Some("the merge ran; its commit is not read yet"), now))?;
+                return Ok(Outcome::Pending);
+            }
+            *budget -= 1;
             let Ok(state) = forge.pr_state(&land.pr) else {
                 store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
                     Some("the merge ran; its commit is not read yet"), now))?;
                 return Ok(Outcome::Pending);
             };
-            let result = serde_json::json!({ "merge_commit": state.merge_commit }).to_string();
+            let Some(result) = merged_result(&state) else {
+                store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Unknown,
+                    Some("the merge was accepted; the pull request is not merged yet"), now))?;
+                return Ok(Outcome::Pending);
+            };
             store.write(|tx| tx.set_op_state(project, &land.op.id, OpState::Confirmed, Some(&result), now))?;
             Ok(Outcome::Done(result))
         }
@@ -438,6 +465,16 @@ fn merge_and_record(
             Ok(Outcome::Pending)
         }
     }
+}
+
+/// The result of a merged pull request: its merge commit. None when the pull
+/// request is not merged yet or names no commit (F2).
+fn merged_result(state: &crate::PrState) -> Option<String> {
+    if !state.is_merged() {
+        return None;
+    }
+    let commit = state.merge_commit.clone().filter(|commit| !commit.trim().is_empty())?;
+    Some(serde_json::json!({ "merge_commit": commit }).to_string())
 }
 
 /// The claim of a task whose first attempt was delivered (T-91): a draft pull

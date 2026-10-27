@@ -123,7 +123,7 @@ pub struct PrState {
     #[serde(default)]
     pub state: String,
     /// The commit the merge created, when the pull request is merged.
-    #[serde(rename = "mergeCommit", default)]
+    #[serde(rename = "mergeCommit", default, deserialize_with = "merge_commit")]
     pub merge_commit: Option<String>,
     /// The sha the pull request's head points at.
     #[serde(rename = "headRefOid", default)]
@@ -200,6 +200,26 @@ pub trait Forge {
 
     /// Close an issue, with one closing comment.
     fn close_issue(&self, repo: &str, number: u64, comment: &str) -> ForgeResult<()>;
+}
+
+/// The commit `gh` names: an object `{"oid": "…"}`. An answer that is a
+/// plain sha is read too.
+fn merge_commit<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Commit {
+        Oid { oid: String },
+        Sha(String),
+    }
+    let commit = Option::<Commit>::deserialize(deserializer)?;
+    Ok(match commit {
+        Some(Commit::Oid { oid }) => Some(oid),
+        Some(Commit::Sha(sha)) => Some(sha),
+        None => None,
+    })
 }
 
 /// `gh --json labels` answers an array of objects (`[{"name": "bug", …}]`);
