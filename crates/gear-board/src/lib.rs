@@ -1243,13 +1243,23 @@ pub fn run_with(
                             panel = None;
                             break;
                         }
-                    } else if y > frame::FIRST_ROW as u16 {
-                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize;
-                        // A click outside the rows of the view is ignored.
-                        if index < rows {
-                            selected = index;
-                            panel = None;
-                            break;
+                    } else {
+                        // Only the rows the frame draws are rows of the view
+                        // (F8): the click is on the screen row, the spacer
+                        // below the data and the footer's row select nothing.
+                        let row = y.saturating_sub(1) as usize;
+                        let last = keys.size().1.saturating_sub(2);
+                        if row >= frame::FIRST_ROW && row < last {
+                            // The rows above the viewport are scrolled away:
+                            // the clicked row is the one the frame drew.
+                            let scroll = frame::scroll_of(rows, selected, keys.size().1);
+                            let index = (row - frame::FIRST_ROW) + scroll;
+                            // A click outside the rows of the view is ignored.
+                            if index < rows {
+                                selected = index;
+                                panel = None;
+                                break;
+                            }
                         }
                     }
                 }
