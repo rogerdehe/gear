@@ -18,7 +18,11 @@ fn key(project: &str, message: &str) -> String {
 fn stale(message: &MessageRow, period: i64, now: Ts) -> bool {
     // T-51 overlap warnings ring once per shared-file set. A changed set
     // creates a fresh message; ordinary stale reminders would defeat that latch.
-    !(message.kind == gear_model::MsgKind::System && message.thread.starts_with("parallel:"))
+    // T-169's friction item waits in the inbox until its reports are closed:
+    // the ordinary stale reminder would turn it urgent and ring the captain a
+    // second time for the same reports (design §6.4).
+    !(message.kind == gear_model::MsgKind::System
+        && (message.thread.starts_with("parallel:") || message.thread == "friction"))
         && message.state == MsgState::Open && now - message.created >= period
 }
 
