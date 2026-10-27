@@ -534,6 +534,12 @@ fn take_seat(
 
 fn pending_review_key(seat: &str) -> String { format!("engine.review_pending.{seat}") }
 
+fn review_model_key(seat: &str) -> String { format!("engine.review_model_entry.{seat}") }
+
+fn review_model_entry(kind: &str, entry: Option<&ModelEntry>) -> String {
+    serde_json::json!({ "cli": kind, "model": entry.map(ModelEntry::model), "args": entry.map(ModelEntry::args).unwrap_or(&[]) }).to_string()
+}
+
 /// Create the temp seat bound to `task`: one transaction, so two ticks cannot
 /// create two seats for the same task.
 ///
@@ -771,6 +777,13 @@ fn start_reviewer(
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
+        let selected = review_model_entry(kind, entry);
+        let recorded = store.read(|tx| tx.get_meta(&review_model_key(&seat.id)))?;
+        if recorded.as_deref() != Some(selected.as_str()) {
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now)
+                .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
+            return Ok(Started::NotYet);
+        }
         let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
         if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
         if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
@@ -790,24 +803,19 @@ fn start_reviewer(
         return Ok(Started::Yes);
     }
 
-    // V1 must be decided while the seat is still Released: onboarding moves
-    // it to Starting, which is not a V1 seat.
-    if seat.state == SeatState::Released {
-        let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
-        if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
-        if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
-            return Ok(Started::NotYet);
-        }
-    }
-
     // 2. a new job is a new generation of the seat: the previous binding is
     //    voided and a pending one is opened on the same pane. An interrupted
     //    start keeps the pending binding it already has.
     let pending = binding.as_ref().map(|binding| binding.status == BindingStatus::Pending).unwrap_or(false);
     let generation = if pending { seat.generation } else { seat.generation + 1 };
     if !pending {
-        if let Err(reason) =
-            store.write(|tx| gear_app::seats::begin_onboard(tx, &seat.id, &pane, kind, now))
+        if let Err(reason) = store.write(|tx| {
+            let generation = gear_app::seats::begin_onboard(tx, &seat.id, &pane, kind, now)?;
+            if seat.state == SeatState::Released {
+                tx.set_meta(&format!("engine.review_released.{}.{generation}", seat.id), "1")?;
+            }
+            Ok(())
+        })
         {
             park(store, &seat.id, &format!("begin_onboard: {}", reason.detail), now)?;
             return Ok(Started::NotYet);
@@ -846,7 +854,19 @@ fn start_reviewer(
     };
     if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
 
-    let current_seat = store.read(|tx| tx.get_seat(&seat.id))?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "review seat disappeared"))?;
+    if occupant.is_none() {
+        let mut env_command = format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path);
+        if let Some(start) = model.and_then(|model| model_start(kind, model)) {
+            if !start.env.is_empty() { env_command = format!("{env_command}; {}", start.env); }
+        }
+        if !env_ready(store, herdr, &seat.id, generation, &pane, &env_command)? { return Ok(Started::NotYet) }
+        record_start(store, &seat.id, generation, &pane, kind, &label)?;
+        if let Some(model) = model { store.write(|tx| tx.set_meta(&crate::model::model_meta_key(&seat.id), model))?; }
+    }
+    let mut current_seat = store.read(|tx| tx.get_seat(&seat.id))?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "review seat disappeared"))?;
+    if store.read(|tx| tx.get_meta(&format!("engine.review_released.{}.{generation}", seat.id)))?.as_deref() == Some("1") {
+        current_seat.state = SeatState::Released;
+    }
     if crate::session::prepare_review(store, herdr, cfg, &current_seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
         return Ok(Started::NotYet);
     }
@@ -873,20 +893,6 @@ fn start_reviewer(
             //    takes one. It is set in the confirmed shell — the pane holds
             //    no agent — and before the checkout, so the shell has applied
             //    it long before the reviewer starts.
-            let mut env_command = format!(
-                "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
-                config.project.id, seat.name, generation, cfg.db_path
-            );
-            if let Some(start) = model.and_then(|model| model_start(kind, model)) {
-                if !start.env.is_empty() {
-                    env_command = format!("{env_command}; {}", start.env);
-                }
-            }
-            if !env_ready(store, herdr, &seat.id, generation, &pane, &env_command)? {
-                // A fresh worktree's shell needs a few seconds: the next tick tries.
-                return Ok(Started::NotYet);
-            }
-
             // 5. the seat's checkout takes the job's branch at the approved
             //    candidate: this is also where the previous job's uncommitted
             //    changes go (never the ignored files, so `target/` and the
@@ -952,6 +958,8 @@ fn start_reviewer(
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.set_seat_task(&seat.id, &task.task)?;
         tx.set_meta(&pending_review_key(&seat.id), "")?;
+        tx.set_meta(&review_model_key(&seat.id), &review_model_entry(kind, entry))?;
+        if let Some(model) = model { tx.set_meta(&crate::model::model_meta_key(&seat.id), model)?; }
         // The task's reviewer session is kept: a re-review of the same task
         // resumes it instead of starting a new conversation (F3).
         tx.set_meta(&session_cli_key(&config.project.id, &task.task), kind)?;
@@ -3125,6 +3133,44 @@ profile = "opencode"
         assert_eq!(report.started, vec!["p:review-1"]);
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
         assert!(calls.iter().any(|(path, args)| path == "/child-review" && args.iter().any(|arg| arg == "review/t2")), "{calls:?}");
+    }
+
+    #[test]
+    fn standby_reviewer_changes_model_before_a_rereview() {
+        let chain = "review = [{ model = \"gpt-6.1-sol\", cli = \"codex\" }, { model = \"gpt-6-astra\", cli = \"codex\" }]";
+        let mut store = world(&CONFIG.replace(REVIEW_CHAIN, chain));
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1"))).unwrap().as_deref(), Some("gpt-6.1-sol"));
+        store.write(|tx| {
+            tx.add_round_session(&gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() }, "review-session")?;
+            tx.set_binding_session_ref("p:review-1", 1, "review-session")?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Rejected; tx.update_attempt(&attempt)?;
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Ready; tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")?;
+            tx.set_meta(&crate::model::model_meta_key("p:heat"), "gpt-6.1-sol")?;
+            gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 12)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 12)?;
+            gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "report", T0 + 12)
+        }).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 13).unwrap();
+        assert!(report.started.is_empty(), "the new model must be ready before delivery");
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Releasing);
+        assert!(!store.read(|tx| tx.ops_of_seat_kind("p:review-1", OpKind::Deliver)).unwrap().iter().any(|op| op.attempt == Some(2)));
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 14).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
+        assert!(report.started.is_empty(), "resume waits for the session runner");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Starting);
+        let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Pending);
+        assert!(recorded_start(&mut store, &seat.id, seat.generation, &binding.pane_id, "codex").unwrap());
+        let action = store.read(|tx| tx.get_meta("engine.review_action.p.T-1.2")).unwrap().unwrap();
+        let action: serde_json::Value = serde_json::from_str(&action).unwrap();
+        assert_eq!(action["action"], "resume");
+        assert_eq!(action["session_ref"], "review-session");
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id))).unwrap().as_deref(), Some("gpt-6-astra"));
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
