@@ -272,6 +272,9 @@ pub struct TaskBoard {
     pub actual_min: Option<i64>,
     /// How many rounds the task had.
     pub rounds: usize,
+    /// How many rounds the task has in the rounds table (§4.1): a dev round
+    /// and a review round are two rounds of one attempt.
+    pub stored_rounds: usize,
     /// The tokens of the task's rounds, when they are counted (§4.3).
     pub tokens: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
@@ -426,6 +429,7 @@ pub fn project_with_agents(
             est_min: task.estimate_min,
             actual_min: actual_min_of(tx, project, &task.id, now)?,
             rounds: tx.attempts_of_task(project, &task.id)?.len(),
+            stored_rounds: tx.rounds_of_task(project, &task.id)?.len(),
             tokens: tokens_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
         };
@@ -589,9 +593,17 @@ pub fn project_with_agents(
             .count();
     }
 
+    let voyages = voyage::reports(tx, project, now)?;
+    let workload = workload_voyage(tx, project, now)?;
+    // The decisions belong to the voyage the board measures (F3).
+    let decisions = decisions_of(
+        tx,
+        project,
+        workload.as_ref().map(|voyage| voyage.milestone.as_str()),
+    )?;
     Ok(ProjectBoard {
-        voyages: voyage::reports(tx, project, now)?,
-        workload: workload_voyage(tx, project, now)?,
+        voyages,
+        workload,
         project: project.to_string(),
         captain_quota: tx.captain_quota(project)?.filter(|state| !state.resumed).map(|state| CaptainQuotaBoard {
             reset_at: state.reset_at, remaining_s: (state.reset_at - now).max(0),
@@ -603,7 +615,7 @@ pub fn project_with_agents(
         graph,
         graph_lanes,
         quota: quota_readings(tx)?,
-        decisions: decisions_of(tx, project, voyage_of(tx, project)?.as_deref())?,
+        decisions,
         frictions: frictions_of(tx, project)?,
         waiting,
         temps,
@@ -833,14 +845,19 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
     let mut total = 0;
     let mut counted = false;
     for round in &rounds {
-        let tokens = round.input.unwrap_or(0)
+        // The fields' presence says what was counted: a round that counted
+        // nothing is a measured zero, not an unknown (F5).
+        if round.input.is_some()
+            || round.output.is_some()
+            || round.cache_read.is_some()
+            || round.cache_write.is_some()
+        {
+            counted = true;
+        }
+        total += round.input.unwrap_or(0)
             + round.output.unwrap_or(0)
             + round.cache_read.unwrap_or(0)
             + round.cache_write.unwrap_or(0);
-        if tokens > 0 {
-            counted = true;
-        }
-        total += tokens;
     }
     Ok(counted.then_some(total))
 }
@@ -857,14 +874,6 @@ fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
         }
     }
     Ok(priced.then_some(total))
-}
-
-/// The milestone of the project's voyage: the decisions belong to it.
-fn voyage_of(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>> {
-    Ok(tx
-        .voyages_of_project(project)?
-        .first()
-        .map(|voyage| voyage.milestone.clone()))
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).

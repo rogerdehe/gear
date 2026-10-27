@@ -392,19 +392,24 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
 /// the agents' friction reports (the prototype).
 fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
     let mut rows = Vec::new();
-    for (index, decision) in project.decisions.iter().enumerate() {
+    // The starred decisions are the ones the user reads in full (F1): the
+    // others are counted by kind below.
+    let starred: Vec<&crate::DecisionBoard> =
+        project.decisions.iter().filter(|decision| decision.star).collect();
+    for (index, decision) in starred.iter().enumerate() {
         let mark = if index == selected { "›" } else { " " };
-        let mut line = format!(
-            "{mark} {} {} {:<9} {}",
+        rows.push(format!(
+            "{mark} {} ★ {:<9} {}",
             clock_of(&decision.at),
-            if decision.star { "★" } else { " " },
             decision.kind,
             decision.what
-        );
+        ));
+        // The reason stands on its own line, as the prototype draws it: a
+        // decision line with the reason appended loses it on a narrow screen
+        // (F2).
         if let Some(why) = &decision.why {
-            line.push_str(&format!("  ·  why: {why}"));
+            rows.push(format!("{:22}why: {why}", ""));
         }
-        rows.push(line);
     }
     // The count of the decisions by kind (§7.2): the landing review shows it
     // next to the starred lines.
@@ -431,10 +436,16 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
     }
 }
 
-/// The decisions of the project by kind: `2 scope, 1 cut`.
+/// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
+///
+/// The starred ones are read in full above; this is the count of the others
+/// (§7.2).
 fn counts_of_kind(project: &ProjectBoard) -> String {
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for decision in &project.decisions {
+        if decision.star {
+            continue;
+        }
         *counts.entry(decision.kind.as_str()).or_default() += 1;
     }
     counts
@@ -450,6 +461,7 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
     let mut rows = Vec::new();
     let mut tokens_total = 0;
     let mut cost_total = 0.0;
+    let mut unknown = 0;
     for (index, (lane, task)) in token_tasks(project).into_iter().enumerate() {
         let mark = if index == selected { "›" } else { " " };
         let estimate = task.est_min.unwrap_or(0);
@@ -459,22 +471,44 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
         } else {
             0.0
         };
-        let tokens = task.tokens.unwrap_or(0);
-        let cost = task.cost_usd.unwrap_or(0.0);
-        tokens_total += tokens;
-        cost_total += cost;
+        // The tokens and the cost are unknown when no round counted them
+        // (F5): they are not a measured zero.
+        let tokens = task.tokens;
+        let cost = task.cost_usd;
+        if tokens.is_none() {
+            unknown += 1;
+        } else {
+            tokens_total += tokens.unwrap_or(0);
+        }
+        if cost.is_none() {
+            unknown += 1;
+        } else {
+            cost_total += cost.unwrap_or(0.0);
+        }
+        let tokens_text = match tokens {
+            Some(tokens) => format!("{}k", tokens / 1000),
+            None => "?".to_string(),
+        };
+        let cost_text = match cost {
+            Some(cost) => format!("${cost:>6.2}"),
+            None => "      ?".to_string(),
+        };
         rows.push(format!(
-            "{mark} {:<7}{:<6}{estimate:>4}m{actual:>5}m{ratio:>7.1}x{:>8}{:>8}k  ${cost:>6.2}",
+            "{mark} {:<7}{:<6}{estimate:>4}m{actual:>5}m{ratio:>7.1}x{:>8}{tokens_text:>9}  {cost_text}",
             task.id,
             lane,
-            task.rounds,
-            tokens / 1000
+            task.stored_rounds,
         ));
     }
-    let rest = vec![format!(
+    let mut total = format!(
         "so far: {:.1}M tokens, ${cost_total:.2}",
         tokens_total as f64 / 1_000_000.0
-    )];
+    );
+    if unknown > 0 {
+        // The total is what is known: the unknown parts are named (F5).
+        total.push_str(&format!(" (known so far; {unknown} unknown)"));
+    }
+    let rest = vec![total];
     ViewRows {
         heading: "task    lane     est    act   ratio  rounds   tokens     cost".to_string(),
         rows,

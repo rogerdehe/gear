@@ -209,21 +209,21 @@ fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
     let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
 
     assert!(text.contains("DECISIONS MADE  (★ = worth a look at landing)"), "{text}");
-    // Every decision, in full, with the star on the one worth a look.
-    assert!(text.contains("11:40"), "the time of the decision: {text}");
-    assert!(text.contains("scope"), "{text}");
-    assert!(
-        text.contains("PR-mode landing added as T-152 (user at kickoff)"),
-        "{text}"
-    );
+    // The starred decision is in full: the time, the star, the kind, what was
+    // decided.
+    assert!(text.contains("12:05"), "the time of the decision: {text}");
     assert!(text.contains("★"), "the star: {text}");
     assert!(text.contains("light procedure moved to M5"), "{text}");
     assert!(
         text.contains("why: needs token data from T-141 first"),
         "the reason of the decision: {text}"
     );
-    // The count of the decisions by kind.
-    assert!(text.contains("by kind: 1 cut, 1 scope"), "{text}");
+    // The decision that is not starred is counted, not read in full.
+    assert!(
+        !text.contains("PR-mode landing added as T-152"),
+        "an unstarred decision is not in full: {text}"
+    );
+    assert!(text.contains("by kind: 1 scope"), "the count: {text}");
     // The friction reports, open and closed.
     assert!(text.contains("FRICTION REPORTS FROM AGENTS"), "{text}");
     assert!(
@@ -265,4 +265,202 @@ fn the_time_and_tokens_view_opens_the_task_panel_of_its_row() {
     assert_eq!(tasks.len(), 1, "{tasks:?}");
     assert_eq!(tasks[0].0, "hull");
     assert_eq!(tasks[0].1.id, "T-1");
+}
+
+/// F2: the reason of a decision stands on its own line, so it is readable on
+/// an ordinary terminal.
+#[test]
+fn the_reason_of_a_decision_is_readable_on_eighty_columns() {
+    let mut store = world();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Decisions, 0, None, (80, 40));
+
+    assert!(
+        text.contains("why: needs token data from T-141 first"),
+        "the whole reason is visible: {text}"
+    );
+}
+
+/// F3: the decisions are the ones of the voyage the board measures, not the
+/// ones of the first milestone by name.
+#[test]
+fn the_decisions_are_the_ones_of_the_voyage_the_board_measures() {
+    let mut store = world();
+    // An older voyage that is finished and has no decisions of its own.
+    let departure = now_seconds() - 7200;
+    store
+        .write(|tx| {
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M1".into(),
+                title: "the first voyage".into(),
+                done: Some("it is done".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(1),
+                departure_estimate_min: Some(40),
+                updated: departure,
+            })?;
+            // The voyage of the board has work left, so it is the active one.
+            let mut task = tx.get_task("p", "T-1")?.expect("the task");
+            task.state = TaskState::Running;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
+
+    assert!(
+        text.contains("light procedure moved to M5"),
+        "the decisions of the active voyage: {text}"
+    );
+}
+
+/// F4: the rounds of a task are the rows of the rounds table: a dev round and
+/// a review round are two rounds of one attempt.
+#[test]
+fn the_rounds_of_a_task_are_the_rows_of_the_rounds_table() {
+    let mut store = world();
+    // The review round of the task: the same attempt, a second round.
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "review".into(),
+            };
+            tx.insert_round(&gear_store::NewRound {
+                key: key.clone(),
+                seat: "p:review-1".into(),
+                generation: 1,
+                cli: "codex".into(),
+                model: None,
+                start_at: departure + 44 * 60,
+            })?;
+            tx.set_round_tokens(
+                &key,
+                &RoundTokens {
+                    input: Some(20_000),
+                    output: Some(2_000),
+                    cache_read: None,
+                    cache_write: None,
+                    reasoning: None,
+                    cost_usd: Some(0.05),
+                    cost_source: "agent".into(),
+                },
+                departure + 50 * 60,
+            )
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    // The row of the task: two rounds now.
+    assert!(text.contains("T-1"), "{text}");
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(row.contains("  2"), "the rounds of the rounds table: {row}");
+}
+
+/// F5: the tokens and the cost that were never counted are unknown, not zero.
+#[test]
+fn the_unknown_usage_is_not_shown_as_zero() {
+    let mut store = world();
+    // A task whose round counted nothing: the fields are there, the numbers
+    // are zero.
+    store
+        .write(|tx| {
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-2".into(),
+                attempt: 1,
+                role: "dev".into(),
+            };
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-2".into(),
+                rank: 2,
+                state: TaskState::Done,
+                priority: "must".into(),
+                lane: Some("hull".into()),
+                milestone: Some("M4".into()),
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(20),
+                issue: None,
+                updated: NOW,
+            })?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-2".into(),
+                n: 1,
+                seat: "p:hull".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: Some("def5678".into()),
+                report: None,
+                safe_point: None,
+                started: NOW,
+                updated: NOW,
+            })?;
+            tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, NOW)?;
+            tx.set_attempt_time("p", "T-2", 1, AttemptStep::Merged, NOW)?;
+            // The round counted nothing: a measured zero.
+            tx.insert_round(&gear_store::NewRound {
+                key: key.clone(),
+                seat: "p:hull".into(),
+                generation: 1,
+                cli: "pi".into(),
+                model: None,
+                start_at: NOW,
+            })?;
+            tx.set_round_tokens(
+                &key,
+                &RoundTokens {
+                    input: Some(0),
+                    output: Some(0),
+                    cache_read: Some(0),
+                    cache_write: Some(0),
+                    reasoning: None,
+                    cost_usd: None,
+                    cost_source: "none".into(),
+                },
+                NOW,
+            )
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-2"))
+        .expect("the row of the task");
+    assert!(row.contains("0k"), "a measured zero is a zero: {row}");
+    assert!(row.contains("?"), "the cost was never priced: {row}");
+    assert!(
+        text.contains("known so far"),
+        "the total names what it does not know: {text}"
+    );
 }
