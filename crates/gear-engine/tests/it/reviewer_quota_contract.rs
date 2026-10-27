@@ -150,7 +150,7 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
 }
 
 fn cfg() -> EngineCfg {
-    let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
     for kind in ["opencode", "claude", "codex"] {
         cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
     }
