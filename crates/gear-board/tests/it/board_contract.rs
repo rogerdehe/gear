@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
 use gear_model::{MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, NewMessage, Store, TaskRow};
+use gear_store::{testing, ContractRow, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 
@@ -735,6 +735,48 @@ impl Frames {
         }
     }
 
+    /// The last complete frame that holds `needle`.
+    ///
+    /// Every frame before it is dropped: the board redraws on its own too, and
+    /// a pty whose output is not read blocks the board (F9). The wait ends
+    /// with the frame that arrived last, so a key that was just pressed is
+    /// not answered by an old frame.
+    fn last_with(&mut self, needle: &str, timeout: Duration) -> String {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let mut last = None;
+            while let Some(frame) = self.take_frame() {
+                if frame.contains(needle) {
+                    last = Some(frame);
+                }
+            }
+            if let Some(frame) = last {
+                return frame;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("no frame with {needle:?} within {timeout:?}");
+            }
+            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
+                .as_millis()
+                .min(50) as i32;
+            // SAFETY: `fds` is one pollfd we own; the call only waits.
+            let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            // SAFETY: the buffer is one chunk long.
+            let read = unsafe {
+                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if read > 0 {
+                self.buffer
+                    .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            }
+        }
+    }
+
     /// Take the next complete frame out of the buffer: the text between a
     /// clear-screen and the footer line that ends it.
     fn take_frame(&mut self) -> Option<String> {
@@ -896,14 +938,19 @@ fn world_with_a_long_graph() -> Store {
             testing::seed_project(tx, "p", "sess", T0)?;
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "claude", T0)?;
             testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            for n in 1..=30 {
+            // Seventeen tasks: the graph is longer than the viewport of an
+            // 80x24 terminal (sixteen rows), and the lane's panel is taller
+            // than the terminal (F9).
+            for n in 1..=17 {
                 tx.insert_task(&TaskRow {
                     repo: None,
                     base: None,
                     gate: None,
                     rework_estimate_min: None,
                     project: "p".into(),
-                    id: format!("T-{n}"),
+                    // The ids are padded, so a frame that shows one of them
+                    // is unambiguous.
+                    id: format!("T-{n:02}"),
                     rank: n as i64,
                     state: TaskState::Ready,
                     priority: "must".into(),
@@ -921,6 +968,19 @@ fn world_with_a_long_graph() -> Store {
                     updated: T0,
                 })?;
             }
+            // The last task's goal is longer than the screen: the panel must
+            // be cut, not hidden (F3).
+            tx.insert_contract(&ContractRow {
+                project: "p".into(),
+                task: "T-17".into(),
+                version: 1,
+                goal: "Finish the board frame and keep the task panel visible when its goal exceeds terminal width".into(),
+                accept: "the panel shows both borders and the footer".into(),
+                evidence_files: vec![],
+                evidence_due_min: None,
+                body: String::new(),
+                created: T0,
+            })?;
             Ok(())
         })
         .unwrap();
@@ -935,7 +995,9 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let mut store = world_with_a_long_graph();
     let opts = Options {
         project: Some("p".into()),
-        refresh: Duration::from_millis(50),
+        // A longer refresh: the board redraws on the keys, not every 50 ms
+        // (F9).
+        refresh: Duration::from_millis(300),
         ..Options::default()
     };
     let pty = Pty::open();
@@ -952,7 +1014,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let mut frames = Frames { master: pty.master, buffer: String::new() };
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
-    // The panel of a lane with thirty tasks is taller than the terminal: it
+    // The panel of a lane with seventeen tasks is taller than the terminal: it
     // keeps both borders and the footer's row (F3).
     press(pty.master, b"\x1b[<0;1;7M");
     let _frame = frames.next("› data", Duration::from_secs(5));
@@ -977,20 +1039,34 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
 
-    // Repeated `Down` walks to the last task and keeps it visible (F8).
-    // Every press is read: the board redraws on its own too, and a pty whose
-    // output is not read blocks the board.
-    let mut frame = String::new();
-    for _ in 0..29 {
+    // Repeated `Down` walks to the last task and keeps it visible (F8). Every
+    // press is read: the board redraws on its own too, and a pty whose output
+    // is not read blocks the board (F9).
+    for _ in 0..16 {
         press(pty.master, b"j");
-        frame = frames.next("dev", Duration::from_secs(5));
+        let _frame = frames.last_with("dev", Duration::from_secs(5));
     }
-    assert!(frame.contains("T-30"), "the last task stays visible: {frame}");
+    let frame = frames.last_with("T-17", Duration::from_secs(5));
+    assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
+
+    // A click on the footer's row and on the spacer below the data selects
+    // nothing (F8): the selection stays on the last task.
+    press(pty.master, b"\x1b[<0;1;24M");
+    press(pty.master, b"\x1b[<0;1;23M");
+    let _frame = frames.next("dev", Duration::from_secs(5));
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
-    let frame = frames.next("T-30 · lane", Duration::from_secs(5));
+    let frame = frames.next("T-17 · lane", Duration::from_secs(5));
     assert!(frame.contains("ROUNDS"), "the panel of the task: {frame}");
+    // The goal is longer than the screen: the panel is cut, not hidden (F3).
+    assert!(frame.contains("┐"), "the right border of the panel: {frame}");
+    assert!(frame.contains("└"), "the bottom border of the panel: {frame}");
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.last().unwrap_or(&"").contains("q quit"),
+        "the footer keeps its row: {frame}"
+    );
 
     // Any key closes the panel; then `q` leaves the board.
     press(pty.master, b"x");
@@ -1012,6 +1088,6 @@ fn a_long_graph_draws_its_last_task() {
         now_seconds(),
     )
     .unwrap();
-    let text = gear_board::frame::frame(&board, gear_board::frame::Tab::Graph, 29, None, (80, 24));
-    assert!(text.contains("T-30"), "the last task is drawn: {text}");
+    let text = gear_board::frame::frame(&board, gear_board::frame::Tab::Graph, 16, None, (80, 24));
+    assert!(text.contains("T-17"), "the last task is drawn: {text}");
 }

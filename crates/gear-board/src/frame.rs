@@ -792,15 +792,19 @@ fn draw_panel(canvas: &mut Canvas, panel: &[String]) {
     // One width for the whole box, borders included (F3): the interior rows
     // are padded or cut to it, so the right border is always inside the
     // canvas.
+    // The box never grows past the canvas (F3): a long row is cut, not the
+    // whole panel. The interior width follows the box.
+    let available = canvas.width.saturating_sub(6);
     let inner = panel
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(18)
-        .max(18);
+        .max(18)
+        .min(available);
     let total = inner + 4;
     if total + 2 > canvas.width {
-        // It does not fit: no half a box is drawn.
+        // It does not fit at all: no half a box is drawn.
         return;
     }
     let left = canvas.width.saturating_sub(total + 1);
