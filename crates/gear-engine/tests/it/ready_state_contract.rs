@@ -265,3 +265,18 @@ fn refused_nonurgent_sender_doorbell_cannot_starve_a_later_urgent_one() {
     let prompts=w.herdr.prompts_to(LANE_PANE);
     assert_eq!(prompts.len(),2,"{prompts:?}"); assert!(prompts[1].contains(&normal));
 }
+
+
+#[test]
+fn naming_and_observation_failures_leave_the_doorbell_for_retry() {
+    for unreadable in [false,true] {
+        let mut w=world(AgentStatus::Idle);
+        let message=captain_message(&mut w,MsgKind::Instruction,true,T0+1);
+        if unreadable { w.herdr.observe_fails=true; }
+        else { w.herdr.inject_next=Some(gear_herdr::fake::Inject::Refuse {code:"rename-failed".into()}); }
+        assert!(gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&message,true,T0+2).unwrap().is_none());
+        let ops=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
+        assert_eq!(ops.len(),1); assert_eq!(ops[0].state,OpState::Intended,"unreadable={unreadable}");
+        assert!(w.herdr.prompts_to(LANE_PANE).is_empty());
+    }
+}

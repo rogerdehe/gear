@@ -601,7 +601,7 @@ fn aim(
             "the agent of {pane_id} had lost its name; it was renamed and the text goes again next tick"
         )),
         crate::names::Target::Gone(reason) => Aimed::Gone(reason),
-        crate::names::Target::Blocked(reason) => Aimed::Refused(reason),
+        crate::names::Target::Blocked(reason) => Aimed::Retry(reason),
         crate::names::Target::Unreadable(reason) => Aimed::Retry(reason),
     }
 }
