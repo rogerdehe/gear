@@ -37,6 +37,7 @@ pub mod quota;
 pub mod release;
 pub mod restart;
 pub mod rounds;
+pub mod session;
 pub mod review;
 pub mod start;
 pub mod switch;
