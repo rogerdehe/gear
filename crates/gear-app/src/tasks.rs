@@ -424,6 +424,41 @@ fn reopened(
     }))
 }
 
+/// The time the work of `task` was merged, if it is merged (design §10.7,
+/// row B03-01): the attempt that landed it, and the time it landed.
+///
+/// `None` when the task has no merged attempt yet.
+pub fn merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<Ts>> {
+    let mut merged = None;
+    for (_, times) in tx.attempt_times_of_task(project, task)? {
+        if let Some(at) = times.merged {
+            merged = Some(at);
+        }
+    }
+    Ok(merged)
+}
+
+/// The time the work of `task` was merged, or a refusal naming why not
+/// (design §10.7, row B03-01): a pass that names the task whose merge landed
+/// this work is only settled when that task is merged.
+pub fn require_merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Ts> {
+    if tx.get_task(project, task)?.is_none() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("no task {task} in project {project}"),
+        ));
+    }
+    match merged_at(tx, project, task)? {
+        Some(at) => Ok(at),
+        None => Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is not merged yet: a pass may name it as the merge that landed this work only when it is merged"
+            ),
+        )),
+    }
+}
+
 /// An acceptance verdict (design/05 `# Verdicts`, design/06 `settle`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -538,6 +573,17 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             format!("no task {} in project {}", v.task, v.project),
         )
     })?;
+    // A pass may name the task whose merge landed this work (design §10.7,
+    // row B03-01): the work is already on the integration branch, so this
+    // task is marked merged by that merge instead of waiting for a merge of
+    // its own. The named task must be merged already; the git side of the
+    // rule (the candidate's tree is in the integration branch) is answered
+    // by the caller, before the write.
+    let integrated_at = match v.integrated_by.as_deref() {
+        Some(by) if v.pass => Some((by.to_string(), require_merged_at(tx, &v.project, by)?)),
+        Some(_) => None,
+        None => None,
+    };
     // A pass must be against the contract the task carries now; a fail may
     // settle an older one.
     if v.pass && v.contract_version != task_row.contract_version {
@@ -609,6 +655,17 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     }
     task_row.updated = now;
     tx.update_task(&task_row)?;
+
+    // The work is merged by the named task's merge: the attempt carries that
+    // merge's time, and the fact is kept so the board and the report can say
+    // which merge landed it (design §10.7, row B03-01).
+    if let Some((by, merged_at)) = integrated_at {
+        tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Merged, merged_at)?;
+        tx.set_meta(
+            &format!("integrated-by:{}:{}", v.project, v.task),
+            &by,
+        )?;
+    }
     Ok(())
 }
 
