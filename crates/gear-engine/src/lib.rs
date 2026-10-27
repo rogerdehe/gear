@@ -128,6 +128,8 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
     pub quota: Vec<String>,
+    /// The lanes whose plan park ended this tick (T-190), one line each.
+    pub park_ended: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -284,6 +286,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
         observe::record_sessions(store, &observed)?;
+        // A park whose time has come ends (T-190): the lane the captain
+        // parked until a time that has passed works again.
+        let ended = store.write(|tx| {
+            gear_app::plan::end_parked_lanes(tx, &project, Some(&agents), now)
+        })?;
+        report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
