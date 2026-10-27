@@ -26,13 +26,33 @@
 //! (consecutive quota ticks, the lane's current model, the reset deadline, the
 //! restart in progress): the `seats` table has `park_until`, but gear-store
 //! exposes no setter for it yet, and a store API is the follow-up.
+//!
+//! # The quota of the providers (design §9.1-§9.2)
+//!
+//! The screen is not the source of quota facts: a marker on the screen or a
+//! provider error is only a **signal**. The engine reads the provider's API
+//! ([`gear_usage::read_quota`]) with the key the config names
+//! (`[[quota.sources]]`, §9.1) and the reading decides:
+//!
+//! - a window is spent (0 % left): the seat is parked until that window's
+//!   reset + 1 min, the round's clock pauses, a pause row of kind `quota` is
+//!   opened (§5.4) and, at the reset, the seat continues in the same session
+//!   (`Continue T-n: your quota is back.`, §3.3 S4);
+//! - quota is left: not a quota stop but a rate limit or an error — the seat
+//!   waits 5 min and continues; the second time in a row it becomes a captain
+//!   item (`<seat>: provider error, not quota`);
+//! - the source cannot be read: today's park, `quota_reset_h` hours.
+//!
+//! Every source is read every 5 min and its last reading is kept in the meta
+//! `quota.reading.<provider>` (§9.1); a reading older than 15 min is stale.
 
 use gear_app::config::{ModelEntry, ProjectConfig, QuotaPolicy};
 use gear_herdr::{HerdrAct, Profile, ScreenFlag};
 use gear_model::{
     ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState, SeatRole, SeatState, Ts,
 };
-use gear_store::{NewMessage, NewOp, SeatRow, Store, Tx};
+use gear_store::{NewMessage, NewOp, RoundKey, SeatRow, Store, Tx};
+use gear_usage::{QuotaReader, Reading};
 
 use crate::model::model_meta_key;
 use crate::observe::SeatObs;
@@ -59,15 +79,42 @@ pub fn apply_quota_policy(
     observed: &[SeatObs],
     now: Ts,
 ) -> GearResult<QuotaReport> {
+    apply_quota_policy_with(store, herdr, cfg, profiles, project, observed, now, &LiveQuota)
+}
+
+/// The quota policy with the readers of §9.1 as a parameter: the live ones
+/// call the provider's API, a test a fake — so every branch of §9.2 is shown
+/// without a provider.
+pub fn apply_quota_policy_with(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    project: &str,
+    observed: &[SeatObs],
+    now: Ts,
+    api: &dyn QuotaApi,
+) -> GearResult<QuotaReport> {
     let mut report = QuotaReport::default();
     let Some(row) = store.read(|tx| tx.get_project(project))? else {
         return Ok(report);
     };
     let config = match gear_app::config::parse(&row.config_toml) {
         Ok(config) => config,
-        // A config that does not parse: no policy can be applied.
-        Err(_) => return Ok(report),
+        // The config struct of gear-app does not know the quota sources yet
+        // (T-147) and it refuses unknown fields: the `[[quota.sources]]`
+        // tables are cut out of the text the strict parse sees. The sources
+        // themselves are read from the raw text below.
+        Err(_) => match gear_app::config::parse(&without_sources(&row.config_toml)) {
+            Ok(config) => config,
+            // A config that does not parse: no policy can be applied.
+            Err(_) => return Ok(report),
+        },
     };
+    // §9.1: the sources of the project and their last readings. Every source
+    // is read every 5 min; a reading older than 15 min is stale.
+    let sources = sources_of(&row.config_toml);
+    report.events.extend(refresh_readings(store, api, &sources, now)?);
 
     for obs in observed {
         let seat = &obs.seat;
@@ -111,6 +158,13 @@ pub fn apply_quota_policy(
         // reviewer is never parked (its role has no Parked state, T-115), so
         // this is the lane's path.
         if seat.state == SeatState::Parked {
+            // §9.2: a wait the source decided (a spent window, a provider
+            // error, an unreadable source) ends at its own time: the seat
+            // continues in the same session.
+            if let Some(line) = wake_from_source(store, project, seat, now)? {
+                report.events.push(line);
+                continue;
+            }
             if parked_until(store, &seat.id)?.is_some_and(|until| until <= now) {
                 let chain = crate::model::role_chain(&config, &seat.name);
                 match chain.first().copied() {
@@ -155,6 +209,75 @@ pub fn apply_quota_policy(
         //    screen text (M-266): only a stopped agent counts.
         let quota = obs.flags.contains(&ScreenFlag::Quota) && obs.idle;
         let ticks = count_quota_tick(store, &seat.id, quota)?;
+        // A provider error is a signal too (§9.2): the source tells a spent
+        // quota from an error, and the error is not a quota stop.
+        let error = obs.flags.contains(&ScreenFlag::Error) && obs.idle;
+        let error_ticks = count_error_tick(store, &seat.id, error)?;
+        let confirmed = (quota && ticks >= i64::from(profile.confirm_rounds))
+            || (error && error_ticks >= i64::from(profile.confirm_rounds));
+        // §9.2: the source of the seat's provider decides. Without a source
+        // the policy of the config decides (below); a reviewer has no source
+        // of its own here — it keeps the policy of its chain (T-115).
+        if !reviewer && (quota || error) {
+            let chain = crate::model::role_chain(&config, &seat.name);
+            if let Some(source) = source_of(&sources, &chain, store, seat)? {
+                // The signal reads the source at once; the decision waits for
+                // the confirmation of the signal.
+                let read = read_source(store, api, &source, now, SIGNAL_MIN_AGE_S);
+                if confirmed {
+                    match read {
+                        Ok(reading) => {
+                            match verdict_of(&reading, now, config.models.quota_reset_h) {
+                                Verdict::Spent { window, until } => {
+                                    let line = park_for_quota(
+                                        store,
+                                        project,
+                                        seat,
+                                        &source.provider,
+                                        &window,
+                                        until,
+                                        now,
+                                    )?;
+                                    report.events.push(line.clone());
+                                    // A parked lane is work stopped for hours:
+                                    // an urgent item that rings the captain
+                                    // (L-74).
+                                    alert_park(store, project, seat, &line, now)?;
+                                }
+                                Verdict::Left => {
+                                    let episodes = count_error_episode(store, &seat.id)?;
+                                    let line = wait_for_provider(
+                                        store,
+                                        project,
+                                        seat,
+                                        &source.provider,
+                                        episodes >= 2,
+                                        now,
+                                    )?;
+                                    report.events.push(line);
+                                }
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            // The source cannot be read: today's park,
+                            // `quota_reset_h` hours (§9.2).
+                            let line = park_unreadable(
+                                store,
+                                project,
+                                seat,
+                                &source.provider,
+                                config.models.quota_reset_h,
+                                now,
+                            )?;
+                            report.events.push(line.clone());
+                            alert_park(store, project, seat, &line, now)?;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
         if !quota || ticks < i64::from(profile.confirm_rounds) {
             continue;
         }
@@ -783,6 +906,861 @@ fn next_thread_seq(
             return Ok(seq);
         }
     }
+}
+
+// ------------------------------------------- the sources and the reading (§9.1)
+
+/// How often a source is read again (§9.1): every 5 min.
+const READ_EVERY_S: i64 = 300;
+/// A reading older than this is stale (§9.1): 15 min.
+const STALE_AFTER_S: i64 = 900;
+/// How long a seat waits after a provider error (§9.2): 5 min.
+const WAIT_AFTER_ERROR_S: i64 = 300;
+/// How old a reading may be when a signal reads the source at once (§9.2):
+/// a minute.
+const SIGNAL_MIN_AGE_S: i64 = 60;
+
+/// A quota source of §9.1: the provider, the reader and where its key is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaSource {
+    /// The provider part of the model ids this source is about.
+    pub provider: String,
+    /// The reader that knows the provider's API.
+    pub reader: QuotaReader,
+    /// The file the key is in (`~` is the home folder).
+    pub key_file: String,
+    /// The dotted path of the key inside that file.
+    pub key_path: String,
+}
+
+/// The config text without the `[[quota.sources]]` tables (§9.1).
+///
+/// The config struct of gear-app does not know the sources yet (T-147) and
+/// it refuses unknown fields, so the tables are cut out of the text the
+/// strict parse sees. The sources themselves are read from the raw text.
+fn without_sources(config_toml: &str) -> String {
+    let mut out = String::new();
+    let mut in_sources = false;
+    for line in config_toml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_sources = trimmed.starts_with("[[quota.sources]]");
+        }
+        if !in_sources {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The sources of a project config: `[[quota.sources]]` (§9.1).
+///
+/// The engine reads them from the project's raw config text: §9.1 fixes the
+/// shape, and the config struct of gear-app (T-147) can take this parse over
+/// without changing what the engine does.
+pub fn sources_of(config_toml: &str) -> Vec<QuotaSource> {
+    let Ok(value) = config_toml.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(list) = value
+        .get("quota")
+        .and_then(|quota| quota.get("sources"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|entry| {
+            let provider = entry
+                .get("provider")
+                .and_then(toml::Value::as_str)?
+                .trim()
+                .to_string();
+            if provider.is_empty() {
+                return None;
+            }
+            let reader = QuotaReader::from_name(entry.get("reader").and_then(toml::Value::as_str)?)?;
+            Some(QuotaSource {
+                provider,
+                reader,
+                key_file: entry
+                    .get("key_file")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                key_path: entry
+                    .get("key_path")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The key of a source: the file it is in, then the dotted path in it (§9.1).
+fn key_of(source: &QuotaSource) -> Result<String, String> {
+    let path = expand_home(&source.key_file);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut cursor = &value;
+    for part in source.key_path.split('.').filter(|part| !part.is_empty()) {
+        cursor = cursor.get(part).ok_or_else(|| {
+            format!("{}: {} is not in the file", path.display(), source.key_path)
+        })?;
+    }
+    cursor
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{}: the key is not text", path.display()))
+}
+
+/// A path that starts with `~` is in the home folder of the user.
+fn expand_home(path: &str) -> std::path::PathBuf {
+    let path = path.trim();
+    let Some(home) = std::env::var_os("HOME") else {
+        return std::path::PathBuf::from(path);
+    };
+    match path.strip_prefix('~') {
+        Some(rest) => {
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            let mut home = std::path::PathBuf::from(home);
+            if !rest.is_empty() {
+                home.push(rest);
+            }
+            home
+        }
+        None => std::path::PathBuf::from(path),
+    }
+}
+
+/// The quota readers as the engine uses them (§9.1).
+///
+/// The live one calls `gear_usage::read_quota`; a test uses a fake one, so
+/// every branch of §9.2 is shown without a provider.
+pub trait QuotaApi {
+    /// The quota of a provider now, or the reason it cannot be read.
+    fn read(
+        &self,
+        reader: QuotaReader,
+        key: &str,
+        codex_session: Option<&str>,
+        now: Ts,
+    ) -> Result<Reading, String>;
+}
+
+/// The live readers (§9.1): the API of the provider.
+pub struct LiveQuota;
+
+impl QuotaApi for LiveQuota {
+    fn read(
+        &self,
+        reader: QuotaReader,
+        key: &str,
+        codex_session: Option<&str>,
+        now: Ts,
+    ) -> Result<Reading, String> {
+        gear_usage::read_quota(reader, key, codex_session, now)
+    }
+}
+
+/// A reading of a provider as the store keeps it (§9.1): the meta
+/// `quota.reading.<provider>`, JSON with the time it was read.
+#[derive(Debug, Clone, PartialEq)]
+struct StoredReading {
+    provider: String,
+    read_at: Ts,
+    windows: Vec<StoredWindow>,
+    /// The reading is older than 15 min (§9.1).
+    stale: bool,
+}
+
+/// One window of a stored reading (§9.1).
+#[derive(Debug, Clone, PartialEq)]
+struct StoredWindow {
+    name: String,
+    used_percent: f64,
+    resets_at: Option<Ts>,
+}
+
+/// The meta key of a provider's last reading (§9.1).
+fn reading_meta_key(provider: &str) -> String {
+    format!("quota.reading.{provider}")
+}
+
+/// The reading of a provider as it is stored (None when there is none).
+fn load_reading(store: &mut Store, provider: &str) -> GearResult<Option<StoredReading>> {
+    let Some(raw) = meta_get(store, &reading_meta_key(provider))? else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    let windows = value
+        .get("windows")
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|window| {
+                    Some(StoredWindow {
+                        name: window.get("name")?.as_str()?.to_string(),
+                        used_percent: window.get("used_percent")?.as_f64()?,
+                        resets_at: window.get("resets_at").and_then(serde_json::Value::as_i64),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Some(StoredReading {
+        provider: value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(provider)
+            .to_string(),
+        read_at: value
+            .get("read_at")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        windows,
+        stale: value
+            .get("stale")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    }))
+}
+
+/// Write a reading of a provider (§9.1): the shape the board reads.
+fn store_reading(store: &mut Store, reading: &StoredReading) -> GearResult<()> {
+    let windows: Vec<serde_json::Value> = reading
+        .windows
+        .iter()
+        .map(|window| {
+            serde_json::json!({
+                "name": window.name,
+                "used_percent": window.used_percent,
+                "resets_at": window.resets_at,
+            })
+        })
+        .collect();
+    let value = serde_json::json!({
+        "provider": reading.provider,
+        "read_at": reading.read_at,
+        "windows": windows,
+        "stale": reading.stale,
+    });
+    meta_set(store, &reading_meta_key(&reading.provider), &value.to_string())
+}
+
+/// Read the quota of a source (§9.1): the key out of its file, then the
+/// reader of the provider.
+///
+/// A reading younger than `min_age_s` is kept — the provider is not asked
+/// twice in a minute. `Err` is the reason the source cannot be read.
+fn read_source(
+    store: &mut Store,
+    api: &dyn QuotaApi,
+    source: &QuotaSource,
+    now: Ts,
+    min_age_s: i64,
+) -> Result<Reading, String> {
+    if let Some(stored) = load_reading(store, &source.provider).map_err(|error| error.to_string())? {
+        if !stored.windows.is_empty() && now - stored.read_at < min_age_s {
+            return Ok(Reading {
+                provider: stored.provider,
+                windows: stored
+                    .windows
+                    .into_iter()
+                    .map(|window| gear_usage::Window {
+                        name: window.name,
+                        used_percent: window.used_percent,
+                        resets_at: window.resets_at,
+                    })
+                    .collect(),
+                read_at: stored.read_at,
+            });
+        }
+    }
+    let key = key_of(source)?;
+    let reading = api.read(source.reader, &key, None, now)?;
+    store_reading(
+        store,
+        &StoredReading {
+            provider: source.provider.clone(),
+            read_at: reading.read_at,
+            windows: reading
+                .windows
+                .iter()
+                .map(|window| StoredWindow {
+                    name: window.name.clone(),
+                    used_percent: window.used_percent,
+                    resets_at: window.resets_at,
+                })
+                .collect(),
+            stale: false,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(reading)
+}
+
+/// Read every source whose reading is older than 5 min (§9.1) and mark a
+/// reading older than 15 min as stale (§9.1).
+fn refresh_readings(
+    store: &mut Store,
+    api: &dyn QuotaApi,
+    sources: &[QuotaSource],
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut events = Vec::new();
+    for source in sources {
+        let stored = load_reading(store, &source.provider)?;
+        let due = stored
+            .as_ref()
+            .map_or(true, |reading| now - reading.read_at >= READ_EVERY_S);
+        if due {
+            match read_source(store, api, source, now, READ_EVERY_S) {
+                Ok(_) => {}
+                Err(reason) => events.push(format!(
+                    "the quota of {} could not be read: {reason}",
+                    source.provider
+                )),
+            }
+        }
+        // A reading that is still old after the refresh is stale (§9.1).
+        if let Some(reading) = load_reading(store, &source.provider)? {
+            if now - reading.read_at > STALE_AFTER_S && !reading.stale {
+                let mut stale = reading.clone();
+                stale.stale = true;
+                store_reading(store, &stale)?;
+                events.push(format!(
+                    "the quota reading of {} is stale (older than 15 min)",
+                    source.provider
+                ));
+            }
+        }
+    }
+    Ok(events)
+}
+
+/// What the source said about the provider (§9.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    /// A window is spent: the seat waits for its reset.
+    Spent { window: String, until: Ts },
+    /// Quota is left: a rate limit or an error, not a quota stop.
+    Left,
+}
+
+/// What a reading means (§9.2): a window with nothing left in it is a quota
+/// stop, anything else is not.
+fn verdict_of(reading: &Reading, now: Ts, reset_h: u32) -> Verdict {
+    let spent: Vec<&gear_usage::Window> = reading
+        .windows
+        .iter()
+        .filter(|window| window.used_percent >= 100.0 - 0.001)
+        .collect();
+    if spent.is_empty() {
+        return Verdict::Left;
+    }
+    // The latest deadline of the spent windows: the seat waits for all of
+    // them (the captain's quota bar does the same, design/04-herdr.md).
+    let until = spent
+        .iter()
+        .filter_map(|window| window.resets_at)
+        .max()
+        // A window without a reset time: today's window (`quota_reset_h`).
+        .unwrap_or(now + i64::from(reset_h.max(1)) * 3600)
+        // A minute after the reset, so the provider is ready (§9.2).
+        + 60;
+    let window = spent
+        .iter()
+        .map(|window| window.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Verdict::Spent { window, until }
+}
+
+/// The provider part of a model id (`minimax-cn/MiniMax-M3.1-Flash` →
+/// `minimax-cn`): the part before the first slash (§9.1).
+fn provider_of(model: &str) -> Option<String> {
+    let model = model.trim();
+    let (provider, _) = model.split_once('/')?;
+    let provider = provider.trim();
+    if provider.is_empty() {
+        None
+    } else {
+        Some(provider.to_string())
+    }
+}
+
+/// The source of the seat's provider (§9.1): None when the project has no
+/// source for it.
+fn source_of(
+    sources: &[QuotaSource],
+    chain: &[&ModelEntry],
+    store: &mut Store,
+    seat: &SeatRow,
+) -> GearResult<Option<QuotaSource>> {
+    if sources.is_empty() {
+        return Ok(None);
+    }
+    let Some(model) = current_model(store, &seat.id, chain) else {
+        return Ok(None);
+    };
+    let Some(provider) = provider_of(&model) else {
+        return Ok(None);
+    };
+    Ok(sources
+        .iter()
+        .find(|source| source.provider == provider)
+        .cloned())
+}
+
+// ------------------------------------------------------- the waits of §9.2
+
+/// What a seat waits for (§9.2).
+#[derive(Debug, Clone, PartialEq)]
+struct Wait {
+    /// `quota` (a spent window), `error` (quota is left) or `unreadable`.
+    kind: String,
+    /// When the wait ends.
+    until: Ts,
+    /// When it began: the round's clock pauses for this long (§5.1).
+    started_at: Ts,
+    /// The provider the seat waits for.
+    provider: String,
+    /// The window that is spent (a quota park).
+    window: String,
+    /// The task the seat continues.
+    task: Option<String>,
+    /// The wait opened a pause row (§5.4): a quota park does, a provider
+    /// error does not — that is not quota wait time.
+    pause: bool,
+}
+
+/// The key of a seat's wait in the engine's meta.
+fn wait_meta_key(seat: &str) -> String {
+    meta_key("quota_wait", seat)
+}
+
+/// The wait of a seat, if it has one.
+fn load_wait(store: &mut Store, seat: &str) -> GearResult<Option<Wait>> {
+    let Some(raw) = meta_get(store, &wait_meta_key(seat))? else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    Ok(Some(Wait {
+        kind: value
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        until: value.get("until").and_then(|v| v.as_i64()).unwrap_or(0),
+        started_at: value
+            .get("started_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        provider: value
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        window: value
+            .get("window")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        task: value.get("task").and_then(|v| v.as_str()).map(str::to_string),
+        pause: value.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
+    }))
+}
+
+/// Write the wait of a seat.
+fn store_wait(store: &mut Store, seat: &str, wait: &Wait) -> GearResult<()> {
+    let value = serde_json::json!({
+        "kind": wait.kind,
+        "until": wait.until,
+        "started_at": wait.started_at,
+        "provider": wait.provider,
+        "window": wait.window,
+        "task": wait.task,
+        "pause": wait.pause,
+    });
+    meta_set(store, &wait_meta_key(seat), &value.to_string())
+}
+
+/// Count this tick's provider error: `previous + 1` while the screen shows
+/// an error, back to 0 when it does not.
+fn count_error_tick(store: &mut Store, seat: &str, error: bool) -> GearResult<i64> {
+    let key = meta_key("quota_error_ticks", seat);
+    let previous = meta_get(store, &key)?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let ticks = if error { previous + 1 } else { 0 };
+    meta_set(store, &key, &ticks.to_string())?;
+    Ok(ticks)
+}
+
+/// Count the provider errors of a seat in a row (§9.2): the second one is a
+/// captain item.
+fn count_error_episode(store: &mut Store, seat: &str) -> GearResult<i64> {
+    let key = meta_key("quota_errors", seat);
+    let previous = meta_get(store, &key)?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    let episodes = previous + 1;
+    meta_set(store, &key, &episodes.to_string())?;
+    Ok(episodes)
+}
+
+/// The provider errors of a seat are over (a quota stop or a good reading).
+fn reset_error_episodes(store: &mut Store, seat: &str) -> GearResult<()> {
+    meta_set(store, &meta_key("quota_errors", seat), "0")
+}
+
+/// Park a seat and open its pause row (§5.4). False when the seat's state
+/// does not allow the park (a retiring lane, for instance).
+fn park_seat(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    reason: &str,
+    pause_reason: Option<&str>,
+    now: Ts,
+) -> GearResult<bool> {
+    let parked = store.write(|tx| {
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
+        if !SeatState::can_transition(row.role, row.state, SeatState::Parked) {
+            return Ok(false);
+        }
+        tx.set_seat_state(&seat.id, SeatState::Parked, Some(reason), now)?;
+        if let Some(pause_reason) = pause_reason {
+            tx.open_pause(project, &seat.id, "quota", pause_reason, now)?;
+        }
+        // The prompt the provider killed is retired: the policy handles this
+        // seat, and the Continue at the reset is its delivery again.
+        retire_unconfirmed_deliveries(tx, project, seat, now)?;
+        Ok(true)
+    })?;
+    Ok(parked)
+}
+
+/// A quota stop: the seat waits for the provider's reset (§9.2).
+///
+/// The seat is parked, a pause row of kind `quota` is opened (§5.4) and the
+/// round's clock pauses with it (§5.1). At the reset the seat continues in
+/// the same session.
+fn park_for_quota(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    provider: &str,
+    window: &str,
+    until: Ts,
+    now: Ts,
+) -> GearResult<String> {
+    let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
+    let reason = format!("quota: {provider} {window}; resume at {until}");
+    let parked = park_seat(
+        store,
+        project,
+        seat,
+        &reason,
+        Some(&format!("{provider} {window}")),
+        now,
+    )?;
+    if !parked {
+        return Ok(format!(
+            "{}: the quota of {provider} is spent, but the seat cannot park",
+            seat.id
+        ));
+    }
+    store_wait(
+        store,
+        &seat.id,
+        &Wait {
+            kind: "quota".to_string(),
+            until,
+            started_at: now,
+            provider: provider.to_string(),
+            window: window.to_string(),
+            task,
+            pause: true,
+        },
+    )?;
+    reset_error_episodes(store, &seat.id)?;
+    Ok(format!(
+        "{}: parked until {until} (quota: {provider} {window})",
+        seat.id
+    ))
+}
+
+/// Quota is left: not a quota stop but a rate limit or an error (§9.2).
+///
+/// The seat waits 5 min and continues; the second time in a row it becomes a
+/// captain item.
+fn wait_for_provider(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    provider: &str,
+    second: bool,
+    now: Ts,
+) -> GearResult<String> {
+    let until = now + WAIT_AFTER_ERROR_S;
+    let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
+    let reason = format!("provider error, not quota; try again at {until}");
+    let parked = park_seat(store, project, seat, &reason, None, now)?;
+    if !parked {
+        return Ok(format!(
+            "{}: the provider of {provider} errors, but the seat cannot park",
+            seat.id
+        ));
+    }
+    store_wait(
+        store,
+        &seat.id,
+        &Wait {
+            kind: "error".to_string(),
+            until,
+            started_at: now,
+            provider: provider.to_string(),
+            window: String::new(),
+            task,
+            pause: false,
+        },
+    )?;
+    if second {
+        // The second time in a row: the captain hears about it (§9.2).
+        alert_provider_error(store, project, seat, now)?;
+    }
+    Ok(format!(
+        "{}: waits until {until} (provider error, not quota)",
+        seat.id
+    ))
+}
+
+/// The source cannot be read: today's park, `quota_reset_h` hours (§9.2).
+fn park_unreadable(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    provider: &str,
+    reset_h: u32,
+    now: Ts,
+) -> GearResult<String> {
+    let until = now + i64::from(reset_h.max(1)) * 3600;
+    let task = open_attempt(store, &seat.id)?.map(|(task, _)| task);
+    let reason = format!("quota: the source of {provider} cannot be read; resume at {until}");
+    let parked = park_seat(
+        store,
+        project,
+        seat,
+        &reason,
+        Some(&format!("{provider} unreadable")),
+        now,
+    )?;
+    if !parked {
+        return Ok(format!(
+            "{}: the source of {provider} cannot be read, but the seat cannot park",
+            seat.id
+        ));
+    }
+    store_wait(
+        store,
+        &seat.id,
+        &Wait {
+            kind: "unreadable".to_string(),
+            until,
+            started_at: now,
+            provider: provider.to_string(),
+            window: String::new(),
+            task,
+            pause: true,
+        },
+    )?;
+    reset_error_episodes(store, &seat.id)?;
+    Ok(format!(
+        "{}: parked until {until} (the source of {provider} cannot be read)",
+        seat.id
+    ))
+}
+
+/// A wait that ended: the seat continues its task in the same session (§9.2,
+/// §3.3 S4).
+fn wake_from_source(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<String>> {
+    let Some(wait) = load_wait(store, &seat.id)? else {
+        return Ok(None);
+    };
+    if wait.until > now {
+        return Ok(None);
+    }
+    // The pause row ends (§5.4).
+    if wait.pause {
+        let _ = store.write(|tx| tx.close_pause(project, &seat.id, "quota", now));
+    }
+    // The round's clock pauses for the whole wait (§5.1).
+    if let Some(round) = store.read(|tx| tx.open_round_of_seat(&seat.id))? {
+        let key = RoundKey {
+            project: project.to_string(),
+            task: round.task.clone(),
+            attempt: round.attempt,
+            role: round.role.clone(),
+        };
+        let secs = (now - wait.started_at).max(0);
+        let _ = store.write(|tx| tx.add_round_pause(&key, secs));
+    }
+    // The seat works again.
+    store.write(|tx| {
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
+        if row.state == SeatState::Parked {
+            gear_model::state::require_transition(
+                SeatState::can_transition(row.role, row.state, SeatState::Active),
+                "seat",
+                row.state.as_str(),
+                SeatState::Active.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Active,
+                Some("quota: the provider is back"),
+                now,
+            )?;
+        }
+        Ok(())
+    })?;
+    // The Continue: the same session, the same task (§9.2).
+    let text = match wait.task.as_deref() {
+        Some(task) => format!("Continue {task}: your quota is back."),
+        None => "Continue: your quota is back.".to_string(),
+    };
+    deliver_continue(store, project, seat, &text, now)?;
+    // The wait is over: the counters of the next signal start again.
+    meta_set(store, &wait_meta_key(&seat.id), "")?;
+    meta_set(store, &quota_meta_key(&seat.id), "0")?;
+    meta_set(store, &meta_key("quota_error_ticks", &seat.id), "0")?;
+    Ok(Some(format!(
+        "{}: continues after the wait ({})",
+        seat.id, wait.kind
+    )))
+}
+
+/// The Continue of §9.2: the seat continues its task, in the same session.
+fn deliver_continue(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    text: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let open = open_attempt(store, &seat.id)?;
+    store.write(|tx| {
+        // The delivery the provider killed is retired: the Continue below is
+        // the seat's delivery again.
+        retire_unconfirmed_deliveries(tx, project, seat, now)?;
+        tx.insert_op(&NewOp {
+            project: project.to_string(),
+            seat: seat.id.clone(),
+            generation: seat.generation,
+            kind: OpKind::Deliver,
+            task: open.as_ref().map(|(task, _)| task.clone()),
+            attempt: open.as_ref().map(|(_, attempt)| *attempt),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": text }),
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
+/// The captain item of a parked lane (§9.2): the lane waits for the provider.
+fn alert_park(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    line: &str,
+    now: Ts,
+) -> GearResult<()> {
+    alert_body(
+        store,
+        project,
+        seat,
+        &format!("{line} — the lane waits for the provider"),
+        now,
+    )
+}
+
+/// The captain item of §9.2: the provider errors again — the lane is not out
+/// of quota.
+fn alert_provider_error(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<()> {
+    alert_body(
+        store,
+        project,
+        seat,
+        &format!("{}: provider error, not quota", seat.id),
+        now,
+    )
+}
+
+/// One urgent item for the captain, with the body given.
+fn alert_body(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    body: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let captain = tx.captain_of(project)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
+        })?;
+        let generation = tx
+            .get_seat(&seat.id)?
+            .map(|row| row.generation)
+            .unwrap_or(seat.generation);
+        let seq = next_thread_seq(tx, project, &captain.id, now, &seat.name)?;
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("{}:{seq}", seat.name),
+            task: seat.task_id.clone(),
+            attempt: None,
+            sender: seat.id.clone(),
+            sender_gen: generation,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent: true,
+            body: body.to_string(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -1821,4 +2799,307 @@ quota_reset_h = 5
             .collect()
     }
 
+    // ------------------------------------------- the quota of the providers (§9.2)
+
+    /// A fake reader (§9.2): it answers what the test says.
+    struct FakeQuota {
+        answer: std::cell::RefCell<Result<gear_usage::Reading, String>>,
+        calls: std::cell::RefCell<Vec<String>>,
+    }
+
+    impl FakeQuota {
+        /// The reader answers with a reading.
+        fn reading(reading: gear_usage::Reading) -> Self {
+            FakeQuota {
+                answer: std::cell::RefCell::new(Ok(reading)),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        /// The reader cannot read the source.
+        fn failing(reason: &str) -> Self {
+            FakeQuota {
+                answer: std::cell::RefCell::new(Err(reason.to_string())),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl QuotaApi for FakeQuota {
+        fn read(
+            &self,
+            reader: QuotaReader,
+            key: &str,
+            _codex_session: Option<&str>,
+            now: Ts,
+        ) -> Result<gear_usage::Reading, String> {
+            self.calls
+                .borrow_mut()
+                .push(format!("{}:{key}", reader.name()));
+            let mut answer = self.answer.borrow_mut();
+            match &mut *answer {
+                Ok(reading) => {
+                    let mut reading = reading.clone();
+                    reading.read_at = now;
+                    Ok(reading)
+                }
+                Err(reason) => Err(reason.clone()),
+            }
+        }
+    }
+
+    /// The key file of the source (§9.1): a JSON file with the key of the
+    /// provider in it.
+    fn key_file(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("auth.json");
+        std::fs::write(&path, r#"{"minimax-cn":{"type":"api","key":"secret"}}"#).unwrap();
+        path
+    }
+
+    /// A project whose lane runs on a provider with a source (§9.1) and whose
+    /// round is open (the clock of §5.1).
+    fn source_world(key_file: &std::path::Path) -> Store {
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
+        text.push_str(&format!(
+            "\n[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\nkey_file = \"{}\"\nkey_path = \"minimax-cn.key\"\n",
+            key_file.display()
+        ));
+        let mut store = world(&text);
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "dev".into(),
+                    },
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "opencode".into(),
+                    model: Some("minimax-cn/MiniMax-M3.1-Flash".into()),
+                    start_at: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The observation of a lane with the flags given.
+    fn observed_flags(seat: &SeatRow, quota: bool, error: bool) -> Vec<SeatObs> {
+        let mut flags = BTreeSet::new();
+        if quota {
+            flags.insert(ScreenFlag::Quota);
+        }
+        if error {
+            flags.insert(ScreenFlag::Error);
+        }
+        vec![SeatObs {
+            seat: seat.clone(),
+            presence: Presence::Present,
+            status: Some(gear_herdr::AgentStatus::Idle),
+            flags,
+            idle: true,
+            screen: None,
+            session: None,
+        }]
+    }
+
+    /// One tick of the quota step with the fake reader (§9.2).
+    fn tick_source(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        api: &FakeQuota,
+        quota: bool,
+        error: bool,
+        now: Ts,
+    ) -> QuotaReport {
+        let seat = lane_seat(store);
+        let obs = observed_flags(&seat, quota, error);
+        apply_quota_policy_with(store, herdr, &cfg(), &cfg().profiles, "p", &obs, now, api).unwrap()
+    }
+
+    /// A reading of a provider: one window with so much used.
+    fn reading_with(used_percent: f64, resets_at: Option<Ts>) -> gear_usage::Reading {
+        gear_usage::Reading {
+            provider: "minimax".into(),
+            windows: vec![gear_usage::Window {
+                name: "MiniMax-M3.1-Flash 5h".into(),
+                used_percent,
+                resets_at,
+            }],
+            read_at: T0,
+        }
+    }
+
+    /// §9.2: a spent window parks the lane until the reset plus a minute, the
+    /// round's clock pauses, and at the reset the lane continues in the same
+    /// session.
+    #[test]
+    fn a_spent_window_parks_the_lane_until_the_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(100.0, Some(T0 + 1800)));
+
+        // The first tick reads the source at once (§9.2) and stores the
+        // reading (§9.1); the signal is not confirmed yet.
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 10);
+        let raw = meta_get(&mut store, "quota.reading.minimax-cn").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["provider"], "minimax-cn");
+        assert_eq!(value["read_at"], T0 + 10);
+        assert_eq!(value["windows"][0]["name"], "MiniMax-M3.1-Flash 5h");
+        assert_eq!(value["windows"][0]["used_percent"], 100.0);
+        assert_eq!(value["windows"][0]["resets_at"], T0 + 1800);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active, "one tick is no fact");
+
+        // The second tick confirms the signal: the lane parks until the reset
+        // of the window plus a minute.
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 20);
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        let until = T0 + 1800 + 60;
+        assert!(
+            seat.state_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&until.to_string()),
+            "{seat:?}"
+        );
+        // The pause row of §5.4 is open.
+        let pauses = store.read(|tx| tx.pauses_of_project("p")).unwrap();
+        assert_eq!(pauses.len(), 1, "{pauses:?}");
+        assert_eq!(pauses[0].kind, "quota");
+        assert_eq!(pauses[0].reason.as_deref(), Some("minimax-cn MiniMax-M3.1-Flash 5h"));
+        assert_eq!(pauses[0].end_at, None);
+
+        // At the reset the lane continues in the same session (§9.2, §3.3 S4).
+        tick_source(&mut store, &mut herdr, &api, false, false, until);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0], "Continue T-1: your quota is back.");
+        // The pause row ends and the round's clock pauses for the wait (§5.1).
+        let pauses = store.read(|tx| tx.pauses_of_project("p")).unwrap();
+        assert_eq!(pauses[0].end_at, Some(until));
+        let round = store
+            .read(|tx| tx.open_round_of_seat("p:heat"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(round.paused_s, until - (T0 + 20), "the clock paused for the park");
+    }
+
+    /// §9.2: quota is left — a rate limit or an error, not a quota stop. The
+    /// lane waits 5 min and continues; the second time in a row it becomes a
+    /// captain item.
+    #[test]
+    fn quota_left_waits_five_minutes_then_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::reading(reading_with(30.0, Some(T0 + 1800)));
+
+        // The signal is a provider error this time (§9.2).
+        tick_source(&mut store, &mut herdr, &api, false, true, T0 + 10);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active, "one tick is no fact");
+        tick_source(&mut store, &mut herdr, &api, false, true, T0 + 20);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        assert!(
+            seat.state_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("provider error, not quota"),
+            "{seat:?}"
+        );
+        // It is not quota wait time: no pause row (§5.4).
+        assert!(store.read(|tx| tx.pauses_of_project("p")).unwrap().is_empty());
+
+        // Five minutes later the lane continues.
+        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 20 + 300);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active);
+        let delivered = deliveries(&mut store);
+        assert_eq!(delivered.len(), 1, "{delivered:?}");
+        assert_eq!(delivered[0], "Continue T-1: your quota is back.");
+
+        // The second time in a row: the captain hears about it (§9.2).
+        tick_source(&mut store, &mut herdr, &api, false, true, T0 + 400);
+        tick_source(&mut store, &mut herdr, &api, false, true, T0 + 410);
+        let open = store
+            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 420))
+            .unwrap();
+        assert!(
+            open.iter()
+                .any(|message| message.body.contains("p:heat: provider error, not quota")),
+            "{open:?}"
+        );
+    }
+
+    /// §9.2: the source cannot be read — today's park, `quota_reset_h` hours.
+    #[test]
+    fn an_unreadable_source_parks_for_the_reset_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        let api = FakeQuota::failing("the provider does not answer");
+
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 10);
+        tick_source(&mut store, &mut herdr, &api, true, false, T0 + 20);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::Parked);
+        let until = T0 + 20 + 5 * 3600;
+        assert!(
+            seat.state_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains(&until.to_string()),
+            "{seat:?}"
+        );
+        // The pause row is open: the lane waits (§5.4).
+        let pauses = store.read(|tx| tx.pauses_of_project("p")).unwrap();
+        assert_eq!(pauses.len(), 1, "{pauses:?}");
+        assert_eq!(pauses[0].kind, "quota");
+    }
+
+    /// §9.1: a reading older than 15 min is stale, and the meta says so.
+    #[test]
+    fn a_stale_reading_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = key_file(dir.path());
+        let mut store = source_world(&key);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
+        // A reading of 20 minutes ago.
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    "quota.reading.minimax-cn",
+                    &serde_json::json!({
+                        "provider": "minimax-cn",
+                        "read_at": T0 - 1200,
+                        "windows": [{"name": "5h", "used_percent": 10.0, "resets_at": null}],
+                    })
+                    .to_string(),
+                )
+            })
+            .unwrap();
+        let api = FakeQuota::failing("the provider does not answer");
+
+        tick_source(&mut store, &mut herdr, &api, false, false, T0);
+
+        let raw = meta_get(&mut store, "quota.reading.minimax-cn").unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["stale"], true, "{value}");
+        assert_eq!(value["read_at"], T0 - 1200, "the old reading is kept");
+    }
 }
