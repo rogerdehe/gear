@@ -444,3 +444,45 @@ fn a_late_check_in_closes_the_stall_after_a_retry() {
         "the lane is not stuck any more: {items:?}"
     );
 }
+
+#[test]
+fn hand_in_from_delivered_settles_the_pending_delivery_without_a_view() {
+    let (mut s,op)=world();
+    s.write(|tx|gear_app::tasks::submit_result(tx,"p","T-7",1,1,"abc1234","report",T0+20)).unwrap();
+    let (confirmed,flagged)=confirm_pending_with(&mut s,"p",3,5,T0+30).unwrap();
+    assert_eq!(confirmed,vec![op.clone()]); assert!(flagged.is_empty());
+    assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,OpState::Confirmed);
+}
+
+#[test]
+fn full_tick_uses_each_projects_configured_delivery_grace() {
+    use gear_herdr::{fake::FakeHerdr,AgentStatus};
+    for (grace, expected) in [(30,OpState::Failed),(120,OpState::Submitted)] {
+        let (mut s,op)=world();
+        s.write(|tx| {let mut p=tx.get_project("p")?.unwrap();p.config_toml=format!(r#"
+[project]
+id="p"
+herdr_session="sess"
+repo="/repo"
+[quota]
+lanes=1
+temps=0
+[captain]
+pane="w1:p1"
+kind="opencode"
+profile="opencode"
+[[lanes]]
+name="heat"
+duty="work"
+owns=["src/"]
+kind="opencode"
+profile="opencode"
+[timing]
+delivery_grace_s={grace}
+"#);tx.update_project(&p)}).unwrap();
+        let mut h=FakeHerdr::new();h.add_agent_named("w1:p1","opencode",AgentStatus::Idle,"p-captain");h.add_agent_named("w1:p2","opencode",AgentStatus::Idle,"p-heat");
+        let mut cfg=gear_engine::EngineCfg::default();cfg.profiles=gear_herdr::builtins();cfg.delivery_grace_s=999;
+        gear_engine::tick(&mut s,&mut h,&cfg,T0+70).unwrap();
+        assert_eq!(s.read(|tx|tx.get_op("p",&op)).unwrap().unwrap().state,expected,"grace {grace}");
+    }
+}

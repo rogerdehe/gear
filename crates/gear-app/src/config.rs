@@ -36,6 +36,9 @@ pub struct ProjectConfig {
     pub conventions: Conventions,
     #[serde(default)]
     pub timing: Timing,
+    /// API-equivalent USD per million tokens, keyed by provider/model.
+    #[serde(default)]
+    pub prices: BTreeMap<String, Price>,
     /// Model chains per role, agreed at kickoff (17 §0). Empty = not managed.
     #[serde(default)]
     pub models: Models,
@@ -577,6 +580,16 @@ impl Default for Models {
     }
 }
 
+/// Per-million-token rates for one provider/model.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
 /// Defaults: tick_s 4, cooldown_s 90, sample_min 20, review_timer_min 45.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -589,6 +602,7 @@ pub struct Timing {
     pub captain_item_stale_min: u32,
     /// Working with no attempt in development while ready work waits.
     pub lane_busy_idle_min: u32,
+    pub delivery_grace_s: u32,
 }
 
 impl Default for Timing {
@@ -600,6 +614,7 @@ impl Default for Timing {
             review_timer_min: 45,
             captain_item_stale_min: 15,
             lane_busy_idle_min: 10,
+            delivery_grace_s: 180,
         }
     }
 }
@@ -704,6 +719,20 @@ pub fn profile_table(
 /// Empty chains are valid: models are not managed by GEAR then.
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
+
+    if cfg.timing.delivery_grace_s == 0 {
+        issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
+    }
+    for (model, price) in &cfg.prices {
+        if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {
+            issues.push(issue(&format!("prices.{model}"), "must name a provider/model".to_string()));
+        }
+        for (field, value) in [("input",price.input),("output",price.output),("cache_read",price.cache_read),("cache_write",price.cache_write)] {
+            if !value.is_finite() || value < 0.0 {
+                issues.push(issue(&format!("prices.{model}.{field}"), "must be a finite non-negative rate".to_string()));
+            }
+        }
+    }
 
     // ---- the gate runs before every merge: it must be the project's own
     // build + test command, never left as the skeleton's TODO.

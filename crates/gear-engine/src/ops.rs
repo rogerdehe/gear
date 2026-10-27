@@ -904,12 +904,16 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
         return Ok(None);
     };
     let views = tx.views_since(&op.seat, op.generation, op.created)?;
-    Ok(views
-        .iter()
-        .find(|view| {
-            view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)
-        })
-        .map(|view| view.ts))
+    if let Some(view) = views.iter().find(|view| view.shown_task.as_deref() == Some(task) && view.shown_attempt == Some(attempt)) {
+        return Ok(Some(view.ts));
+    }
+    // A hand-in from this seat proves it received the attempt even when no
+    // check-in view was recorded. Do not flag its delivery as unconfirmed.
+    let row = tx.get_attempt(&op.project, task, attempt)?;
+    if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
+        return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
+    }
+    Ok(None)
 }
 
 /// The session the attempt ran in (design §3.2 step 5): at the check-in the
