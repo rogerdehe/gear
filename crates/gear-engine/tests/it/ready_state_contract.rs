@@ -130,6 +130,8 @@ fn captain_message(w: &mut World, kind: MsgKind, urgent: bool, at: i64) -> Strin
 fn a_done_pi_gets_its_task_whatever_its_screen_says() {
     let mut w = world(AgentStatus::Done);
     w.herdr.set_screen(LANE_PANE, "Working tree clean");
+    // This freshly onboarded session needs no /new, but still goes through preparation.
+    w.store.write(|tx| tx.set_meta("engine.session_fresh.p:heat", "1")).unwrap();
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
