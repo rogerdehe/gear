@@ -255,7 +255,6 @@ pub fn prepare_lane(
     attempt: i64,
     now: Ts,
 ) -> GearResult<Prep> {
-    let _ = cfg;
     let project = seat.project.clone();
     let role = if attempt >= 2 { Role::Rework } else { Role::Dev };
     let key = round_key(&project, task, attempt, role);
@@ -283,7 +282,7 @@ pub fn prepare_lane(
         Ok(())
     })?;
 
-    Ok(if action.is_ready() { Prep::Ready } else { Prep::Wait })
+    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, now)
 }
 
 /// The session step of a **review** round (design §3.2 steps 2-3, §13.4):
@@ -302,7 +301,6 @@ pub fn prepare_review(
     attempt: i64,
     now: Ts,
 ) -> GearResult<Prep> {
-    let _ = cfg;
     let project = seat.project.clone();
     let key = round_key(&project, task, attempt, Role::Review);
 
@@ -326,7 +324,7 @@ pub fn prepare_review(
     })?;
     set_review_action(store, &project, task, attempt, &action)?;
 
-    Ok(if action.is_ready() { Prep::Ready } else { Prep::Wait })
+    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, Role::Review, &action, now)
 }
 
 /// The facts of a lane round (design §3.3).
@@ -565,6 +563,36 @@ mod tests {
     use gear_store::testing;
 
     const T0: i64 = 1_800_000_000;
+
+    #[test]
+    fn new_session_is_typed_then_waits_five_seconds_for_codex() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let action = Action::New;
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &action, now).unwrap();
+        assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 5), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 6), Prep::Ready);
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.session_action.as_deref(), Some("new-unconfirmed"));
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneType { text, .. } if text == "/new")));
+    }
+
+    #[test]
+    fn working_and_unknown_agents_receive_no_session_commands() {
+        for status in [gear_herdr::AgentStatus::Working, gear_herdr::AgentStatus::Unknown] {
+            let mut store = world();
+            let mut herdr = FakeHerdr::new();
+            herdr.add_agent("w1:p1", "codex", status);
+            let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+            let prep = crate::session_runner::run(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, Role::Dev, &Action::New, T0).unwrap();
+            assert_eq!(prep, Prep::Wait);
+            assert!(!herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::PaneType { .. } | gear_herdr::fake::Call::SendKeys { .. })));
+        }
+    }
 
     /// The facts of a lane round, with the defaults of a seat that works.
     fn lane_facts() -> Facts {
