@@ -656,6 +656,7 @@ fn finish_start(
     store
         .write(|tx| {
             gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
+            tx.set_meta(&format!("engine.session_fresh.{}", seat.id), &generation.to_string())?;
             tx.set_meta(&crate::start::pending_key(&seat.id), "")?;
             if let Some(entry) = entry {
                 tx.set_meta(&crate::model::model_meta_key(&seat.id), entry.model())?;
@@ -716,7 +717,8 @@ fn resume_start(
         .and_then(|info| info.agent_session.map(|session| session.value)));
     store
         .write(|tx| {
-            gear_app::seats::finish_onboard(tx, &seat.id, seat.generation, session_ref.as_deref(), now)
+            gear_app::seats::finish_onboard(tx, &seat.id, seat.generation, session_ref.as_deref(), now)?;
+            tx.set_meta(&format!("engine.session_fresh.{}", seat.id), &seat.generation.to_string())
         })
         .map_err(|e| format!("finish_onboard: {}", e.detail))?;
     Ok(true)
