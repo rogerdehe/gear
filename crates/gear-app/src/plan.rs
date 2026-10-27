@@ -1416,6 +1416,74 @@ fn contract_body(item: &QueueItem) -> String {
     body
 }
 
+/// `gear plan show T-n`: one task's block as it would stand in the plan file
+/// (design §8.3), so the captain edits a block without reading the whole
+/// file.
+///
+/// The block is the one the draft parser reads back: the header
+/// (`## T-<n> [priority] lane=… milestone=…`), then the fields the task
+/// carries — `goal`, `accept`, `evidence-files`, `evidence-due`, `estimate`,
+/// `deps`, `followup-of` and `issue`. A block that parses back is the same
+/// task, so the captain can copy it into the plan file as it is.
+///
+/// Read-only: nothing is written.
+pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
+    let row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+    let contract = tx.get_contract(project, task, row.contract_version)?;
+    let mut text = String::new();
+    // The header: the id, the priority, the lane, the milestone and the
+    // `required` mark, exactly as the plan file writes them.
+    text.push_str(&format!("## {} [{}]", row.id, row.priority));
+    if let Some(lane) = row.lane.as_deref() {
+        text.push_str(&format!(" lane={lane}"));
+    }
+    if let Some(milestone) = row.milestone.as_deref() {
+        text.push_str(&format!(" milestone={milestone}"));
+    }
+    if row.required {
+        text.push_str(" required");
+    }
+    text.push('\n');
+    // The fields the task carries: the contract's goal and acceptance, its
+    // evidence, its estimate, its dependencies and what it follows up.
+    if let Some(contract) = contract.as_ref() {
+        text.push_str(&format!("goal: {}\n", contract.goal));
+        text.push_str(&format!("accept: {}\n", contract.accept));
+        if !contract.evidence_files.is_empty() {
+            text.push_str(&format!(
+                "evidence-files: {}\n",
+                contract.evidence_files.join(", ")
+            ));
+        }
+        if let Some(minutes) = contract.evidence_due_min {
+            text.push_str(&format!("evidence-due: {minutes}\n"));
+        }
+    }
+    if let Some(minutes) = row.estimate_min {
+        text.push_str(&format!("estimate: {minutes}\n"));
+    }
+    text.push_str(&format!(
+        "deps: {}\n",
+        if row.deps.is_empty() {
+            "-".to_string()
+        } else {
+            row.deps.join(", ")
+        }
+    ));
+    if let Some(followup) = row.followup_of.as_deref() {
+        text.push_str(&format!("followup-of: {followup}\n"));
+    }
+    if let Some(issue) = row.issue {
+        text.push_str(&format!("issue: #{issue}\n"));
+    }
+    Ok(text.trim_end().to_string())
+}
+
 /// The first task on a dependency cycle, if there is one.
 fn find_cycle(graph: &BTreeMap<String, Vec<String>>) -> Option<String> {
     let mut colour: BTreeMap<String, u8> = BTreeMap::new();

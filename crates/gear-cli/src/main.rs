@@ -44,6 +44,13 @@ enum Cmd {
         #[arg(long)]
         deps: bool,
     },
+    /// Captain: the queue of the project (design §8.3) — what every lane
+    /// does now, why an idle lane is idle, and what it has left.
+    Queue {
+        /// The queue as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Captain: reports about the project.
     Report {
         #[command(subcommand)]
@@ -180,6 +187,11 @@ enum PlanOp {
         #[arg(long = "request-id")]
         request_id: Option<String>,
     },
+    /// Print one task's block as it would stand in the plan file (design §8.3).
+    Show {
+        /// The task to show (T-n).
+        task: String,
+    },
     /// Print `## NEW` blocks for the open issues the plan does not carry yet.
     ImportIssues {
         /// The voyage file to check against; default: the plan the store holds.
@@ -299,11 +311,13 @@ fn run(cli: Cli) -> GearResult<()> {
             PlanOp::Apply { path, keep, next, request_id } => {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
+            PlanOp::Show { task } => cmd_plan_show(&task),
             PlanOp::ImportIssues { path, label } => {
                 cmd_import_issues(path, label, cli.json)
             }
         },
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
+        Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
         },
@@ -718,6 +732,67 @@ fn output_error(e: std::io::Error) -> GearError {
 /// `gear board`: the plan board (PRD §15). The board itself lives in
 /// `gear-board`; the CLI opens the store, names the project and hands the
 /// terminal over.
+/// `gear queue`: the captain's plain view of the work (design §8.3) — every
+/// lane, what it does now, why an idle lane is idle, and what it has left.
+///
+/// Read-only, so it starts no engine.
+fn cmd_queue(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_queue(&mut store, &env, json)?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear queue` body, over injected state.
+fn run_queue(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    json: bool,
+) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    let queue = gear_app::queue::build(store, &project, now_ts())?;
+    if json {
+        return serde_json::to_string(&queue).map_err(json_error);
+    }
+    Ok(gear_app::queue::render(&queue))
+}
+
+/// `gear plan show T-n`: one task's block as it would stand in the plan file
+/// (design §8.3).
+///
+/// Read-only, so it starts no engine.
+fn cmd_plan_show(task: &str) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    let out = store.read(|tx| gear_app::plan::show(tx, &project, task))?;
+    println!("{out}");
+    Ok(())
+}
+
 fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
