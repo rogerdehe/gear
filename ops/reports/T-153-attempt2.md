@@ -1,0 +1,7 @@
+# T-153 attempt 2: session dispatch rework
+
+- F1: a session preparation for the open round reserves the pane against all doorbells until the session step completes. The reservation also covers an unsent round or S1 recovery when a session step cannot yet be initialized. Fake-Herdr tests cover an urgent instruction during `/new`, eventual doorbell after Ready and delivery, and recovery with no available profile.
+- F2: `prepare_lane` consumes the current generation's fresh marker even when it recovers an existing round, without changing its resume action. A generation-2 recovery test resumes the old session and verifies that the next unrelated task invokes `/new`.
+- F3: Retiring lanes can recover their open round under the existing attempt and operation guards. A fake-Herdr test verifies resume arguments and confirms no new assignment after the recovered task completes.
+
+The fixes were committed and pushed separately as 90a9483, fe21c18, and 3b40e0b, with additional reservation and test coverage in 07ef981, 8e86198, and d7a7fdf. All nine focused session-dispatch tests passed, including the strengthened Retiring test. `scripts/test.sh` passed 1,145 tests with zero failures or skips against integration base 883fe88e2e982f93acc04730aa548c71e80ada54; build time was 112 seconds and suite wall time was 131 seconds under shared load. Existing slow-test warnings included the previously logged F4 gate/dispatch fixture; its performance remains out of scope for this rework.
