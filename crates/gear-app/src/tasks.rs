@@ -459,6 +459,26 @@ pub fn require_merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<T
     }
 }
 
+/// The work is merged by the named task's merge (design §10.7, row B03-01):
+/// the attempt carries that merge's time, and the fact is kept so the board
+/// and the report can say which merge landed it.
+///
+/// Written once: the attempt's merge time is the first one (the store keeps
+/// it) and the attribution names the same merge, so a replay of the verdict
+/// changes nothing.
+fn mark_integrated_by(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    by: &str,
+    merged_at: Ts,
+) -> GearResult<()> {
+    tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, merged_at)?;
+    tx.set_meta(&format!("integrated-by:{project}:{task}"), by)?;
+    Ok(())
+}
+
 /// An acceptance verdict (design/05 `# Verdicts`, design/06 `settle`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -507,6 +527,18 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             continue;
         }
         if settled.passed == v.pass && settled.candidate == v.candidate {
+            // The same verdict again settles nothing; but a pass that names
+            // the merge that landed the work (design §10.7, row B03-01) still
+            // has to be marked: the attribution arrives after the attempt was
+            // accepted — the normal path after an auto-settled review or a
+            // failed merge. The marking is written once, so the replay of the
+            // same plan changes nothing.
+            if v.pass {
+                if let Some(by) = v.integrated_by.as_deref() {
+                    let merged_at = require_merged_at(tx, &v.project, by)?;
+                    mark_integrated_by(tx, &v.project, &v.task, v.attempt, by, merged_at)?;
+                }
+            }
             return Ok(());
         }
         // The one conflict a captain may make (T-90): a pass that already
@@ -660,11 +692,7 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     // merge's time, and the fact is kept so the board and the report can say
     // which merge landed it (design §10.7, row B03-01).
     if let Some((by, merged_at)) = integrated_at {
-        tx.set_attempt_time(&v.project, &v.task, v.attempt, AttemptStep::Merged, merged_at)?;
-        tx.set_meta(
-            &format!("integrated-by:{}:{}", v.project, v.task),
-            &by,
-        )?;
+        mark_integrated_by(tx, &v.project, &v.task, v.attempt, &by, merged_at)?;
     }
     Ok(())
 }
