@@ -140,7 +140,14 @@ pub fn release_idle_standby(
     standby.sort_by_key(|seat| seat.state_since);
     let working = working_lanes(store, project)?;
     let excess = standby.len().saturating_sub(working.max(0) as usize);
-    for seat in standby.into_iter().take(excess) {
+    // The sweep touches only the seats that were already Standby before this
+    // tick: a seat that just got its verdict waits for the next review, and
+    // it stays until the next tick (the captain's decision of M-2603).
+    let waiting: Vec<SeatRow> = standby
+        .into_iter()
+        .filter(|seat| seat.state_since < now)
+        .collect();
+    for seat in waiting.into_iter().take(excess) {
         // A standby reviewer has no job: it is idle, its agent alive.
         match release_one(store, herdr, project, &seat, None, now) {
             Ok(true) => report.released.push(seat.id.clone()),
@@ -1524,6 +1531,66 @@ profile = "codex"
         assert_eq!(row.state, SeatState::Standby, "its job is done");
         assert_eq!(row.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// The captain's decision of M-2603: the release sweep touches only the
+    /// seats that were already Standby before this tick. A reviewer that just
+    /// got its verdict stays Standby with its pane open until the next tick.
+    #[test]
+    fn a_reviewer_that_just_got_its_verdict_waits_for_the_next_tick() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        // The attempt is judged: the reviewer goes to Standby in this tick.
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:r-1".into(),
+                    created: T0 + 5,
+                })
+            })
+            .unwrap();
+
+        // No lane works (W = 0), and the reviewer got its verdict in this
+        // very tick: it waits.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "it waits for the next review");
+        assert_eq!(seat.task_id, None, "its job binding ended");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+
+        // The next tick releases it: it has been waiting since the last one.
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Releasing, "the idle reviewer goes");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
     }
 
     /// T-143 (design §3.6): with one lane working (W = 1) and two Standby
