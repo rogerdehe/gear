@@ -855,8 +855,8 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
 /// candidate has no landed work, so it may be cancelled too.
 /// The verdicts that name the task whose merge landed the work
 /// (design §10.7, row B03-01): the named task must be merged, and the
-/// candidate's tree has to be in the integration branch — otherwise the work
-/// is not there and the verdict is refused.
+/// candidate must be an ancestor of the integration branch — otherwise the
+/// work is not there and the verdict is refused.
 ///
 /// The store is asked first, so the refusal names the task that is not
 /// merged. Git runs before the write transaction, like the cancellation
@@ -889,7 +889,16 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
             Some(lane) => config.repo_of_lane(lane),
             None => config.root_repo(),
         };
-        if !crate::base::tree_on_integration(&repo.path, &repo.integration, candidate)? {
+        // The candidate must be an ancestor of the integration branch: the
+        // work is there because the candidate is (design §10.7, row B03-01,
+        // contract v3 of T-165). A commit with the same tree but no ancestry
+        // is not the work that landed.
+        let reference = crate::base::fetch_integration(&repo.path, &repo.integration)?;
+        if !crate::base::contains(
+            std::path::Path::new(&repo.path),
+            candidate,
+            &reference,
+        )? {
             return Err(bad(
                 0,
                 format!(
