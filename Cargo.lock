@@ -267,6 +267,7 @@ dependencies = [
  "board-herdr",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
