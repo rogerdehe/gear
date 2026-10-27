@@ -248,12 +248,24 @@ pub(crate) fn advance(
     // A same-CLI restart of an open round cannot safely start fresh merely
     // because its session has not been observed yet. Keep the plan pending.
     if plan.resume_required && plan.resume.is_none() {
-        let session = pane_of(store, seat)?.and_then(|pane|herdr.agent_get(&pane).ok().flatten())
+        let pane = pane_of(store, seat)?;
+        let agent = pane.as_ref().and_then(|pane|herdr.agent_get(pane).ok().flatten());
+        let session = agent.as_ref()
             .filter(|info|info.agent.as_deref() == Some(plan.old_cli.as_str()))
-            .and_then(|info|info.agent_session.map(|session|session.value));
-        let Some(session) = session.filter(|s|!s.is_empty()) else { return Ok(None) };
-        plan.resume = Some(session);
-        set_pending(store, &seat.id, &plan)?;
+            .and_then(|info|info.agent_session.as_ref().map(|session|session.value.clone()))
+            .filter(|session|!session.is_empty());
+        if let Some(session) = session {
+            plan.resume = Some(session);
+            set_pending(store, &seat.id, &plan)?;
+        } else if pane.as_ref().is_some_and(|pane|matches!(herdr.agent_get(pane), Ok(None))) {
+            // The persisted plan may have been created while its agent was
+            // present but unable to report a session. Once that same pane is
+            // a shell, use the fresh-start fallback from plan creation.
+            plan.resume_required = false;
+            set_pending(store, &seat.id, &plan)?;
+        } else {
+            return Ok(None);
+        }
     }
     loop {
         match plan.phase {
@@ -1190,6 +1202,36 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         herdr.exit_agent(PANE); advance_pending(&mut store,&mut herdr,&cfg,T+3);
         let args=herdr.calls.iter().find_map(|c|if let Call::AgentStart {args,..}=c {Some(args)} else {None}).unwrap();
         assert!(args.windows(2).any(|w|w==["--session","old-session"]),"{args:?}");
+    }
+    #[test]
+    fn persisted_same_cli_restart_falls_back_when_agent_exits_without_a_session() {
+        let dir=tempfile::tempdir().unwrap();
+        let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),false);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        store.write(|tx|tx.set_binding_session_ref("p:heat",1,"")).unwrap();
+        herdr.set_agent_session(PANE,"");
+        change(&mut store,"pi","new-model");
+
+        // The agent is still present when config reconciliation persists the
+        // plan, so GEAR cannot yet know that a fresh session will be needed.
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        let plan=pending(&mut store,"p:heat").unwrap().unwrap();
+        assert!(plan.resume_required);
+        assert!(plan.resume.is_none());
+        assert!(!herdr.calls.iter().any(|call|matches!(call,Call::AgentStart {..})));
+
+        // Once the agent has exited, the persisted plan must clear its resume
+        // requirement and start once with the new model in the same pane.
+        herdr.exit_agent(PANE);
+        advance_pending(&mut store,&mut herdr,&cfg,T+2);
+        let starts:Vec<_>=herdr.calls.iter().filter_map(|call|if let Call::AgentStart {kind,pane,args,..}=call {Some((kind,pane,args))} else {None}).collect();
+        assert_eq!(starts.len(),1,"{starts:?}");
+        assert_eq!((starts[0].0.as_str(),starts[0].1.as_str()),("pi",PANE));
+        assert!(starts[0].2.windows(2).any(|args|args==["--model","new-model"]),"{:?}",starts[0].2);
+        assert!(!starts[0].2.iter().any(|arg|arg=="--session"),"{:?}",starts[0].2);
+        assert!(pending(&mut store,"p:heat").unwrap().is_none());
+        let ops=store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Deliver)).unwrap();
+        assert!(ops.iter().any(|op|op.payload["text"].as_str().is_some_and(|text|text.contains("Continue T-1"))),"{ops:?}");
     }
     #[test]
     fn removing_the_model_chain_restarts_without_a_model_flag() {
