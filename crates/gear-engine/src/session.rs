@@ -219,7 +219,7 @@ fn review_action(facts: &Facts) -> Action {
         && facts.ran_here_with_the_same_cli();
     if v1 {
         return match facts.earlier_session.as_deref() {
-            Some(session) if facts.current_session.as_deref() == Some(session) => Action::Keep,
+            Some(session) if facts.agent_live && facts.current_session.as_deref() == Some(session) => Action::Keep,
             Some(session) => Action::Resume(session.to_string()),
             // The earlier round has no session to continue.
             None => Action::New,
@@ -322,9 +322,8 @@ pub fn prepare_review(
         if round.is_none() {
             create_round(tx, &key, seat, &facts, now)?;
         }
-        Ok(())
+        tx.set_meta(&review_action_key(&project, task, attempt), &review_action_json(&action))
     })?;
-    set_review_action(store, &project, task, attempt, &action)?;
 
     Ok(if action.is_ready() { Prep::Ready } else { Prep::Wait })
 }
@@ -527,18 +526,22 @@ fn recorded_review_action(
     attempt: i64,
 ) -> GearResult<Option<Action>> {
     let action = store.read(|tx| tx.get_meta(&review_action_key(project, task, attempt)))?;
-    Ok(action.as_deref().and_then(parse_action))
+    Ok(action.as_deref().and_then(|value| {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+            let name = json.get("action")?.as_str()?;
+            if name == "resume" {
+                return Some(Action::Resume(json.get("session_ref")?.as_str()?.to_string()));
+            }
+            parse_action(name)
+        } else {
+            parse_action(value)
+        }
+    }))
 }
 
-/// Record the action of a review round.
-fn set_review_action(
-    store: &mut Store,
-    project: &str,
-    task: &str,
-    attempt: i64,
-    action: &Action,
-) -> GearResult<()> {
-    store.write(|tx| tx.set_meta(&review_action_key(project, task, attempt), action.as_str()))
+fn review_action_json(action: &Action) -> String {
+    let session = match action { Action::Resume(session) => Some(session.as_str()), _ => None };
+    serde_json::json!({ "action": action.as_str(), "session_ref": session }).to_string()
 }
 
 /// The key of a review round's action.
@@ -725,6 +728,9 @@ mod tests {
         };
         assert_eq!(choose(&facts), Action::Keep);
 
+        facts.agent_live = false;
+        assert_eq!(choose(&facts), Action::Resume("session-r".into()));
+        facts.agent_live = true;
         facts.current_session = Some("session-other".into());
         assert_eq!(choose(&facts), Action::Resume("session-r".into()));
     }
@@ -845,7 +851,8 @@ mod tests {
         let action = store
             .read(|tx| tx.get_meta(&review_action_key("p", "T-1", 1)))
             .unwrap();
-        assert_eq!(action.as_deref(), Some("new"), "the action is recorded");
+        let action: serde_json::Value = serde_json::from_str(action.as_deref().unwrap()).unwrap();
+        assert_eq!(action["action"], "new", "the action is recorded");
     }
 
     /// An engine that knows the codex profile.

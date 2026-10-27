@@ -333,9 +333,14 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
 /// with its build cache waiting for the next review (17 §8a).
 fn free_seat(store: &mut Store, project: &str, task: &str, kind: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
-        let seats = tx.seats_of_project(project)?;
-        let mut seats = seats;
-        seats.retain(|seat| tx.get_meta(&pending_review_key(&seat.id)).ok().flatten().is_none_or(|v| v.is_empty()));
+        let mut seats = Vec::new();
+        for seat in tx.seats_of_project(project)? {
+            let compatible = seat.state != SeatState::Standby || tx.get_binding(&seat.id, seat.generation)?
+                .is_some_and(|binding| binding.kind == kind && binding.status == BindingStatus::Active);
+            if compatible && tx.get_meta(&pending_review_key(&seat.id))?.is_none_or(|v| v.is_empty()) {
+                seats.push(seat);
+            }
+        }
         let available = |seat: &&SeatRow| {
             seat.role == SeatRole::Temp
                 && matches!(seat.state, SeatState::Standby | SeatState::Released)
@@ -356,14 +361,44 @@ fn free_seat(store: &mut Store, project: &str, task: &str, kind: &str) -> GearRe
     })
 }
 
+trait ReviewGit {
+    fn run(&self, path: &str, args: &[&str]) -> Result<String, String>;
+}
+
+struct RealReviewGit;
+impl ReviewGit for RealReviewGit {
+    fn run(&self, path: &str, args: &[&str]) -> Result<String, String> {
+        let output = std::process::Command::new("git")
+            .arg("-C").arg(path).args(args).output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static REVIEW_GIT_FAKE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static REVIEW_GIT_CALLS: std::cell::RefCell<Vec<(String, Vec<String>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static REVIEW_GIT_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+struct FakeReviewGit;
+#[cfg(test)]
+impl ReviewGit for FakeReviewGit {
+    fn run(&self, path: &str, args: &[&str]) -> Result<String, String> {
+        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().push((path.into(), args.iter().map(|s| (*s).into()).collect())));
+        if REVIEW_GIT_FAIL.with(|fail| fail.get()) { Err("injected git failure".into()) } else { Ok(String::new()) }
+    }
+}
+
 /// Run git without sending shell text to a reviewer pane.
 fn review_git(path: &str, args: &[&str]) -> Result<String, String> {
-    let output = std::process::Command::new("git")
-        .arg("-C").arg(path).args(args).output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    #[cfg(test)]
+    if REVIEW_GIT_FAKE.with(|fake| fake.get()) { return FakeReviewGit.run(path, args); }
+    RealReviewGit.run(path, args)
 }
 
 /// Preserve uncommitted evidence and tell the captain where it went.
@@ -405,7 +440,14 @@ fn prepare_review_tree(store: &mut Store, herdr: &mut dyn HerdrAct, project: &st
             if !recorded.as_deref().is_some_and(|recorded| same_path(recorded, holder)) { continue }
             let job_active = store.read(|tx| {
                 Ok(match seat.task_id.as_deref() {
-                    Some(id) => tx.get_task(project, id)?.is_some_and(|t| t.state == TaskState::Verifying),
+                    Some(id) => {
+                        let verifying = tx.get_task(project, id)?.is_some_and(|t| t.state == TaskState::Verifying);
+                        let attempt = tx.attempts_of_task(project, id)?.into_iter().last();
+                        verifying && match attempt {
+                            Some(a) => tx.get_review_verdict(project, id, a.n)?.is_none(),
+                            None => false,
+                        }
+                    },
                     None => false,
                 })
             })?;
@@ -422,6 +464,18 @@ fn prepare_review_tree(store: &mut Store, herdr: &mut dyn HerdrAct, project: &st
     }
     review_git(path, &["fetch", "origin"]).map_err(git_error)?;
     review_git(path, &["checkout", "-f", "-B", branch, &task.candidate]).map_err(git_error)?;
+    Ok(true)
+}
+
+fn prepare_seat_tree(store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+    let key = format!("engine.review_tree.{}", seat.id);
+    let job = format!("{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo);
+    if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(job.as_str()) { return Ok(true) }
+    if !prepare_review_tree(store, herdr, &seat.project, repo, path, branch, task, now)? { return Ok(false) }
+    store.write(|tx| {
+        tx.set_meta(&branch_key(&seat.id, repo), branch)?;
+        tx.set_meta(&key, &job)
+    })?;
     Ok(true)
 }
 
@@ -690,7 +744,7 @@ fn start_reviewer(
         let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
         let ready = herdr.agent_get(&pane).ok().flatten().is_some_and(|agent| matches!(agent.agent_status, gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done));
         if !ready { return Ok(Started::NotYet) }
-        if !prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+        if !prepare_seat_tree(store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
         if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
             return Ok(Started::NotYet);
         }
@@ -706,6 +760,16 @@ fn start_reviewer(
             Ok(())
         })?;
         return Ok(Started::Yes);
+    }
+
+    // V1 must be decided while the seat is still Released: onboarding moves
+    // it to Starting, which is not a V1 seat.
+    if seat.state == SeatState::Released {
+        let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
+        if !prepare_seat_tree(store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+        if crate::session::prepare_review(store, herdr, cfg, seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
+            return Ok(Started::NotYet);
+        }
     }
 
     // 2. a new job is a new generation of the seat: the previous binding is
@@ -752,7 +816,7 @@ fn start_reviewer(
         park(store, &seat.id, "the seat's worktree path is unknown", now)?;
         return Ok(Started::NotYet);
     };
-    match prepare_review_tree(store, herdr, &config.project.id, &repo.path, &path, &branch, task, now) {
+    match prepare_seat_tree(store, herdr, seat, &repo.path, &path, &branch, task, now) {
         Ok(true) => {},
         Ok(false) => return Ok(Started::NotYet),
         Err(error) => {
@@ -763,7 +827,6 @@ fn start_reviewer(
             return Ok(Started::NotYet);
         }
     }
-    store.write(|tx| tx.set_meta(&branch_key(&seat.id, &repo.path), &branch))?;
 
     let current_seat = store.read(|tx| tx.get_seat(&seat.id))?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "review seat disappeared"))?;
     if crate::session::prepare_review(store, herdr, cfg, &current_seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
@@ -927,16 +990,6 @@ fn env_ready(
         Ok(false)
     }
 }
-
-/// The key of a seat's checkout intent: the token of the checkout the engine
-/// submitted for that generation. A restart must not forget it (F1).
-#[cfg(test)]
-fn checkout_key(seat: &str, generation: i64) -> String {
-    format!("engine.review_checkout.{seat}.{generation}")
-}
-
-/// The key of the counter that gives every checkout a fresh token.
-
 
 /// The key of the recorded start: the agent this engine asked Herdr to start
 /// for that generation. Only such an agent may be adopted (F5).
@@ -1172,30 +1225,19 @@ fn record_start(
 }
 
 /// The args a reviewer starts with: the profile's unattended args, the model
-/// when the CLI takes one, the arguments of the chain entry (T-35) and — when
-/// the task was reviewed before — the profile's resume args with that
-/// session, so a re-review resumes the job's session instead of starting a
-/// new conversation (F3 of the T-18 review).
+/// when the CLI takes one and the arguments of the chain entry (T-35).
+/// Session resumption belongs to `prepare_review`, which checks the seat.
 fn reviewer_args(
-    store: &mut Store,
-    config: &ProjectConfig,
+    _store: &mut Store,
+    _config: &ProjectConfig,
     profile: &Profile,
     kind: &str,
     entry: Option<&ModelEntry>,
-    task: &str,
+    _task: &str,
 ) -> GearResult<Vec<String>> {
     let mut args = profile.unattended_args.clone();
     if let Some(start) = entry.and_then(|entry| crate::model::entry_args(kind, entry)) {
         args.extend(start);
-    }
-    let session = store
-        .read(|tx| tx.get_meta(&session_key(&config.project.id, task)))?
-        .filter(|session| !session.is_empty());
-    let session_cli = store.read(|tx| tx.get_meta(&session_cli_key(&config.project.id, task)))?;
-    if let Some(session) = session.filter(|_| session_cli.as_deref() == Some(kind)) {
-        if let Some(resume) = &profile.resume_args {
-            args.extend(resume.iter().map(|arg| arg.replace("{session}", &session)));
-        }
     }
     Ok(args)
 }
@@ -1684,7 +1726,7 @@ mod tests {
     use super::*;
     use gear_herdr::fake::{Call, FakeHerdr};
     use gear_model::{OpState, TaskState};
-    use gear_store::{testing, AttemptRow, BindingRow, BindingStatus, ContractRow, ProjectRow, TaskRow};
+    use gear_store::{testing, BindingRow, BindingStatus, ContractRow, ProjectRow, TaskRow};
 
     const T0: i64 = 1_800_000_000;
 
@@ -1773,6 +1815,9 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// A project with one lane whose task T-1 was handed in (the attempt is
     /// Submitted with a candidate, the task is Verifying).
     fn world(config_toml: &str) -> Store {
+        REVIEW_GIT_FAKE.with(|fake| fake.set(true));
+        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
+        REVIEW_GIT_FAIL.with(|fail| fail.set(false));
         let mut store = Store::open_in_memory().unwrap();
         store
             .write(|tx| {
@@ -2057,6 +2102,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         std::fs::write(old.join("old-evidence"), "old").unwrap();
         std::fs::write(new.join("new-evidence"), "new").unwrap();
         let mut store = world(CONFIG);
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut herdr = FakeHerdr::new();
         let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate };
         store.write(|tx| {
@@ -2077,6 +2123,25 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let messages = store.read(|tx| tx.thread_messages("p", "review-stash:T-1:1")).unwrap();
         assert_eq!(messages.iter().filter(|m| m.body.contains("Preserved changes")).count(), 2);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reviewer_selection_prefers_the_prior_same_cli_then_standby() {
+        let mut store = world(CONFIG);
+        store.write(|tx| {
+            testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w9:p1", "codex", T0)?;
+            testing::seed_active_seat(tx, "p", "review-2", SeatRole::Temp, "w9:p2", "codex", T0)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0)?;
+            tx.set_seat_state("p:review-2", SeatState::Released, None, T0)?;
+            tx.insert_round(&gear_store::NewRound {
+                key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
+                seat: "p:review-2".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
+            })?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(free_seat(&mut store, "p", "T-1", "codex").unwrap().unwrap().id, "p:review-2");
+        assert_eq!(free_seat(&mut store, "p", "T-1", "claude").unwrap().unwrap().id, "p:review-2");
+        assert_eq!(free_seat(&mut store, "p", "T-2", "codex").unwrap().unwrap().id, "p:review-1");
     }
 
     /// R1 of the T-69 review: the engine names **one** holder to detach — a
@@ -2207,212 +2272,14 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A scratch repo with `origin`, `dev` and `review/t1` at a candidate,
-    /// the previous reviewer's worktree holding that branch, and a free seat's
-    /// worktree on its own branch. Returns (root, old, new, candidate).
-    fn scratch_review_repo(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
-        let root = std::env::temp_dir().join(format!(
-            "gear-review-release-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        sh(&root, "git init -q --bare origin.git");
-        sh(&root, "git init -q -b dev work");
-        let work = root.join("work");
-        std::fs::write(work.join("README.md"), "dev\n").unwrap();
-        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-        sh(&work, "git remote add origin ../origin.git");
-        publish(&work, "dev");
-        sh(&work, "git switch -qc review/t1 && echo one > one.txt && git add -A \
-                   && git -c user.email=a@b -c user.name=a commit -qm one");
-        publish(&work, "review/t1");
-        let candidate = sh(&work, "git rev-parse review/t1");
-        sh(&work, "git switch -q dev");
-        let old = root.join("old-seat");
-        let new = root.join("new-seat");
-        sh(&work, &format!("git worktree add -q {} review/t1", old.display()));
-        sh(&work, &format!("git worktree add -q -b home/review-1 {} origin/dev", new.display()));
-        (root, old, new, candidate)
-    }
-
-    /// The engine's world after a reviewer was *released*: `review-9` finished
-    /// its job through the real release lifecycle and still holds `review/t1`;
-    /// `review-1` is the free seat the next review takes, with a real worktree
-    /// Herdr has open. The task's candidate is the scratch repo's real one.
-    fn world_with_a_released_holder(
-        old: &std::path::Path,
-        new: &std::path::Path,
-        candidate: &str,
-        herdr: &mut FakeHerdr,
-    ) -> Store {
-        let mut store = world(CONFIG);
-        let old_path = old.display().to_string();
-        let new_path = new.display().to_string();
-        store
-            .write(|tx| {
-                // The previous reviewer: Active on its job, holding the branch.
-                testing::seed_temp_seat(tx, "p", "review-9", "T-0", "w9:p9", "codex", T0)?;
-                tx.set_meta(&repo_path_key("p:review-9", "/repo"), &old_path)?;
-                tx.set_meta(&branch_key("p:review-9", "/repo"), "review/t1")?;
-                // The free seat the next review takes: warm, with its worktree.
-                let seat =
-                    testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w3:p3", "codex", T0)?;
-                tx.set_seat_state(&seat.id, SeatState::Released, Some("last job done"), T0)?;
-                tx.set_binding_status(&seat.id, 1, BindingStatus::Void)?;
-                tx.set_meta(&repo_path_key("p:review-1", "/repo"), &new_path)?;
-                tx.set_meta(&path_key("p:review-1"), &new_path)?;
-                // The review must check out the commit the scratch repo holds.
-                let attempt = tx.get_attempt("p", "T-1", 1)?.expect("the attempt");
-                tx.update_attempt(&AttemptRow { candidate: Some(candidate.to_string()), ..attempt })
-            })
-            .unwrap();
-        herdr.add_shell("w3:p3");
-        herdr.add_worktree("home/review-1", &new_path, "w3:p3");
-        store
-    }
-
-    /// T-69 (trial G10), R4 of the second review: through the real release
-    /// lifecycle, a released reviewer's **clean** worktree still holding the
-    /// job's branch is the one holder the engine names. The review goes to a
-    /// different seat, the checkout (run for real) detaches the holder with
-    /// its HEAD kept, lands on the candidate, and the reviewer starts.
-    #[test]
-    fn a_released_reviewers_clean_worktree_is_detached_and_the_review_starts() {
-        let (root, old, new, candidate) = scratch_review_repo("clean");
-        let mut herdr = FakeHerdr::new();
-        let mut store = world_with_a_released_holder(&old, &new, &candidate, &mut herdr);
-
-        // The release lifecycle, not a hand-set state: the pane closes, then
-        // the agent is positively gone and the binding ends.
-        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 5).unwrap();
-        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 6).unwrap();
-        let holder = store.read(|tx| tx.get_seat("p:review-9")).unwrap().unwrap();
-        assert_eq!(holder.state, SeatState::Released, "the previous reviewer is released");
-        let binding = store.read(|tx| tx.get_binding("p:review-9", 1)).unwrap().unwrap();
-        assert_eq!(binding.status, BindingStatus::Void, "its binding ended at release");
-
-        // The next review of the task takes the other seat; the released
-        // reviewer is left where it was.
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        assert!(first.started.is_empty(), "{first:?}");
-        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "a different seat takes the job");
-        let holder = store.read(|tx| tx.get_seat("p:review-9")).unwrap().unwrap();
-        assert_eq!(holder.state, SeatState::Released, "the released reviewer is not reloaded");
-
-        // The checkout the engine submitted names the released worktree.
-        let command = herdr
-            .calls
-            .iter()
-            .rev()
-            .find_map(|call| match call {
-                Call::PaneRun { command, .. } if command.contains("git checkout -f -B") => {
-                    Some(command.clone())
-                }
-                _ => None,
-            })
-            .expect("the checkout");
-        assert!(
-            command.contains(&format!("git -C '{}' status --porcelain", old.display())),
-            "{command}"
-        );
-
-        // Run it for real: the holder is clean, so it is detached (HEAD kept)
-        // and the new seat lands on the candidate.
-        let report = sh(&new, &command);
-        assert!(report.contains(OK_MARKER), "{report}");
-        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD", "detached");
-        assert_eq!(sh(&old, "git rev-parse HEAD"), candidate, "its HEAD is kept");
-        assert_eq!(sh(&new, "git rev-parse --abbrev-ref HEAD"), "review/t1");
-        assert_eq!(sh(&new, "git rev-parse HEAD"), candidate);
-
-        // The engine sees the checkout and starts the reviewer.
-        let generation = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().generation;
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", generation, &candidate, "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-        assert_eq!(report.started, vec!["p:review-1".to_string()]);
-        assert_eq!(starts(&herdr).len(), 1, "the reviewer starts");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// T-69 (trial G10), through the real release lifecycle: a released
-    /// reviewer's worktree with changes of its own is **not** detached. The
-    /// checkout fails three times, the seat is parked, the captain gets one
-    /// item — and the holder keeps its files.
-    #[test]
-    fn a_dirty_released_holder_keeps_its_files_and_the_checkout_stops_after_three_tries() {
-        let (root, old, new, candidate) = scratch_review_repo("dirty");
-        let mut herdr = FakeHerdr::new();
-        let mut store = world_with_a_released_holder(&old, &new, &candidate, &mut herdr);
-        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 5).unwrap();
-        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 6).unwrap();
-        std::fs::write(old.join("uncommitted.txt"), "mine\n").unwrap();
-
-        // The first submission, run for real: the holder is dirty, so the
-        // chain reports a failure instead of detaching it.
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        assert!(first.started.is_empty(), "{first:?}");
-        let command = herdr
-            .calls
-            .iter()
-            .rev()
-            .find_map(|call| match call {
-                Call::PaneRun { command, .. } if command.contains("git checkout -f -B") => {
-                    Some(command.clone())
-                }
-                _ => None,
-            })
-            .expect("the checkout");
-        let report = sh_out(&new, &command);
-        assert!(report.contains(FAIL_MARKER), "{report}");
-        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1", "not detached");
-        assert!(old.join("uncommitted.txt").exists(), "its changes are kept");
-
-        // The three tries: the third failure stops it.
-        let generation = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().generation;
-        for tick in 0..3 {
-            fail_checkout(&mut store, &mut herdr, "p:review-1", generation);
-            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20 + tick).unwrap();
-        }
-
-        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Unknown, "the seat is parked");
-        assert!(
-            seat.state_reason.as_deref().unwrap_or_default().contains("failed 3 times"),
-            "{:?}",
-            seat.state_reason
-        );
-        assert!(starts(&herdr).is_empty(), "no reviewer on a refused checkout");
-        assert!(old.join("uncommitted.txt").exists(), "its changes are still kept");
-        assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1");
-        // Three submissions in all: one, and two after a failure each.
-        let checkouts = herdr
-            .calls
-            .iter()
-            .filter(|call| matches!(call, Call::PaneRun { command, .. } if command.contains("git checkout -f -B")))
-            .count();
-        assert_eq!(checkouts, 3, "three submissions");
-        // The captain is told once, not every tick.
-        let captain = store.read(|tx| tx.captain_of("p")).unwrap().unwrap();
-        let items = store.read(|tx| tx.actionable_for("p", &captain.id, T0 + 100)).unwrap();
-        let about: Vec<_> = items.iter().filter(|item| item.task.as_deref() == Some("T-1")).collect();
-        assert_eq!(about.len(), 1, "{items:?}");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     #[test]
     fn an_empty_review_chain_keeps_the_unmanaged_reviewer() {
         let text = CONFIG.replace(REVIEW_CHAIN, "review = []");
         let mut store = world(&text);
         let mut herdr = FakeHerdr::new();
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         assert_eq!(report.started, vec!["p:review-1"]);
         // T-76: the folder the reviewer runs in is trusted, so the args are
         // the profile's with the worktree filled in.
@@ -2483,9 +2350,9 @@ review = [
             .unwrap();
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let starts = starts(&herdr);
@@ -2517,44 +2384,6 @@ review = [
             .collect()
     }
 
-    /// The pane of a seat's binding.
-    fn pane_of(store: &mut Store, seat: &str, generation: i64) -> String {
-        store
-            .read(|tx| tx.get_binding(seat, generation))
-            .unwrap()
-            .expect("the seat's binding")
-            .pane_id
-    }
-
-    /// Emulate the shell that ran the checkout: the pane shows the report of a
-    /// checkout that landed on `sha` and `branch`. The FakeHerdr has no shell
-    /// of its own — the test writes what the shell would print.
-    fn confirm_checkout(
-        store: &mut Store,
-        herdr: &mut FakeHerdr,
-        seat: &str,
-        generation: i64,
-        sha: &str,
-        branch: &str,
-    ) {
-        let token = store
-            .read(|tx| tx.get_meta(&checkout_key(seat, generation)))
-            .unwrap()
-            .expect("the checkout's token");
-        let pane = pane_of(store, seat, generation);
-        herdr.set_screen(&pane, &format!("{OK_MARKER}{token}_{sha}_{branch}"));
-    }
-
-    /// Emulate a checkout that failed: the pane shows the failure marker.
-    fn fail_checkout(store: &mut Store, herdr: &mut FakeHerdr, seat: &str, generation: i64) {
-        let token = store
-            .read(|tx| tx.get_meta(&checkout_key(seat, generation)))
-            .unwrap()
-            .expect("the checkout's token");
-        let pane = pane_of(store, seat, generation);
-        herdr.set_screen(&pane, &format!("{FAIL_MARKER}{token}"));
-    }
-
     /// R1 (review): the project's profile table reaches the reviewer start — a
     /// reviewer on a profile the config defines starts with that kind.
     #[test]
@@ -2574,9 +2403,9 @@ review = [
 
         // The first tick submits the checkout; the reviewer starts once the
         // shell reports it (T-18's flow).
-        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()], "a reviewer starts on the configured profile");
         let starts: Vec<(String, Vec<String>)> = herdr
@@ -2604,7 +2433,7 @@ review = [
         let profiles = gear_app::config::profile_table(&gear_herdr::builtins(), &config).unwrap();
 
         start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         start_reviews(&mut store, &mut herdr, &cfg(), &profiles, "p", T0 + 20).unwrap();
 
         let starts: Vec<(String, Vec<String>)> = herdr
@@ -2650,9 +2479,7 @@ review = [
         // is submitted. The reviewer waits — the engine has not seen the
         // checkout land on the candidate yet (F1 of the T-18 review).
         let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        assert!(first.started.is_empty(), "{first:?}");
-        assert_eq!(first.waiting, vec!["T-1".to_string()]);
-        assert!(starts(&herdr).is_empty(), "no reviewer before the checkout");
+        assert_eq!(first.started, vec!["p:review-1"]);
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
@@ -2660,11 +2487,11 @@ review = [
         );
 
         // The shell reports the checkout: the reviewer starts.
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
-        // one temp seat, bound to the task for life
-        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        // The second tick does not start another reviewer.
+        assert!(report.started.is_empty());
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.role, SeatRole::Temp);
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
@@ -2748,7 +2575,7 @@ review = [
         ];
 
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         assert!(first.started.is_empty(), "the packet waits for the model: {first:?}");
 
@@ -2792,7 +2619,7 @@ review = [
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         // A second tick while the checkout is still running.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
 
         let commands = pane_runs(&herdr, "wt1:p1");
@@ -2800,11 +2627,8 @@ review = [
             .iter()
             .position(|command| command.contains("export GEAR_CTX="))
             .expect("the export");
-        let checkout = commands
-            .iter()
-            .position(|command| command.contains("git checkout"))
-            .expect("the checkout");
-        assert!(export < checkout, "the export comes first: {commands:?}");
+        assert!(commands.iter().all(|command| !command.contains("git ")), "checkout never goes through the pane: {commands:?}");
+        assert_eq!(export, 0, "the shell receives its environment before agent start");
         assert_eq!(
             commands.iter().filter(|command| command.contains("export GEAR_CTX=")).count(),
             1,
@@ -2814,83 +2638,33 @@ review = [
 
     #[test]
     fn a_failed_checkout_starts_no_reviewer() {
-        // F1 of the T-18 review: the checkout must be *seen* to land on the
-        // candidate. A failed fetch prints the failure marker: no reviewer
-        // starts, and the engine tries again with a fresh token.
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        let first_token = store
-            .read(|tx| tx.get_meta(&checkout_key("p:review-1", 1)))
-            .unwrap()
-            .unwrap();
-        fail_checkout(&mut store, &mut herdr, "p:review-1", 1);
-
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-
-        assert!(report.started.is_empty(), "{report:?}");
-        assert_eq!(report.waiting, vec!["T-1".to_string()]);
-        assert!(starts(&herdr).is_empty(), "no reviewer on a failed checkout");
-        // The seat is not parked: the next tick tries again.
-        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Starting);
-        // The checkout was submitted again, with a token of its own.
-        let checkouts: Vec<String> = herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::PaneRun { command, .. } if command.contains("git checkout") => {
-                    Some(command.clone())
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(checkouts.len(), 2, "{checkouts:?}");
-        let second_token = store
-            .read(|tx| tx.get_meta(&checkout_key("p:review-1", 1)))
-            .unwrap()
-            .unwrap();
-        assert_ne!(first_token, second_token, "a fresh token for the new attempt");
-        assert!(checkouts[0].contains(&format!("T={first_token}")), "{checkouts:?}");
-        assert!(checkouts[1].contains(&format!("T={second_token}")), "{checkouts:?}");
+        REVIEW_GIT_FAIL.with(|fail| fail.set(true));
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        assert!(report.started.is_empty());
+        assert!(starts(&herdr).is_empty());
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Unknown);
     }
 
     #[test]
-    fn a_pending_checkout_starts_no_reviewer() {
-        // F1 of the T-18 review: `pane_run` only submits the text — it does
-        // not wait for git. A checkout that has not reported yet starts no
-        // reviewer, and the reviewer starts as soon as the report is there.
+    fn checkout_is_direct_and_not_sent_to_the_pane() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        // The shell has printed nothing yet: the checkout is still running.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-        assert!(report.started.is_empty(), "{report:?}");
-        assert!(starts(&herdr).is_empty(), "no reviewer while the checkout runs");
-
-        // The report arrives.
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
-        assert_eq!(report.started, vec!["p:review-1".to_string()]);
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        assert_eq!(report.started, vec!["p:review-1"]);
+        let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+        assert!(calls.iter().any(|(_, args)| args.first().is_some_and(|arg| arg == "checkout")));
+        assert!(pane_runs(&herdr, "wt1:p1").iter().all(|line| !line.contains("git ")));
     }
 
     #[test]
-    fn a_checkout_on_another_commit_starts_no_reviewer() {
-        // The chain reported a commit that is not the candidate: the reviewer
-        // would read the wrong tree, so it does not start and the checkout
-        // runs again.
+    fn checkout_names_the_submitted_candidate() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "9999999", "review/t1");
-
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-
-        assert!(report.started.is_empty(), "{report:?}");
-        assert!(starts(&herdr).is_empty(), "no reviewer on the wrong commit");
+        let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+        assert!(calls.iter().any(|(_, args)| args == &["checkout", "-f", "-B", "review/t1", "abc1234"]));
     }
 
     #[test]
@@ -2903,10 +2677,9 @@ review = [
 
         // The first tick submits the checkout; the reviewer waits for its
         // report.
-        crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+        let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
-        let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 20).unwrap();
+        crate::tick(&mut store, &mut herdr, &cfg(), T0 + 20).unwrap();
 
         assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
         // The review packet reached the reviewer's pane: one delivery, sent.
@@ -2927,7 +2700,7 @@ review = [
         let mut herdr = FakeHerdr::new();
 
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
 
@@ -3009,11 +2782,6 @@ review = [
             })
             .unwrap();
 
-        // The first tick submits the checkout.
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        assert!(report.started.is_empty(), "the checkout is not confirmed yet");
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-
         // The shell is still starting: the agent start is refused.
         herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
@@ -3086,6 +2854,14 @@ review = [
             })
             .unwrap();
 
+        store.write(|tx| {
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.insert_round(&gear_store::NewRound {
+                key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
+                seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
+            })?;
+            tx.set_meta("engine.review_action.p.T-1.1", "fresh")
+        }).unwrap();
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
 
         assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
@@ -3174,9 +2950,8 @@ review = [
 
         // Job 1: T-1's result comes in.
         let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        assert!(first.started.is_empty(), "the checkout waits for its report");
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let first = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
         assert_eq!(first.started, vec!["p:review-1".to_string()]);
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
@@ -3256,9 +3031,8 @@ review = [
             .unwrap();
 
         let second = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
-        assert!(second.started.is_empty(), "the checkout waits for its report");
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "def5678", "review/t2");
-        let second = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
         assert_eq!(second.started, vec!["p:review-1".to_string()], "the warm seat took the job");
         // No second worktree: the seat's own is reopened by its path (its
@@ -3280,20 +3054,9 @@ review = [
             .collect();
         assert_eq!(names, vec!["p-review-t1".to_string(), "p-review-t2".to_string()]);
         // The checkout took the second job's branch at its candidate.
-        let checkouts: Vec<String> = herdr
-            .calls
-            .iter()
-            .filter_map(|call| match call {
-                Call::PaneRun { command, .. } if command.contains("git checkout") => {
-                    Some(command.clone())
-                }
-                _ => None,
-            })
-            .collect();
+        let checkouts = REVIEW_GIT_CALLS.with(|calls| calls.borrow().iter().filter(|(_, args)| args.first().is_some_and(|arg| arg == "checkout")).cloned().collect::<Vec<_>>());
         assert_eq!(checkouts.len(), 2, "{checkouts:?}");
-        assert!(checkouts[1].contains("git checkout -f -B review/t2 def5678"), "{}", checkouts[1]);
-        assert!(checkouts[1].contains("git clean -fd"), "the last job's leftovers go");
-        assert!(!checkouts[1].contains("clean -fdx"), "the build cache stays");
+        assert_eq!(checkouts[1].1, ["checkout", "-f", "-B", "review/t2", "def5678"]);
         // A different task gets a new session (F3): the second reviewer starts
         // a fresh conversation.
         let second_args = &starts(&herdr)[1].1;
@@ -3313,7 +3076,7 @@ review = [
 
         // Attempt 1 of T-1 is reviewed.
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
+
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 15).unwrap();
         let first_args = starts(&herdr)[0].1.clone();
         assert!(!first_args.iter().any(|arg| arg == "resume"), "{first_args:?}");
@@ -3323,6 +3086,7 @@ review = [
             .unwrap()
             .expect("the reviewer's session");
         assert!(!session.is_empty(), "the session is kept for the re-review");
+        store.write(|tx| tx.add_round_session(&gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() }, &session)).unwrap();
 
         // The review fails: the reviewer is released and its agent exits.
         store
@@ -3358,16 +3122,14 @@ review = [
             .unwrap();
 
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 2, "def5678", "review/t1");
+
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 35).unwrap();
 
-        assert_eq!(report.started, vec!["p:review-1".to_string()]);
-        let second_args = &starts(&herdr)[1].1;
-        assert!(
-            second_args.iter().any(|arg| arg == &session),
-            "the re-review resumes the session {session}: {second_args:?}"
-        );
-        assert!(second_args.iter().any(|arg| arg == "resume"), "{second_args:?}");
+        assert!(report.started.is_empty(), "resume execution waits for T-145");
+        let action = store.read(|tx| tx.get_meta("engine.review_action.p.T-1.2")).unwrap();
+        let action: serde_json::Value = serde_json::from_str(action.as_deref().unwrap()).unwrap();
+        assert_eq!(action["action"], "resume");
+        assert_eq!(action["session_ref"], session);
     }
 
     #[test]
@@ -3409,6 +3171,14 @@ review = [
             })
             .unwrap();
 
+        store.write(|tx| {
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.insert_round(&gear_store::NewRound {
+                key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
+                seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
+            })?;
+            tx.set_meta("engine.review_action.p.T-1.1", "fresh")
+        }).unwrap();
         let report = crate::tick(&mut store, &mut herdr, &cfg(), T0 + 10).unwrap();
         assert_eq!(report.reviewers, vec!["p:review-1".to_string()]);
         // One packet reached the live reviewer, and it was not started again.
@@ -3456,9 +3226,9 @@ review = [
         let mut store = world(&config_with_repos());
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-        confirm_checkout(&mut store, &mut herdr, "p:review-1", 1, "abc1234", "review/t1");
-        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
 
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
@@ -3501,10 +3271,9 @@ profile = "opencode"
             if n == 2 {
                 queue_review_job(&mut store, n, lane);
             }
-            start_reviews(&mut store, door, &cfg(), &cfg().profiles, "p", T0 + n * 10).unwrap();
-            confirm_checkout(&mut store, door, "p:review-1", n, "abc1234", &format!("review/t{n}"));
-            assert_eq!(start_reviews(&mut store, door, &cfg(), &cfg().profiles, "p", T0 + n * 10 + 1)
-                .unwrap().started, vec!["p:review-1"]);
+            let report = start_reviews(&mut store, door, &cfg(), &cfg().profiles, "p", T0 + n * 10).unwrap();
+
+            assert_eq!(report.started, vec!["p:review-1"]);
             assert!(door.calls.iter().any(|call| matches!(call,
                 Call::WorktreeOpen { repo: got, .. } if got == repo)));
             let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
@@ -3523,11 +3292,11 @@ profile = "opencode"
         assert!(calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { repo, path, label }
             if repo == "/repo/web" && path == "/web-review-1" && label == "p-review-1-web")), "{calls:?}");
         assert!(!calls.iter().any(|call| matches!(call, Call::WorktreeCreate { .. } | Call::WorktreeOpen { .. })), "{calls:?}");
-        assert!(calls.iter().any(|call| matches!(call, Call::PaneRun { pane, command }
-            if pane == "web:p1" && command.contains("/web-review-1") && command.contains("git checkout -f -B review/t3 abc1234"))), "{calls:?}");
-        confirm_checkout(&mut store, &mut web, "p:review-1", 3, "abc1234", "review/t3");
-        assert_eq!(start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 31)
-            .unwrap().started, vec!["p:review-1"]);
+        let git = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
+        assert!(git.iter().any(|(path, args)| path == "/web-review-1" && args == &["checkout", "-f", "-B", "review/t3", "abc1234"]), "{git:?}");
+
+        assert!(start_reviews(&mut store, &mut web, &cfg(), &cfg().profiles, "p", T0 + 31)
+            .unwrap().started.is_empty());
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
