@@ -1008,7 +1008,7 @@ pub(crate) fn reconcile_config(
     let seats = store.read(|tx|tx.seats_of_project(project))?;
     for seat in seats {
         if seat.role != gear_model::SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby) { continue }
-        if pending(store, &seat.id)?.is_some() { continue }
+        if pending(store, &seat.id)?.is_some() || crate::switch::pending(store, &seat.id)?.is_some() { continue }
         let Some(lane) = config.lanes.iter().find(|lane|lane.name == seat.name) else { continue };
         let Some(current_cli) = current_cli(store, &seat)? else { continue };
         let chain = crate::model::role_chain(&config, &lane.name);
@@ -1138,6 +1138,19 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         let round=store.read(|tx|tx.open_round_of_seat("p:heat")).unwrap().unwrap();
         assert_ne!(store.read(|tx|crate::session::round_session(tx,&round)).unwrap().as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("fresh"));
+    }
+    #[test]
+    fn config_change_waits_for_an_existing_model_switch() {
+        let dir=tempfile::tempdir().unwrap(); let (mut store,mut herdr,cfg)=world(dir.path().to_str().unwrap(),true);
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T).unwrap();
+        change(&mut store,"codex","new-model");
+        store.write(|tx|tx.set_meta(&crate::switch::pending_meta_key("p:heat"),"escape|0|0|other-model")).unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+1).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_none());
+        assert!(!herdr.calls.iter().any(|c|matches!(c,Call::Prompt {..}|Call::SendKeys {..}|Call::AgentStart {..})));
+        crate::switch::clear_pending(&mut store,"p:heat").unwrap();
+        reconcile_config(&mut store,&mut herdr,&cfg,&cfg.profiles,"p",T+2).unwrap();
+        assert!(pending(&mut store,"p:heat").unwrap().is_some());
     }
     #[test]
     fn same_cli_restart_waits_until_the_open_session_is_known() {
