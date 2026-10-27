@@ -126,11 +126,9 @@ fn a_captains_re_init_needs_its_pane_proven() {
     assert_eq!(config_version(&db), 1, "nothing changed");
 }
 
-/// T-91, F1: landing a task through its pull request is not in this release,
-/// so the config refuses `merge = "pr"` instead of letting a project be
-/// configured for a landing that cannot work.
+/// PR landing mode can be registered through the real initialization command.
 #[test]
-fn a_pull_request_merge_mode_is_refused() {
+fn a_pull_request_merge_mode_is_registered() {
     let dir = scratch("pr-mode");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
@@ -148,11 +146,11 @@ fn a_pull_request_merge_mode_is_refused() {
     )
     .expect("the config");
     let o = init(&dir, &db, &path, None, true);
-    assert_eq!(o.status.code(), Some(1), "{}", String::from_utf8_lossy(&o.stdout));
-    let err = stderr(&o);
-    assert!(err.contains("github.merge"), "{err}");
-    assert!(err.contains("not in this release"), "{err}");
-    assert_eq!(config_version(&db), 0, "nothing was registered");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(config_version(&db), 1, "the project was registered");
+    let mut store = Store::open(&db).expect("the store");
+    let cfg = gear_app::config::latest(&mut store, "p").expect("the registered config");
+    assert_eq!(cfg.root_repo().github.unwrap().merge, gear_app::config::MergeMode::Pr);
 }
 
 #[test]
