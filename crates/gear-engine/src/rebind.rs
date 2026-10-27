@@ -61,7 +61,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             let Some(binding) = binding else { continue };
             let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => continue };
             if let Some(agent) = occupant {
-                if phase_name == "exiting" && seat.state != SeatState::Queued {
+                if phase_name == "exiting" {
                     let since = match phase.as_ref().and_then(|v| v["since"].as_i64()) {
                         Some(since) => since,
                         None => {
@@ -220,7 +220,7 @@ gate="new-gate"
         let text = format!("<!-- gear-plan project=p base={version} -->\n# Staff\n- {command}\n");
         let env=Env {ctx:Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}),pane_id:Some("w1:p1".into()),admin:false};
         let fp=Fingerprint {pane_id:"w1:p1".into(),kind:Some("codex".into()),session_ref:None};
-        plan::apply(store,&env,Some(&fp),None,&draft::parse(&text).unwrap(),&text,command,now).unwrap();
+        plan::apply(store,&env,Some(&fp),None,&draft::parse(&text).unwrap(),&text,&format!("{command}-{now}"),now).unwrap();
     }
     fn finish_old(store: &mut Store) {
         store.write(|tx| {
@@ -246,11 +246,22 @@ gate="new-gate"
             let seat=store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
             assert_eq!(seat.state,SeatState::NeedsCheck);
             staff(&mut store,"retry heat",T+40);
+            let sends = |h: &FakeHerdr| h.calls.iter().filter(|c| matches!(c,Call::SendKeys {pane,..} if pane == PANE)).count();
+            let before = sends(&h);
             tick(&mut store,&mut h,&cfg,T+41).unwrap();
+            for now in T+42..T+41+EXIT_WAIT {
+                tick(&mut store,&mut h,&cfg,now).unwrap();
+            }
+            assert_eq!(sends(&h),before+1);
+            tick(&mut store,&mut h,&cfg,T+41+EXIT_WAIT).unwrap();
+            assert_eq!(store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap().state,SeatState::NeedsCheck);
+            assert_eq!(sends(&h),before+1);
+            staff(&mut store,"retry heat",T+80);
+            tick(&mut store,&mut h,&cfg,T+81).unwrap();
             h.exit_agent(PANE);
-            tick(&mut store,&mut h,&cfg,T+42).unwrap();
-            assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+43).unwrap(),["p:heat"]);
-            tick(&mut store,&mut h,&cfg,T+44).unwrap();
+            tick(&mut store,&mut h,&cfg,T+82).unwrap();
+            assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+83).unwrap(),["p:heat"]);
+            tick(&mut store,&mut h,&cfg,T+84).unwrap();
             assert_eq!(store.read(|tx|tx.get_meta(&marker("p:heat"))).unwrap().as_deref(),Some(""));
         }
     }
