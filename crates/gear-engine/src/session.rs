@@ -239,6 +239,17 @@ fn resume(facts: &Facts) -> Action {
     }
 }
 
+/// The session restored by S1 remains authoritative: the round's session
+/// history can also contain the transient session observed before recovery.
+pub(crate) fn round_session(tx: &gear_store::Tx<'_>, round: &gear_store::RoundRow) -> GearResult<Option<String>> {
+    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let resumed = tx.get_meta(&format!("engine.session_step.{}", round.seat))?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .filter(|s| s["round"] == identity && s["action"] == "resume" && s["step"] == "done" && s["result"] == "resume")
+        .and_then(|s| s["target"].as_str().map(str::to_string));
+    Ok(resumed.or_else(|| round.sessions.last().cloned()))
+}
+
 /// The session step of a **lane** round (design §3.2 steps 2-3, §13.4).
 ///
 /// The round row is created on the first call and kept over the ticks
@@ -261,7 +272,19 @@ pub fn prepare_lane(
 
     let mut facts = lane_facts(store, herdr, &project, seat, task, attempt)?;
     let round = round_of(store, &key)?;
-    facts.open_round_session = round.as_ref().and_then(|round| round.sessions.last().cloned());
+    let fresh_key = format!("engine.session_fresh.{}", seat.id);
+    let fresh_generation = store.read(|tx| tx.get_meta(&fresh_key))?.as_deref() == Some(&seat.generation.to_string());
+    let fresh = round.is_none() && fresh_generation;
+    if fresh {
+        // Onboarding has already started this agent, but its first unrelated
+        // round is fresh; a related recorded session still resumes.
+        facts.agent_live = false;
+        facts.current_session = None;
+    }
+    facts.open_round_session = match &round {
+        Some(round) => store.read(|tx| round_session(tx, round))?,
+        None => None,
+    };
 
     let mut action = match &round {
         // A new round: the rules of §3.3 decide.
@@ -282,6 +305,9 @@ pub fn prepare_lane(
         if round.is_none() {
             create_round(tx, &key, seat, &facts, now)?;
         }
+        // Resuming an existing round also uses this generation's fresh
+        // process; it must not be reused for a later unrelated round.
+        if fresh_generation { tx.set_meta(&fresh_key, "")?; }
         if round.is_none() {
             tx.set_attempt_action(&project, task, attempt, action.as_str())?;
         }
@@ -517,7 +543,7 @@ fn create_round(
         seat: seat.id.clone(),
         generation: seat.generation,
         cli: facts.current_cli.clone().unwrap_or_default(),
-        model: None,
+        model: tx.get_meta(&crate::model::model_meta_key(&seat.id))?,
         start_at: now,
     })
 }

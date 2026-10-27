@@ -233,6 +233,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     };
 
+    let mut reviewer_nudge_flags = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -327,8 +328,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 report.flagged.push(seat.id.clone());
             }
         }
-        // … then the attempts and their deliveries in one write transaction.
-        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
+        // Session setup may take several ticks; no packet goes before Ready.
+        dispatch::recover_open_rounds(store, herdr, cfg, &project, &observed, &planned, now)?;
+        let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
+        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
         // 6. feed: a lane running dry gets one item in the captain's inbox,
@@ -363,9 +366,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let (_nudged, stuck) =
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
-            if !report.flagged.contains(&seat) {
-                report.flagged.push(seat);
-            }
+            reviewer_nudge_flags.push((project.clone(), seat));
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
@@ -396,7 +397,23 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
-        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+        let executed = ops::execute_intended(store, herdr, &project, now)?;
+        store.write(|tx| {
+            for (id, state) in &executed {
+                if state != "submitted" { continue; }
+                let Some(op) = tx.get_op(&project, id)? else { continue };
+                if op.kind != gear_model::OpKind::Deliver { continue; }
+                let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+                if seat.role != gear_model::SeatRole::Lane { continue; }
+                if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                    if tx.get_attempt(&project, task, n)?.is_some_and(|a| a.sent_at.is_none()) {
+                        tx.set_attempt_sent(&project, task, n, now)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        report.executed.extend(executed);
 
         // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).
@@ -412,6 +429,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     report.rounds = rounds::tick(store, herdr, cfg, now)?;
     overrun::tick(store, herdr, cfg, now)?;
     waits::tick(store, herdr, cfg, now)?;
+    for (project, seat) in reviewer_nudge_flags {
+        if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
+            && !report.flagged.contains(&seat) {
+            report.flagged.push(seat);
+        }
+    }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
     for seat in report.flagged.clone() {
@@ -464,6 +487,30 @@ pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) ->
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
+/// Session preparation owns the pane until its current round is ready.
+fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) -> GearResult<bool> {
+    let seat = &obs.seat;
+    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(false) };
+    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    if let Some(state) = state.filter(|s| s["round"] == identity) {
+        match state["step"].as_str() {
+            Some("failed") => return Ok(false),
+            Some("done") => {},
+            _ => return Ok(true),
+        }
+    }
+    // A round can exist before the runner has written its first step (or when
+    // no profile is available); an unsent assignment still reserves the pane.
+    let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
+    if attempt.state == gear_model::AttemptState::Delivered && attempt.sent_at.is_none() { return Ok(true) }
+    if !matches!(attempt.state, gear_model::AttemptState::Delivered | gear_model::AttemptState::Started | gear_model::AttemptState::Stopped) { return Ok(false) }
+    let expected = crate::session::round_session(tx, &round)?;
+    Ok(expected.is_some_and(|session| obs.presence == observe::Presence::Missing
+        || (obs.presence == observe::Presence::Present && obs.session.as_deref().is_some_and(|current| current != session))))
+}
+
 fn doorbell_inputs(
     tx: &gear_store::Tx<'_>,
     project: &str,
@@ -537,6 +584,7 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -548,6 +596,7 @@ fn doorbell_inputs(
                     && !shown.contains(&message.id)
             };
             if include && !doorbelled.contains(&message.id) {
+                if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
                 waiting.push(item(&message));
             }
         }
@@ -561,12 +610,25 @@ fn doorbell_inputs(
             {
                 continue;
             }
+            if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
             waiting.push(item(&message));
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_ops = tx.slot_ops(&seat.id)?;
+        // A review delivery stays submitted until the verdict. Its reviewer
+        // must still receive the urgent overrun question during the review.
+        let review_question = seat.role == gear_model::SeatRole::Temp
+            && !overrun_questions.is_empty()
+            && !slot_ops.is_empty()
+            && slot_ops.iter().all(|op| op.kind == OpKind::Deliver
+                && op.state == OpState::Submitted
+                && op.task == seat.task_id);
+        if review_question {
+            waiting.retain(|item| overrun_questions.contains(&item.id));
+        }
+        let slot_busy = (!slot_ops.is_empty() && !review_question) || session_preparation_pending(tx, seat_obs)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))

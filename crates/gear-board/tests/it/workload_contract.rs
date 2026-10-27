@@ -1,0 +1,339 @@
+//! T-158: the board's third view (Workload) and the projection per lane
+//! (design §10.7 row B4).
+
+use gear_board::frame::{frame, lane_panel, Tab};
+use gear_model::{AttemptState, SeatRole, TaskState};
+use gear_store::{testing, AttemptRow, Store, TaskRow};
+
+const NOW: i64 = 1_800_000_000;
+
+/// Now, in epoch seconds.
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// A voyage with two lanes of very different size and pace: `hull` has little
+/// work left and works at its estimate, `deck` has much more work left and
+/// works twice as slow.
+fn world() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "pi", NOW)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(4),
+                departure_estimate_min: Some(140),
+                updated: NOW,
+            })?;
+            // hull: 30 minutes of estimate, 30 minutes of work, 20 left.
+            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
+            task(tx, "T-2", "hull", 2, TaskState::Ready, Some(20))?;
+            // deck: 30 minutes of estimate, 60 minutes of work, 60 left.
+            task(tx, "T-3", "deck", 3, TaskState::Done, Some(30))?;
+            task(tx, "T-4", "deck", 4, TaskState::Ready, Some(60))?;
+            Ok(())
+        })
+        .unwrap();
+    // The work: hull measured 30 minutes on 30 of estimate (pace 1.0), deck
+    // measured 60 minutes on 30 of estimate (pace 2.0).
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            attempt(tx, "T-1", departure, departure + 30 * 60, departure + 30 * 60)?;
+            attempt(tx, "T-3", departure, departure + 30 * 60, departure + 60 * 60)?;
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// A task of the fixture.
+fn task(
+    tx: &gear_store::Tx<'_>,
+    id: &str,
+    lane: &str,
+    rank: i64,
+    state: TaskState,
+    estimate: Option<i64>,
+) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
+        project: "p".into(),
+        id: id.into(),
+        rank,
+        state,
+        priority: "must".into(),
+        lane: Some(lane.into()),
+        milestone: Some("M4".into()),
+        required: false,
+        contract_version: 1,
+        deps: vec![],
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: estimate,
+        issue: None,
+        updated: NOW,
+    })
+}
+
+/// A finished task of the fixture: it started, it was handed in and it was
+/// merged at `merged`.
+fn attempt(
+    tx: &gear_store::Tx<'_>,
+    task: &str,
+    started: i64,
+    handed_in: i64,
+    merged: i64,
+) -> gear_model::GearResult<()> {
+    tx.insert_attempt(&AttemptRow {
+        project: "p".into(),
+        task: task.into(),
+        n: 1,
+        seat: "p:hull".into(),
+        generation: 1,
+        contract_version: 1,
+        adopted_version: 1,
+        pending_update: None,
+        state: AttemptState::Accepted,
+        candidate: Some("abc".into()),
+        report: None,
+        safe_point: None,
+        started,
+        updated: started,
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
+    })?;
+    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Started, started)?;
+    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::HandedIn, handed_in)?;
+    tx.set_attempt_time("p", task, 1, gear_store::AttemptStep::Merged, merged)?;
+    Ok(())
+}
+
+#[test]
+fn the_slower_lane_sets_the_finish_and_is_named() {
+    let mut store = world();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+
+    // Each lane at its own pace: hull needs 20 minutes (pace 1.0), deck needs
+    // 120 (pace 2.0 on 60 minutes of estimate).
+    let hull = voyage.lanes.iter().find(|lane| lane.lane == "hull").unwrap();
+    let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    assert_eq!(hull.done_min, 30);
+    assert_eq!(hull.left_min, 20);
+    assert_eq!(hull.pace, Some(1.0));
+    assert_eq!(hull.projected_min, Some(20));
+    assert_eq!(deck.done_min, 60);
+    assert_eq!(deck.left_min, 60);
+    assert_eq!(deck.pace, Some(2.0));
+    assert_eq!(deck.projected_min, Some(120));
+
+    // The slowest lane sets the finish and is named.
+    assert_eq!(
+        voyage.slowest_lane.as_ref().map(|(lane, _)| lane.clone()),
+        Some("deck".to_string())
+    );
+    assert_eq!(voyage.slowest_lane.as_ref().map(|(_, min)| *min), Some(120));
+    let elapsed = voyage.elapsed_min.unwrap();
+    assert_eq!(voyage.projected_min, Some(elapsed + 120));
+}
+
+#[test]
+fn the_burn_up_is_the_scope_done_so_far() {
+    let mut store = world();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    // The burn-up is cumulative: hull's 30 minutes in the first hour and
+    // deck's 30 minutes in the second, so 30 and 60 (the prototype's
+    // BURN = [0, 0, 95, 170, 260, 330]).
+    assert_eq!(voyage.burn_up, vec![30, 60]);
+}
+
+#[test]
+fn the_burn_up_keeps_the_hours_without_progress() {
+    let mut store = world();
+    // Three hours later: the voyage is in its fifth hour and nothing was
+    // merged since the second.
+    let later = now_seconds() + 3 * 3600;
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, later).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    // The hours without progress stay in the series, and the scope done so
+    // far is kept.
+    assert_eq!(voyage.burn_up.len(), 5, "{:?}", voyage.burn_up);
+    assert_eq!(voyage.burn_up[0], 30);
+    assert_eq!(voyage.burn_up[1], 60);
+    assert_eq!(*voyage.burn_up.last().unwrap(), 60, "the scope done is kept");
+}
+
+#[test]
+fn the_workload_view_shows_the_lanes_and_the_burn_up() {
+    let mut store = world();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
+    assert!(text.contains("WORK DONE AND LEFT, BY LANE"), "{text}");
+    assert!(text.contains("hull"), "{text}");
+    assert!(text.contains("deck"), "{text}");
+    // The bars of the lanes: the done minutes and the minutes left.
+    assert!(text.contains("done 1 (30m) · left 1 (20m)"), "{text}");
+    assert!(text.contains("done 1 (30m) · left 1 (60m)"), "{text}");
+    // The burn-up and its hours.
+    assert!(text.contains("BURN-UP  (minutes of estimate merged, per voyage hour)"), "{text}");
+    assert!(text.contains("h0"), "{text}");
+    // The bars of the burn-up: the estimate merged in the hour.
+    assert!(text.contains("██"), "{text}");
+}
+
+#[test]
+fn the_lane_panel_shows_what_it_did_and_what_is_left() {
+    let mut store = world();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    let panel = lane_panel(lane);
+    let text = panel.join("\n");
+    assert!(text.contains("lane deck"), "{text}");
+    assert!(text.contains("DONE"), "{text}");
+    assert!(text.contains("T-3"), "{text}");
+    assert!(text.contains("LEFT, in order"), "{text}");
+    assert!(text.contains("T-4"), "{text}");
+    assert!(text.contains("left: 1 tasks, 60m of estimates"), "{text}");
+}
+
+/// A lane with open work and no measured history: its pace is unknown, so the
+/// finish of the voyage is unknown too (F2).
+#[test]
+fn an_unmeasured_lane_leaves_the_finish_unknown() {
+    let mut store = world();
+    // A new lane with a big open task and nothing measured yet.
+    store
+        .write(|tx| {
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p4", "pi", NOW)?;
+            task(tx, "T-5", "mast", 5, TaskState::Ready, Some(1000))
+        })
+        .unwrap();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    // The lane is in the report with its work, but it has no pace.
+    let mast = voyage.lanes.iter().find(|lane| lane.lane == "mast").unwrap();
+    assert_eq!(mast.left_min, 1000);
+    assert_eq!(mast.pace, None);
+    assert_eq!(mast.projected_min, None);
+    // The finish of the voyage is unknown: the unmeasured lane is neither
+    // dropped nor given another lane's pace.
+    assert_eq!(voyage.slowest_lane, None);
+    assert_eq!(voyage.projected_min, None);
+}
+
+/// An open task without an estimate is unknown work, not zero work (F2).
+#[test]
+fn an_open_task_without_an_estimate_leaves_the_finish_unknown() {
+    let mut store = world();
+    store
+        .write(|tx| task(tx, "T-5", "deck", 5, TaskState::Ready, None))
+        .unwrap();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let voyage = &board.projects[0].voyages[0];
+    let deck = voyage.lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    assert!(!deck.left_known, "the open task without an estimate is unknown");
+    assert_eq!(voyage.slowest_lane, None);
+    assert_eq!(voyage.projected_min, None);
+}
+
+/// The lane panel: the running and the reviewing task are in NOW, the queued
+/// ones in LEFT — each task once (F4).
+#[test]
+fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut running = tx.get_task("p", "T-4")?.unwrap();
+            running.state = TaskState::Running;
+            tx.update_task(&running)?;
+            task(tx, "T-5", "deck", 5, TaskState::Verifying, Some(20))?;
+            task(tx, "T-6", "deck", 6, TaskState::Ready, Some(15))
+        })
+        .unwrap();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    let lane = board.projects[0].lanes.iter().find(|lane| lane.lane == "deck").unwrap();
+    let text = lane_panel(lane).join("\n");
+    // The running and the reviewing task are in NOW, once each.
+    assert_eq!(text.matches("T-4").count(), 1, "{text}");
+    assert_eq!(text.matches("T-5").count(), 1, "{text}");
+    // LEFT holds the queued task only.
+    assert!(text.contains("○ T-6"), "{text}");
+    assert!(text.contains("left: 1 tasks, 15m of estimates"), "{text}");
+}
+
+/// A voyage whose tasks are all done: the Workload view keeps its
+/// measurements (F5).
+#[test]
+fn the_workload_view_keeps_the_measurements_of_a_finished_voyage() {
+    let mut store = finished_world();
+    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
+    // The voyage is over: no active voyage is measured any more.
+    assert!(board.projects[0].voyages.is_empty());
+    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
+    // The lanes keep their completed scope: hull 30 + 20, deck 30 + 60.
+    assert!(text.contains("done 2 (50m)"), "{text}");
+    assert!(text.contains("done 2 (90m)"), "{text}");
+    assert!(text.contains("done 140m"), "{text}");
+    // The burn-up of the finished voyage is kept.
+    assert!(text.contains("BURN-UP"), "{text}");
+}
+
+/// A voyage whose every task is done, with the times of the work.
+fn finished_world() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "pi", NOW)?;
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M4".into(),
+                title: "one seat model".into(),
+                done: Some("a rework resumes its session".into()),
+                bar: None,
+                eta: Some("12h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(4),
+                departure_estimate_min: Some(140),
+                updated: NOW,
+            })?;
+            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
+            task(tx, "T-2", "hull", 2, TaskState::Done, Some(20))?;
+            task(tx, "T-3", "deck", 3, TaskState::Done, Some(30))?;
+            task(tx, "T-4", "deck", 4, TaskState::Done, Some(60))
+        })
+        .unwrap();
+    store
+        .write(|tx| {
+            attempt(tx, "T-1", departure, departure + 30 * 60, departure + 30 * 60)?;
+            attempt(tx, "T-2", departure, departure + 20 * 60, departure + 30 * 60)?;
+            attempt(tx, "T-3", departure, departure + 30 * 60, departure + 60 * 60)?;
+            attempt(tx, "T-4", departure, departure + 60 * 60, departure + 60 * 60)
+        })
+        .unwrap();
+    store
+}
