@@ -238,9 +238,30 @@ pub fn continue_text(task: &str, version: i64, packet: &str) -> String {
 
 /// design/09 "Delivery content", exactly:
 /// `New task <task> (contract v<version>). Branch: <branch> (in your worktree). Run `gear` first (…). Task packet: <packet>. Read it before starting; report with gear send. After your result, end your turn: …`
+///
+/// This is the wording of a **rework** (attempt n ≥ 2): the branch and the
+/// worktree are already there, so nothing is said about starting them.
 pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> String {
     format!(
         "New task {task} (contract v{version}). Branch: {branch} (in your worktree). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+    )
+}
+
+/// design/09 "Delivery content" for the **first attempt** of a task (attempt
+/// 1), with the command that starts the branch (T-222, F-75: four lanes
+/// started a task on the previous task's branch, so the candidate carried
+/// another task or work landed on a handed-in branch).
+///
+/// `New task <task> (contract v<version>). Branch: <branch>. Start it from the integration branch: git fetch origin && git switch -c <branch> origin/<integration> (if it exists already: git switch <branch>). Run `gear` first (…). …`
+pub fn first_attempt_text(
+    task: &str,
+    version: i64,
+    branch: &str,
+    integration: &str,
+    packet: &str,
+) -> String {
+    format!(
+        "New task {task} (contract v{version}). Branch: {branch}. Start it from the integration branch: git fetch origin && git switch -c {branch} origin/{integration} (if it exists already: git switch {branch}). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -359,6 +380,27 @@ pub fn packet_ref(task: &str) -> String {
 /// The task branch a lane works on (17 §3): `<lane>/t<n>` (no slug in slice 2).
 pub fn task_branch(lane: &str, task: &str) -> String {
     format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+}
+
+/// The integration branch a lane's branch starts from (T-222): the lane's own
+/// repo (T-52) and its integration branch, else the project's convention. A
+/// config that does not parse falls back to the default convention.
+pub fn integration_branch(tx: &Tx<'_>, project: &str, lane: &str) -> String {
+    let parsed = tx
+        .get_project(project)
+        .ok()
+        .flatten()
+        .and_then(|row| gear_app::config::parse(&row.config_toml).ok());
+    let integration = match parsed {
+        Some(config) => config.repo_of_lane(lane).integration,
+        None => gear_app::config::Conventions::default().integration,
+    };
+    let integration = integration.trim().to_string();
+    if integration.is_empty() {
+        gear_app::config::Conventions::default().integration
+    } else {
+        integration
+    }
 }
 
 /// One decision per Lane-role seat of `project` (other roles skipped), in
@@ -517,7 +559,21 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                     Some(attempt) => attempt,
                     None => gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?,
                 };
-                let mut text = assign_text(task, attempt.contract_version, &task_branch(&seat.name, task), &packet_ref(task));
+                // T-222 (F-75): the first attempt says how to start the branch;
+                // a rework (attempt n ≥ 2) keeps the old wording — the branch
+                // and the worktree are already there.
+                let branch = task_branch(&seat.name, task);
+                let mut text = if attempt.n == 1 {
+                    first_attempt_text(
+                        task,
+                        attempt.contract_version,
+                        &branch,
+                        &integration_branch(tx, project, &seat.name),
+                        &packet_ref(task),
+                    )
+                } else {
+                    assign_text(task, attempt.contract_version, &branch, &packet_ref(task))
+                };
                 let action = attempt.session_action.as_deref().unwrap_or("");
                 if attempt.n == 1 && (action.starts_with("new") || action == "fresh" || action == "resume-fallback") {
                     if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of) {
@@ -784,4 +840,153 @@ mod tests {
         }).unwrap();
     }
 
+    /// A config the engine can read: the project, its quota, its captain and
+    /// its conventions.
+    fn config_toml(integration: &str) -> String {
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\
+             [quota]\nlanes = 4\ntemps = 2\n\
+             [captain]\npane = \"w1:p0\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             [conventions]\nintegration = \"{integration}\"\n"
+        )
+    }
+
+    /// A ready task of the lane `heat`.
+    fn ready_task(id: &str) -> TaskRow {
+        TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: id.into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: None,
+            issue: None,
+            updated: NOW,
+        }
+    }
+
+    /// The text of the delivery the engine intends for the lane.
+    fn assign_delivery_text(store: &mut gear_store::Store, task: &str, attempt: i64) -> String {
+        store
+            .write(|tx| {
+                let actions = vec![(
+                    tx.get_seat("p:heat")?.unwrap(),
+                    Action::Assign { task: task.to_string() },
+                )];
+                let ops = intend_dispatch(tx, "p", &actions, NOW)?;
+                assert_eq!(ops.len(), 1, "one delivery");
+                assert_eq!(ops[0].attempt, Some(attempt), "the attempt the delivery is for");
+                Ok(ops[0].payload["text"].as_str().unwrap().to_string())
+            })
+            .unwrap()
+    }
+
+    /// T-222 (F-75): the first packet of a task says how to start its branch
+    /// from the integration branch.
+    #[test]
+    fn a_first_attempt_says_how_to_start_the_branch() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = config_toml("trunk");
+            tx.update_project(&project)?;
+            gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+            tx.insert_task(&ready_task("T-1"))?;
+            Ok(())
+        })
+        .unwrap();
+        let text = assign_delivery_text(&mut store, "T-1", 1);
+        assert!(
+            text.contains(
+                "Branch: heat/t1. Start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/trunk (if it exists already: git switch heat/t1)."
+            ),
+            "{text}"
+        );
+    }
+
+    /// A rework (attempt n ≥ 2) keeps the old wording: the branch and the
+    /// worktree are already there.
+    #[test]
+    fn a_rework_keeps_the_old_branch_line() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = config_toml("trunk");
+            tx.update_project(&project)?;
+            gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+            tx.insert_task(&ready_task("T-1"))?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 2,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Delivered,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: NOW,
+                updated: NOW,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        let text = assign_delivery_text(&mut store, "T-1", 2);
+        assert!(text.contains("Branch: heat/t1 (in your worktree)."), "{text}");
+        assert!(!text.contains("git switch"), "a rework does not start a branch: {text}");
+    }
+
+    /// The lane's own repo names its integration branch (T-52).
+    #[test]
+    fn the_lane_repo_names_the_integration_branch() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+            project.config_toml = format!(
+                "{}\n[[repos]]\nname = \"web\"\npath = \"web\"\nintegration = \"web-dev\"\n\
+                 [[lanes]]\nname = \"heat\"\nduty = \"d\"\nowns = []\nkind = \"opencode\"\nprofile = \"opencode\"\nrepo = \"web\"\n",
+                config_toml("trunk")
+            );
+            tx.update_project(&project)?;
+            gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+            tx.insert_task(&ready_task("T-1"))?;
+            Ok(())
+        })
+        .unwrap();
+        let text = assign_delivery_text(&mut store, "T-1", 1);
+        assert!(text.contains("git switch -c heat/t1 origin/web-dev"), "{text}");
+    }
+
+    /// The exact wording of the two packets.
+    #[test]
+    fn the_two_packet_writings() {
+        assert_eq!(
+            first_attempt_text("T-1", 1, "heat/t1", "dev", "`gear --show T-1`"),
+            "New task T-1 (contract v1). Branch: heat/t1. Start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        );
+        assert_eq!(
+            assign_text("T-1", 1, "heat/t1", "`gear --show T-1`"),
+            "New task T-1 (contract v1). Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        );
+    }
 }
