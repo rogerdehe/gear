@@ -3,7 +3,7 @@
 //! Forecast the remaining ready/current work using measured lane development
 //! time; warn within about one average task. Without measurements, retain the
 //! ready-count warning. One active item per lane, with persistent severity:
-//! repeats stay quiet even after acknowledgment; worsening gets a fresh id.
+//! repeats stay quiet after acknowledgment until the reminder interval.
 //! Recovery, parked/held lanes and the captain's tail declaration close it.
 //!
 //! Two more facts of the same kind are watched here, every tick:
@@ -138,7 +138,7 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
         };
         let previous = tx.get_meta(&state_key)?.and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
         // The captain may resolve an alert without refilling immediately. The
-        // same condition stays acknowledged until it worsens or recovers.
+        // same condition stays acknowledged until it worsens, recovers, or is due again.
         let body = if ready == 0 && !working {
             format!("lane {} is IDLE", seat.name)
         } else if let Some(dry) = dry {
@@ -157,31 +157,16 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
                 if ready == 1 { "task" } else { "tasks" }
             )
         };
-        if severity <= previous {
-            if severity < previous {
-                // Improve the existing description silently; only worsening
-                // is a new fact that needs another doorbell.
-                if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
-                    tx.update_message_body(project, &item.id, &body)?;
-                }
-                tx.set_meta(&state_key, &severity.to_string())?;
-            }
+        if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
+            if item.body != body { tx.update_message_body(project, &item.id, &body)?; }
+            tx.set_meta(&state_key, &severity.to_string())?;
             continue;
         }
-        let mut action = "opened";
-        if let Some(item) = open_item(tx, project, &seat.name, &captain.id)? {
-            if previous == 0 {
-                // An alert from an older engine is the same incident.
-                if item.body != body { tx.update_message_body(project, &item.id, &body)?; }
-                tx.set_meta(&state_key, &severity.to_string())?;
-                continue;
-            }
-            // A worsening must have a fresh id: a view of the earlier alert
-            // must not hide the new fact from the captain's doorbell.
-            tx.update_message_state(project, &item.id, MsgState::Resolved,
-                Some("the shortage worsened"), None, None, now)?;
-            action = "updated";
+        if previous != 0 && severity <= previous && !crate::attention::due(tx, project, &thread(&seat.name), &captain.id, now)? {
+            tx.set_meta(&state_key, &severity.to_string())?;
+            continue;
         }
+        let action = "opened";
         tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(), thread: thread(&seat.name),
@@ -280,7 +265,7 @@ fn imbalance(
             Ok(Some(FeedChange { lane: idle, action: "updated" }))
         }
         None => {
-            if told == incident {
+            if !told.is_empty() && !crate::attention::due(tx, project, BALANCE_THREAD, captain, now)? {
                 // The captain resolved the item and the imbalance is the same:
                 // the fact is not told again.
                 return Ok(None);

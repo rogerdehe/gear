@@ -34,6 +34,7 @@ mod eng_execute;
 mod eng_intend_recover;
 mod eng_reconcile;
 mod feed_contract;
+mod friction_ring_contract;
 mod lane_view_contract;
 mod onboard_contract;
 mod onboard_run_contract;
