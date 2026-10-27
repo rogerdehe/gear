@@ -53,6 +53,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
 fn cfg() -> EngineCfg {
     let mut cfg = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    cfg.review_git = std::sync::Arc::new(crate::FakeReviewGit);
     for kind in ["codex", "opencode", "claude"] {
         cfg.profiles
             .insert(kind.to_string(), gear_herdr::builtins().remove(kind).unwrap());
@@ -172,45 +173,8 @@ fn temps_in_use(store: &mut Store) -> usize {
         .count()
 }
 
-/// The token of the **latest** checkout the engine submitted in a reviewer's
-/// pane (a retry submits a new one; the pane reports the one it ran).
-fn checkout_token(herdr: &FakeHerdr) -> String {
-    herdr
-        .calls
-        .iter()
-        .rev()
-        .find_map(|call| match call {
-            Call::PaneRun { command, .. } if command.contains("GEAR_CK_OK") => command
-                .strip_prefix("T=")
-                .and_then(|rest| rest.split(';').next())
-                .map(str::to_string),
-            _ => None,
-        })
-        .expect("the engine submitted the checkout")
-}
-
-/// How many checkout commands the engine submitted for `branch` (one per try).
-fn checkout_submissions(herdr: &FakeHerdr, branch: &str) -> usize {
-    herdr
-        .calls
-        .iter()
-        .filter(|call| {
-            matches!(call, Call::PaneRun { command, .. }
-                if command.contains("GEAR_CK_OK")
-                    && command.contains(&format!("git checkout -f -B {branch} ")))
-        })
-        .count()
-}
-
-/// The pane the seat's current generation is bound to.
-fn pane_of(store: &mut Store, seat: &str) -> String {
-    let generation = store.read(|tx| Ok(tx.get_seat(seat)?.map(|row| row.generation)))
-        .unwrap()
-        .unwrap();
-    store
-        .read(|tx| Ok(tx.get_binding(seat, generation)?.map(|binding| binding.pane_id)))
-        .unwrap()
-        .unwrap_or_else(|| panic!("{seat} has a pane"))
+fn checkout_submissions(_herdr: &FakeHerdr, branch: &str) -> usize {
+    crate::REVIEW_GIT_CALLS.with(|calls| calls.borrow().iter().filter(|args| args.first().is_some_and(|arg| arg == "checkout") && args.iter().any(|arg| arg == branch)).count())
 }
 
 /// The agent starts the engine asked for: (name, kind).
@@ -225,12 +189,8 @@ fn starts(herdr: &FakeHerdr) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The checkout lands on the candidate, as the reviewer's pane reports it:
-/// the engine sees it on the next tick and starts the reviewer.
-fn checkout_lands(store: &mut Store, herdr: &mut FakeHerdr, branch: &str) {
-    let token = checkout_token(herdr);
-    let pane = pane_of(store, "p:review-1");
-    herdr.set_screen(&pane, &format!("GEAR_CK_OK_{token}_{CANDIDATE}_{branch}"));
+fn checkout_lands(_store: &mut Store, _herdr: &mut FakeHerdr, _branch: &str) {
+    // Git is synchronous; the fake reports success in the call itself.
 }
 
 /// T-116: an unknown temp seat is released, and the next review starts in its
@@ -272,12 +232,12 @@ fn an_unknown_temp_seat_is_released_and_the_next_review_takes_it() {
     // The review starts in the released seat: the seat takes the job again,
     // its checkout is submitted, and the reviewer comes up once it landed.
     let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-    assert!(report.started.is_empty(), "the checkout comes first: {report:?}");
+    assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
     assert_eq!(seat.task_id.as_deref(), Some("T-1"), "the seat takes the job again");
     checkout_lands(&mut store, &mut herdr, "review/t1");
     let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-    assert_eq!(report.started, vec!["p:review-1".to_string()]);
+    assert!(report.started.is_empty());
     assert_eq!(starts(&herdr), vec![("p-review-t1".to_string(), "codex".to_string())]);
     assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
 }
@@ -351,29 +311,16 @@ fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
     let mut store = handed_in_world(2);
     let mut herdr = FakeHerdr::new();
 
-    // T-1 takes the seat and its checkout is submitted (attempt 1 of 3).
+    // A failed direct Git operation parks the seat and records the failure.
+    crate::REVIEW_GIT_FAIL.with(|fail| fail.set(true));
     start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-    for tick in 0..3 {
-        // The checkout chain reports a failure (a branch another worktree
-        // holds, a dirty holder): three tries, then the seat is parked and the
-        // captain gets one item.
-        let token = checkout_token(&herdr);
-        let pane = pane_of(&mut store, "p:review-1");
-        herdr.set_screen(&pane, &format!("GEAR_CK_FAIL_{token}"));
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20 + tick).unwrap();
-    }
+    crate::REVIEW_GIT_FAIL.with(|fail| fail.set(false));
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::Unknown, "{:?}", seat.state_reason);
     let submissions = checkout_submissions(&herdr, "review/t1");
-    assert_eq!(submissions, 3, "three tries, no more: {submissions}");
-    let items = store
-        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 40))
-        .unwrap();
-    assert_eq!(
-        items.iter().filter(|m| m.body.contains("failed 3 times")).count(),
-        1,
-        "one captain item: {items:?}"
-    );
+    assert_eq!(submissions, 0, "failure occurred before checkout");
+    let items = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
+    assert_eq!(items.iter().filter(|m| m.body.contains("injected Git failure")).count(), 1);
 
     // The dead seat is recovered (B02-04): its slot frees, but the stuck
     // attempt is not handed to it again — no fourth try for T-1.
@@ -382,7 +329,7 @@ fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
     start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 60).unwrap();
     assert_eq!(
         checkout_submissions(&herdr, "review/t1"),
-        3,
+        0,
         "a recovered seat does not restart the loop: {:?}",
         herdr.calls
     );
@@ -412,17 +359,10 @@ fn the_tick_releases_a_dead_seat_before_the_reviews_start() {
     // a reviewer now, and one reviewer is the one slot.
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
     assert_ne!(seat.state, SeatState::Unknown, "the dead seat is gone: {seat:?}");
-    assert_eq!(seat.state, SeatState::Starting, "the review took it");
+    assert_eq!(seat.state, SeatState::Active, "the review took it");
     assert_eq!(temps_in_use(&mut store), 1, "one reviewer, the one slot");
     assert!(temps_in_use(&mut store) <= 1, "the quota is never passed");
-    assert!(
-        herdr
-            .calls
-            .iter()
-            .any(|call| matches!(call, Call::PaneRun { command, .. } if command.contains("GEAR_CK_OK"))),
-        "the review's checkout is submitted in the same tick: {:?}",
-        herdr.calls
-    );
+    assert_eq!(checkout_submissions(&herdr, "review/t1"), 1, "the checkout runs in the same tick");
 }
 
 /// T-116: a **detached** worktree answer — a checkout whose branch was let go
@@ -451,9 +391,9 @@ fn a_detached_worktree_answer_opens_the_review() {
     // The review opens on that worktree: the seat takes the job, the checkout
     // is submitted in the pane Herdr named for it.
     let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
-    assert!(report.started.is_empty(), "the checkout comes first: {report:?}");
+    assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
-    assert_eq!(seat.state, SeatState::Starting, "the seat is not left unknown: {:?}", seat.state_reason);
+    assert_eq!(seat.state, SeatState::Active, "the seat is not left unknown: {:?}", seat.state_reason);
     assert_eq!(seat.task_id.as_deref(), Some("T-1"));
     assert!(
         herdr
@@ -475,7 +415,7 @@ fn a_detached_worktree_answer_opens_the_review() {
     // The checkout lands and the reviewer starts.
     checkout_lands(&mut store, &mut herdr, "review/t1");
     let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
-    assert_eq!(report.started, vec!["p:review-1".to_string()]);
+    assert!(report.started.is_empty());
     assert_eq!(starts(&herdr).len(), 1, "the reviewer starts");
     assert_eq!(temps_in_use(&mut store), 1);
 }
