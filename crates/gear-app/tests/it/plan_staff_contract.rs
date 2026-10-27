@@ -287,6 +287,20 @@ fn parked(s: &mut Store, name: &str, reason: &str) {
     .unwrap();
 }
 
+/// Apply a staff line with the given session's agents, as the CLI does.
+fn run_with_agent_list(
+    s: &mut Store,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+    staff: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
+    let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
+    let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
+    apply(s, &env, Some(&fp), agents, &parse(&text).unwrap(), &text, rid, T0 + 10)
+}
+
 /// Apply a staff line with the session's agents, as the CLI does.
 fn run_with_agents(
     s: &mut Store,
@@ -296,11 +310,7 @@ fn run_with_agents(
 ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     use gear_herdr::HerdrRead as _;
     let agents = herdr.agents().unwrap();
-    let base = s.read(|tx| tx.plan_version("p")).unwrap();
-    let text = format!("<!-- gear-plan project=p base={base} -->\n# Staff\n{staff}");
-    let env = Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false };
-    let fp = Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None };
-    apply(s, &env, Some(&fp), Some(&agents), &parse(&text).unwrap(), &text, rid, T0 + 10)
+    run_with_agent_list(s, Some(&agents), staff, rid)
 }
 
 /// A session with the agent of the lane `heat` in its pane.
@@ -393,4 +403,28 @@ fn a_quota_park_is_untouched() {
         .unwrap();
     run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
     assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+}
+
+/// T-190: a parked lane whose agent is gone is released: it is queued again
+/// and the engine onboards it (the seat states allow no direct Parked →
+/// Queued, so the lane is let go first).
+#[test]
+fn a_parked_lane_without_an_agent_is_released() {
+    let mut s = world();
+    parked(&mut s, "heat", "until-task=T-12");
+    // The session was read: no agent is in the lane's pane.
+    run_with_agent_list(&mut s, Some(&[]), "- release heat\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Queued);
+}
+
+/// T-190: a release of a park whose time has come works: the apply does not
+/// abort, and the lane works again.
+#[test]
+fn a_release_of_an_expired_park_works() {
+    let mut s = world();
+    let mut herdr = session();
+    // The park's time is an hour before the apply.
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    run_with_agents(&mut s, &mut herdr, "- release heat\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
 }

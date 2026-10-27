@@ -594,11 +594,6 @@ fn apply_queue(
         not_mentioned.push(task.id);
     }
 
-    // A park whose time has come ends before this apply's staff lines (T-190):
-    // a lane the captain parked until a time that has passed works again.
-    // A park the captain writes now is not ended by the same apply.
-    end_parked_lanes(tx, project, agents, now)?;
-
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
@@ -814,6 +809,11 @@ fn apply_queue(
             if line.pass { "pass" } else { "fail" }
         ));
     }
+
+    // A park whose time has come ends (T-190) — after the staff lines and
+    // the verdicts, so an explicit release in this apply runs against the
+    // state the captain saw, and the parks that are left end here.
+    end_parked_lanes(tx, project, agents, now)?;
 
     tx.insert_plan(&PlanRow {
         project: project.to_string(),
@@ -1348,10 +1348,25 @@ fn release_lane(
             "released by the captain: its agent is gone",
         )
     };
+    // A parked lane whose agent is gone is let go first (Parked → Held →
+    // Queued): the seat states allow no direct Parked → Queued, the same way
+    // a park that ended lets the lane go (T-190).
+    let from = if seat.state == SeatState::Parked && target == SeatState::Queued {
+        require_transition(
+            SeatState::can_transition(SeatRole::Lane, SeatState::Parked, SeatState::Held),
+            "seat",
+            SeatState::Parked.as_str(),
+            SeatState::Held.as_str(),
+        )?;
+        tx.set_seat_state(&seat_id, SeatState::Held, Some(reason), now)?;
+        SeatState::Held
+    } else {
+        seat.state
+    };
     require_transition(
-        SeatState::can_transition(SeatRole::Lane, seat.state, target),
+        SeatState::can_transition(SeatRole::Lane, from, target),
         "seat",
-        seat.state.as_str(),
+        from.as_str(),
         target.as_str(),
     )?;
     tx.set_seat_state(&seat_id, target, Some(reason), now)?;
