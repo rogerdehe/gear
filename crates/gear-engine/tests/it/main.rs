@@ -29,6 +29,7 @@ mod dispatch_tick_contract;
 mod doorbell_contract;
 mod doorbell_isolation;
 mod doorbell_while_working;
+mod doorbell_working_budget_contract;
 mod eng_confirm;
 mod eng_execute;
 mod eng_intend_recover;

@@ -337,8 +337,25 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let delivery_grace = gear_app::config::latest(store, &project)
             .map(|config| i64::from(config.timing.delivery_grace_s))
             .unwrap_or(cfg.delivery_grace_s);
-        let (confirmed, flagged) =
-            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
+        // T-213: the seats whose agent Herdr reports working this tick. A
+        // doorbell that reached one of them waits behind the agent's turn:
+        // that is not a stall, so its check budget is not spent.
+        let working: Vec<String> = observed
+            .iter()
+            .filter(|obs| {
+                obs.presence == observe::Presence::Present
+                    && obs.status == Some(gear_herdr::AgentStatus::Working)
+            })
+            .map(|obs| obs.seat.id.clone())
+            .collect();
+        let (confirmed, flagged) = ops::confirm_pending_with(
+            store,
+            &project,
+            cfg.doorbell_check_budget,
+            delivery_grace,
+            &working,
+            now,
+        )?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 
