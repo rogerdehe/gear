@@ -319,6 +319,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
 
+        // T-209: when an active attempt's agent exited but its bound pane is
+        // still a shell, restart it once in place before treating the absence
+        // as a stall. Pending starts continue through the same durable restart
+        // machine on later ticks.
+        let restarted = restart_missing_jobs(store, herdr, cfg, &profiles, &project, &observed, now)?;
+        missing_seats.retain(|seat| !restarted.contains(seat));
+        report.flagged.retain(|seat| !restarted.contains(seat));
+
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
         //     seat still says Active, so nothing else would ever notice.
@@ -575,6 +583,87 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     }
     Ok(report)
+}
+
+fn restart_missing_jobs(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    project: &str,
+    observed: &[observe::SeatObs],
+    now: Ts,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    use gear_model::{AttemptState, SeatRole, SeatState};
+    let shell_panes = match herdr.panes() { Ok(panes) => panes, Err(_) => return Ok(Default::default()) };
+    let mut handled = std::collections::BTreeSet::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if !matches!(seat.role, SeatRole::Lane | SeatRole::Temp) { continue }
+        let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+        let pending_restart = restart::pending(store, &seat.id)?;
+        let pane = pending_restart.as_ref().and_then(|_| restart::pane_of(store, &seat).ok().flatten())
+            .or_else(|| binding.as_ref().filter(|b| b.status == gear_store::BindingStatus::Active || b.status == gear_store::BindingStatus::Pending).map(|b| b.pane_id.clone()));
+        let Some(pane) = pane.filter(|p| shell_panes.contains(p)) else { continue };
+        if herdr.agent_get(&pane).ok().flatten().is_some() { continue }
+
+        let jobs = if seat.role == SeatRole::Lane {
+            store.read(|tx| tx.open_attempts_of_seat(&seat.id))?.into_iter()
+                .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Delivered))
+                .map(|a| (a.task, a.n)).collect::<Vec<_>>()
+        } else {
+            let task = store.read(|tx| Ok(tx.get_meta(&format!("engine.review_pending.{}", seat.id))?.filter(|s| !s.is_empty()).or(seat.task_id.clone())))?;
+            match task {
+                Some(task) => store.read(|tx| tx.attempts_of_task(project, &task))?.into_iter()
+                    .filter(|a| a.state == AttemptState::Submitted && store.read(|tx| tx.get_review_verdict(project, &task, a.n).map(|v| v.is_none())).unwrap_or(false))
+                    .map(|a| (a.task, a.n)).collect(),
+                None => Vec::new(),
+            }
+        };
+        for (task, attempt) in jobs {
+            let marker = format!("engine.restart.{}.{}.{}", seat.id, task, attempt);
+            let state = store.read(|tx| tx.get_meta(&marker))?;
+            if matches!(state.as_deref(), Some("started" | "failed")) { break; }
+            let is_missing = observed.iter().any(|o| o.seat.id == seat.id && o.presence == observe::Presence::Missing && o.seat.state == SeatState::Active);
+            let plan = restart::pending(store, &seat.id)?;
+            if !is_missing && !(state.as_deref() == Some("starting") && plan.is_some()) { continue }
+            if state.is_none() {
+                store.write(|tx| tx.set_meta(&marker, "starting"))?;
+            }
+            let entry = if plan.is_some() { None } else {
+                let Some(binding) = binding.as_ref() else { continue };
+                let project_row = store.read(|tx| tx.get_project(project))?;
+                let Some(config) = project_row.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else { continue };
+                let saved = store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?.filter(|s| !s.is_empty());
+                let reviewer = if seat.role == SeatRole::Temp {
+                    store.read(|tx| tx.get_meta(&format!("engine.review_model_entry.{}", seat.id)))?
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                } else { None };
+                let (model, args) = if let Some(meta) = reviewer {
+                    (meta["model"].as_str().map(str::to_owned).or(saved.clone()).unwrap_or_default(), meta["args"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default())
+                } else {
+                    let lane = config.lanes.iter().find(|l| l.name == seat.name);
+                    let selected = lane.map(|l| crate::model::role_chain(&config, &l.name).into_iter().find(|entry| entry.cli().unwrap_or(&l.kind) == binding.kind && saved.as_deref().is_none_or(|m| entry.model() == m)));
+                    match selected.flatten() {
+                        Some(entry) => (entry.model().to_string(), entry.args().to_vec()),
+                        None => (saved.unwrap_or_default(), Vec::new()),
+                    }
+                };
+                Some(gear_app::config::ModelEntry::Entry(gear_app::config::ModelSpec { model, cli: Some(binding.kind.clone()), args, context_window_k: None }))
+            };
+            match restart::advance(store, herdr, cfg, profiles, project, &seat, entry.as_ref(), now) {
+                Ok(Some(_)) => {
+                    store.write(|tx| tx.set_meta(&marker, "started"))?;
+                    handled.insert(seat.id.clone());
+                }
+                Ok(None) if restart::pending(store, &seat.id)?.is_some() => { handled.insert(seat.id.clone()); }
+                Ok(None) => { store.write(|tx| tx.set_meta(&marker, "failed"))?; }
+                Err(_) => { store.write(|tx| tx.set_meta(&marker, "failed"))?; }
+            }
+            break;
+        }
+    }
+    Ok(handled)
 }
 
 /// Settle every review verdict whose attempt is still handed in (T-13), in
