@@ -2283,6 +2283,8 @@ quota_reset_h = 5
                 // the seat's worktree is not recorded in this fixture).
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
+                "-c".to_string(),
+                format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/lane.md")).unwrap())),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),

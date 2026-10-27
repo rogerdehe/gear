@@ -2113,9 +2113,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0+20).unwrap();
         let found = starts(&herdr);
         let args = &found[0].1;
-        let text = args.iter().find_map(|s| s.strip_prefix("developer_instructions=")).unwrap().parse::<toml::Value>().unwrap();
-        assert!(text.as_str().unwrap().starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
-        assert_eq!(text.as_str().unwrap(), std::fs::read_to_string(dir.path().join("rules/review.md")).unwrap());
+        let value = args.iter().find(|s| s.starts_with("developer_instructions=")).unwrap();
+        let parsed: toml::Table = toml::from_str(value).unwrap();
+        let text = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
+        assert!(text.starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
+        assert_eq!(text, std::fs::read_to_string(dir.path().join("rules/review.md")).unwrap());
     }
 
     #[test]
@@ -2189,6 +2191,8 @@ review = [
             starts[0].1,
             vec![
                 "--dangerously-skip-permissions".to_string(),
+                "--append-system-prompt-file".to_string(),
+                std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy().into_owned(),
                 "--model".to_string(),
                 "claude-sonnet-5-5".to_string(),
                 "--effort".to_string(),
@@ -2342,6 +2346,8 @@ review = [
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
                     "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
+                    "-c".to_string(),
+                    format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md")).unwrap())),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),

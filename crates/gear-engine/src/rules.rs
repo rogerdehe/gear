@@ -83,8 +83,8 @@ mod tests {
         let codex = gear_herdr::builtin("codex").unwrap();
         let review = arguments(&mut store, "p", SeatRole::Temp, db.to_str().unwrap(), &codex).unwrap();
         assert_eq!(review[0], "-c");
-        let value = review[1].strip_prefix("developer_instructions=").unwrap().parse::<toml::Value>().unwrap();
-        let text = value.as_str().unwrap();
+        let value: toml::Table = toml::from_str(&review[1]).unwrap();
+        let text = value.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
         assert!(text.starts_with(REVIEW.trim_end()));
         assert!(text.ends_with("Voyage done: land the fleet\nBar: stable\n"));
         assert!(arguments(&mut store, "p", SeatRole::Captain, db.to_str().unwrap(), &codex).unwrap().is_empty());

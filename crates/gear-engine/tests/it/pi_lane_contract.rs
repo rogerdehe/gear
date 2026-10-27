@@ -263,6 +263,8 @@ fn a_pi_lane_starts_with_its_model() {
         starts[0].2,
         vec![
             "--approve".to_string(),
+            "--append-system-prompt".to_string(),
+            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
         ],
@@ -315,6 +317,8 @@ fn a_pi_lane_starts_with_the_arguments_of_its_chain_entry() {
         starts[0].2,
         vec![
             "--approve".to_string(),
+            "--append-system-prompt".to_string(),
+            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
             "--thinking".to_string(),
