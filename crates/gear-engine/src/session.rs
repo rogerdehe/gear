@@ -779,6 +779,75 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
     }
 
     #[test]
+    fn ineffective_exit_is_bounded_and_visible() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        store.write(|tx| { testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "cap:p1", "codex", T0)?; Ok(()) }).unwrap();
+        let action = Action::Resume("wanted".into());
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+        for n in [0, 1, 31, 32, 33, 63] { assert_eq!(run(&mut store, &mut herdr, T0 + n), Prep::Wait); }
+        let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        assert!(seat.state_reason.as_deref().unwrap().contains("fallback_wait_exit"));
+    }
+
+    #[test]
+    fn fallback_starts_plain_if_the_agent_exits_before_deadline() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        let action = Action::Resume("wanted".into());
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+        for n in [0, 1, 31, 32, 33] { assert_eq!(run(&mut store, &mut herdr, T0 + n), Prep::Wait); }
+        herdr.exit_agent("pi:p1");
+        assert_eq!(run(&mut store, &mut herdr, T0 + 63), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 64), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 65), Prep::Ready);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { args, .. } if !args.contains(&"wanted".to_string()))));
+    }
+
+    #[test]
+    fn fallback_agent_that_never_becomes_ready_is_bounded_without_typing() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        store.write(|tx| { testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "cap:p1", "codex", T0)?; Ok(()) }).unwrap();
+        herdr.exit_agent("pi:p1");
+        herdr.refuse_starts = Some(("resume rejected".into(), 1));
+        let action = Action::Resume("wanted".into());
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &action, false, now).unwrap();
+        for n in [0, 1, 2] { assert_eq!(run(&mut store, &mut herdr, T0 + n), Prep::Wait); }
+        herdr.set_status("pi:p1", gear_herdr::AgentStatus::Working);
+        let before = herdr.calls.len();
+        assert_eq!(run(&mut store, &mut herdr, T0 + 62), Prep::Wait);
+        let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        assert!(seat.state_reason.as_deref().unwrap().contains("wait_fallback"));
+        assert!(!herdr.calls[before..].iter().any(|c| matches!(c, gear_herdr::fake::Call::PaneType { .. } | gear_herdr::fake::Call::SendKeys { .. } | gear_herdr::fake::Call::AgentStart { .. })));
+    }
+
+    #[test]
+    fn exhausted_temp_review_recovery_reaches_needs_check_without_touching_agent() {
+        let (mut store, mut herdr, _, config) = pi_world();
+        store.write(|tx| {
+            testing::seed_active_seat(tx, "p", "review-9", gear_model::SeatRole::Temp, "pi:review", "pi", T0)?;
+            tx.set_seat_state("p:review-9", SeatState::Starting, None, T0)?;
+            tx.set_meta("engine.session_step.p:review-9", &serde_json::json!({"round":"p:T-1:1:review", "action":"resume", "step":"fallback_wait_exit", "step_at":T0, "target":"wanted"}).to_string())
+        }).unwrap();
+        herdr.add_agent("pi:review", "pi", gear_herdr::AgentStatus::Working);
+        let seat = store.read(|tx| tx.get_seat("p:review-9")).unwrap().unwrap();
+        assert_eq!(crate::session_runner::run(&mut store, &mut herdr, &config, &seat, "T-1", 1, Role::Review, &Action::Resume("wanted".into()), false, T0 + 30).unwrap(), Prep::Wait);
+        assert_eq!(store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state, SeatState::NeedsCheck);
+        assert!(!herdr.calls.iter().any(|c| matches!(c, gear_herdr::fake::Call::PaneType { .. } | gear_herdr::fake::Call::SendKeys { .. })));
+    }
+
+    #[test]
+    fn unobservable_fallback_is_still_bounded() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        store.write(|tx| tx.set_meta("engine.session_step.p:pi-lane", &serde_json::json!({"round":"p:T-1:1:dev", "action":"resume", "step":"wait_fallback", "step_at":T0, "target":"wanted"}).to_string())).unwrap();
+        herdr.observe_fails = true;
+        assert_eq!(crate::session_runner::run(&mut store, &mut herdr, &config, &seat, "T-1", 1, Role::Dev, &Action::Resume("wanted".into()), false, T0 + 60).unwrap(), Prep::Wait);
+        let seat = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        assert!(seat.state_reason.as_deref().unwrap().contains("wait_fallback"));
+    }
+
+    #[test]
     fn a_large_followup_compacts_after_resuming() {
         let (mut store, mut herdr, seat, config) = pi_world();
         let action = Action::Resume("wanted-session".into());

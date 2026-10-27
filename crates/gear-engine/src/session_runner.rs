@@ -1,6 +1,6 @@
 //! Persisted, bounded execution of a round's session action.
 use gear_herdr::{AgentStatus, HerdrAct, Outcome, Profile};
-use gear_model::{GearResult, MsgKind, MsgState, SeatRole, Ts};
+use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{NewMessage, SeatRow, Store};
 use serde_json::{json, Value};
 use crate::{EngineCfg, session::{Action, Prep, Role}};
@@ -39,6 +39,42 @@ fn notify_new(store: &mut Store, seat: &SeatRow, now: Ts) -> GearResult<()> {
     })
 }
 
+fn recovery_failed(store: &mut Store, seat: &SeatRow, state: &mut Value, phase: &str, now: Ts) -> GearResult<Prep> {
+    let reason = format!("session resume recovery {phase} timed out; the agent needs checking");
+    // Temp seats use existing lifecycle transitions to reach NeedsCheck without
+    // typing into or closing a possibly working agent.
+    store.write(|tx| {
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "session seat disappeared"))?;
+        let mut current = row.state;
+        if row.role == SeatRole::Temp {
+            for next in match current {
+                SeatState::Queued | SeatState::Released => vec![SeatState::Starting, SeatState::Unknown],
+                SeatState::Starting => vec![SeatState::Unknown],
+                SeatState::Standby => vec![SeatState::Releasing, SeatState::Unknown],
+                SeatState::Releasing => vec![SeatState::Unknown],
+                _ => vec![],
+            } {
+                gear_model::state::require_transition(SeatState::can_transition(row.role, current, next), "seat", current.as_str(), next.as_str())?;
+                tx.set_seat_state(&seat.id, next, Some(&reason), now)?;
+                current = next;
+            }
+        }
+        if current != SeatState::NeedsCheck {
+            gear_model::state::require_transition(SeatState::can_transition(row.role, current, SeatState::NeedsCheck), "seat", current.as_str(), SeatState::NeedsCheck.as_str())?;
+            tx.set_seat_state(&seat.id, SeatState::NeedsCheck, Some(&reason), now)?;
+            if let Some(captain) = tx.captain_of(&seat.project)? {
+                tx.insert_message(&NewMessage { meta: None, project: seat.project.clone(), thread: format!("session:{}", seat.id), task: None, attempt: None,
+                    sender: "engine".into(), sender_gen: 0, recipient: captain.id, kind: MsgKind::System, urgent: true,
+                    body: format!("{}: {reason}", seat.id), reply_to: None, needs_ack: true, state: MsgState::Open, created: now })?;
+            }
+        }
+        step(state, "failed", now);
+        state["failure"] = json!(reason);
+        tx.set_meta(&key(seat), &state.to_string())
+    })?;
+    Ok(Prep::Wait)
+}
+
 fn profile(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, kind: &str) -> GearResult<Option<Profile>> {
     let project = store.read(|tx| tx.get_project(&seat.project))?;
     let mut profiles = cfg.profiles.clone();
@@ -53,9 +89,32 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
     let Some(binding) = binding else { return Ok(Prep::Wait) };
     let Some(profile) = profile(store, cfg, seat, &binding.kind)? else { return Ok(Prep::Wait) };
-    let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
-    let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity)
+    let stored = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity);
+    let occupant = match herdr.agent_get(&binding.pane_id) {
+        Ok(value) => value,
+        Err(_) => {
+            if let Some(mut state) = stored {
+                let phase = str_field(&state, "step").to_string();
+                if (phase == "wait_exit" && now.saturating_sub(time(&state, "step_at")) >= 30)
+                    || (phase == "wait_resume" && now.saturating_sub(time(&state, "step_at")) >= 60) {
+                    step(&mut state, "fallback_exit", now);
+                    save(store, seat, &state)?;
+                    return Ok(Prep::Wait);
+                }
+                let limit = match phase.as_str() {
+                    "fallback_exit" | "fallback_enter" | "fallback_wait_exit" => Some(30),
+                    "start_fallback" | "wait_fallback" => Some(60),
+                    _ => None,
+                };
+                if limit.is_some_and(|limit| now.saturating_sub(time(&state, "step_at")) >= limit) {
+                    return recovery_failed(store, seat, &mut state, &phase, now);
+                }
+            }
+            return Ok(Prep::Wait);
+        }
+    };
+    let existing = stored
         .filter(|state| {
             if str_field(state, "step") != "done" || str_field(state, "result") == "resume-fallback" { return true }
             match action {
@@ -77,6 +136,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     if phase == "done" {
         return Ok(if is_ready || (occupant.is_none() && str_field(&state, "result") == "fresh") { Prep::Ready } else { Prep::Wait });
     }
+    if phase == "failed" { return Ok(Prep::Wait) }
     if occupant.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Working) && action_name == "compact" && !state["saw_working"].as_bool().unwrap_or(false) {
         state["saw_working"] = json!(true); save(store, seat, &state)?;
     }
@@ -99,6 +159,9 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         save(store, seat, &state)?; return Ok(Prep::Wait);
     }
     if phase == "enter" {
+        if action_name == "resume" && occupant.is_none() {
+            step(&mut state, "start_resume", now); save(store, seat, &state)?; return Ok(Prep::Wait);
+        }
         if !is_ready { return Ok(Prep::Wait) }
         herdr.type_settle();
         if matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) { return Ok(Prep::Wait) }
@@ -142,6 +205,7 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     }
     if phase == "fallback_exit" {
         if occupant.is_none() { step(&mut state, "start_fallback", now); save(store, seat, &state)?; }
+        else if now.saturating_sub(time(&state, "step_at")) >= 30 { return recovery_failed(store, seat, &mut state, &phase, now); }
         else if is_ready {
             if let Some(command) = profile.exit_command.as_deref().filter(|s| !s.is_empty()) {
                 if !matches!(herdr.pane_type(&binding.pane_id, command), Outcome::Refused { .. }) {
@@ -154,6 +218,8 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         return Ok(Prep::Wait);
     }
     if phase == "fallback_enter" {
+        if occupant.is_none() { step(&mut state, "start_fallback", now); save(store, seat, &state)?; return Ok(Prep::Wait) }
+        if now.saturating_sub(time(&state, "step_at")) >= 30 { return recovery_failed(store, seat, &mut state, &phase, now); }
         if is_ready {
             herdr.type_settle();
             if !matches!(herdr.send_keys(&binding.pane_id, &["enter".into()]), Outcome::Refused { .. }) {
@@ -164,9 +230,11 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     }
     if phase == "fallback_wait_exit" {
         if occupant.is_none() { step(&mut state, "start_fallback", now); save(store, seat, &state)?; }
+        else if now.saturating_sub(time(&state, "step_at")) >= 30 { return recovery_failed(store, seat, &mut state, &phase, now); }
         return Ok(Prep::Wait);
     }
     if phase == "start_resume" || phase == "start_fallback" {
+        if phase == "start_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 { return recovery_failed(store, seat, &mut state, &phase, now); }
         if occupant.is_some() { return Ok(Prep::Wait) }
         let mut args = profile.unattended_args.clone();
         let target = str_field(&state, "target");
@@ -208,6 +276,9 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
         }
         if phase == "wait_resume" && now.saturating_sub(time(&state, "step_at")) >= 60 {
             step(&mut state, if occupant.is_none() { "start_fallback" } else { "fallback_exit" }, now); save(store, seat, &state)?;
+        }
+        if phase == "wait_fallback" && now.saturating_sub(time(&state, "step_at")) >= 60 {
+            return recovery_failed(store, seat, &mut state, &phase, now);
         }
     }
     Ok(Prep::Wait)
