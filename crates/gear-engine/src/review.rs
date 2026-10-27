@@ -108,7 +108,7 @@ pub fn start_reviews(
             Some(seat) => seat,
             // A seat that finished its last job is warm: the job takes it
             // rather than building a new worktree (17 §8a).
-            None => match free_seat(store, project)? {
+            None => match free_seat(store, project, &task.task, &kind)? {
                 Some(seat) => take_seat(store, &seat, &task.task, profile_name, now)?,
                 // No warm seat free: a new one only while the quota has room.
                 // Otherwise the job waits for a seat instead of building a
@@ -334,18 +334,26 @@ fn temp_seat_of(store: &mut Store, project: &str, task: &str) -> GearResult<Opti
 
 /// A seat that finished its last job and holds no live one: a warm worktree
 /// with its build cache waiting for the next review (17 §8a).
-fn free_seat(store: &mut Store, project: &str) -> GearResult<Option<SeatRow>> {
+fn free_seat(store: &mut Store, project: &str, task: &str, kind: &str) -> GearResult<Option<SeatRow>> {
     store.read(|tx| {
-        Ok(tx
-            .seats_of_project(project)?
-            .into_iter()
-            // Only a warm seat of the new kind (`review-<k>`): legacy per-task
-            // seats (`r-<n>`) are retired and never reused.
-            .find(|seat| {
-                seat.role == SeatRole::Temp
-                    && seat.state == SeatState::Released
-                    && seat.name.starts_with("review-")
-            }))
+        let seats = tx.seats_of_project(project)?;
+        let available = |seat: &&SeatRow| {
+            seat.role == SeatRole::Temp
+                && matches!(seat.state, SeatState::Standby | SeatState::Released)
+                && seat.name.starts_with("review-")
+        };
+        // V1: prefer the seat of this task's earlier review on the same CLI.
+        for round in tx.rounds_of_task(project, task)?.into_iter().rev() {
+            if round.role == "review" && round.cli == kind {
+                if let Some(seat) = seats.iter().filter(available).find(|seat| seat.id == round.seat) {
+                    return Ok(Some(seat.clone()));
+                }
+            }
+        }
+        // V2: a live standby seat before a released seat.
+        Ok(seats.iter().filter(available).find(|seat| seat.state == SeatState::Standby)
+            .or_else(|| seats.iter().filter(available).find(|seat| seat.state == SeatState::Released))
+            .cloned())
     })
 }
 
