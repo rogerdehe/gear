@@ -170,6 +170,63 @@ pub fn start_reviews(
     Ok(report)
 }
 
+/// The reviewers whose verdict is in go to `Standby` (design §3.6).
+///
+/// A reviewer that handed in its verdict keeps its agent and its pane: the
+/// seat is idle, not gone, and it can take the next review. What ends is its
+/// **job binding** (`seats.task_id = NULL`): the seat waits for work, it does
+/// not work on a task any more.
+///
+/// A reviewer that handed in no verdict is not put on standby: a reviewer
+/// whose job is gone (the task was cancelled, a newer attempt was handed in)
+/// is released by `release.rs`.
+///
+/// The transition `Active → Standby` is not in the model's table yet (§3.6 is
+/// new): the captain's own `- release <reviewer>` states its transition the
+/// same way (`gear-app/src/plan.rs`).
+pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<String>> {
+    let mut standby = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        // Only a reviewer that is up: a queued or starting one has no agent
+        // yet, and one on its way out is already leaving.
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Active {
+            continue;
+        }
+        let Some(task) = seat.task_id.clone() else { continue };
+        if !handed_a_verdict(store, project, &seat, &task)? {
+            continue;
+        }
+        store.write(|tx| {
+            tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), now)?;
+            // The job binding ends: the seat waits for the next review.
+            tx.clear_seat_task(&seat.id)?;
+            Ok(())
+        })?;
+        standby.push(seat.id.clone());
+    }
+    Ok(standby)
+}
+
+/// Whether this reviewer handed in a verdict for the task it works on: a
+/// verdict of that task that this seat wrote.
+///
+/// The verdict of the **attempt** it judged counts, not the verdict of a
+/// later attempt: a rework (a fail verdict) is the reviewer's own job, done.
+fn handed_a_verdict(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
+    store.read(|tx| {
+        for attempt in tx.attempts_of_task(project, task)? {
+            if tx
+                .get_review_verdict(project, task, attempt.n)?
+                .is_some_and(|verdict| verdict.by_seat == seat.id)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+}
+
 /// An attempt a lane handed in that no reviewer is bound to.
 struct ReviewTask {
     task: String,

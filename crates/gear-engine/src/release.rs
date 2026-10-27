@@ -28,6 +28,11 @@ pub struct ReleaseReport {
 }
 
 /// Release every reviewer of `project` whose task is no longer under review.
+///
+/// The step of the tick that owns the life cycle of a reviewer seat
+/// (design §3.6): the reviewers whose verdict is in go to `Standby` — the
+/// agent stays alive, the pane stays open, the job binding ends — and a
+/// reviewer whose job is gone leaves.
 pub fn release_finished_reviews(
     store: &mut Store,
     herdr: &mut dyn HerdrAct,
@@ -35,6 +40,11 @@ pub fn release_finished_reviews(
     now: Ts,
 ) -> GearResult<ReleaseReport> {
     let mut report = ReleaseReport::default();
+
+    // The verdict ends the job, not the seat: the reviewer waits for the
+    // next one.
+    crate::review::standby_after_verdict(store, project, now)?;
+
     let seats = store.read(|tx| tx.seats_of_project(project))?;
     for seat in seats {
         if seat.role != SeatRole::Temp {
@@ -498,6 +508,120 @@ profile = "codex"
         store
     }
 
+    /// A project with a lane that works on `T-2` (its attempt is `Started`,
+    /// so the lane counts for W — design §3.6) and a reviewer seat on `T-1`,
+    /// a task that is under review.
+    fn world_with_a_working_lane() -> (Store, SeatRow) {
+        let mut store = Store::open_in_memory().unwrap();
+        let seat = store
+            .write(|tx| {
+                tx.insert_project(&ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: CONFIG.into(),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 2,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: T0,
+                })?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: TaskState::Verifying,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-2".into(),
+                    rank: 2,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                let lane =
+                    testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
+                // The lane works: its attempt is `Started` (W = 1).
+                gear_app::tasks::start_attempt(tx, "p", "T-2", &lane.id, 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
+                let seat = testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w2:p2", "codex", T0)?;
+                Ok(seat)
+            })
+            .unwrap();
+        (store, seat)
+    }
+
+    /// The attempt of `T-1` is handed in and judged by `seat`: the reviewer
+    /// handed in its verdict.
+    fn judge(store: &mut Store, seat: &str) {
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: seat.into(),
+                    created: T0 + 5,
+                })
+            })
+            .unwrap();
+    }
+
     /// A project with the lane `heat` on `pane`, the seat in `state`, and one
     /// task `T-1` the lane may work on.
     fn lane_world(pane: &str, state: SeatState) -> (Store, SeatRow) {
@@ -930,7 +1054,8 @@ profile = "codex"
         assert_eq!(seat.state, SeatState::Active);
 
         // Its verdict comes in while the task still waits for settlement: the
-        // reviewer's job is done and it leaves at once (L-58).
+        // reviewer's job is done (L-58). It does not leave: it waits for the
+        // next review, its agent alive and its pane open (design §3.6).
         store
             .write(|tx| {
                 tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
@@ -945,7 +1070,31 @@ profile = "codex"
             })
             .unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
-        assert_eq!(exits(&herdr), 1, "the reviewer is told to exit once its verdict is in");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the reviewer waits for the next review");
+        assert_eq!(seat.task_id, None, "its job binding ended");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// T-143 (design §3.6): after its verdict a reviewer seat goes to
+    /// `Standby`: the agent stays alive, the pane stays open, and the job
+    /// binding ends.
+    #[test]
+    fn a_verdict_puts_the_reviewer_on_standby_with_its_pane_open() {
+        let (mut store, seat) = world_with_a_working_lane();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        judge(&mut store, &seat.id);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(row.state, SeatState::Standby, "the reviewer waits for the next review");
+        assert_eq!(row.task_id, None, "its job binding ended");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+        assert!(removes(&herdr).is_empty(), "its worktree is kept");
+        let binding = store.read(|tx| tx.get_binding(&seat.id, 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Active, "its agent is still there");
     }
 
     /// B02-04: a parked reviewer that runs no reviewer is released — the slot
