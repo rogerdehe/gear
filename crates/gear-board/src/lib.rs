@@ -1239,7 +1239,10 @@ pub fn run_with(
                             break;
                         }
                     } else if y > frame::FIRST_ROW as u16 {
-                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize;
+                        // The rows above the viewport are scrolled away: the
+                        // clicked row is the one the frame drew (F8).
+                        let scroll = frame::scroll_of(rows, selected, keys.size().1);
+                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize + scroll;
                         // A click outside the rows of the view is ignored.
                         if index < rows {
                             selected = index;
