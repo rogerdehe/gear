@@ -750,7 +750,7 @@ fn count_quota_tick(store: &mut Store, seat: &str, quota: bool, now: Ts) -> Gear
         .unwrap_or(0);
     let ticks = if quota { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok((ticks, signal_start(store, seat, quota, previous == 0, now)?))
+    Ok((ticks, signal_start(store, seat, "quota_signal", quota, previous == 0, now)?))
 }
 
 /// The time the signal episode of a seat began: `now` when the signal is new,
@@ -758,11 +758,12 @@ fn count_quota_tick(store: &mut Store, seat: &str, quota: bool, now: Ts) -> Gear
 fn signal_start(
     store: &mut Store,
     seat: &str,
+    episode: &str,
     signal: bool,
     fresh: bool,
     now: Ts,
 ) -> GearResult<Ts> {
-    let key = meta_key("quota_signal", seat);
+    let key = meta_key(episode, seat);
     if !signal {
         meta_set(store, &key, "0")?;
         return Ok(0);
@@ -1086,20 +1087,17 @@ fn load_attempt(store: &mut Store, provider: &str) -> GearResult<Option<Ts>> {
 /// The session of the project's codex reviewer: the codex reader reads the
 /// rollout of that session (§9.1, F4).
 fn codex_session(store: &mut Store, project: &str) -> GearResult<Option<String>> {
-    let seats = store.read(|tx| tx.seats_of_project(project))?;
-    for seat in seats {
-        if seat.profile != "codex" {
-            continue;
+    store.read(|tx| {
+        let mut seats = tx.seats_of_project(project)?;
+        seats.retain(|seat| seat.role == SeatRole::Temp && matches!(seat.state, SeatState::Active | SeatState::Standby));
+        seats.sort_by_key(|seat| (seat.state != SeatState::Active, seat.id.clone()));
+        for seat in seats {
+            let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { continue };
+            if binding.status != gear_store::BindingStatus::Active || binding.kind != "codex" { continue }
+            if let Some(session) = binding.session_ref.filter(|s| !s.trim().is_empty()) { return Ok(Some(session)) }
         }
-        let session = store
-            .read(|tx| tx.get_binding(&seat.id, seat.generation))?
-            .and_then(|binding| binding.session_ref)
-            .filter(|session| !session.trim().is_empty());
-        if session.is_some() {
-            return Ok(session);
-        }
-    }
-    Ok(None)
+        Ok(None)
+    })
 }
 
 /// The reading of a provider as it is stored (None when there is none).
@@ -1438,7 +1436,7 @@ fn count_error_tick(store: &mut Store, seat: &str, error: bool, now: Ts) -> Gear
         .unwrap_or(0);
     let ticks = if error { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok((ticks, signal_start(store, seat, error, previous == 0, now)?))
+    Ok((ticks, signal_start(store, seat, "quota_error_signal", error, previous == 0, now)?))
 }
 
 /// Count the provider errors of a seat in a row (§9.2): the second one is a
@@ -3202,6 +3200,32 @@ quota_reset_h = 5
         );
     }
 
+    #[test]
+    fn failed_signal_reads_never_reuse_a_pre_episode_reading() {
+        for (quota,error) in [(true,false),(false,true)] {
+            for cached_percent in [30.0,100.0] {
+                let dir=tempfile::tempdir().unwrap(); let key=key_file(dir.path());
+                let mut store=source_world(&key);
+                let mut herdr=FakeHerdr::new(); herdr.add_agent(PANE,"opencode",AgentStatus::Idle);
+                let api=FakeQuota::reading(reading_with(cached_percent,Some(T0+1800)));
+                tick_source(&mut store,&mut herdr,&api,false,false,T0);
+                assert_eq!(api.calls(),1);
+                *api.answer.borrow_mut()=Err("signal read failed".into());
+                tick_source(&mut store,&mut herdr,&api,quota,error,T0+4);
+                let episode = if quota { "engine.quota_signal.p:heat" } else { "engine.quota_error_signal.p:heat" };
+                assert_eq!(meta_get(&mut store,episode).unwrap().as_deref(),Some((T0+4).to_string().as_str()));
+                tick_source(&mut store,&mut herdr,&api,quota,error,T0+8);
+                assert_eq!(api.calls(),3,"the old reading must not satisfy either signal read");
+                let seat=lane_seat(&mut store);
+                assert_eq!(seat.state,SeatState::Parked);
+                let reason=seat.state_reason.unwrap();
+                assert!(reason.contains("cannot be read"),"{reason}");
+                assert!(reason.contains(&(T0+8+5*3600).to_string()),"{reason}");
+                assert_eq!(meta_get(&mut store,episode).unwrap().as_deref(),Some((T0+4).to_string().as_str()));
+            }
+        }
+    }
+
     /// F2: a source that cannot be read is read again in the next window,
     /// not on every tick: an outage does not stall the engine.
     #[test]
@@ -3246,6 +3270,30 @@ quota_reset_h = 5
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["provider"], "codex");
         assert_eq!(value["read_at"], T0 + 10);
+    }
+
+    #[test]
+    fn codex_source_uses_live_reviewer_instead_of_released_or_void_bindings() {
+        let mut store=codex_world();
+        store.write(|tx| {
+            tx.set_seat_state("p:codex-1",SeatState::Released,None,T0+1)?;
+            tx.set_binding_status("p:codex-1",1,gear_store::BindingStatus::Void)?;
+            testing::seed_active_seat(tx,"p","codex-0",SeatRole::Temp,"w1:p8","codex",T0)?;
+            tx.set_seat_state("p:codex-0",SeatState::Standby,None,T0+1)?;
+            tx.set_binding_session_ref("p:codex-0",1,"standby-session")?;
+            testing::seed_active_seat(tx,"p","codex-2",SeatRole::Temp,"w1:p10","codex",T0)?;
+            tx.set_seat_profile("p:codex-2","custom-codex-profile")?;
+            tx.set_binding_session_ref("p:codex-2",1,"current-reviewer-session")
+        }).unwrap();
+        let mut herdr=FakeHerdr::new(); let api=FakeQuota::reading(reading_with(10.0,None));
+        tick_source(&mut store,&mut herdr,&api,false,false,T0+10);
+        assert_eq!(api.sessions(),vec![Some("current-reviewer-session".into())]);
+        store.write(|tx|tx.set_binding_status("p:codex-2",1,gear_store::BindingStatus::Void)).unwrap();
+        assert_eq!(codex_session(&mut store,"p").unwrap().as_deref(),Some("standby-session"));
+        store.write(|tx|tx.set_binding_status("p:codex-0",1,gear_store::BindingStatus::Void)).unwrap();
+        assert_eq!(codex_session(&mut store,"p").unwrap(),None);
+        tick_source(&mut store,&mut herdr,&api,false,false,T0+400);
+        assert_eq!(api.sessions().last(),Some(&None));
     }
 
     /// A project with a codex reviewer and a codex source without a key file
