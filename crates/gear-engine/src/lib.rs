@@ -295,6 +295,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             }
         }
 
+        // Configuration changes take effect through the same durable in-place
+        // restart machinery before quota and dispatch act on the lane.
+        restart::reconcile_config(store, herdr, cfg, &profiles, &project, now)?;
+
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
