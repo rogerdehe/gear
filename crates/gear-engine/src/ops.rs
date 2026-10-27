@@ -270,7 +270,8 @@ pub fn execute_intended(
             // blocked-seat alert carries the reason to the captain (T-57).
             let item = match item {
                 Prepared::Run { id, .. }
-                    if op.kind == OpKind::Deliver && crate::blocked::holding(tx, &op.seat)? =>
+                    if op.kind == OpKind::Deliver && (crate::blocked::holding(tx, &op.seat)?
+                        || tx.get_meta(&crate::quiet::compact_key(&op.seat))?.is_some_and(|s| !s.is_empty())) =>
                 {
                     Prepared::Wait { id }
                 }
