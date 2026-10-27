@@ -83,6 +83,7 @@ The station's "projected finish" multiplies the sum of all open estimates by the
   The session choice is a fixed rule the engine applies, never a captain call at dispatch: a review is always new, a re-review or rework resumes, a lane's next task is new unless its plan block says it continues an earlier task (then keep, compacted). The only difference between lanes and reviewers is the idle release time, a config value per role: a reviewer seat is released after a short idle spell, a lane keeps its pane, worktree and build cache.
 
 ## For M5 (user, 2026-10-26)
+- **A captain that only relays (user, 2026-10-27, discuss at M5 kickoff).** Lanes think little so the captain must think: design, decide, write exact contracts, judge findings. Seen in another GEAR project: a captain that only splits messages into tasks, passes them on and acknowledges reports, deciding nothing. M5 settles how GEAR prevents and detects this.
 - A lane with no task that stays busy blocks its next delivery: the engine delivers only to an idle agent (§10.2), and Flash lanes keep tidying instead of ending their turn (M4 21:12 and 23:53, keel, ~10 min each). After 5 min busy with no task and ready work waiting, the engine interrupts the turn (esc) and delivers.
 - **Machine health watch (user, 2026-10-26 22:21: a long-term feature; "the ship must not break without us knowing").** M4 evidence: load 46 then 159 on 10 cores; two `find /` scans from an aborted lane turn ran 14+ min; four parallel builds plus another project's Go suite; fseventsd at 100% CPU and 3-4 GB for days; the user felt the lag before GEAR did. The engine samples every minute, as facts, not screen text:
   - load average vs cores, memory pressure, swap, free disk on the state and worktree volumes;
@@ -97,6 +98,6 @@ The station's "projected finish" multiplies the sum of all open estimates by the
 - Cut from M4 at station M-2572: T-176 (the engine follows the project's own Herdr session, design §10.7 A1) and T-185 (three merge.rs tests over 10 s; share the git setup).
 
 - Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
-- A light procedure for small tasks, decided from M4's per-round token and time data.
+- **A light procedure for small tasks (user, 2026-10-27, must).** Small, low-risk work must not go through the full loop (task, hand-in, review, rework, re-review). Example: adding two log lines to see a server error took that whole loop. Size the procedure to the work, decided from M4's per-round token and time data.
 - OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
 - Cut from M4 at station M-2503 (pace 1.66x): T-180 admin stop waits for merges (T-121), T-181 acknowledged instructions and the config drift warning, T-182 a push race does not re-run the gate, T-183 T-134 F2/F3 names. Their goals are in gear/voyages/M4.md.

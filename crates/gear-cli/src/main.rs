@@ -63,6 +63,9 @@ enum Cmd {
         #[command(subcommand)]
         op: CaptainOp,
     },
+    /// Who am I: the pane this call runs in, the seat bound to it, the store,
+    /// and why a claim fails (design §10.7, row B9).
+    Whoami,
 }
 
 #[derive(Subcommand, Debug)]
@@ -330,6 +333,7 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_captain_handover(&pane, cli.json)
         }
         Some(Cmd::Captain { op: CaptainOp::Take { project } }) => cmd_captain_take(project.as_deref(), cli.json),
+        Some(Cmd::Whoami) => cmd_whoami(cli.json),
     }
 }
 
@@ -355,6 +359,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
             | Some(Cmd::Board { .. })
             | Some(Cmd::Report { .. })
+            | Some(Cmd::Whoami)
             | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
             | Some(Cmd::Captain { .. })
     )
@@ -751,6 +756,37 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     let mut out = std::io::stdout();
     gear_board::run(&mut store, &opts, &mut out,
         herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
+}
+
+/// `gear whoami`: who this call is (design §10.7, row B9) — the pane it
+/// really runs in, the seat bound to it, the store it would write to, and why
+/// a claim fails.
+///
+/// It only reads: no engine, no write.
+fn cmd_whoami(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    // `whoami` takes the ancestry in the signed form of the packet.
+    let ancestors: Vec<i32> = gear_app::identity::process_ancestors()
+        .into_iter()
+        .map(|pid| pid as i32)
+        .collect();
+    let who = gear_app::identity::whoami(&mut store, &env, &mut herdr, &ancestors);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "pane": who.pane,
+                "seat": who.seat,
+                "store": who.store,
+                "reason": who.reason,
+            })
+        );
+        return Ok(());
+    }
+    print!("{who}");
+    Ok(())
 }
 
 /// `gear friction`: the friction reports of the project (design §6.3, §6.4) —

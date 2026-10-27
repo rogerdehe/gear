@@ -244,6 +244,12 @@ fn resume(facts: &Facts) -> Action {
 pub(crate) fn round_session(tx: &gear_store::Tx<'_>, round: &gear_store::RoundRow) -> GearResult<Option<String>> {
     let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
     let generation = tx.get_seat(&round.seat)?.map(|seat| seat.generation);
+    let cross_cli = tx.get_meta(&format!("engine.session_cross_cli.{}", round.seat))?
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .is_some_and(|s| s["round"] == identity && s["generation"].as_i64() == generation);
+    if cross_cli {
+        return match generation { Some(generation) => Ok(tx.get_binding(&round.seat, generation)?.and_then(|b| b.session_ref)), None => Ok(None) };
+    }
     let resumed = tx.get_meta(&format!("engine.session_step.{}", round.seat))?
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .filter(|s| s["round"] == identity && s["generation"].as_i64() == generation && s["action"] == "resume" && s["step"] == "done" && s["result"] == "resume")
