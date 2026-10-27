@@ -335,3 +335,59 @@ fn a_failed_nudge_is_not_delivered_again_in_the_same_session() {
         w.herdr.prompts_to(LANE)
     );
 }
+
+#[test]
+fn resolved_failed_delivery_stays_closed_after_a_late_checkin() {
+    let mut w = world();
+    w.tick(1);
+    w.tick(9);
+    let item = w.stall_items().remove(0);
+    w.store.write(|tx| tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 10)).unwrap();
+    view(&mut w, 20);
+    w.herdr.set_status(LANE, AgentStatus::Working);
+    w.tick(21);
+    assert_eq!(w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Started);
+    w.tick(910);
+    let items = w.stall_items();
+    assert_eq!(items.len(), 1, "the recovered failure must not ring again: {items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved);
+}
+
+fn cancel_failed_task(w: &mut World) {
+    use gear_app::{draft::parse, identity::Fingerprint, plan::apply, Env};
+    use gear_model::GearCtx;
+    let text = "<!-- gear-plan project=p base=0 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: g\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
+    let env = Env { ctx: Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}), pane_id:Some(CAP.into()), admin:false };
+    let fp = Fingerprint {pane_id:CAP.into(),kind:Some("opencode".into()),session_ref:None};
+    apply(&mut w.store, &env, Some(&fp), None, &parse(text).unwrap(), text, "cancel-failed", T0 + 10).unwrap();
+}
+
+#[test]
+fn cancellation_closes_the_failed_delivery_stall_and_prevents_a_reminder() {
+    let mut w = world();
+    w.tick(1); w.tick(9);
+    assert_eq!(w.stall_items()[0].state, MsgState::Open);
+    cancel_failed_task(&mut w);
+    assert_eq!(w.store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, AttemptState::Abandoned);
+    w.tick(21);
+    assert_eq!(w.stall_items()[0].state, MsgState::Resolved);
+    assert!(w.store.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+    w.tick(910);
+    let items = w.stall_items();
+    assert_eq!(items.len(), 1, "cancelled work must not ring again: {items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved);
+}
+
+#[test]
+fn cancellation_preserves_an_independent_missing_agent_stall() {
+    let mut w = world();
+    w.tick(1); w.tick(9);
+    cancel_failed_task(&mut w);
+    w.herdr.exit_agent(LANE);
+    w.tick(21);
+    assert!(w.store.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+    let items = w.stall_items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].state, MsgState::Open);
+    assert!(items[0].body.contains("gone from its pane"), "{items:?}");
+}

@@ -2546,6 +2546,40 @@ mod tests {
         assert!(summary < warning, "the warning comes after the summary: {out}");
     }
 
+    #[test]
+    fn plan_apply_prints_the_tasks_a_rebind_is_waiting_for() {
+        let (mut store, mut herdr) = world_with_task();
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = r#"
+[project]
+id="p"
+repo="/repo"
+herdr_session="sess"
+[quota]
+lanes=1
+temps=0
+[captain]
+pane="w1:p1"
+kind="codex"
+profile="codex"
+[[lanes]]
+name="heat"
+duty="work"
+owns=["src/"]
+kind="opencode"
+profile="opencode"
+[[repos]]
+name="api"
+path="api"
+"#.into();
+            tx.update_project(&project)
+        }).unwrap();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
+        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+    }
+
     /// The JSON output carries the same warnings as the text: the lanes that
     /// would stand idle and the apply's own (design §7.2: a decision line
     /// that is not structured).
@@ -3812,13 +3846,15 @@ mod tests {
             .is_empty());
     }
 
-    /// §5.1: a review is charged from the reviewer's own start — its delivery
-    /// confirmation — and never from the writer's check-in.
+    /// §5.1 (T-193): a review is charged from the reviewer's own clock — the
+    /// review round's start — and never from the writer's check-in. The
+    /// writer's attempt carries the writer's times only.
     #[test]
-    fn a_review_is_charged_from_the_reviewers_own_start() {
+    fn a_review_is_charged_from_the_reviewers_own_clock() {
         let (mut store, mut herdr) = world_with_task();
         herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
-        // The lane hands the candidate in.
+        // The lane hands the candidate in: the writer checked in at T0 and its
+        // packet went out at T0+10.
         store
             .write(|tx| {
                 gear_app::tasks::submit_result(
@@ -3833,9 +3869,8 @@ mod tests {
                 )
             })
             .unwrap();
-        // The reviewer gets the packet an hour later.
         store
-            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 3600))
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 10))
             .unwrap();
         // A reviewer seat, bound to the task.
         store
@@ -3844,9 +3879,29 @@ mod tests {
                 tx.set_seat_task("p:review-1", "T-1")
             })
             .unwrap();
+        // The review round starts an hour later: the reviewer worked from
+        // there, and the writer's hour is not the reviewer's.
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 3600,
+                })
+            })
+            .unwrap();
 
-        // The verdict five minutes after the delivery: well inside the review's
-        // own budget, even though the writer checked in an hour before.
+        // The verdict five minutes after the review started: inside the
+        // review's own budget, even though the writer checked in an hour
+        // before.
         let mut c = send_cmd("review");
         c.task = Some("T-1".into());
         c.attempt = Some(1);
@@ -3870,6 +3925,99 @@ mod tests {
                 .is_empty(),
             "the reviewer was inside its own budget"
         );
+        // The writer's attempt still carries the writer's times only.
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.sent_at, Some(T0 + 10), "{attempt:?}");
+        assert_eq!(attempt.started, T0, "{attempt:?}");
+    }
+
+    /// §5.1, §6.2 (T-193): a review over its own budget needs a friction
+    /// report — the reviewer's own clock says so, not the writer's.
+    #[test]
+    fn a_review_over_its_own_budget_needs_a_friction_report() {
+        let (mut store, mut herdr) = world_with_task();
+        herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "abc1234",
+                    "ops/reports/T-1.md",
+                    T0,
+                )
+            })
+            .unwrap();
+        store
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 10))
+            .unwrap();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
+                tx.set_seat_task("p:review-1", "T-1")
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 3600,
+                })
+            })
+            .unwrap();
+
+        // The verdict half an hour after the review started: over the review's
+        // budget (30 min by default).
+        let mut c = send_cmd("review");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.verdict = Some("pass".into());
+        let error = run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 1801,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.detail.contains("FRICTION_REQUIRED") || error.detail.contains("--friction"),
+            "{}",
+            error.detail
+        );
+
+        // With a report: it is stored, and it is required.
+        c.friction = Some("the reviewer's checkout was slow".into());
+        run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 1801,
+            false,
+        )
+        .unwrap();
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].role, "review");
+        assert!(reports[0].required, "the report was required: {reports:?}");
     }
 
     /// §6.3, §6.4: the captain reads the reports and closes one.

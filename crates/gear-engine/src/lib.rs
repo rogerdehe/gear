@@ -23,6 +23,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod friction;
 pub mod guardrails;
 pub mod merge;
 pub mod model;
@@ -34,9 +35,11 @@ pub mod ops;
 pub mod overrun;
 pub mod parallel;
 pub mod quota;
+pub mod quiet;
 pub mod release;
 pub mod restart;
 pub mod rounds;
+mod rules;
 pub mod session;
 mod session_runner;
 pub mod review;
@@ -146,6 +149,10 @@ pub struct TickReport {
     /// The all-tail item opened or closed this tick (`all-tail:opened|closed`):
     /// every lane in the tail while required work remains (B02-08).
     pub tail: Vec<String>,
+    /// The friction item opened, updated or closed this tick
+    /// (`friction:opened|updated|closed`): the captain hears about the open
+    /// friction reports when it has nothing else to do (design §6.4).
+    pub friction: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
@@ -175,6 +182,11 @@ pub struct TickReport {
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
     let mut report = TickReport::default();
+
+    // Settle recorded lane rebinds before onboarding or dispatch sees config.
+    for project in store.read(|tx| tx.project_ids())? {
+        gear_app::plan::reconcile_rebinds(store, &project)?;
+    }
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
@@ -236,6 +248,9 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     };
 
     let mut reviewer_nudge_flags = Vec::new();
+    let mut missing_seats = std::collections::BTreeSet::new();
+    let mut present_seats = Vec::new();
+    let mut observed_seats = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -257,6 +272,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        for obs in &observed {
+            observed_seats.push((project.clone(), obs.seat.id.clone(), obs.presence == observe::Presence::Present));
+            if obs.presence == observe::Presence::Missing {
+                missing_seats.insert(obs.seat.id.clone());
+            } else if obs.presence == observe::Presence::Present {
+                present_seats.push((project.clone(), obs.seat.id.clone()));
+            }
+        }
         // A hand restart of an agent is a new session in the same generation
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
@@ -304,6 +327,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //     lane that is on quota does not have its delivery budget spent.
         let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
+
+        // The loop guard acts on the observed working session before dispatch;
+        // its message also resets the ordinary push reminder clock.
+        quiet::loops(store, herdr, &project, &observed, now)?;
+        store.write(|tx| quiet::tick(tx, &project, now))?;
 
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
         let delivery_grace = gear_app::config::latest(store, &project)
@@ -365,6 +393,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 .map(|change| format!("all-tail:{}", change.as_str())),
         );
 
+        // 6d. the friction ring (design §6.4): an idle captain hears about
+        //     the open friction reports — one item on the thread `friction`,
+        //     at most once per 30 min, updated by a new report and closed
+        //     when every report it lists is closed.
+        report.friction.extend(
+            friction::ring(store, &project, now)?
+                .map(|change| format!("friction:{}", change.as_str())),
+        );
+
         // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
@@ -406,6 +443,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
+        quiet::prepare_pending_deliveries(store, herdr, cfg, &project, now)?;
         let executed = ops::execute_intended(store, herdr, &project, now)?;
         store.write(|tx| {
             for (id, state) in &executed {
@@ -446,13 +484,53 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
+    // A failed delivery remains a live fact until its retry is cleared or
+    // confirmed. The initial failure is emitted only once by the op, so
+    // revisit it on later ticks to allow a resolved item to ring again.
+    for (project, seat, present) in &observed_seats {
+        let other_cause = report.flagged.contains(seat);
+        let outstanding = store.write(|tx| {
+            let Some(failed) = delivery::failed(tx, seat)? else { return Ok(false) };
+            let task = tx.get_task(project, &failed.task)?;
+            let attempt = tx.get_attempt(project, &failed.task, failed.attempt)?;
+            let ended = task.as_ref().is_some_and(|t| t.state.is_terminal())
+                || attempt.as_ref().is_some_and(|a| a.state.is_terminal());
+            if ended {
+                delivery::clear(tx, seat)?;
+                // A missing agent or independent escalation is still a live
+                // fact; keep its item and let the normal flag update it.
+                if !other_cause { stall::resolve(tx, project, seat, now, None)?; }
+                return Ok(false);
+            }
+            Ok(*present && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))
+        })?;
+        if outstanding && !report.flagged.contains(seat) {
+            report.flagged.push(seat.clone());
+        }
+    }
     let mut actionable = Vec::new();
     for seat in &report.flagged {
         if !store.read(|tx| waits::waiting_seat(tx, seat))? { actionable.push(seat.clone()); }
     }
     report.flagged = actionable;
+    for (project, seat) in present_seats {
+        if !report.flagged.contains(&seat) {
+            store.write(|tx| {
+                if tx.get_meta(&format!("stall-missing:{seat}"))?.as_deref() == Some("1") {
+                    stall::resolve(tx, &project, &seat, now, None)?;
+                    tx.set_meta(&format!("stall-missing:{seat}"), "")?;
+                }
+                Ok(())
+            })?;
+        }
+    }
     for seat in report.flagged.clone() {
-        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+        if let Err(e) = store.write(|tx| {
+            let missing = missing_seats.contains(&seat);
+            tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
+            let fact = if missing { "its agent is gone from its pane" } else { "a delivery was not confirmed or continuing it made no progress" };
+            stall::alert_fact(tx, &seat, now, fact)
+        }) {
             // One seat's alert failing never stops the tick.
             report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
         }
