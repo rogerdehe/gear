@@ -225,6 +225,22 @@ fn apply_queue(
         )?;
     }
 
+    // Apply rebinds before taking the existing-task and config snapshots:
+    // an idle lane's NEW tasks belong to its destination repo. A deferred
+    // rebind keeps the old config until the lane's attempts finish.
+    let mut staffed: Vec<String> = Vec::new();
+    for item in &draft.staff {
+        if let StaffItem::Rebind { lane, repo, owns, line } = item {
+            let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
+            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
+                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            warnings.push(message.clone());
+            staffed.push(message);
+            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            continue;
+        }
+    }
+
     let existing: BTreeMap<String, TaskRow> = tx
         .tasks_of_project(project)?
         .into_iter()
@@ -581,17 +597,8 @@ fn apply_queue(
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
-    let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
-        if let StaffItem::Rebind { lane, repo, owns, line } = item {
-            let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
-            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
-                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
-            warnings.push(message.clone());
-            staffed.push(message);
-            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
-            continue;
-        }
+        if matches!(item, StaffItem::Rebind { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
             // The decision log (design §7.4): a staff line is a decision.
@@ -1110,6 +1117,27 @@ fn request_rebind(tx: &Tx<'_>, project: &str, lane: &str, repo: &str, owns: &[St
     }
     let request = RebindRequest { repo: repo.into(), owns: owns.to_vec() };
     rebind_config(tx, project, lane, &request, line)?; // validate before recording anything
+    // Include other lanes' pending targets as reservations. A conflicting
+    // pair must be refused in this transaction, not discovered repeatedly by
+    // the engine after both attempts finish.
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let mut projected = crate::config::parse(&row.config_toml)?;
+    let old_issues = crate::config::validate(&projected);
+    for other in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane && s.id != seat_id) {
+        let Some(raw) = tx.get_meta(&rebind_pending_key(&other.id))?.filter(|v| !v.is_empty()) else { continue };
+        let pending: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(line, format!("invalid pending rebind: {e}")))?;
+        let target = projected.lanes.iter_mut().find(|l| l.name == other.name)
+            .ok_or_else(|| bad(line, format!("pending lane {:?} is not configured", other.name)))?;
+        target.repo = Some(pending.repo);
+        target.owns = pending.owns;
+    }
+    let target = projected.lanes.iter_mut().find(|l| l.name == lane)
+        .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
+    target.repo = Some(request.repo.clone());
+    target.owns = request.owns.clone();
+    if let Some(issue) = crate::config::validate(&projected).into_iter().find(|issue| !old_issues.contains(issue)) {
+        return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
+    }
     let key = rebind_pending_key(&seat_id);
     let data = serde_json::to_string(&request).map_err(|e| bad(line, e))?;
     if tx.get_meta(&key)?.is_some_and(|old| !old.is_empty() && old != data) {
