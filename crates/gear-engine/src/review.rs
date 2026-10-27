@@ -919,6 +919,13 @@ fn start_reviewer(
             tx.set_seat_state(&seat.id, SeatState::Active, Some("review assigned"), now)?;
             tx.set_seat_task(&seat.id, &task.task)?;
             if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":seat.generation,"sha":task.candidate,"state":"running"}).to_string())?; }
+            if direction {
+                if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                    if let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) {
+                        crate::rounds::add_session(tx, &gear_store::RoundKey { project: config.project.id.clone(), task: task.task.clone(), attempt: task.attempt, role: "direction".into() }, session, &binding.kind)?;
+                    }
+                }
+            }
             tx.set_meta(&pending_review_key(&seat.id), "")?;
             tx.set_meta(&branch_key(&seat.id, &repo.path), &branch)?;
             tx.insert_op(&NewOp { project: config.project.id.clone(), seat: seat.id.clone(), generation: seat.generation,
@@ -1086,6 +1093,11 @@ fn start_reviewer(
         gear_app::seats::finish_onboard(tx, &seat.id, generation, session_ref, now)?;
         tx.set_seat_task(&seat.id, &task.task)?;
         if direction { tx.set_meta(&direction_key(&config.project.id, &task.task, task.attempt), &serde_json::json!({"seat":seat.id,"generation":generation,"sha":task.candidate,"state":"running"}).to_string())?; }
+        if direction {
+            if let Some(session) = session_ref.filter(|s| !s.is_empty()) {
+                crate::rounds::add_session(tx, &gear_store::RoundKey { project: config.project.id.clone(), task: task.task.clone(), attempt: task.attempt, role: "direction".into() }, session, kind)?;
+            }
+        }
         tx.set_meta(&pending_review_key(&seat.id), "")?;
         tx.set_meta(&review_model_key(&seat.id), &review_model_entry(kind, entry))?;
         if let Some(model) = model { tx.set_meta(&crate::model::model_meta_key(&seat.id), model)?; }
