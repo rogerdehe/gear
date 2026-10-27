@@ -483,7 +483,8 @@ pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) ->
 
 /// What the doorbell decision needs to know about one seat (design/07).
 /// Session preparation owns the pane until its current round is ready.
-fn session_preparation_pending(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) -> GearResult<bool> {
+    let seat = &obs.seat;
     let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(false) };
     let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
     let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
@@ -493,8 +494,12 @@ fn session_preparation_pending(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatR
     }
     // A round can exist before the runner has written its first step (or when
     // no profile is available); an unsent assignment still reserves the pane.
-    Ok(tx.get_attempt(&round.project, &round.task, round.attempt)?
-        .is_some_and(|a| a.state == gear_model::AttemptState::Delivered && a.sent_at.is_none()))
+    let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
+    if attempt.state == gear_model::AttemptState::Delivered && attempt.sent_at.is_none() { return Ok(true) }
+    if !matches!(attempt.state, gear_model::AttemptState::Delivered | gear_model::AttemptState::Started | gear_model::AttemptState::Stopped) { return Ok(false) }
+    let expected = crate::session::round_session(tx, &round)?;
+    Ok(expected.is_some_and(|session| obs.presence == observe::Presence::Missing
+        || (obs.presence == observe::Presence::Present && obs.session.as_deref().is_some_and(|current| current != session))))
 }
 
 fn doorbell_inputs(
@@ -599,7 +604,7 @@ fn doorbell_inputs(
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty() || session_preparation_pending(tx, seat)?;
+        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty() || session_preparation_pending(tx, seat_obs)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
