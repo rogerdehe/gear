@@ -135,6 +135,41 @@ pub struct ProjectBoard {
     pub unconfirmed_deliveries: usize,
     /// The quota readings of the providers (§9.1).
     pub quota: Vec<QuotaReading>,
+    /// The captain's decisions of this voyage (§7.1): the log the board
+    /// shows in its fourth view.
+    pub decisions: Vec<DecisionBoard>,
+    /// The friction reports the agents left (§6.1), open and closed.
+    pub frictions: Vec<FrictionBoard>,
+}
+
+/// One decision of the captain's log, as the board shows it (§7.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecisionBoard {
+    /// When the decision was taken.
+    pub at: String,
+    /// The kind of the decision (`scope`, `cut`, `override`…).
+    pub kind: String,
+    /// What was decided.
+    pub what: String,
+    /// Why it was decided.
+    pub why: Option<String>,
+    /// The decision is worth a look at the landing (§7.2).
+    pub star: bool,
+}
+
+/// One friction report of an agent, as the board shows it (§6.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrictionBoard {
+    /// The task it was reported for.
+    pub task: String,
+    /// The lane that reported it.
+    pub lane: String,
+    /// What the report says.
+    pub body: String,
+    /// The captain closed it.
+    pub closed: bool,
+    /// What the captain did about it.
+    pub outcome: Option<String>,
 }
 
 /// A captain quota pause, as shown to the user.
@@ -171,7 +206,7 @@ pub struct Rework {
 }
 
 /// One lane and its queue, in plan order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LaneBoard {
     pub lane: String,
     /// Herdr observation, never inferred from task or seat state.
@@ -225,7 +260,7 @@ pub struct DownSeat {
 }
 
 /// One task of a lane's queue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TaskBoard {
     pub id: String,
     pub state: TaskState,
@@ -237,6 +272,10 @@ pub struct TaskBoard {
     pub actual_min: Option<i64>,
     /// How many rounds the task had.
     pub rounds: usize,
+    /// The tokens of the task's rounds, when they are counted (§4.3).
+    pub tokens: Option<i64>,
+    /// The cost of the task's rounds, when it is known (§4.4).
+    pub cost_usd: Option<f64>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -387,6 +426,8 @@ pub fn project_with_agents(
             est_min: task.estimate_min,
             actual_min: actual_min_of(tx, project, &task.id, now)?,
             rounds: tx.attempts_of_task(project, &task.id)?.len(),
+            tokens: tokens_of(tx, project, &task.id)?,
+            cost_usd: cost_of(tx, project, &task.id)?,
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
@@ -562,6 +603,8 @@ pub fn project_with_agents(
         graph,
         graph_lanes,
         quota: quota_readings(tx)?,
+        decisions: decisions_of(tx, project, voyage_of(tx, project)?.as_deref())?,
+        frictions: frictions_of(tx, project)?,
         waiting,
         temps,
         unconfirmed_deliveries,
@@ -784,6 +827,85 @@ fn actual_min_of(
 /// The finished voyages are not in `voyages` (the home page and the station
 /// watch the active ones only), but their measurements are still true: a
 /// landed voyage keeps its burn-up and its lanes.
+/// The tokens of a task's rounds (§4.3): None when no round counted them.
+fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let mut total = 0;
+    let mut counted = false;
+    for round in &rounds {
+        let tokens = round.input.unwrap_or(0)
+            + round.output.unwrap_or(0)
+            + round.cache_read.unwrap_or(0)
+            + round.cache_write.unwrap_or(0);
+        if tokens > 0 {
+            counted = true;
+        }
+        total += tokens;
+    }
+    Ok(counted.then_some(total))
+}
+
+/// The cost of a task's rounds (§4.4): None when no round priced them.
+fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let mut total = 0.0;
+    let mut priced = false;
+    for round in &rounds {
+        if let Some(cost) = round.cost_usd {
+            priced = true;
+            total += cost;
+        }
+    }
+    Ok(priced.then_some(total))
+}
+
+/// The milestone of the project's voyage: the decisions belong to it.
+fn voyage_of(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>> {
+    Ok(tx
+        .voyages_of_project(project)?
+        .first()
+        .map(|voyage| voyage.milestone.clone()))
+}
+
+/// The captain's decisions of the voyage, as the board shows them (§7.1).
+fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<Vec<DecisionBoard>> {
+    let Some(voyage) = voyage else {
+        return Ok(Vec::new());
+    };
+    Ok(tx
+        .decisions_of(project, voyage)?
+        .into_iter()
+        .map(|decision| DecisionBoard {
+            at: decision.at,
+            kind: decision.kind,
+            what: decision.what,
+            why: decision.why,
+            star: decision.star,
+        })
+        .collect())
+}
+
+/// The friction reports of the project (§6.1): the open ones and the closed
+/// ones, oldest first.
+fn frictions_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FrictionBoard>> {
+    Ok(tx
+        .frictions_of_project(project)?
+        .into_iter()
+        .map(|friction| FrictionBoard {
+            task: friction.task,
+            lane: friction
+                .seat
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            body: friction.body,
+            closed: friction.closed_at.is_some(),
+            outcome: friction.outcome,
+        })
+        .collect())
+}
+
 fn workload_voyage(
     tx: &Tx<'_>,
     project: &str,
@@ -932,6 +1054,14 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                         "id": task.id,
                         "state": state_word(task.state),
                     })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "decisions": project.decisions.iter().map(|decision| serde_json::json!({
+                    "at": decision.at, "kind": decision.kind, "what": decision.what,
+                    "why": decision.why, "star": decision.star,
+                })).collect::<Vec<_>>(),
+                "frictions": project.frictions.iter().map(|friction| serde_json::json!({
+                    "task": friction.task, "lane": friction.lane, "body": friction.body,
+                    "closed": friction.closed, "outcome": friction.outcome,
                 })).collect::<Vec<_>>(),
                 "deps": project.deps.iter().map(|node| serde_json::json!({
                     "id": node.id,
@@ -1139,6 +1269,16 @@ fn open_panel(
         }
         frame::Tab::Graph => {
             let Some(task) = project.graph.get(selected) else { return Ok(None) };
+            let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;
+            Ok(Some(rows))
+        }
+        frame::Tab::Tokens => {
+            // The task panel of the task the row names: its rounds with their
+            // tokens.
+            let tasks = frame::token_tasks(project);
+            let Some((_, task)) = tasks.get(selected) else {
+                return Ok(None);
+            };
             let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }

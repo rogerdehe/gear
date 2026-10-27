@@ -383,12 +383,123 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
             ViewRows { heading, rows, rest }
         }
         Tab::Workload => view_workload(project, selected),
-        Tab::Decisions | Tab::Tokens => ViewRows {
-            heading: format!("{}: the next task", tab.title()),
-            rows: Vec::new(),
-            rest: Vec::new(),
-        },
+        Tab::Decisions => view_decisions(project, selected),
+        Tab::Tokens => view_tokens(project, selected),
     }
+}
+
+/// The fourth view: the captain's decisions (★ = worth a look at landing) and
+/// the agents' friction reports (the prototype).
+fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let mut rows = Vec::new();
+    for (index, decision) in project.decisions.iter().enumerate() {
+        let mark = if index == selected { "›" } else { " " };
+        let mut line = format!(
+            "{mark} {} {} {:<9} {}",
+            clock_of(&decision.at),
+            if decision.star { "★" } else { " " },
+            decision.kind,
+            decision.what
+        );
+        if let Some(why) = &decision.why {
+            line.push_str(&format!("  ·  why: {why}"));
+        }
+        rows.push(line);
+    }
+    // The count of the decisions by kind (§7.2): the landing review shows it
+    // next to the starred lines.
+    if !project.decisions.is_empty() {
+        rows.push(String::new());
+        rows.push(format!("by kind: {}", counts_of_kind(project)));
+    }
+    // The friction reports the agents left (§6.1).
+    rows.push(String::new());
+    rows.push("FRICTION REPORTS FROM AGENTS".to_string());
+    for friction in &project.frictions {
+        rows.push(format!(
+            "  {} {:<6}{:<8}{}",
+            friction.task,
+            friction.lane,
+            if friction.closed { "closed" } else { "open" },
+            friction.body
+        ));
+    }
+    ViewRows {
+        heading: "DECISIONS MADE  (★ = worth a look at landing)".to_string(),
+        rows,
+        rest: Vec::new(),
+    }
+}
+
+/// The decisions of the project by kind: `2 scope, 1 cut`.
+fn counts_of_kind(project: &ProjectBoard) -> String {
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for decision in &project.decisions {
+        *counts.entry(decision.kind.as_str()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{count} {kind}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The fifth view: the time and the tokens of every task that ran (the
+/// prototype).
+fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let mut rows = Vec::new();
+    let mut tokens_total = 0;
+    let mut cost_total = 0.0;
+    for (index, (lane, task)) in token_tasks(project).into_iter().enumerate() {
+        let mark = if index == selected { "›" } else { " " };
+        let estimate = task.est_min.unwrap_or(0);
+        let actual = task.actual_min.unwrap_or(0);
+        let ratio = if estimate > 0 {
+            actual as f64 / estimate as f64
+        } else {
+            0.0
+        };
+        let tokens = task.tokens.unwrap_or(0);
+        let cost = task.cost_usd.unwrap_or(0.0);
+        tokens_total += tokens;
+        cost_total += cost;
+        rows.push(format!(
+            "{mark} {:<7}{:<6}{estimate:>4}m{actual:>5}m{ratio:>7.1}x{:>8}{:>8}k  ${cost:>6.2}",
+            task.id,
+            lane,
+            task.rounds,
+            tokens / 1000
+        ));
+    }
+    let rest = vec![format!(
+        "so far: {:.1}M tokens, ${cost_total:.2}",
+        tokens_total as f64 / 1_000_000.0
+    )];
+    ViewRows {
+        heading: "task    lane     est    act   ratio  rounds   tokens     cost".to_string(),
+        rows,
+        rest,
+    }
+}
+
+/// The tasks of the Time & tokens view, in the order of its rows: the tasks
+/// that ran, lane by lane.
+pub fn token_tasks(project: &ProjectBoard) -> Vec<(&str, &TaskBoard)> {
+    let mut tasks = Vec::new();
+    for lane in &project.lanes {
+        for task in &lane.tasks {
+            if task.actual_min.is_some() {
+                tasks.push((lane.lane.as_str(), task));
+            }
+        }
+    }
+    tasks
+}
+
+/// The clock of a decision: the time of its line (`2026-10-27 10:05` →
+/// `10:05`).
+fn clock_of(at: &str) -> &str {
+    at.rsplit(' ').next().unwrap_or(at)
 }
 
 /// The third view: the work done and left, per lane, and the burn-up.
