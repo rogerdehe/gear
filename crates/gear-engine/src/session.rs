@@ -273,7 +273,8 @@ pub fn prepare_lane(
     let mut facts = lane_facts(store, herdr, &project, seat, task, attempt)?;
     let round = round_of(store, &key)?;
     let fresh_key = format!("engine.session_fresh.{}", seat.id);
-    let fresh = round.is_none() && store.read(|tx| tx.get_meta(&fresh_key))?.as_deref() == Some(&seat.generation.to_string());
+    let fresh_generation = store.read(|tx| tx.get_meta(&fresh_key))?.as_deref() == Some(&seat.generation.to_string());
+    let fresh = round.is_none() && fresh_generation;
     if fresh {
         // Onboarding has already started this agent, but its first unrelated
         // round is fresh; a related recorded session still resumes.
@@ -303,8 +304,10 @@ pub fn prepare_lane(
     store.write(|tx| {
         if round.is_none() {
             create_round(tx, &key, seat, &facts, now)?;
-            if fresh { tx.set_meta(&fresh_key, "")?; }
         }
+        // Resuming an existing round also uses this generation's fresh
+        // process; it must not be reused for a later unrelated round.
+        if fresh_generation { tx.set_meta(&fresh_key, "")?; }
         if round.is_none() {
             tx.set_attempt_action(&project, task, attempt, action.as_str())?;
         }
