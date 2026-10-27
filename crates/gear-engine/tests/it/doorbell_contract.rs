@@ -16,6 +16,7 @@ fn input(seat: &str) -> DoorbellInput {
         generation: 2,
         pane_id: "w1:p1".into(),
         idle: true,
+        status: Some(gear_herdr::AgentStatus::Idle),
         slot_busy: false,
         last_settled_at: None,
         no_task: false,
@@ -61,6 +62,7 @@ fn silent_when_nothing_busy_or_slot_held() {
     nothing.waiting = vec![];
     let mut busy = input("b");
     busy.idle = false;
+    busy.status = Some(gear_herdr::AgentStatus::Working);
     let mut slot = input("c");
     slot.slot_busy = true;
     assert_eq!(decide(&[nothing, busy, slot], 90, NOW), vec![]);
@@ -88,6 +90,7 @@ fn one_action_per_ringing_input_in_input_order() {
 fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
     let mut working = input("lane");
     working.idle = false;
+    working.status = Some(gear_herdr::AgentStatus::Working);
     working.last_settled_at = Some(NOW); // inside the cooldown
     working.waiting = vec![DoorbellItem { id: "M-4".into(), urgent: true, at_once: true }];
 
@@ -100,6 +103,7 @@ fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
 fn a_working_seat_is_told_only_about_the_at_once_messages() {
     let mut working = input("lane");
     working.idle = false;
+    working.status = Some(gear_herdr::AgentStatus::Working);
     working.waiting = vec![
         DoorbellItem { id: "M-4".into(), urgent: true, at_once: true },
         DoorbellItem { id: "M-5".into(), urgent: false, at_once: false },
