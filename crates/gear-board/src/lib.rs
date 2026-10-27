@@ -687,21 +687,35 @@ pub fn integration_overlaps_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Ove
 
 /// The repo and the task of one overlap key: `integration:<task>` for the
 /// project root, `<repo>:integration:<task>` for a child repo.
+///
+/// Only that exact shape is an overlap (F1): the bookkeeping keys of the
+/// scan — `pair:<pair>:files`, `pair:<pair>:item` — are not overlaps, and
+/// the task is a task id, not the rest of the key.
 fn split_overlap_key(rest: &str) -> Option<(String, String)> {
     // A repo named `integration` is the one case where the key has two
     // `integration` segments.
     if let Some(task) = rest.strip_prefix("integration:integration:") {
-        return Some(("integration".to_string(), task.to_string()));
+        return task_id(task).map(|task| ("integration".to_string(), task));
     }
     let (repo, tail) = match rest.split_once(':') {
         Some((repo, tail)) if repo != "integration" => (repo.to_string(), tail),
         _ => (String::new(), rest),
     };
     let task = tail.strip_prefix("integration:")?;
-    if task.is_empty() {
+    // `pair` is the namespace of the scan's bookkeeping, not a repo.
+    if repo == "pair" {
         return None;
     }
-    Some((repo, task.to_string()))
+    task_id(task).map(|task| (repo, task))
+}
+
+/// A task id: one segment, not empty. The suffixes of the bookkeeping keys
+/// (`:files`, `:item`, `:notified`) are not part of a task id.
+fn task_id(task: &str) -> Option<String> {
+    if task.is_empty() || task.contains(':') {
+        return None;
+    }
+    Some(task.to_string())
 }
 
 /// The files and the integration branch of one overlap value.

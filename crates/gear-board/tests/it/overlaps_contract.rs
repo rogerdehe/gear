@@ -115,3 +115,32 @@ fn an_overlap_never_waits_for_the_captain() {
     let text = render(&board, View::Lanes);
     assert!(text.contains("Waiting for the captain: 0 items"), "{text}");
 }
+
+/// F1 of the review of T-208: the bookkeeping keys of the scan are not
+/// overlaps. The old scan kept `pair:integration:<task>:files` and
+/// `pair:integration:<task>:item` when it resolved the legacy captain item,
+/// so a cleared overlap key must still print nothing.
+#[test]
+fn the_bookkeeping_keys_of_the_scan_are_not_overlaps() {
+    let mut store = world();
+    store
+        .write(|tx| {
+            // The overlap is gone: the scan cleared its key.
+            tx.set_meta("parallel:p:integration:T-2", "")?;
+            // The bookkeeping of the legacy item stays.
+            tx.set_meta("parallel:p:pair:integration:T-2:files", "[]")?;
+            tx.set_meta("parallel:p:pair:integration:T-2:item", "M-9")?;
+            Ok(())
+        })
+        .unwrap();
+
+    let overlaps = integration_overlaps(&mut store, "p").unwrap();
+    assert!(overlaps.is_empty(), "{overlaps:?}");
+
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    let text = render(&board, View::Lanes);
+    assert!(!text.contains("overlap:"), "{text}");
+
+    let screen = frame::frame(&board, frame::Tab::Now, 0, None, (120, 40));
+    assert!(!screen.contains("overlap:"), "{screen}");
+}
