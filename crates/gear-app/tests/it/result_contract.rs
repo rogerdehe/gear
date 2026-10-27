@@ -170,3 +170,13 @@ fn rejected_delivered_hand_in_does_not_start_attempt() {
     assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
     assert_eq!(s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap().started,None);
 }
+
+#[test]
+fn current_contract_mismatch_rolls_back_the_implicit_start() {
+    let mut s=world_initial(false); let (env,fp)=lane();
+    s.write(|tx| {let mut task=tx.get_task("p","T-1")?.unwrap();task.contract_version=2;tx.update_task(&task)}).unwrap();
+    assert_eq!(mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"new-current-contract"),T0+20).unwrap_err().code,ErrorCode::BadFormat);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
+    assert_eq!(s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap().started,None);
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().state,TaskState::Ready);
+}
