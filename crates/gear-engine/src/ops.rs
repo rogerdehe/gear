@@ -786,7 +786,20 @@ pub fn confirm_pending_with(
                             retry_now: false,
                         },
                     )?;
-                    if !flagged.contains(&op.seat) {
+                    // T-206 (F3): the first failure of a delivery does not
+                    // ring the captain yet: the lane's own path may deliver
+                    // the packet again, and that retry's own deadline opens
+                    // the one stall item.
+                    let marker = crate::lane_nudge::retry_marker(
+                        &op.seat,
+                        op.task.as_deref().unwrap_or_default(),
+                        op.attempt.unwrap_or_default(),
+                    );
+                    if tx.get_meta(&marker)?.is_none() {
+                        tx.set_meta(&marker, "allowed")?;
+                    }
+                    let may_retry = tx.get_meta(&marker)?.as_deref() == Some("allowed");
+                    if !may_retry && !flagged.contains(&op.seat) {
                         flagged.push(op.seat.clone());
                     }
                     continue;

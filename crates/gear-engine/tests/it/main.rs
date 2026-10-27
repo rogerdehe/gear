@@ -65,7 +65,7 @@ mod delivery_grace_contract;
 mod targeting_contract;
 mod all_tail_contract;
 mod dead_temp_slot_contract;
-mod quiet_contract;
+mod lane_nudge_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about

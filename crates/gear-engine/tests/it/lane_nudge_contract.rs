@@ -149,22 +149,71 @@ fn a_lane_that_keeps_stopping_ends_with_one_captain_item() {
     let (mut s, mut h, c) = world();
 
     tick(&mut s, &mut h, &c, T + 10).unwrap();
-    // Three nudges, then the captain is told.
-    for at in [130, 140, 150] {
+    // One nudge per idle episode: the next nudge waits a full interval
+    // (F2), so the episodes are two minutes apart.
+    for at in [130, 250, 370] {
         tick(&mut s, &mut h, &c, T + at).unwrap();
     }
     assert_eq!(nudges(&mut s).len(), 3, "{:?}", nudges(&mut s));
     assert!(stall_items(&mut s).is_empty(), "the captain hears nothing yet");
 
-    tick(&mut s, &mut h, &c, T + 160).unwrap();
+    tick(&mut s, &mut h, &c, T + 490).unwrap();
     assert_eq!(nudges(&mut s).len(), 3, "no fourth nudge: {:?}", nudges(&mut s));
     let items = stall_items(&mut s);
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].contains("heat"), "{items:?}");
 
     // And the item is not repeated.
-    tick(&mut s, &mut h, &c, T + 170).unwrap();
+    tick(&mut s, &mut h, &c, T + 610).unwrap();
     assert_eq!(stall_items(&mut s).len(), 1, "one item only");
+}
+
+/// F2: a nudge waits a full interval: the tick right after it sends nothing.
+#[test]
+fn a_nudge_waits_a_full_interval_before_the_next_one() {
+    let (mut s, mut h, c) = world();
+
+    tick(&mut s, &mut h, &c, T + 10).unwrap();
+    tick(&mut s, &mut h, &c, T + 130).unwrap();
+    assert_eq!(nudges(&mut s).len(), 1, "{:?}", nudges(&mut s));
+
+    // The tick right after the nudge: nothing goes out.
+    tick(&mut s, &mut h, &c, T + 131).unwrap();
+    assert_eq!(nudges(&mut s).len(), 1, "one nudge only: {:?}", nudges(&mut s));
+
+    // A full interval later: the next nudge.
+    tick(&mut s, &mut h, &c, T + 260).unwrap();
+    assert_eq!(nudges(&mut s).len(), 2, "{:?}", nudges(&mut s));
+}
+
+/// F2: a delivery that is still in flight blocks the nudge: the lane gets
+/// one packet, not two.
+#[test]
+fn a_delivery_in_flight_blocks_the_nudge() {
+    let (mut s, mut h, c) = world();
+    // The lane's packet is Unknown: it may yet get through, so no second
+    // packet may go out.
+    s.write(|tx| {
+        let op = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "the packet" }),
+            created: T,
+        })?;
+        tx.set_op_state("p", &op.id, gear_model::OpState::Unknown, Some("the engine stopped"), T)
+    })
+    .unwrap();
+
+    tick(&mut s, &mut h, &c, T + 10).unwrap();
+    tick(&mut s, &mut h, &c, T + 130).unwrap();
+
+    assert!(nudges(&mut s).is_empty(), "{:?}", nudges(&mut s));
 }
 
 #[test]
@@ -177,4 +226,92 @@ fn a_lane_on_its_quota_is_not_nudged() {
     tick(&mut s, &mut h, &c, T + 300).unwrap();
 
     assert!(nudges(&mut s).is_empty(), "{:?}", nudges(&mut s));
+}
+
+/// F3: the first failure of a lane's delivery does not ring the captain: the
+/// packet may still be delivered again, and that retry's own deadline opens
+/// the one stall item.
+#[test]
+fn the_first_failure_waits_for_the_retry() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.write(|tx| {
+        testing::seed_project(tx, "p", "sess", T)?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
+        testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T)?;
+        tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
+            project: "p".into(),
+            id: "T-1".into(),
+            rank: 1,
+            state: TaskState::Ready,
+            priority: "must".into(),
+            lane: Some("heat".into()),
+            milestone: None,
+            required: false,
+            contract_version: 1,
+            deps: vec![],
+            followup_of: None,
+            wait_on: None,
+            wait_cond: None,
+            rework_note: None,
+            estimate_min: Some(30),
+            issue: None,
+            updated: T,
+        })?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
+        // The packet was sent and never confirmed.
+        let op = tx.insert_op(&gear_store::NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: gear_model::OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": "the packet" }),
+            created: T,
+        })?;
+        tx.set_op_state("p", &op.id, gear_model::OpState::Submitted, None, T)
+    })
+    .unwrap();
+    let mut h = FakeHerdr::new();
+    h.add_agent("w1:p1", "codex", AgentStatus::Idle);
+    h.add_agent(LANE, "opencode", AgentStatus::Idle);
+    let mut cfg = EngineCfg::default();
+    cfg.profiles = gear_herdr::builtins();
+    cfg.cooldown_s = 0;
+    // A short grace: the delivery fails at once.
+    cfg.delivery_grace_s = 1;
+
+    // The first failure: the captain is not rung yet.
+    tick(&mut s, &mut h, &cfg, T + 10).unwrap();
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the retry may still come: {:?}",
+        stall_items(&mut s)
+    );
+
+    // Two minutes later the packet is delivered again.
+    tick(&mut s, &mut h, &cfg, T + 130).unwrap();
+    let redelivered = s
+        .read(|tx| tx.ops_of_seat_kind("p:heat", gear_model::OpKind::Deliver))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.payload.get("redeliver").is_some())
+        .count();
+    assert_eq!(redelivered, 1, "the packet goes out again once");
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the retry has not failed yet: {:?}",
+        stall_items(&mut s)
+    );
+
+    // The retry fails too: now the captain hears about it, once.
+    tick(&mut s, &mut h, &cfg, T + 140).unwrap();
+    let items = stall_items(&mut s);
+    assert_eq!(items.len(), 1, "{items:?}");
 }

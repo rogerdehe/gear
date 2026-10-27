@@ -34,7 +34,7 @@ mod opencode;
 pub mod ops;
 pub mod overrun;
 pub mod parallel;
-pub mod quiet;
+pub mod lane_nudge;
 pub mod quota;
 pub mod release;
 pub mod restart;
@@ -414,7 +414,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
 
         // 7c. a lane that stopped on a server error goes on by itself
         //     (T-206): its agent is idle with an attempt in flight.
-        let (nudged_lanes, stuck_lanes) = quiet::nudge_stopped_lanes(store, &project, &observed, now)?;
+        let (nudged_lanes, stuck_lanes) = lane_nudge::nudge_stopped_lanes(store, &project, &observed, now)?;
         report.lane_nudged.extend(nudged_lanes);
         for seat in stuck_lanes {
             report.flagged.push(seat);
@@ -506,7 +506,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 if !other_cause { stall::resolve(tx, project, seat, now, None)?; }
                 return Ok(false);
             }
-            Ok(*present && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))
+            // T-206 (F3): while the lane's delivery may still be retried, the
+            // outstanding failure is not a stall yet: the retry's own
+            // deadline opens the one item.
+            let may_retry = tx
+                .get_meta(&crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt))?
+                .is_some();
+            Ok(*present
+                && !may_retry
+                && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))
         })?;
         if outstanding && !report.flagged.contains(seat) {
             report.flagged.push(seat.clone());
