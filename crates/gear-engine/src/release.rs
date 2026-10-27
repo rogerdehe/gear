@@ -86,7 +86,7 @@ pub fn release_finished_reviews(
             }
             // A reviewer that is up and whose job is gone: it leaves.
             SeatState::Active => {
-                let Some(task) = seat.task_id.clone() else {
+                let Some(task) = pending.clone().or_else(|| seat.task_id.clone()) else {
                     continue;
                 };
                 // Still doing its job: nothing to release.
