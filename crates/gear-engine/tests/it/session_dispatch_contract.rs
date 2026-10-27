@@ -96,3 +96,21 @@ fn freshly_onboarded_followup_still_resumes_its_earlier_session() {
     assert_eq!(state["action"],"resume"); assert_eq!(state["target"],"previous");
     assert!(h.prompts_to(PANE).is_empty());
 }
+
+#[test]
+fn urgent_doorbell_waits_for_session_preparation_and_delivery() {
+    use gear_model::{MsgKind, MsgState};
+    use gear_store::{NewMessage, ViewRecord};
+    let (mut s,mut h,c)=world(false);
+    s.write(|tx| tx.insert_message(&NewMessage {project:"p".into(),thread:"instruction".into(),task:None,attempt:None,sender:"p:captain".into(),sender_gen:1,recipient:"p:heat".into(),kind:MsgKind::Instruction,urgent:true,body:"please read".into(),reply_to:None,needs_ack:false,state:MsgState::Open,created:T,meta:None}).map(|_| ())).unwrap();
+    advance(&mut s,&mut h,&c,0);
+    advance(&mut s,&mut h,&c,1);
+    assert!(h.prompts_to(PANE).is_empty(),"{:?}",h.calls);
+    h.set_agent_session(PANE,"new");
+    advance(&mut s,&mut h,&c,7);
+    assert_eq!(h.prompts_to(PANE).len(),1);
+    assert!(h.prompts_to(PANE)[0].contains("New task T-1"));
+    s.write(|tx|tx.insert_view(&ViewRecord { project:"p".into(),seat:"p:heat".into(),generation:1,ts:T+8,shown_msgs:vec![],shown_ops:vec![],shown_task:Some("T-1".into()),shown_attempt:Some(1),shown_contract:Some(1) })).unwrap();
+    advance(&mut s,&mut h,&c,9);
+    assert!(h.prompts_to(PANE).iter().any(|p|p.contains("item(s) waiting")),"{:?}",h.calls);
+}

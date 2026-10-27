@@ -482,6 +482,21 @@ pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) ->
 }
 
 /// What the doorbell decision needs to know about one seat (design/07).
+/// Session preparation owns the pane until its current round is ready.
+fn session_preparation_pending(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(false) };
+    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    if let Some(state) = state.filter(|s| s["round"] == identity) {
+        return Ok(!matches!(state["step"].as_str(), Some("done" | "failed")));
+    }
+    // A round can exist before the runner has written its first step (or when
+    // no profile is available); an unsent assignment still reserves the pane.
+    Ok(tx.get_attempt(&round.project, &round.task, round.attempt)?
+        .is_some_and(|a| a.state == gear_model::AttemptState::Delivered && a.sent_at.is_none()))
+}
+
 fn doorbell_inputs(
     tx: &gear_store::Tx<'_>,
     project: &str,
@@ -584,7 +599,7 @@ fn doorbell_inputs(
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty() || session_preparation_pending(tx, seat)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
