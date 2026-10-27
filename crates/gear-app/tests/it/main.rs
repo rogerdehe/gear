@@ -34,6 +34,7 @@ mod tasks_contract;
 mod time_contract;
 mod time_report_contract;
 mod verdict_item_contract;
+mod queue_contract;
 mod voyage_contract;
 mod voyage_report_contract;
 mod standard_contract;
