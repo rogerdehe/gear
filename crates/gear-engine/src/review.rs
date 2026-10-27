@@ -16,6 +16,7 @@
 
 use gear_app::config::{ModelEntry, ProjectConfig, Repo};
 use gear_herdr::{HerdrAct, Outcome, Profile};
+use gear_model::state::require_transition;
 use gear_model::{
     AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatRole, SeatState,
     TaskState, Ts,
@@ -138,7 +139,7 @@ pub fn start_reviews(
         //    several seats recovered by `release_dead_temps` started at once
         //    and passed the quota (F1 of the T-116 review).
         if !occupies_quota(seat.state)
-            && !has_free_slot(store, project, i64::from(config.quota.temps))?
+            && !has_free_slot(store, herdr, project, i64::from(config.quota.temps))?
         {
             report.waiting.push(task.task.clone());
             tell_captain(store, project, &task, "every temp seat is in use", now)?;
@@ -168,6 +169,85 @@ pub fn start_reviews(
         }
     }
     Ok(report)
+}
+
+/// The reviewers whose verdict is in go to `Standby` (design §3.6).
+///
+/// A reviewer that handed in its verdict keeps its agent and its pane: the
+/// seat is idle, not gone, and it can take the next review. What ends is its
+/// **job binding** (`seats.task_id = NULL`): the seat waits for work, it does
+/// not work on a task any more.
+///
+/// A reviewer that handed in no verdict is not put on standby: a reviewer
+/// whose job is gone (the task was cancelled, a newer attempt was handed in)
+/// is released by `release.rs`.
+///
+/// The transition `Active → Standby` is not in the model's table yet (§3.6 is
+/// new): the captain's own `- release <reviewer>` states its transition the
+/// same way (`gear-app/src/plan.rs`).
+pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<String>> {
+    let mut standby = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        // Only a reviewer that is up: a queued or starting one has no agent
+        // yet, and one on its way out is already leaving.
+        if seat.role != SeatRole::Temp || seat.state != SeatState::Active {
+            continue;
+        }
+        let Some(task) = seat.task_id.clone() else { continue };
+        if !handed_a_verdict(store, project, &seat, &task)? {
+            continue;
+        }
+        store.write(|tx| {
+            // Active → Standby (design §3.6): the model knows the transition.
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, SeatState::Active, SeatState::Standby),
+                "seat",
+                SeatState::Active.as_str(),
+                SeatState::Standby.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), now)?;
+            // The job binding ends: the seat waits for the next review.
+            tx.clear_seat_task(&seat.id)?;
+            Ok(())
+        })?;
+        standby.push(seat.id.clone());
+    }
+    Ok(standby)
+}
+
+/// Whether this reviewer handed in the verdict of the job it works on.
+///
+/// The job is the attempt its own review packet named — the seat's last
+/// `Deliver` op — and the verdict must be that attempt's: an earlier verdict
+/// of the same task does not end the review that runs now. A rework is a new
+/// attempt of the same task, and it is judged by its own verdict (F1 of the
+/// T-143 review).
+///
+/// A seat with no packet (a legacy seat, a seat of an older engine) has no
+/// job to name: the latest attempt of the task is its job then.
+fn handed_a_verdict(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
+    store.read(|tx| {
+        let attempt = match tx.last_op(&seat.id, OpKind::Deliver)? {
+            // The packet of the job: it must be about this seat's task.
+            Some(op) => {
+                if op.task.as_deref() != Some(task) {
+                    return Ok(false);
+                }
+                op.attempt
+            }
+            // A seat with no packet: the latest attempt of the task is its job.
+            None => tx
+                .attempts_of_task(project, task)?
+                .into_iter()
+                .last()
+                .map(|attempt| attempt.n),
+        };
+        let Some(attempt) = attempt else { return Ok(false) };
+        Ok(tx
+            .get_review_verdict(project, task, attempt)?
+            .is_some_and(|verdict| verdict.by_seat == seat.id))
+    })
 }
 
 /// An attempt a lane handed in that no reviewer is bound to.
@@ -353,24 +433,62 @@ fn next_temp_name(tx: &Tx<'_>, project: &str) -> GearResult<String> {
     }
 }
 
-/// Whether a temp slot is free: the seats that occupy the quota are Starting,
-/// Active, Releasing and Unknown (design/10).
-fn has_free_slot(store: &mut Store, project: &str, quota: i64) -> GearResult<bool> {
-    store.read(|tx| {
-        let occupying = tx
-            .seats_of_project(project)?
-            .into_iter()
-            .filter(|seat| seat.role == SeatRole::Temp && occupies_quota(seat.state))
-            .count() as i64;
-        Ok(occupying < quota)
-    })
+/// Whether a temp slot is free: the seats that occupy the quota are the ones
+/// with a live agent or starting — `Active`, `Standby`, `Starting` and
+/// `Releasing` (design §3.6, the captain's decision of M-2603). A `Released`
+/// seat holds no slot, and a parked (`Unknown`) one holds its slot only while
+/// Herdr shows an agent in its pane (B02-04: a parked reviewer is a reviewer
+/// a human has to look at).
+fn has_free_slot(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    quota: i64,
+) -> GearResult<bool> {
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    let mut occupying = 0;
+    for seat in seats {
+        if seat.role != SeatRole::Temp {
+            continue;
+        }
+        if occupies_quota(seat.state) {
+            occupying += 1;
+            continue;
+        }
+        if seat.state == SeatState::Unknown && shows_an_agent(store, herdr, &seat)? {
+            occupying += 1;
+        }
+    }
+    Ok(occupying < quota)
 }
 
-/// The states in which a temp seat occupies the quota (design/10).
+/// Whether Herdr shows an agent in the seat's pane: a parked (`Unknown`)
+/// seat holds a temp slot only while its agent is there (design §3.6).
+///
+/// A pane that cannot be read is not an absence: the seat keeps its slot
+/// (design/08).
+fn shows_an_agent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+) -> GearResult<bool> {
+    let Some(binding) = store.read(|tx| tx.get_binding(&seat.id, seat.generation))? else {
+        return Ok(false);
+    };
+    match herdr.agent_get(&binding.pane_id) {
+        Ok(Some(_)) => Ok(true),
+        Ok(None) => Ok(false),
+        Err(_) => Ok(true),
+    }
+}
+
+/// The states in which a temp seat occupies the quota (design §3.6): a live
+/// agent (`Active`, `Standby`), one that is starting, and one on its way out
+/// (`Releasing` — its agent is still leaving).
 fn occupies_quota(state: SeatState) -> bool {
     matches!(
         state,
-        SeatState::Starting | SeatState::Active | SeatState::Releasing | SeatState::Unknown
+        SeatState::Active | SeatState::Standby | SeatState::Starting | SeatState::Releasing
     )
 }
 
@@ -3511,6 +3629,70 @@ profile = "opencode"
                 herdr.calls
             );
         }
+    }
+
+    /// T-143 (design §3.6): the temps quota counts the seats with a live
+    /// agent — a Standby reviewer holds a slot like an active one, so a
+    /// review never passes the quota.
+    #[test]
+    fn a_standby_reviewer_holds_a_temp_slot() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| {
+                // T-1 is judged: it waits for no review.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0,
+                })?;
+                // The reviewer that judged it waits for the next review: it
+                // holds the one temp slot of the project.
+                let seat = testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w2:p2", "codex", T0)?;
+                tx.set_seat_state(&seat.id, SeatState::Standby, Some("review done"), T0)?;
+                tx.clear_seat_task(&seat.id)?;
+                // A free seat from an earlier job: warm, but it needs a slot.
+                let warm = testing::seed_temp_seat(tx, "p", "review-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&warm.id, SeatState::Released, Some("review done"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        // The count itself: the standby reviewer holds the slot, the released
+        // one holds nothing.
+        assert!(
+            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            "the standby reviewer holds the slot"
+        );
+        assert!(
+            has_free_slot(&mut store, &mut herdr, "p", 2).unwrap(),
+            "a second slot is free"
+        );
+
+        // A reviewer on its way out holds its slot too (the captain's decision
+        // of M-2603): its agent is still leaving.
+        store
+            .write(|tx| tx.set_seat_state("p:review-1", SeatState::Releasing, Some("released"), T0 + 1))
+            .unwrap();
+        assert!(
+            !has_free_slot(&mut store, &mut herdr, "p", 1).unwrap(),
+            "the reviewer on its way out holds the slot"
+        );
+        store
+            .write(|tx| tx.set_seat_state("p:review-1", SeatState::Standby, Some("review done"), T0))
+            .unwrap();
+
+        // A second task is handed in: the warm seat could take it, but the
+        // standby reviewer holds the only slot of the project.
+        queue_review_job(&mut store, 2, "heat");
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        assert!(report.started.is_empty(), "{report:?}");
+        assert_eq!(report.waiting, vec!["T-2".to_string()], "{report:?}");
     }
 }
 
