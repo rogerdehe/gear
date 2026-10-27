@@ -675,6 +675,17 @@ mod tests {
     }
 
     #[test]
+    fn pi_compact_without_work_finishes_as_keep_after_fifteen_seconds() {
+        let (mut store, mut herdr, seat, config) = pi_world();
+        let run = |store: &mut Store, herdr: &mut FakeHerdr, now| crate::session_runner::run(store, herdr, &config, &seat, "T-1", 1, Role::Dev, &Action::Compact, false, now).unwrap();
+        assert_eq!(run(&mut store, &mut herdr, T0), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 1), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 15), Prep::Wait);
+        assert_eq!(run(&mut store, &mut herdr, T0 + 16), Prep::Ready);
+        assert_eq!(store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.as_deref(), Some("keep"));
+    }
+
+    #[test]
     fn context_size_uses_the_configured_window_and_last_usage() {
         let (mut store, _herdr, seat, config) = pi_world();
         let text = r#"
