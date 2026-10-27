@@ -1529,6 +1529,13 @@ fn review_packet(
     )
 }
 
+/// The key that remembers that the captain was told that the review of a
+/// task's attempt waits. The notice is told once per attempt (T-214): a
+/// resolved item does not bring the same news back.
+fn review_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.review_wait_told.{project}.{task}.{attempt}")
+}
+
 /// Tell the captain that a review waits: one open item per task, so the tick
 /// does not fill the inbox with the same news.
 fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &str, now: Ts) -> GearResult<()> {
@@ -1536,11 +1543,15 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
         let captain = tx.captain_of(project)?.ok_or_else(|| {
             GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
+        let told_key = review_wait_told_key(project, &task.task, task.attempt);
         // One open item per task: the captain is told once, not every tick.
-        let already = tx
-            .actionable_for(project, &captain.id, now)?
-            .into_iter()
-            .any(|message| message.task.as_deref() == Some(task.task.as_str()));
+        // And once per attempt: a resolved item does not bring the same news
+        // back on the next tick (T-214).
+        let already = tx.get_meta(&told_key)?.is_some()
+            || tx
+                .actionable_for(project, &captain.id, now)?
+                .into_iter()
+                .any(|message| message.task.as_deref() == Some(task.task.as_str()));
         if already {
             return Ok(());
         }
@@ -1571,6 +1582,9 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
             created: now,
         };
         tx.insert_message(&message)?;
+        // The notice is told once per attempt: remember it, so a later tick
+        // does not add it again after the captain resolved the item.
+        tx.set_meta(&told_key, &now.to_string())?;
         Ok(())
     })
 }
@@ -2116,8 +2130,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let value = args.iter().find(|s| s.starts_with("developer_instructions=")).unwrap();
         let parsed: toml::Table = toml::from_str(value).unwrap();
         let text = parsed.get("developer_instructions").and_then(toml::Value::as_str).unwrap();
-        assert!(text.starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
-        assert_eq!(text, std::fs::read_to_string(dir.path().join("rules/review.md")).unwrap());
+        let path = dir.path().join("rules/review.md");
+        assert!(text.contains(path.to_str().unwrap()), "{text}");
+        assert!(value.len() < 400, "the typed command must stay short: {value}");
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with(include_str!("../../../skills/gear/references/rules/review.md").trim_end()));
     }
 
     #[test]
@@ -2347,7 +2363,7 @@ review = [
                     "-c".to_string(),
                     "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
                     "-c".to_string(),
-                    format!("developer_instructions={}", toml::Value::String(std::fs::read_to_string(std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md")).unwrap())),
+                    gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy(), "")[0].clone(),
                     "-m".to_string(),
                     "gpt-6.1-sol".to_string(),
                     "-c".to_string(),
@@ -2577,6 +2593,64 @@ review = [
         start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 21)).unwrap();
         assert_eq!(inbox.len(), 1, "one open item per task: {inbox:?}");
+    }
+
+    /// T-214: the "the review waits" notice is told once per attempt. A
+    /// resolved item does not bring the same news back on the next tick, and
+    /// the next attempt of the task is told once again.
+    #[test]
+    fn the_review_waits_notice_is_told_once_per_attempt() {
+        let mut store = world(CONFIG_NO_SLOT);
+        let mut herdr = FakeHerdr::new();
+
+        // The first tick: the review waits, the captain is told once.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 11)).unwrap();
+        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
+        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+
+        // The captain resolves the item.
+        let id = inbox[0].id.clone();
+        store
+            .write(|tx| {
+                tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, T0 + 12)
+            })
+            .unwrap();
+
+        // The later ticks add no item: the notice was already told for this
+        // attempt.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 31)).unwrap();
+        assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        let again = store.read(|tx| tx.thread_messages("p", "T-1:2")).unwrap();
+        assert!(again.is_empty(), "a second item was added: {again:?}");
+
+        // The next attempt of the same task is told once again.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 40)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 40)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    2,
+                    1,
+                    "def5678",
+                    "ops/reports/T-1.md",
+                    T0 + 41,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 50).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 51)).unwrap();
+        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
+        assert!(inbox[0].body.contains("attempt 2"), "{}", inbox[0].body);
     }
 
     #[test]

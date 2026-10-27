@@ -820,6 +820,11 @@ fn apply_queue(
         ));
     }
 
+    // A park whose time has come ends (T-190) — after the staff lines and
+    // the verdicts, so an explicit release in this apply runs against the
+    // state the captain saw, and the parks that are left end here.
+    end_parked_lanes(tx, project, agents, now)?;
+
     tx.insert_plan(&PlanRow {
         project: project.to_string(),
         version,
@@ -855,8 +860,8 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
 /// candidate has no landed work, so it may be cancelled too.
 /// The verdicts that name the task whose merge landed the work
 /// (design §10.7, row B03-01): the named task must be merged, and the
-/// candidate's tree has to be in the integration branch — otherwise the work
-/// is not there and the verdict is refused.
+/// candidate must be an ancestor of the integration branch — otherwise the
+/// work is not there and the verdict is refused.
 ///
 /// The store is asked first, so the refusal names the task that is not
 /// merged. Git runs before the write transaction, like the cancellation
@@ -889,7 +894,16 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
             Some(lane) => config.repo_of_lane(lane),
             None => config.root_repo(),
         };
-        if !crate::base::tree_on_integration(&repo.path, &repo.integration, candidate)? {
+        // The candidate must be an ancestor of the integration branch: the
+        // work is there because the candidate is (design §10.7, row B03-01,
+        // contract v3 of T-165). A commit with the same tree but no ancestry
+        // is not the work that landed.
+        let reference = crate::base::fetch_integration(&repo.path, &repo.integration)?;
+        if !crate::base::contains(
+            std::path::Path::new(&repo.path),
+            candidate,
+            &reference,
+        )? {
             return Err(bad(
                 0,
                 format!(
@@ -1294,8 +1308,12 @@ fn release_seat(
     }
 }
 
-/// `- release <lane>` (T-133): only a held lane is released: any other state is
+/// `- release <lane>` (T-133): a held lane is released: any other state is
 /// a transition this line cannot mean, and it is refused with the reason.
+///
+/// A **parked** lane is released the same way (T-190): the captain's `- park
+/// <lane> until=…` has no other way out, and a park whose time has come ends
+/// by itself (see [`end_parked_lanes`]).
 fn release_lane(
     tx: &Tx<'_>,
     seat: &gear_store::SeatRow,
@@ -1305,11 +1323,11 @@ fn release_lane(
     now: Ts,
 ) -> GearResult<()> {
     let seat_id = seat.id.clone();
-    if seat.state != SeatState::Held {
+    if !matches!(seat.state, SeatState::Held | SeatState::Parked) {
         return Err(GearError::new(
             ErrorCode::BadTransition,
             format!(
-                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there)",
+                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there); a Parked lane is released the same way",
                 seat.state.as_str()
             ),
         ));
@@ -1349,14 +1367,128 @@ fn release_lane(
             "released by the captain: its agent is gone",
         )
     };
+    // A parked lane whose agent is gone is let go first (Parked → Held →
+    // Queued): the seat states allow no direct Parked → Queued, the same way
+    // a park that ended lets the lane go (T-190).
+    let from = if seat.state == SeatState::Parked && target == SeatState::Queued {
+        require_transition(
+            SeatState::can_transition(SeatRole::Lane, SeatState::Parked, SeatState::Held),
+            "seat",
+            SeatState::Parked.as_str(),
+            SeatState::Held.as_str(),
+        )?;
+        tx.set_seat_state(&seat_id, SeatState::Held, Some(reason), now)?;
+        SeatState::Held
+    } else {
+        seat.state
+    };
     require_transition(
-        SeatState::can_transition(SeatRole::Lane, seat.state, target),
+        SeatState::can_transition(SeatRole::Lane, from, target),
         "seat",
-        seat.state.as_str(),
+        from.as_str(),
         target.as_str(),
     )?;
     tx.set_seat_state(&seat_id, target, Some(reason), now)?;
     Ok(())
+}
+
+/// End the parks whose time has come (T-190).
+///
+/// A lane the plan parked (`- park <lane> until=…` or `until-task=T-n`) goes
+/// back to work when the park ends: **Active** when its agent is still in the
+/// pane, **Queued** when the agent is gone (the engine onboards it again, as
+/// for a released lane).
+///
+/// A lane parked on **quota** is left to the quota path: the engine's
+/// `resume:<seat>` meta says so, and the quota park ends when the provider's
+/// window starts again.
+///
+/// The plan's apply, `gear plan check` and the engine's tick call it: a park
+/// that has passed must not keep a lane standing still.
+pub fn end_parked_lanes(
+    tx: &Tx<'_>,
+    project: &str,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    let mut ended = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane || seat.state != SeatState::Parked {
+            continue;
+        }
+        // A quota park is the quota path's business.
+        if tx.get_meta(&format!("resume:{}", seat.id))?.is_some() {
+            continue;
+        }
+        let Some(reason) = seat.state_reason.as_deref() else {
+            continue;
+        };
+        let over = if let Some(until) = reason.strip_prefix("until=") {
+            // The park ends at the time the captain wrote.
+            match parse_rfc3339(until) {
+                Some(at) => at <= now,
+                None => false,
+            }
+        } else if let Some(task) = reason.strip_prefix("until-task=") {
+            // The park ends when the task it waits for is done.
+            tx.get_task(project, task)?
+                .is_some_and(|task| task.state == TaskState::Done)
+        } else {
+            false
+        };
+        if !over {
+            continue;
+        }
+        // The seat's binding is GEAR's record of the pane it started an agent
+        // in; the session's agents say whether one is in that pane now.
+        let binding = tx
+            .get_binding(&seat.id, seat.generation)?
+            .filter(|binding| binding.status == BindingStatus::Active);
+        let running = match &binding {
+            // No live binding: the agent was ended or never bound.
+            None => false,
+            Some(binding) => {
+                let Some(agents) = agents else {
+                    // Without the session's agents nobody may say whether the
+                    // agent is there: the park stays.
+                    continue;
+                };
+                agents.iter().any(|agent| {
+                    agent.pane_id == binding.pane_id
+                        && agent.agent.as_deref() == Some(binding.kind.as_str())
+                })
+            }
+        };
+        if running {
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Active),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Active.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Active, Some("park ended"), now)?;
+        } else {
+            // The agent is gone: the lane is let go and the engine onboards it
+            // again. Parked → Held → Queued are the transitions the seat states
+            // allow.
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, seat.state, SeatState::Held),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Held.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Held, Some("park ended"), now)?;
+            require_transition(
+                SeatState::can_transition(SeatRole::Lane, SeatState::Held, SeatState::Queued),
+                "seat",
+                SeatState::Held.as_str(),
+                SeatState::Queued.as_str(),
+            )?;
+            tx.set_seat_state(&seat.id, SeatState::Queued, Some("park ended"), now)?;
+        }
+        ended.push(format!("{}: the park ended", seat.name));
+    }
+    Ok(ended)
 }
 
 /// `- release <reviewer>` (T-140, design §3.6): a reviewer seat in `Standby` —
@@ -1549,6 +1681,74 @@ fn contract_body(item: &QueueItem) -> String {
         body.push_str(&format!("evidence-due: {minutes}\n"));
     }
     body
+}
+
+/// `gear plan show T-n`: one task's block as it would stand in the plan file
+/// (design §8.3), so the captain edits a block without reading the whole
+/// file.
+///
+/// The block is the one the draft parser reads back: the header
+/// (`## T-<n> [priority] lane=… milestone=…`), then the fields the task
+/// carries — `goal`, `accept`, `evidence-files`, `evidence-due`, `estimate`,
+/// `deps`, `followup-of` and `issue`. A block that parses back is the same
+/// task, so the captain can copy it into the plan file as it is.
+///
+/// Read-only: nothing is written.
+pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
+    let row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+    let contract = tx.get_contract(project, task, row.contract_version)?;
+    let mut text = String::new();
+    // The header: the id, the priority, the lane, the milestone and the
+    // `required` mark, exactly as the plan file writes them.
+    text.push_str(&format!("## {} [{}]", row.id, row.priority));
+    if let Some(lane) = row.lane.as_deref() {
+        text.push_str(&format!(" lane={lane}"));
+    }
+    if let Some(milestone) = row.milestone.as_deref() {
+        text.push_str(&format!(" milestone={milestone}"));
+    }
+    if row.required {
+        text.push_str(" required");
+    }
+    text.push('\n');
+    // The fields the task carries: the contract's goal and acceptance, its
+    // evidence, its estimate, its dependencies and what it follows up.
+    if let Some(contract) = contract.as_ref() {
+        text.push_str(&format!("goal: {}\n", contract.goal));
+        text.push_str(&format!("accept: {}\n", contract.accept));
+        if !contract.evidence_files.is_empty() {
+            text.push_str(&format!(
+                "evidence-files: {}\n",
+                contract.evidence_files.join(", ")
+            ));
+        }
+        if let Some(minutes) = contract.evidence_due_min {
+            text.push_str(&format!("evidence-due: {minutes}\n"));
+        }
+    }
+    if let Some(minutes) = row.estimate_min {
+        text.push_str(&format!("estimate: {minutes}\n"));
+    }
+    text.push_str(&format!(
+        "deps: {}\n",
+        if row.deps.is_empty() {
+            "-".to_string()
+        } else {
+            row.deps.join(", ")
+        }
+    ));
+    if let Some(followup) = row.followup_of.as_deref() {
+        text.push_str(&format!("followup-of: {followup}\n"));
+    }
+    if let Some(issue) = row.issue {
+        text.push_str(&format!("issue: #{issue}\n"));
+    }
+    Ok(text.trim_end().to_string())
 }
 
 /// The first task on a dependency cycle, if there is one.
@@ -2007,7 +2207,16 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLan
 /// when T-12 is over) or `- tail: heat until=2026-10-26T18:00:00Z` (at that
 /// time). The end belongs to the declaration: a tail without one lasts until
 /// the captain clears it.
+///
+/// Every tail line is validated, but only the final effective declaration
+/// writes: the `# Decisions` history is retained, and an earlier line must
+/// neither clear the spent marker nor revive a tail that has ended (T-191).
 fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
+    // Every tail line is validated (a broken one refuses the whole apply),
+    // but only the final effective declaration writes: the `# Decisions`
+    // history is retained, and an earlier line must never clear the spent
+    // marker or revive a tail that has ended (T-191).
+    let mut decls: Vec<TailDecl> = Vec::new();
     for decision in &draft.decisions {
         let Some(rest) = decision.strip_prefix("tail:") else { continue; };
         let mut lanes: BTreeSet<String> = BTreeSet::new();
@@ -2047,22 +2256,43 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
             return Err(bad(1, "tail: - clears the tail, it takes no `until=`"));
         }
         let until_stored = until.as_ref().map(TailUntil::as_stored).unwrap_or_default();
-        // The same declaration, replayed (its line is still in the plan file),
-        // must not revive a tail that has already ended: only a genuinely new
-        // declaration resets it.
-        let declaration = tail_declaration(&lanes.iter().cloned().collect::<Vec<_>>(), &until_stored);
-        let spent = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
-        let spent = spent == declaration;
-        for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
-            tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-                if spent { "0" } else if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
-        }
-        if !spent {
-            tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
-        }
-        tx.set_meta(&format!("lane-tail-until:{project}"), &until_stored)?;
+        decls.push(TailDecl {
+            lanes: lanes.into_iter().collect(),
+            until: until_stored,
+        });
     }
+    // A tail line replaces the set of lanes it silences: the last line is the
+    // effective declaration, the earlier ones are history.
+    let Some(effective) = decls.last() else {
+        // No tail line at all: the state is preserved.
+        return Ok(());
+    };
+    // The same declaration, replayed (its line is still in the plan file),
+    // must not revive a tail that has already ended: only a genuinely new
+    // declaration resets it. The marker is read before this replay writes
+    // anything — an earlier line in the retained history never clears it.
+    let spent_before = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+    let declaration = tail_declaration(&effective.lanes, &effective.until);
+    let spent = spent_before == declaration;
+    let seats = tx.seats_of_project(project)?;
+    for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
+        tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
+            if spent { "0" } else if effective.lanes.contains(&seat.name) { "1" } else { "0" })?;
+    }
+    if !spent {
+        tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
+    }
+    tx.set_meta(&format!("lane-tail-until:{project}"), &effective.until)?;
     Ok(())
+}
+
+/// A tail declaration, as the captain wrote it: the lanes it silences and
+/// its end.
+struct TailDecl {
+    /// The lanes it names (`-` alone clears the tail).
+    lanes: Vec<String>,
+    /// Its end, in the form the store keeps ("" when it has none).
+    until: String,
 }
 
 /// The end of a tail: a task id or an RFC3339 moment.

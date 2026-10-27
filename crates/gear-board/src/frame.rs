@@ -213,17 +213,16 @@ pub fn frame(
     canvas.put(0, VIEW_ROW, &view.heading);
     let first = FIRST_ROW;
     let last = height.saturating_sub(2);
-    let visible = last.saturating_sub(first);
-    // The selected row stays on the screen.
-    let scroll = selected.saturating_sub(visible.saturating_sub(1));
-    for (index, line) in view.rows.iter().enumerate() {
-        let row = first + index;
+    // The selected row stays on the screen: the rows above it scroll away
+    // (F8). The offset is the one the mouse hit testing uses.
+    let scroll = scroll_of(view.rows.len(), selected, height);
+    // The rows are drawn from the offset, and the screen row is what is
+    // bounded (F8): bounding the row before the offset dropped the rows the
+    // user scrolled to.
+    for (index, line) in view.rows.iter().enumerate().skip(scroll) {
+        let row = first + (index - scroll);
         if row >= last {
             break;
-        }
-        let row = row.saturating_sub(scroll);
-        if row < first {
-            continue;
         }
         canvas.put(0, row, line);
     }
@@ -239,6 +238,19 @@ pub fn frame(
         draw_panel(&mut canvas, panel);
     }
     canvas.text()
+}
+
+/// The offset of the first visible row of a view (the viewport, F8).
+///
+/// The rows above it are scrolled away, so the mouse hit testing adds the
+/// same offset to the row the user clicked.
+pub fn scroll_of(rows: usize, selected: usize, height: usize) -> usize {
+    let first = FIRST_ROW;
+    let last = height.saturating_sub(2);
+    let visible = last.saturating_sub(first);
+    selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(rows.saturating_sub(visible))
 }
 
 /// The head of the board: the title, the time and tasks bars and the tabs.
@@ -777,33 +789,45 @@ fn done_clauses(project: &ProjectBoard) -> Vec<String> {
 /// Draw the panel over the frame: a box at the right of the screen, as the
 /// prototype draws its window over the board.
 fn draw_panel(canvas: &mut Canvas, panel: &[String]) {
-    let width = panel
+    // One width for the whole box, borders included (F3): the interior rows
+    // are padded or cut to it, so the right border is always inside the
+    // canvas.
+    // The box never grows past the canvas (F3): a long row is cut, not the
+    // whole panel. The interior width follows the box.
+    let available = canvas.width.saturating_sub(6);
+    let inner = panel
         .iter()
         .map(|line| line.chars().count())
         .max()
-        .unwrap_or(20)
-        .max(20)
-        .min(canvas.width.saturating_sub(4));
-    if width < 8 {
+        .unwrap_or(18)
+        .max(18)
+        .min(available);
+    let total = inner + 4;
+    if total + 2 > canvas.width {
+        // It does not fit at all: no half a box is drawn.
         return;
     }
-    let left = canvas.width.saturating_sub(width + 1);
+    let left = canvas.width.saturating_sub(total + 1);
     let top = VIEW_ROW;
+    // The footer row is reserved: the bottom border stands above it (F3).
+    let bottom = (top + panel.len() + 1).min(canvas.height - 2);
     // The box: a top border, the rows, a bottom border.
-    canvas.put(left, top, &format!("┌{}┐", "─".repeat(width)));
+    canvas.put(left, top, &format!("┌{}┐", "─".repeat(inner + 2)));
     for (index, row) in panel.iter().enumerate() {
         let line = top + 1 + index;
-        if line + 1 >= canvas.height {
+        if line >= bottom {
             break;
         }
         canvas.put(
             left,
             line,
-            &format!("│ {:<width$} │", row.chars().take(width - 2).collect::<String>()),
+            &format!(
+                "│ {:<inner$} │",
+                row.chars().take(inner).collect::<String>()
+            ),
         );
     }
-    let bottom = (top + panel.len() + 1).min(canvas.height - 1);
-    canvas.put(left, bottom, &format!("└{}┘", "─".repeat(width)));
+    canvas.put(left, bottom, &format!("└{}┘", "─".repeat(inner + 2)));
 }
 
 /// The lane's panel: what it did, what it does now and what it has left.

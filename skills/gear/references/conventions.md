@@ -68,8 +68,10 @@ A lane's worktree holds only its repo (§9).
    Out of scope: <noticed, not touched> | none
    ```
 
-   **Then end your turn.** The next task is delivered as soon as you are idle. Never wait for the review, never investigate GEAR to see why nothing came yet.
+   Add `--friction "<what cost time the captain could fix>"` to a result or review when applicable; it is required when the round exceeds its budget. Include a missing permission, slow build or test, unclear contract, missing tool or fixture, or costly step. **Then end your turn.** The next task is delivered as soon as you are idle.
 7. **Rework comes first.** A sent-back task is delivered before new work; do exactly the rework note.
+
+When GEAR asks at the estimate, answer with `gear send --kind progress --task T-<n> --attempt <a> --contract <c> --left <minutes> --blocker "<what stops you, or none>" "<done; left>"`, then continue. To wait for another task's merge, send `gear send --kind blocked --task T-<n> --attempt <a> --contract <c> --on T-<m> "<done; what waits>"`; GEAR pauses the clock and resumes this session when it lands.
 
 ## 6. Asking for a decision
 

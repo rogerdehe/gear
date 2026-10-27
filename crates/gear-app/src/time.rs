@@ -22,11 +22,61 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, Ts};
+use gear_model::{ErrorCode, GearError, GearResult, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{AttemptTimes, Store, Tx};
 
+/// The tokens and the cost of a round (design §4.3-§4.4).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct Tokens {
+    pub input: Option<i64>,
+    pub output: Option<i64>,
+    pub cache_read: Option<i64>,
+    pub cache_write: Option<i64>,
+    pub reasoning: Option<i64>,
+    /// The cost of the round in USD; None when it is not known.
+    pub cost_usd: Option<f64>,
+    /// `agent` | `prices` | `none` — where the cost came from.
+    pub cost_source: Option<String>,
+}
+
+impl Tokens {
+    /// The tokens of two rounds, added up (the known ones only).
+    pub fn add(&mut self, other: &Tokens) {
+        self.input = add(self.input, other.input);
+        self.output = add(self.output, other.output);
+        self.cache_read = add(self.cache_read, other.cache_read);
+        self.cache_write = add(self.cache_write, other.cache_write);
+        self.reasoning = add(self.reasoning, other.reasoning);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+    }
+
+    /// The tokens in and out, as the report shows them.
+    pub fn line(&self) -> String {
+        let input = self.input.unwrap_or(0);
+        let output = self.output.unwrap_or(0);
+        let mut line = format!("tokens {input} in / {output} out");
+        if let Some(cost) = self.cost_usd {
+            line.push_str(&format!(" · cost ${cost:.4}"));
+        }
+        line
+    }
+}
+
+/// The sum of two known values; None when neither is known.
+fn add(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (Some(a), None) => Some(a),
+        (None, b) => b,
+    }
+}
+
 /// One round of a task (one attempt) and what its steps took, in minutes.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct Round {
     /// The attempt number.
     pub n: i64,
@@ -44,10 +94,29 @@ pub struct Round {
     pub merge: Option<i64>,
     /// start → the last step of the round that happened.
     pub span: Option<i64>,
+    /// The tokens and the cost of this round (design §4.3-§4.4): every
+    /// stored round of the attempt, the reviewer's included (the review
+    /// work belongs to the task it reviews, §4.2).
+    pub tokens: Tokens,
+    /// The stored rounds of the attempt, one per role: the lane's own
+    /// (`dev`/`rework`) and the reviewer's (`review`).
+    pub usage: Vec<RoundUsage>,
+}
+
+/// One stored round of a task (design §4.3-§4.4): its role and what it
+/// consumed.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct RoundUsage {
+    /// The attempt the round belongs to.
+    pub attempt: i64,
+    /// `dev` | `rework` | `review`.
+    pub role: String,
+    /// The tokens and the cost of the round.
+    pub tokens: Tokens,
 }
 
 /// The time of one task.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct TaskTime {
     pub id: String,
     /// The voyage (milestone) the task sails on.
@@ -62,6 +131,8 @@ pub struct TaskTime {
     pub rework_min: Option<i64>,
     /// The first start → the last step that happened.
     pub actual_min: Option<i64>,
+    /// The tokens and the cost of the task's rounds.
+    pub tokens: Tokens,
 }
 
 impl TaskTime {
@@ -95,7 +166,7 @@ impl TaskTime {
 ///
 /// Every duration is the sum of what is known: None when no task of the voyage
 /// has it (a task from before the times existed has none).
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct VoyageTime {
     /// The milestone; None for the tasks that sail on no voyage.
     pub milestone: Option<String>,
@@ -112,6 +183,8 @@ pub struct VoyageTime {
     pub rework_min: Option<i64>,
     /// The time the voyage's tasks took.
     pub actual_min: Option<i64>,
+    /// The tokens and the cost of the voyage's tasks.
+    pub tokens: Tokens,
 }
 
 impl VoyageTime {
@@ -122,13 +195,16 @@ impl VoyageTime {
 }
 
 /// The time report of a project.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct Report {
     pub project: String,
     /// The tasks, in the order of the plan.
     pub tasks: Vec<TaskTime>,
     /// The voyages, in milestone order.
     pub voyages: Vec<VoyageTime>,
+    /// The work and waiting time of the voyage the report is about (§5.4):
+    /// present when the report names one voyage.
+    pub work: Option<VoyageWork>,
 }
 
 /// What the report is about: one task, one voyage, or everything.
@@ -149,6 +225,7 @@ pub fn build(
     env: &Env,
     fp: Option<&Fingerprint>,
     filter: &Filter,
+    now: Ts,
 ) -> GearResult<Report> {
     store.read(|tx| {
         let (ctx, _seat) = require_seat(
@@ -158,12 +235,12 @@ pub fn build(
             Some(&[SeatRole::Captain]),
             Some(&[SeatState::Active]),
         )?;
-        report(tx, &ctx.project, filter)
+        report(tx, &ctx.project, filter, now)
     })
 }
 
 /// The report of a project, read from the store.
-pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report> {
+pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter, now: Ts) -> GearResult<Report> {
     // A task that does not exist is `NoTarget`, not an empty report: a typo
     // must not look like a project without work.
     if let Some(wanted) = &filter.task {
@@ -186,22 +263,31 @@ pub fn report(tx: &Tx<'_>, project: &str, filter: &Filter) -> GearResult<Report>
                 continue;
             }
         }
-        let rounds: Vec<Round> = tx
+        let mut rounds: Vec<Round> = tx
             .attempt_times_of_task(project, &task.id)?
             .into_iter()
             .map(|(n, times)| round(n, &times))
             .collect();
+        // The tokens and the cost of every attempt's own round (design §4.3):
+        // the lane's dev round (or its rework round) is the work of that
+        // attempt; the reviewer's round is the reviewer's, not the task's.
+        let tokens = tokens_of_attempts(tx, project, &task.id, &mut rounds)?;
         // A task with neither an estimate nor an attempt has nothing to
         // account for; it is not in the report.
         let estimate = estimate_of(tx, project, &task)?;
         if rounds.is_empty() && task.estimate_min.is_none() && estimate.is_none() {
             continue;
         }
-        tasks.push(task_time(task, rounds, estimate));
+        tasks.push(task_time(task, rounds, estimate, tokens));
     }
 
     let voyages = voyages_of(&tasks);
-    Ok(Report { project: project.to_string(), tasks, voyages })
+    // The work and waiting time of the voyage the report is about (§5.4).
+    let work = match &filter.voyage {
+        Some(voyage) => Some(work_of(tx, project, voyage, now)?),
+        None => None,
+    };
+    Ok(Report { project: project.to_string(), tasks, voyages, work })
 }
 
 /// The estimate of a task: the plan's `estimate:` field, or — for a task that
@@ -225,6 +311,7 @@ fn task_time(
     task: gear_store::TaskRow,
     rounds: Vec<Round>,
     estimate_min: Option<i64>,
+    tokens: Tokens,
 ) -> TaskTime {
     let rework: Vec<&Round> = rounds.iter().skip(1).collect();
     let rework_rounds = rework.len() as i64;
@@ -253,6 +340,7 @@ fn task_time(
         rework_min,
         actual_min,
         rounds,
+        tokens,
     }
 }
 
@@ -268,7 +356,57 @@ fn round(n: i64, times: &AttemptTimes) -> Round {
         wait: between(times.verdict, times.settled),
         merge: between(times.settled, times.merged),
         span: between(times.started, last),
+        tokens: Tokens::default(),
+        usage: Vec::new(),
     }
+}
+
+/// The tokens and the cost of every stored round of the task (design §4.3-§4.4):
+/// the lane's own rounds (dev, rework) **and** the reviewer's round — the
+/// review work belongs to the task it reviews (§4.2).
+///
+/// The rounds are filled in place: every attempt carries the usage of each of
+/// its stored rounds, and the task's total is their sum.
+fn tokens_of_attempts(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    rounds: &mut [Round],
+) -> GearResult<Tokens> {
+    let stored = tx.rounds_of_task(project, task)?;
+    let mut tokens = Tokens::default();
+    for round in rounds.iter_mut() {
+        let mut usage: Vec<RoundUsage> = Vec::new();
+        for row in stored.iter().filter(|row| row.attempt == round.n) {
+            let round_tokens = Tokens {
+                input: row.input,
+                output: row.output,
+                cache_read: row.cache_read,
+                cache_write: row.cache_write,
+                reasoning: row.reasoning,
+                cost_usd: row.cost_usd,
+                cost_source: row.cost_source.clone(),
+            };
+            tokens.add(&round_tokens);
+            usage.push(RoundUsage {
+                attempt: row.attempt,
+                role: row.role.clone(),
+                tokens: round_tokens,
+            });
+        }
+        round.usage = usage;
+        round.tokens = tokens_of(&round.usage);
+    }
+    Ok(tokens)
+}
+
+/// The tokens and the cost of a list of stored rounds.
+fn tokens_of(usage: &[RoundUsage]) -> Tokens {
+    let mut tokens = Tokens::default();
+    for round in usage {
+        tokens.add(&round.tokens);
+    }
+    tokens
 }
 
 /// The minutes between two steps, when both happened.
@@ -314,6 +452,11 @@ fn voyages_of(tasks: &[TaskTime]) -> Vec<VoyageTime> {
         voyage.wait = sum_known(voyage.tasks.iter().map(|task| task.wait()));
         voyage.merge = sum_known(voyage.tasks.iter().map(|task| task.merge()));
         voyage.actual_min = sum_known(voyage.tasks.iter().map(|task| task.actual_min));
+        let mut tokens = Tokens::default();
+        for task in &voyage.tasks {
+            tokens.add(&task.tokens);
+        }
+        voyage.tokens = tokens;
         voyage.rework_rounds = voyage.tasks.iter().map(|task| task.rework_rounds).sum();
         // The voyage's rework time is known only when every task's is.
         voyage.rework_min = if voyage.tasks.iter().all(|task| task.rework_min.is_some()) {
@@ -337,7 +480,288 @@ fn sum_known(values: impl Iterator<Item = Option<i64>>) -> Option<i64> {
     any.then_some(sum)
 }
 
+/// The work and waiting time of one voyage (§5.4).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct VoyageWork {
+    /// The milestone the voyage sails on.
+    pub milestone: String,
+    /// The wall clock of the voyage: departure → now (or landing), in minutes.
+    pub elapsed_min: Option<i64>,
+    /// The wall time every lane seat was in a quota pause at once, in minutes.
+    pub fleet_stopped_min: i64,
+    /// How many quota stops stopped the whole fleet.
+    pub fleet_stops: usize,
+    /// The wall clock without the quota stops.
+    pub elapsed_without_quota_min: Option<i64>,
+    /// Per lane: the work, the quota wait, the declared wait and the idle.
+    pub lanes: Vec<LaneWork>,
+}
+
+/// The work and waiting time of one lane (§5.4).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct LaneWork {
+    /// The lane's name.
+    pub lane: String,
+    /// The seconds its rounds were active (the work it did).
+    pub work_s: i64,
+    /// The seconds it waited for the quota.
+    pub quota_wait_s: i64,
+    /// The seconds it waited for a declared wait.
+    pub declared_wait_s: i64,
+    /// The rest of the voyage's elapsed time.
+    pub idle_s: i64,
+    /// The tokens and the cost of the lane's own rounds of this voyage
+    /// (design §7.5: the time and the tokens per lane).
+    pub tokens: Tokens,
+}
+
+/// The work and waiting time of a voyage, read from the store.
+///
+/// - **work** = the sum of the lane's rounds' `active_s`;
+/// - **quota wait** and **declared wait** = the sums of the lane's pauses
+///   (kind `quota` and kind `wait`);
+/// - **idle** = the rest of the voyage's elapsed time;
+/// - **fleet stopped by quota** = the wall time during which every lane seat
+///   was in a quota pause at once (the union of the overlaps);
+/// - **elapsed without quota stops** = elapsed − fleet stopped.
+///
+/// Read-only: nothing is written.
+pub fn work_of(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    now: Ts,
+) -> GearResult<VoyageWork> {
+    let voyage = tx.get_voyage(project, milestone)?;
+    // The voyage's window: from its departure until now (design §5.4).
+    let departure = voyage.as_ref().and_then(|v| v.departure);
+    let elapsed_s = departure.map(|departure| (now - departure).max(0));
+    // The tasks of this voyage: the rounds of the other voyages are not this
+    // voyage's work.
+    let tasks = tx.tasks_of_project(project)?;
+    let own: Vec<String> = tasks
+        .iter()
+        .filter(|task| task.milestone.as_deref() == Some(milestone))
+        .filter(|task| task.state != TaskState::Draft)
+        .map(|task| task.id.clone())
+        .collect();
+    // The lane seats of the project: the fleet is stopped when all of them
+    // are parked at once.
+    let seats: Vec<gear_store::SeatRow> = tx
+        .seats_of_project(project)?
+        .into_iter()
+        .filter(|seat| seat.role == SeatRole::Lane)
+        .collect();
+    // The pauses of every lane seat, per kind.
+    let pauses = tx.pauses_of_project(project)?;
+    // The rounds of every lane seat: their active time is the work.
+    let rounds = tx.rounds_of_project(project)?;
+    // A lane that was retired before this voyage is not one of the fleet's
+    // lanes: it is no line of the report, and it does not hold the fleet from
+    // being stopped (ops/reviews/T-171.md round 2, F10). A lane that was
+    // retired during the voyage, but worked in it, still is one.
+    let lanes: Vec<(String, String)> = seats
+        .iter()
+        .filter(|seat| {
+            seat.state != SeatState::Retired
+                || worked_in_window(&seat.id, &rounds, &pauses, departure, now)
+        })
+        .map(|seat| (seat.name.clone(), seat.id.clone()))
+        .collect();
+
+    let mut work = VoyageWork {
+        milestone: milestone.to_string(),
+        elapsed_min: elapsed_s.map(|s| s / 60),
+        ..Default::default()
+    };
+    // The quota pauses of every lane seat, clipped to the voyage's window:
+    // a pause of another voyage is not this voyage's stoppage.
+    let mut quota_spans: Vec<(String, i64, i64)> = Vec::new();
+    for (name, seat_id) in &lanes {
+        let mut lane = LaneWork { lane: name.clone(), ..Default::default() };
+        for row in rounds.iter().filter(|row| &row.seat == seat_id) {
+            // The reviewer's round is the reviewer's work, not the lane's.
+            if row.role == "review" {
+                continue;
+            }
+            // Only the rounds of this voyage's tasks count.
+            if !own.iter().any(|task| task == &row.task) {
+                continue;
+            }
+            lane.work_s += row.active_s;
+        }
+        // The lane's own tokens and cost of this voyage (design §7.5).
+        for row in rounds.iter().filter(|row| &row.seat == seat_id) {
+            if !own.iter().any(|task| task == &row.task) {
+                continue;
+            }
+            lane.tokens.add(&Tokens {
+                input: row.input,
+                output: row.output,
+                cache_read: row.cache_read,
+                cache_write: row.cache_write,
+                reasoning: row.reasoning,
+                cost_usd: row.cost_usd,
+                cost_source: row.cost_source.clone(),
+            });
+        }
+        for pause in pauses.iter().filter(|pause| &pause.seat == seat_id) {
+            // A pause that is still open ends now (design §5.4): the lane is
+            // still waiting.
+            let end = pause.end_at.unwrap_or(now);
+            let start = pause.start_at;
+            // The pause is clipped to the voyage's window.
+            let Some(departure) = departure else {
+                continue;
+            };
+            let start = start.max(departure);
+            let end = end.min(now).max(start);
+            if end <= start {
+                continue;
+            }
+            let seconds = end - start;
+            match pause.kind.as_str() {
+                "quota" => {
+                    lane.quota_wait_s += seconds;
+                    quota_spans.push((seat_id.clone(), start, end));
+                }
+                "wait" => lane.declared_wait_s += seconds,
+                _ => {}
+            }
+        }
+        // The idle time is the rest of the voyage's elapsed time.
+        lane.idle_s = elapsed_s
+            .map(|elapsed| {
+                elapsed - lane.work_s - lane.quota_wait_s - lane.declared_wait_s
+            })
+            .unwrap_or(0)
+            .max(0);
+        work.lanes.push(lane);
+    }
+    // The fleet is stopped while every lane seat is parked at once (design
+    // §5.4): the overlap of the quota pauses of all the lanes, not the union
+    // of one lane's pauses.
+    let (stopped, stops) = fleet_stopped(&quota_spans, lanes.len());
+    work.fleet_stopped_min = stopped / 60;
+    work.fleet_stops = stops;
+    work.elapsed_without_quota_min = elapsed_s.map(|elapsed| (elapsed - stopped).max(0) / 60);
+    Ok(work)
+}
+
+/// Whether a lane seat has a round or a pause inside the voyage's window
+/// (the departure until now). An open round or pause reaches now.
+fn worked_in_window(
+    seat_id: &str,
+    rounds: &[gear_store::RoundRow],
+    pauses: &[gear_store::PauseRow],
+    departure: Option<Ts>,
+    now: Ts,
+) -> bool {
+    let Some(departure) = departure else {
+        return false;
+    };
+    let overlaps = |start: Ts, end: Option<Ts>| {
+        let end = end.unwrap_or(now);
+        start < now && end > departure
+    };
+    rounds
+        .iter()
+        .filter(|row| row.seat == seat_id)
+        .any(|row| overlaps(row.start_at, row.end_at))
+        || pauses
+            .iter()
+            .filter(|pause| pause.seat == seat_id)
+            .any(|pause| overlaps(pause.start_at, pause.end_at))
+}
+
+/// The wall time during which **every** lane seat was in a quota pause at
+/// once (design §5.4): the overlap of the lanes' quota pauses.
+///
+/// A lane with no pause at all keeps the fleet from ever being stopped, and
+/// two lanes that pause at different times never stop it either.
+///
+/// Returns the seconds and the number of stops.
+fn fleet_stopped(spans: &[(String, i64, i64)], lanes: usize) -> (i64, usize) {
+    if spans.is_empty() || lanes == 0 {
+        return (0, 0);
+    }
+    // The merged span of every seat: a seat's own pauses never overlap.
+    let mut per_seat: std::collections::BTreeMap<&str, Vec<(i64, i64)>> =
+        std::collections::BTreeMap::new();
+    for (seat, start, end) in spans {
+        per_seat.entry(seat.as_str()).or_default().push((*start, *end));
+    }
+    for seat_spans in per_seat.values_mut() {
+        seat_spans.sort_unstable();
+        let mut merged: Vec<(i64, i64)> = Vec::new();
+        for (start, end) in seat_spans.iter() {
+            match merged.last_mut() {
+                Some(last) if *start <= last.1 => last.1 = last.1.max(*end),
+                _ => merged.push((*start, *end)),
+            }
+        }
+        *seat_spans = merged;
+    }
+    // The stretches every seat is paused in: the boundaries of all the spans.
+    let mut points: Vec<i64> = per_seat
+        .values()
+        .flat_map(|spans| spans.iter().flat_map(|(start, end)| [*start, *end]))
+        .collect();
+    points.sort_unstable();
+    points.dedup();
+    let mut seconds = 0;
+    let mut stops = 0;
+    for window in points.windows(2) {
+        let (start, end) = (window[0], window[1]);
+        // The seats paused for the whole stretch.
+        let paused = per_seat
+            .values()
+            .filter(|spans| spans.iter().any(|(from, to)| *from <= start && end <= *to))
+            .count();
+        if paused == lanes {
+            seconds += end - start;
+            stops += 1;
+        }
+    }
+    (seconds, stops)
+}
+
+/// The §5.4 line of one lane: the work, the waits and the idle.
+pub fn lane_line(lane: &LaneWork) -> String {
+    format!(
+        "lane {} · work {} · quota wait {} · declared wait {} · idle {}",
+        lane.lane,
+        hours(lane.work_s),
+        hours(lane.quota_wait_s),
+        hours(lane.declared_wait_s),
+        hours(lane.idle_s)
+    )
+}
+
+/// The §5.4 line of the voyage: the wall clock, the quota stops and the rest.
+pub fn voyage_work_line(work: &VoyageWork) -> String {
+    format!(
+        "Voyage {} · elapsed {} · fleet stopped by quota {} ({}) · elapsed without quota stops {}",
+        work.milestone,
+        hours(work.elapsed_min.unwrap_or(0) * 60),
+        hours(work.fleet_stopped_min * 60),
+        if work.fleet_stops == 1 { "1 stop".to_string() } else { format!("{} stops", work.fleet_stops) },
+        hours(work.elapsed_without_quota_min.unwrap_or(0) * 60)
+    )
+}
+
+/// A duration in hours and minutes: `2h05m`.
+pub fn hours(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+}
+
 // ---------------------------------------------------------------- rendering
+
+/// The tokens and the cost of a voyage, as the report shows them.
+pub fn voyage_tokens_line(voyage: &VoyageTime) -> String {
+    voyage.tokens.line()
+}
 
 /// The report as the captain reads it: one line per task, one line per voyage.
 pub fn render(report: &Report) -> String {
@@ -349,10 +773,29 @@ pub fn render(report: &Report) -> String {
     lines.push(String::new());
     for task in &report.tasks {
         lines.push(task_line(task));
+        // Every stored round of the task, with what it consumed (design
+        // §4.5): the lane's own round and the reviewer's, each apart.
+        for usage in task.rounds.iter().flat_map(|round| round.usage.iter()) {
+            lines.push(format!(
+                "  {} attempt {} {} · {}",
+                task.id,
+                usage.attempt,
+                usage.role,
+                usage.tokens.line()
+            ));
+        }
     }
     lines.push(String::new());
     for voyage in &report.voyages {
         lines.push(voyage_line(voyage));
+    }
+    // The work and waiting time of the voyage the report is about (§5.4).
+    if let Some(work) = &report.work {
+        lines.push(String::new());
+        lines.push(voyage_work_line(work));
+        for lane in &work.lanes {
+            lines.push(lane_line(lane));
+        }
     }
     lines.join("\n")
 }
@@ -386,6 +829,7 @@ fn task_line(task: &TaskTime) -> String {
     if let Some(ratio) = task.ratio() {
         line.push_str(&format!(" · ratio {ratio:.2}"));
     }
+    line.push_str(&format!(" · {}", task.tokens.line()));
     line
 }
 
@@ -427,6 +871,7 @@ fn voyage_line(voyage: &VoyageTime) -> String {
     if let Some(ratio) = voyage.ratio() {
         line.push_str(&format!(" · ratio {ratio:.2}"));
     }
+    line.push_str(&format!(" · {}", voyage.tokens.line()));
     line
 }
 
@@ -489,7 +934,7 @@ mod tests {
     fn the_durations_are_the_steps_between_them() {
         let mut s = world();
         let report = s
-            .read(|tx| report(tx, "p", &Filter::default()))
+            .read(|tx| report(tx, "p", &Filter::default(), T0))
             .unwrap();
         let task = &report.tasks[0];
         assert_eq!(task.dev(), Some(10));
@@ -523,7 +968,7 @@ mod tests {
         })
         .unwrap();
         let report = s
-            .read(|tx| report(tx, "p", &Filter::default()))
+            .read(|tx| report(tx, "p", &Filter::default(), T0))
             .unwrap();
         let task = &report.tasks[0];
         assert_eq!(task.rework_rounds, 1);

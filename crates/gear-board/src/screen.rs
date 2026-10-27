@@ -193,8 +193,13 @@ pub fn leave(out: &mut dyn Write) -> std::io::Result<()> {
 }
 
 /// Clear the screen and draw `text` at the top.
+///
+/// The canvas is written **without** a trailing newline (F2): a newline after
+/// the footer's row scrolls the screen by one line, so the title leaves the
+/// top and every visible row sits one line above where the hit testing
+/// expects it.
 pub fn draw(out: &mut dyn Write, text: &str) -> std::io::Result<()> {
-    writeln!(out, "\x1b[H\x1b[2J{text}")?;
+    write!(out, "\x1b[H\x1b[2J{text}")?;
     out.flush()
 }
 
