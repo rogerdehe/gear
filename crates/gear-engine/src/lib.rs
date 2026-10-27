@@ -236,6 +236,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     };
 
     let mut reviewer_nudge_flags = Vec::new();
+    let mut missing_seats = std::collections::BTreeSet::new();
+    let mut present_seats = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -257,6 +259,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        for obs in &observed {
+            if obs.presence == observe::Presence::Missing {
+                missing_seats.insert(obs.seat.id.clone());
+            } else if obs.presence == observe::Presence::Present {
+                present_seats.push((project.clone(), obs.seat.id.clone()));
+            }
+        }
         // A hand restart of an agent is a new session in the same generation
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
@@ -442,13 +451,41 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
+    // A failed delivery remains a live fact until its retry is cleared or
+    // confirmed. The initial failure is emitted only once by the op, so
+    // revisit it on later ticks to allow a resolved item to ring again.
+    for (_, seat) in &present_seats {
+        let outstanding = store.read(|tx| Ok(
+            tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty())
+                && delivery::failed(tx, seat)?.is_some()
+        ))?;
+        if outstanding && !report.flagged.contains(seat) {
+            report.flagged.push(seat.clone());
+        }
+    }
     let mut actionable = Vec::new();
     for seat in &report.flagged {
         if !store.read(|tx| waits::waiting_seat(tx, seat))? { actionable.push(seat.clone()); }
     }
     report.flagged = actionable;
+    for (project, seat) in present_seats {
+        if !report.flagged.contains(&seat) {
+            store.write(|tx| {
+                if tx.get_meta(&format!("stall-missing:{seat}"))?.as_deref() == Some("1") {
+                    stall::resolve(tx, &project, &seat, now, None)?;
+                    tx.set_meta(&format!("stall-missing:{seat}"), "")?;
+                }
+                Ok(())
+            })?;
+        }
+    }
     for seat in report.flagged.clone() {
-        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+        if let Err(e) = store.write(|tx| {
+            let missing = missing_seats.contains(&seat);
+            tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
+            let fact = if missing { "its agent is gone from its pane" } else { "a delivery was not confirmed or continuing it made no progress" };
+            stall::alert_fact(tx, &seat, now, fact)
+        }) {
             // One seat's alert failing never stops the tick.
             report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
         }

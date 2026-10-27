@@ -62,6 +62,7 @@ pub fn resolve(
         .into_iter()
         .find(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
     let Some(item) = open else {
+        if before.is_none() { tx.set_meta(&format!("stall-active:{seat_id}"), "")?; }
         return Ok(false);
     };
     if let Some(before) = before {
@@ -69,6 +70,7 @@ pub fn resolve(
             return Ok(false);
         }
     }
+    tx.set_meta(&format!("stall-active:{seat_id}"), "")?;
     tx.update_message_state(
         project,
         &item.id,
@@ -88,6 +90,10 @@ pub fn resolve(
 /// recorded the wait, and the captain is not rung for a seat that is not
 /// stuck.
 pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
+    alert_fact(tx, seat_id, now, "its agent is gone from its pane, a delivery was not confirmed, or continuing it made no progress")
+}
+
+pub fn alert_fact(tx: &Tx<'_>, seat_id: &str, now: Ts, fact: &str) -> GearResult<bool> {
     let Some(seat) = tx.get_seat(seat_id)? else {
         return Ok(false);
     };
@@ -100,13 +106,19 @@ pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
     if captain.id == seat.id {
         return Ok(false); // the captain itself: its doorbell is the signal
     }
-    let open = tx
-        .thread_messages(&seat.project, &thread(&seat.id))?
-        .into_iter()
-        .any(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
-    if open {
+    let body = format!("lane {} is stuck: {}. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.", seat.name, fact);
+    let open = tx.thread_messages(&seat.project, &thread(&seat.id))?.into_iter()
+        .find(|m| matches!(m.state, MsgState::Open | MsgState::Waiting));
+    if let Some(item) = open {
+        if item.body != body { tx.update_message_body(&seat.project, &item.id, &body)?; }
         return Ok(false);
     }
+    let key = format!("stall-active:{seat_id}");
+    if tx.get_meta(&key)?.is_some_and(|v| !v.is_empty())
+        && !crate::attention::due(tx, &seat.project, &thread(&seat.id), &captain.id, now)? {
+        return Ok(false);
+    }
+    tx.set_meta(&key, "1")?;
     tx.insert_message(&NewMessage {
         meta: None,
         project: seat.project.clone(),
@@ -118,14 +130,47 @@ pub fn alert(tx: &Tx<'_>, seat_id: &str, now: Ts) -> GearResult<bool> {
         recipient: captain.id.clone(),
         kind: MsgKind::System,
         urgent: true,
-        body: format!(
-            "lane {} is stuck: its agent is gone from its pane, a delivery was not confirmed, or continuing it made no progress. Look at its pane (agent exited? context full? a dialog? quota?), get it going (restart or resume it, or give it a fresh session), then resolve this item.",
-            seat.name
-        ),
+        body,
         reply_to: None,
         needs_ack: false,
         state: MsgState::Open,
         created: now,
     })?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gear_model::SeatRole;
+    use gear_store::{Store, testing::{seed_active_seat, seed_project}};
+
+    #[test]
+    fn persistent_stall_is_one_item_realerts_and_closes_on_recovery() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            seed_project(tx, "p", "sess", 1000)?;
+            seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", 1000)?;
+            seed_active_seat(tx, "p", "lane", SeatRole::Lane, "w1:p1", "opencode", 1000)?;
+            Ok(())
+        }).unwrap();
+        for now in 1001..1006 {
+            store.write(|tx| alert(tx, "p:lane", now)).unwrap();
+        }
+        let messages = store.read(|tx| tx.thread_messages("p", "stall:p:lane")).unwrap();
+        assert_eq!(messages.len(), 1);
+        let id = messages[0].id.clone();
+        store.write(|tx| alert_fact(tx, "p:lane", 1006, "a delivery was not confirmed")).unwrap();
+        let updated = store.read(|tx| tx.thread_messages("p", "stall:p:lane")).unwrap();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].id, id);
+        assert!(updated[0].body.contains("a delivery was not confirmed"));
+        store.write(|tx| tx.update_message_state("p", &id, MsgState::Resolved, Some("seen"), None, None, 1010)).unwrap();
+        assert!(!store.write(|tx| alert(tx, "p:lane", 1909)).unwrap());
+        assert!(store.write(|tx| alert(tx, "p:lane", 1910)).unwrap());
+        assert!(store.write(|tx| resolve(tx, "p", "p:lane", 1911, None)).unwrap());
+        let messages = store.read(|tx| tx.thread_messages("p", "stall:p:lane")).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|m| m.state == MsgState::Resolved));
+    }
 }
