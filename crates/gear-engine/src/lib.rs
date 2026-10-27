@@ -560,6 +560,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 // confirmation window: it spends its marker here, and the
                 // captain hears about it now.
                 if crate::lane_nudge::retry_failed(tx, seat, &failed.task, failed.attempt)? {
+                    if attempt.as_ref().is_some_and(|a| a.state == gear_model::AttemptState::Started) {
+                        delivery::clear(tx, seat)?;
+                        tx.set_meta(&crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt), "")?;
+                        return Ok(false);
+                    }
                     tx.set_meta(
                         &crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt),
                         "",
