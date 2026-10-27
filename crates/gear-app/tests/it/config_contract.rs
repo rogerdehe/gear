@@ -59,7 +59,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
         }
     );
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180 });
+    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180, handin_base_window_min: 30 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
