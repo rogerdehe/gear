@@ -114,6 +114,10 @@ fn cancel_and_lane_cannot_apply() {
 /// A task of the project: its lane, its state and the tasks it waits for.
 fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::TaskRow {
     gear_store::TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank: 1,
@@ -136,7 +140,7 @@ fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::Ta
 /// The lanes that are about to stand idle: the lane and its current task
 /// (None when it has none).
 fn idle(s: &mut Store) -> Vec<(String, Option<String>, Vec<String>)> {
-    s.read(|tx| gear_app::plan::idle_lanes(tx, "p"))
+    s.read(|tx| gear_app::plan::idle_lanes(tx, "p", NOW))
         .unwrap()
         .into_iter()
         .map(|lane| (lane.lane, lane.current, lane.blocked))

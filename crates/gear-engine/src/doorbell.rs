@@ -27,10 +27,15 @@ pub struct DoorbellInput {
     pub pane_id: String,
     /// From observe: present, reachable state, idle with no Busy flag.
     pub idle: bool,
+    /// Live agent state; None means the seat is not reachable.
+    pub status: Option<gear_herdr::AgentStatus>,
     /// Seat holds a delivery slot (Intended/Executing/Submitted/Unknown deliver/doorbell op).
     pub slot_busy: bool,
     /// When the last doorbell op for this seat was settled (Confirmed/Failed/Void), if any.
     pub last_settled_at: Option<Ts>,
+    /// The seat has no open attempt (design §10.4): a lane in that state gets
+    /// the text that tells it to stop working on earlier things.
+    pub no_task: bool,
     /// This seat's waiting messages that no earlier doorbell named, in the
     /// order they are named: the actionable ones first, then the unshown
     /// replies/instructions. One doorbell per message, never repeated (T-130),
@@ -77,7 +82,7 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
                 seat: input.seat.clone(),
                 generation: input.generation,
                 pane_id: input.pane_id.clone(),
-                text: text(&named),
+                text: text(&named, input.no_task),
                 covers: named.into_iter().map(|item| item.id).collect(),
             }
         })
@@ -113,18 +118,30 @@ pub fn reaches_while_working(
     )
 }
 
-/// The one-line doorbell text: the message ids, and "Run `gear` now."
+/// The one-line doorbell text.
 ///
+/// With a task (`no_task` false):
 /// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run `gear` now.`
+///
+/// Without a task (design §10.4 — a lane with no open attempt):
+/// `GEAR: <n> item(s) for you: <ids>. Run gear, answer them, then end your turn. You have no task now: do not continue earlier work.`
+///
 /// Never message bodies.
-pub fn text(items: &[DoorbellItem]) -> String {
+pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
+    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+    if no_task {
+        return format!(
+            "GEAR: {} item(s) for you: {}. Run gear, answer them, then end your turn. You have no task now: do not continue earlier work.",
+            items.len(),
+            ids.join(" ")
+        );
+    }
     let urgent = items.iter().filter(|item| item.urgent).count();
     let urgent = if urgent > 0 {
         format!(" ({urgent} urgent)")
     } else {
         String::new()
     };
-    let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
     format!(
         "GEAR: {} item(s) waiting for you{urgent}: {}. Run `gear` now.",
         items.len(),
@@ -141,6 +158,11 @@ fn rings(input: &DoorbellInput, cooldown_s: i64, now: Ts) -> bool {
         return false; // a delivery already occupies the seat
     }
     let at_once = input.waiting.iter().any(|item| item.at_once);
+    match input.status {
+        Some(gear_herdr::AgentStatus::Blocked) | None => return false,
+        Some(gear_herdr::AgentStatus::Unknown) => return input.waiting.iter().any(|item| item.urgent && item.at_once),
+        _ => {}
+    }
     if !input.idle {
         // A working agent is only interrupted for a message that must reach
         // it now (T-130).
@@ -161,5 +183,5 @@ fn named(input: &DoorbellInput) -> Vec<DoorbellItem> {
     if input.idle {
         return input.waiting.clone();
     }
-    input.waiting.iter().filter(|item| item.at_once).cloned().collect()
+    input.waiting.iter().filter(|item| item.at_once && (input.status != Some(gear_herdr::AgentStatus::Unknown) || item.urgent)).cloned().collect()
 }

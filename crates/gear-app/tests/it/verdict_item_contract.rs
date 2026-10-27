@@ -2,9 +2,10 @@
 //! not by `gear reply … --resolve`.
 //!
 //! M3: the captain resolved two fails by reply; the items closed and nothing
-//! was settled. The home page now names the line to write, a reply that would
-//! close a fail is refused with that line, and once the plan settles it the
-//! item is an ordinary one again.
+//! was settled. The home page now names the line to write and a reply that
+//! would close a fail is refused with that line. T-187: the plan that
+//! settles the attempt closes the item with it, so the captain does not have
+//! to resolve it by hand (M-2412).
 
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
@@ -71,6 +72,7 @@ fn world_with(passed: bool) -> Store {
             tx.set_review_blocking("p", "T-1", 1, "F1", T0)?;
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "T-1:1".into(),
             task: Some("T-1".into()),
@@ -158,8 +160,10 @@ fn resolving_the_fail_by_reply_is_refused_and_leaves_it_verifying() {
     assert!(s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
 }
 
+/// T-187: the verdict that settles the attempt closes the review item too:
+/// the captain does not have to resolve it by hand (M-2412).
 #[test]
-fn after_the_plan_settles_it_resolving_works() {
+fn after_the_plan_settles_it_the_item_is_closed() {
     let mut s = world();
     assert_eq!(resolve(&mut s, "M-1").unwrap_err().code, ErrorCode::BadFormat);
 
@@ -175,10 +179,13 @@ fn after_the_plan_settles_it_resolving_works() {
         Some("handle the edge case")
     );
 
-    // The item is an ordinary one now: a reply resolves it.
-    let handled = resolve(&mut s, "M-1").unwrap();
-    assert_eq!(handled.handled, vec![("M-1".to_string(), MsgState::Resolved.as_str().to_string())]);
-    assert_eq!(s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state, MsgState::Resolved);
+    // The item is closed with the plan that settled it.
+    let item = s.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Resolved);
+    assert_eq!(item.result.as_deref(), Some("settled in plan 2"));
+    // And a reply to it is refused: it is handled.
+    let error = resolve(&mut s, "M-1").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadTransition);
 }
 
 #[test]
@@ -203,6 +210,7 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
         tx.set_op_state("p", &op.id, OpState::Failed, Some("conflict merging abc1234"), T0 + 5)?;
         // The engine's item, naming the task and attempt (T-90).
         let item = tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "merge:1".into(),
             task: Some("T-1".into()),
@@ -225,8 +233,8 @@ fn a_failed_merge_is_settled_by_a_verdict_too() {
 
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
     assert!(
-        page.text.contains(&format!("# Verdicts: {VERDICTS_LINE}")),
-        "{}",
+        page.text.contains("# Staff: - remerge T-1"),
+        "a failed merge is retried, not reworked (B5): {}",
         page.text
     );
 
@@ -272,6 +280,7 @@ fn an_ordinary_question_is_answered_without_a_verdict() {
         .write(|tx| {
             Ok(tx
                 .insert_message(&NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "T-1:2".into(),
                     task: Some("T-1".into()),
@@ -332,6 +341,7 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
             tx.set_op_state("p", &failed.id, OpState::Executing, None, T0 + 4)?;
             tx.set_op_state("p", &failed.id, OpState::Failed, Some("push refused"), T0 + 5)?;
             let item = tx.insert_message(&NewMessage {
+                meta: None,
                 project: "p".into(),
                 thread: "push:T-1".into(),
                 task: Some("T-1".into()),
@@ -351,13 +361,18 @@ fn a_remerge_that_landed_closes_the_merge_item_by_reply() {
         })
         .unwrap();
 
-    // Only the Failed op: the item still asks for a `# Verdicts` line, and a
-    // reply that would close it is refused with that line.
+    // Only the Failed op: the item still asks for a plan line, and a reply
+    // that would close it is refused with that line.
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
-    assert!(page.text.contains(&format!("# Verdicts: {VERDICTS_LINE}")), "{}", page.text);
+    assert!(
+        page.text.contains("# Staff: - remerge T-1"),
+        "a failed merge is retried, not reworked (B5): {}",
+        page.text
+    );
     let err = resolve(&mut s, &merge_item).unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{err:?}");
-    assert!(err.detail.contains("fail rework"), "{err:?}");
+    assert!(err.detail.contains("- remerge T-1"), "{err:?}");
+    assert!(err.detail.contains("fail rework"), "the rework line is named too: {err:?}");
 
     // … then the remerge landed: a Confirmed op for the same attempt.
     s.write(|tx| {

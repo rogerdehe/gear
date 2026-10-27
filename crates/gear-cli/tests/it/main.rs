@@ -8,3 +8,4 @@ mod readonly_no_engine;
 mod scratch;
 mod skill_contract;
 mod version_contract;
+mod whoami_contract;

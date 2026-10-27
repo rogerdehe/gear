@@ -2,7 +2,7 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -37,6 +37,16 @@ pub struct SendArgs {
     pub to: Option<String>,
     pub reply_to: Option<String>,
     pub urgent: bool,
+    /// Progress only (design §5.2): the minutes the lane says are left.
+    pub left: Option<i64>,
+    /// Progress only (design §5.2): what stops the lane ("none" when nothing
+    /// does).
+    pub blocker: Option<String>,
+    /// Blocked only (design §5.3): the task the lane waits for.
+    pub on: Option<String>,
+    /// Result/Review only (design §6.1): what cost time that the captain
+    /// could fix.
+    pub friction: Option<String>,
     pub request_id: String,
 }
 
@@ -71,8 +81,21 @@ pub struct SendResult {
 ///   in the same transaction `review::submit_review(…)` stores the verdict on
 ///   the attempt's review record — it settles nothing; the item goes to the
 ///   captain with the verdict in its first line (a fail is actionable, a pass is information).
-/// - Ack/Blocked side effects (tasks, handover) arrive later in slice 2 and
-///   must return BadFormat until then rather than silently storing.
+/// - Ack side effects (tasks, handover) arrive later in slice 2 and must
+///   return BadFormat until then rather than silently storing.
+/// - A progress answer (design §5.2) carries the minutes the lane says are
+///   left and what stops it, in the message's meta.
+/// - A declared wait (design §5.3) — the `blocked` kind — works: the lane
+///   names the task it waits for, the wait is written on its task and the
+///   attempt goes on.
+/// - Messages to a reviewer seat carry the task (design §3.8): a reviewer
+///   seat is bound to a task for life, so the messages it writes carry that
+///   task, and an instruction the captain addresses to it without `--task`
+///   takes its `task_id`; an idle reviewer has no job, and the instruction
+///   is refused ("<reviewer> has no review job; nothing would show").
+/// - A hand-in is answered (design §10.7, row B03-04/10): the lane is told
+///   that its work is in and that the next task comes by itself. The line is
+///   printed by `gear send` — the CLI owns the reply a hand-in gets.
 pub fn send(
     store: &mut Store,
     env: &Env,
@@ -98,6 +121,20 @@ pub fn send(
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
             crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+            // A rework keeps the work the reviewer read (design §10.7, row
+            // B03-08): the new candidate carries the previous attempt's
+            // candidate. The refusal names that commit. It comes before the
+            // push check: a branch that lost the reviewed work is refused for
+            // that, not for where it is pushed.
+            if let (Some(ctx), Some(task), Some(attempt)) =
+                (env.ctx.as_ref(), args.task.as_deref(), args.attempt)
+            {
+                let previous = store
+                    .read(|tx| crate::tasks::rework_base_candidate(tx, &ctx.project, task, attempt))?;
+                if let Some(previous) = previous {
+                    crate::tasks::require_rework_contains(&gate.worktree, &previous, candidate)?;
+                }
+            }
             // And it must be on the task's branch on origin (T-83): a hand-in
             // nobody can fetch is not a hand-in (M2.1: T-60).
             if let Some(task) = args.task.as_deref() {
@@ -151,6 +188,20 @@ pub fn send(
                     ));
                 }
             }
+            MsgKind::Blocked => {
+                // A declared wait (design §5.3): the lane names the task it
+                // waits for, and the attempt the wait belongs to.
+                if args.task.is_none()
+                    || args.attempt.is_none()
+                    || args.contract.is_none()
+                    || args.on.is_none()
+                {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        "a blocked message needs `--task`, `--attempt`, `--contract` and `--on T-<n>`",
+                    ));
+                }
+            }
             other => {
                 return Err(GearError::new(
                     ErrorCode::BadFormat,
@@ -171,6 +222,38 @@ pub fn send(
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 "`--about` needs registered task dependencies (slice 2)",
+            ));
+        }
+        // The fields belong to their message: the minutes left and the
+        // blocker to a progress answer (§5.2), the task waited for to a
+        // declared wait (§5.3).
+        if (args.left.is_some() || args.blocker.is_some()) && args.kind != MsgKind::Progress {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--left` and `--blocker` belong to a progress message, not to {}",
+                    args.kind.as_str()
+                ),
+            ));
+        }
+        if args.on.is_some() && args.kind != MsgKind::Blocked {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--on` belongs to a blocked message, not to {}",
+                    args.kind.as_str()
+                ),
+            ));
+        }
+        if args.friction.is_some()
+            && !matches!(args.kind, MsgKind::Result | MsgKind::Review)
+        {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                format!(
+                    "`--friction` belongs to a hand-in or a review, not to {}",
+                    args.kind.as_str()
+                ),
             ));
         }
         if args.to.is_some() && args.reply_to.is_some() {
@@ -197,6 +280,15 @@ pub fn send(
             ));
         }
 
+        // The task the message is about (design §3.8). A reviewer seat is
+        // bound to a task for life: the messages it writes carry that task,
+        // so the captain's answer comes back to the job it belongs to and
+        // shows on the reviewer's home page.
+        let mut task = args.task.clone();
+        if task.is_none() && seat.role == SeatRole::Temp {
+            task = seat.task_id.clone();
+        }
+
         // Recipient: the sender of the answered message, a seat the captain
         // addresses, or the project captain.
         let (recipient, inherited_thread) = if let Some(reply_to) = &args.reply_to {
@@ -215,9 +307,25 @@ pub fn send(
                 ));
             }
             let seat_id = format!("{}:{}", ctx.project, to);
-            tx.get_seat(&seat_id)?.ok_or_else(|| {
+            let target = tx.get_seat(&seat_id)?.ok_or_else(|| {
                 GearError::new(ErrorCode::NoTarget, format!("no seat {seat_id} in this project"))
             })?;
+            // A message to a reviewer seat carries the task it is about
+            // (design §3.8): without it nothing would show on the reviewer's
+            // home page. An idle reviewer has no job and no task, so the
+            // instruction would be invisible — it is refused, with the
+            // reason.
+            if task.is_none() && target.role == SeatRole::Temp {
+                match target.task_id.clone() {
+                    Some(job) => task = Some(job),
+                    None => {
+                        return Err(GearError::new(
+                            ErrorCode::BadFormat,
+                            format!("{to} has no review job; nothing would show"),
+                        ))
+                    }
+                }
+            }
             (seat_id, None)
         } else {
             let captain = tx.captain_of(&ctx.project)?.ok_or_else(|| {
@@ -230,7 +338,7 @@ pub fn send(
         };
 
         let state = match args.kind {
-            MsgKind::Progress | MsgKind::Result => MsgState::Info,
+            MsgKind::Progress | MsgKind::Result | MsgKind::Blocked => MsgState::Info,
             MsgKind::Review if args.verdict == Some(crate::review::Outcome::Pass) => MsgState::Info,
             _ => MsgState::Open,
         };
@@ -252,7 +360,7 @@ pub fn send(
             let review = match (args.kind, args.verdict) {
                 (MsgKind::Review, Some(verdict)) => Some(crate::review::Review {
                     project: ctx.project.clone(),
-                    task: args.task.clone().unwrap_or_default(),
+                    task: task.clone().unwrap_or_default(),
                     attempt: args.attempt.unwrap_or_default(),
                     outcome: verdict,
                     findings: if seat.role == SeatRole::Temp {
@@ -278,10 +386,33 @@ pub fn send(
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
             if args.kind == MsgKind::Result {
+                let result_task = task.as_deref().ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--task`"))?;
+                let result_attempt = args.attempt.ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--attempt`"))?;
+                let owner = tx.get_attempt(&ctx.project, result_task, result_attempt)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no attempt {result_attempt} of task {result_task}")))?;
+                if owner.seat != seat.id || (owner.state == AttemptState::Delivered && owner.generation != ctx.generation) {
+                    return Err(GearError::new(ErrorCode::Forbidden, format!("attempt {result_attempt} of task {result_task} is not owned by this seat and generation")));
+                }
+                // The friction report of the round (design §6.1): when the
+                // round passed its budget, the report is required (§6.2) and
+                // the hand-in is refused without it.
+                let role = if args.attempt.unwrap_or_default() >= 2 {
+                    "rework"
+                } else {
+                    "dev"
+                };
+                let required = check_friction(
+                    tx,
+                    &ctx.project,
+                    task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    role,
+                    args.friction.as_deref(),
+                    now,
+                )?;
                 crate::tasks::submit_result(
                     tx,
                     &ctx.project,
-                    args.task.as_deref().ok_or_else(|| {
+                    task.as_deref().ok_or_else(|| {
                         GearError::new(ErrorCode::BadFormat, "a result needs `--task`")
                     })?,
                     args.attempt.ok_or_else(|| {
@@ -296,13 +427,60 @@ pub fn send(
                     &args.body,
                     now,
                 )?;
+                store_friction(
+                    tx,
+                    &ctx.project,
+                    task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    role,
+                    &seat.id,
+                    args.friction.as_deref(),
+                    required,
+                )?;
             }
 
             // A review stores the verdict on the attempt's review record
             // before the item reaches the captain (T-2). It settles nothing:
             // the task and the attempt keep their state.
             if let Some(review) = &review {
+                // The reviewer's own friction report (§6.1): the review round
+                // has a budget too (§5.1).
+                let required = check_friction(
+                    tx,
+                    &ctx.project,
+                    &review.task,
+                    review.attempt,
+                    "review",
+                    args.friction.as_deref(),
+                    now,
+                )?;
                 crate::review::submit_review(tx, review, now)?;
+                store_friction(
+                    tx,
+                    &ctx.project,
+                    &review.task,
+                    review.attempt,
+                    "review",
+                    &seat.id,
+                    args.friction.as_deref(),
+                    required,
+                )?;
+            }
+
+            // A declared wait (design §5.3): the lane's task waits for
+            // another task to land. The attempt stays Started and the lane
+            // ends its turn; the wait itself is on the task.
+            if args.kind == MsgKind::Blocked {
+                declare_wait(
+                    tx,
+                    &ctx.project,
+                    &seat,
+                    args.task.as_deref().unwrap_or_default(),
+                    args.attempt.unwrap_or_default(),
+                    args.contract.unwrap_or_default(),
+                    args.on.as_deref().unwrap_or_default(),
+                    now,
+                )?;
             }
 
             // The thread of a new message is numbered here, after the replay
@@ -310,15 +488,16 @@ pub fn send(
             let thread = match &inherited_thread {
                 Some(thread) => thread.clone(),
                 None => {
-                    let prefix = args.task.clone().unwrap_or_else(|| ctx.seat.clone());
+                    let prefix = task.clone().unwrap_or_else(|| ctx.seat.clone());
                     let seq = next_thread_seq(tx, &ctx.project, &recipient, now, &prefix)?;
                     format!("{prefix}:{seq}")
                 }
             };
             let message = NewMessage {
+                meta: progress_meta(args.left, args.blocker.as_deref())?,
                 project: ctx.project.clone(),
                 thread: thread.clone(),
-                task: args.task.clone(),
+                task: task.clone(),
                 attempt: args.attempt,
                 sender: seat.id.clone(),
                 sender_gen: ctx.generation,
@@ -403,7 +582,7 @@ fn stored_receipt(
 /// transaction (to replay a committed receipt) or inside it.
 fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
     format!(
-        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}",
+        "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}|friction={:?}",
         args.kind.as_str(),
         args.body,
         args.task,
@@ -414,7 +593,11 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> S
         args.about,
         args.to,
         args.reply_to,
-        args.urgent
+        args.urgent,
+        args.left,
+        args.blocker,
+        args.on,
+        args.friction
     )
 }
 
@@ -574,6 +757,10 @@ pub enum ReplyMode {
     Resolve,
     Wait,
     Note,
+    /// Open an item that was resolved by mistake (design §10.7, row
+    /// B03-07). The item goes back to the captain's inbox; nothing is sent
+    /// to the seat that asked.
+    Reopen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -597,11 +784,225 @@ pub struct ReplyResult {
     pub replayed: bool,
 }
 
-/// `gear reply` (captain only). Each id must be in this project, addressed to
+/// May this item be handled in this mode? (design §10.7, row B03-07): a
+/// reopen works on a resolved item — one resolved by mistake — and every
+/// other mode works on an open or waiting one; only a resolve may close an
+/// informational record.
+fn handlable(message: &MessageRow, mode: ReplyMode) -> bool {
+    match mode {
+        ReplyMode::Reopen => message.state == MsgState::Resolved,
+        _ => {
+            message.state == MsgState::Open
+                || message.state == MsgState::Waiting
+                || (message.state == MsgState::Info && mode == ReplyMode::Resolve)
+        }
+    }
+}
+
+/// The friction report of a round (design §6.1): what cost the lane or the
+/// reviewer time that the captain could fix.
+///
+/// When the round is over its budget the report is required (§6.2): the
+/// hand-in is refused with `FRICTION_REQUIRED` and the numbers that say so.
+/// Nothing is written when it refuses. Returns whether the report was
+/// required.
+fn check_friction(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    role: &str,
+    friction: Option<&str>,
+    now: Ts,
+) -> GearResult<bool> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let round = rounds
+        .iter()
+        .find(|round| round.attempt == attempt && round.role == role);
+    let model = round.and_then(|round| round.model.as_deref());
+    let budget = tx.round_budget_min(project, task, attempt, role, model)?;
+    // The round's own clock (design §5.1). A review is charged from the
+    // reviewer's own start — its delivery confirmation, else the round's
+    // start — and never from the writer's check-in: the reviewer did not
+    // spend the writer's time.
+    let started = if role == "review" {
+        tx.get_attempt(project, task, attempt)?
+            .and_then(|attempt| attempt.sent_at)
+            .or_else(|| round.map(|round| round.start_at))
+    } else {
+        tx.attempt_times(project, task, attempt)
+            .ok()
+            .and_then(|times| times.started)
+            .or_else(|| {
+                tx.get_attempt(project, task, attempt)
+                    .ok()
+                    .flatten()
+                    .map(|attempt| attempt.started)
+            })
+    };
+    // The active time of the round: now − its start − its own pauses.
+    let paused = round.map(|round| round.paused_s).unwrap_or(0);
+    let active_s = match started {
+        Some(started) => (now - started - paused).max(0),
+        None => 0,
+    };
+    // The budget is in minutes and the active time in seconds: a round that is
+    // one second over its budget is over (§6.2). The minutes are for the
+    // message only.
+    let over = active_s > budget * 60;
+    if over && friction.is_none() {
+        return Err(GearError::new(
+            ErrorCode::FrictionRequired,
+            format!(
+                "{task} took {} min against {budget} min. Add --friction \"<what made it slow>\" and send again.",
+                (active_s + 59) / 60
+            ),
+        ));
+    }
+    Ok(over)
+}
+
+/// Store the friction report of a round (design §6.1): what cost time that
+/// the captain could fix, with the round's own facts (§6.3).
+fn store_friction(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    role: &str,
+    seat: &str,
+    friction: Option<&str>,
+    required: bool,
+) -> GearResult<()> {
+    let Some(body) = friction else { return Ok(()) };
+    tx.insert_friction(&gear_store::NewFriction {
+        project: project.to_string(),
+        task: task.to_string(),
+        attempt,
+        role: role.to_string(),
+        seat: seat.to_string(),
+        body: body.to_string(),
+        required,
+    })?;
+    Ok(())
+}
+
+/// The structured fields of a progress answer (design §5.2): the minutes the
+/// lane says are left and what stops it. `None` when the answer carries
+/// neither.
+fn progress_meta(left: Option<i64>, blocker: Option<&str>) -> GearResult<Option<String>> {
+    if left.is_none() && blocker.is_none() {
+        return Ok(None);
+    }
+    let mut fields = serde_json::Map::new();
+    if let Some(left) = left {
+        fields.insert("left".to_string(), serde_json::Value::from(left));
+    }
+    if let Some(blocker) = blocker {
+        fields.insert(
+            "blocker".to_string(),
+            serde_json::Value::String(blocker.to_string()),
+        );
+    }
+    Ok(Some(serde_json::Value::Object(fields).to_string()))
+}
+
+/// A declared wait (design §5.3): the lane's task cannot finish until another
+/// task lands.
+///
+/// The wait is written on the task (`wait_on`, `wait_cond`); the attempt
+/// stays Started, so the lane's round goes on when the wait ends. The message
+/// itself is the captain's info item: the wait is a fact, not an action.
+///
+/// Accepted only when the task it waits for exists and is not Done: a wait
+/// for a task that is already done would never end.
+fn declare_wait(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &gear_store::SeatRow,
+    task: &str,
+    attempt: i64,
+    contract: i64,
+    on: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let attempt_row = tx.get_attempt(project, task, attempt)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no attempt {attempt} of task {task} in project {project}"),
+        )
+    })?;
+    if attempt_row.seat != seat.id {
+        return Err(GearError::new(
+            ErrorCode::Forbidden,
+            format!(
+                "attempt {attempt} of task {task} belongs to {}, not to {}",
+                attempt_row.seat, seat.id
+            ),
+        ));
+    }
+    // The contract the lane names must be the one the attempt works to and
+    // the one the task carries now — the same two checks a hand-in makes. A
+    // captain who changed the contract (and ended the wait with it) must not
+    // have the lane's old command park the task on an obsolete dependency.
+    if contract != attempt_row.adopted_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "attempt {attempt} of task {task} works to contract {}, not {contract}",
+                attempt_row.adopted_version
+            ),
+        ));
+    }
+    let task_row = tx.get_task(project, task)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {task} in project {project}"),
+        )
+    })?;
+    if contract != task_row.contract_version {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is on contract v{}, not the v{contract} this message names: \
+                 run `gear` and `gear --show {task}` to work to v{}, then declare the wait again",
+                task_row.contract_version, task_row.contract_version
+            ),
+        ));
+    }
+    if attempt_row.state != AttemptState::Started {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "attempt {attempt} of task {task} is {}, not started: a wait is declared while the work goes on",
+                attempt_row.state.as_str()
+            ),
+        ));
+    }
+    let waited = tx.get_task(project, on)?.ok_or_else(|| {
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("no task {on} in project {project} to wait for"),
+        )
+    })?;
+    if waited.state == TaskState::Done {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("{on} is done: there is nothing to wait for"),
+        ));
+    }
+    tx.set_task_wait(project, task, on, "merged")?;
+    tx.open_pause(project, &seat.id, "wait", &format!("waiting for {on}"), now)?;
+    Ok(())
+}
+
+/// `gear send` (captain only). Each id must be in this project, addressed to
 /// the captain, Open or Waiting (Info may only be resolved). Resolve → Resolved; Wait → Waiting until
 /// wait_until (required; wait_on is an optional label); Note → state unchanged,
 /// with the text kept on the item and sent to nobody (T-103: a note is the
-/// captain's record, not a message).
+/// captain's record, not a message); Reopen → a Resolved item goes back to
+/// Open (design §10.7, row B03-07: an item resolved by mistake is reopened),
+/// and nothing is sent to anybody.
 ///
 /// Resolve and Wait write one Reply (state Info) per (live sender, thread) into
 /// that sender's inbox for actionable items — only when the sender is a seat of
@@ -685,10 +1086,7 @@ pub fn reply(
                         ),
                     ));
                 }
-                if message.state != MsgState::Open
-                    && message.state != MsgState::Waiting
-                    && !(message.state == MsgState::Info && args.mode == ReplyMode::Resolve)
-                {
+                if !handlable(&message, args.mode) {
                     return Err(GearError::new(
                         ErrorCode::BadTransition,
                         format!("message {id} is {}, it cannot be handled again", message.state.as_str()),
@@ -701,18 +1099,27 @@ pub fn reply(
                     )));
                 }
                 // A review fail (or a failed merge) is settled where it can
-                // be: by a `# Verdicts` line. Resolving it by reply would
-                // close the item and settle nothing (T-90).
+                // be: by a plan line — a `# Verdicts` line, or a `# Staff`
+                // `- remerge T-<n>` line for a failed merge (B5). Resolving it
+                // by reply would close the item and settle nothing (T-90).
                 if args.mode == ReplyMode::Resolve {
                     if let Some(hint) = crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
-                        return Err(GearError::new(
-                            ErrorCode::BadFormat,
-                            format!(
-                                "message {} is settled by a plan # Verdicts line, not by a reply: next: {}",
-                                message.id,
-                                crate::home::verdict_command(&hint),
-                            ),
-                        ));
+                        let mut detail = format!(
+                            "message {} is settled by a plan {} line, not by a reply: next: {}",
+                            message.id,
+                            crate::home::verdict_section(&hint),
+                            crate::home::verdict_command(&hint),
+                        );
+                        // A failed merge is retried with `- remerge T-<n>` (B5);
+                        // a rework is the other way round, and the line for it
+                        // is named too.
+                        if hint.remerge.is_some() {
+                            detail.push_str(&format!(
+                                " (a rework is a `# Verdicts` line: {})",
+                                hint.line
+                            ));
+                        }
+                        return Err(GearError::new(ErrorCode::BadFormat, detail));
                     }
                 }
                 originals.push(message);
@@ -727,10 +1134,20 @@ pub fn reply(
                     ReplyMode::Resolve => MsgState::Resolved,
                     ReplyMode::Wait => MsgState::Waiting,
                     ReplyMode::Note => original.state,
+                    // A resolved item resolved by mistake goes back to the
+                    // captain's inbox (design §10.7, row B03-07). The model's
+                    // transition table (gear-model, deck's file) knows no
+                    // Resolved → Open, so the reopen states it here: nothing
+                    // else reopens, and nothing else moves.
+                    ReplyMode::Reopen => MsgState::Open,
                 };
                 if new_state != original.state {
+                    let allowed = match args.mode {
+                        ReplyMode::Reopen => original.state == MsgState::Resolved,
+                        _ => MsgState::can_transition(original.state, new_state),
+                    };
                     gear_model::state::require_transition(
-                        MsgState::can_transition(original.state, new_state),
+                        allowed,
                         "reply",
                         original.state.as_str(),
                         new_state.as_str(),
@@ -740,7 +1157,7 @@ pub fn reply(
                 // and the wait fields it had; resolve and wait set their own
                 // (T-103).
                 let (wait_on, wait_until) = match args.mode {
-                    ReplyMode::Note => (original.wait_on.clone(), original.wait_until),
+                    ReplyMode::Note | ReplyMode::Reopen => (original.wait_on.clone(), original.wait_until),
                     _ => (args.wait_on.clone(), args.wait_until),
                 };
                 tx.update_message_state(
@@ -755,8 +1172,9 @@ pub fn reply(
                 handled.push((original.id.clone(), new_state.as_str().to_string()));
 
                 // A note is the captain's bookkeeping: stored on the item just
-                // above, sent to nobody (T-103).
-                if args.mode == ReplyMode::Note {
+                // above, sent to nobody (T-103). A reopen is the same: the
+                // item is back in the inbox, the captain answers it there.
+                if args.mode == ReplyMode::Note || args.mode == ReplyMode::Reopen {
                     continue;
                 }
 
@@ -800,6 +1218,7 @@ pub fn reply(
                 if !answered.contains(&key) {
                     answered.push(key);
                     let answer = NewMessage {
+                        meta: None,
                         project: ctx.project.clone(),
                         thread: original.thread.clone(),
                         task: original.task.clone(),

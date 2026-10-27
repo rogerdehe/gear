@@ -1,4 +1,4 @@
-# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25.
+# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25; M4 config v20: ownership re-split, lanes on MiniMax only.
 # Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
 
 [project]
@@ -17,49 +17,53 @@ profile = "claude"
 
 [[lanes]]
 name = "hull"
-duty = "M3.1 engine: starting and switching a pi lane, a dead temp seat freeing its slot, admin stop waiting for merges, the engine side of the trial's batch-2 fixes"
-owns = ["crates/gear-engine/Cargo.toml", "crates/gear-engine/examples/", "crates/gear-engine/tests/", "crates/gear-engine/src/attention.rs", "crates/gear-engine/src/blocked.rs", "crates/gear-engine/src/busy.rs", "crates/gear-engine/src/captain_quota.rs", "crates/gear-engine/src/delivery.rs", "crates/gear-engine/src/dispatch.rs", "crates/gear-engine/src/feed.rs", "crates/gear-engine/src/guardrails.rs", "crates/gear-engine/src/lib.rs", "crates/gear-engine/src/merge.rs", "crates/gear-engine/src/model.rs", "crates/gear-engine/src/observe.rs", "crates/gear-engine/src/onboard.rs", "crates/gear-engine/src/opencode.rs", "crates/gear-engine/src/ops.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/src/release.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/review.rs", "crates/gear-engine/src/stall.rs", "crates/gear-engine/src/start.rs", "crates/gear-engine/src/switch.rs", "crates/gear-engine/src/tailed.rs", "crates/gear-engine/src/trust.rs"]
-kind = "pi"
-profile = "pi"
-# User 2026-10-26: every lane on pi.
+duty = "M4 engine seats and sessions: the session rule and its actions, warm reviewers, reviewer worktrees, quota from the providers, kind change and rebind; gear-app config, tasks, seats, review, identity"
+owns = ["crates/gear-engine/src/onboard.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/release.rs", "crates/gear-engine/src/review.rs", "crates/gear-engine/src/switch.rs", "crates/gear-engine/src/start.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/src/captain_quota.rs", "crates/gear-engine/src/opencode.rs", "crates/gear-engine/src/model.rs", "crates/gear-engine/src/trust.rs", "crates/gear-engine/src/guardrails.rs", "crates/gear-engine/src/attention.rs", "crates/gear-engine/src/feed.rs", "crates/gear-engine/src/tailed.rs", "crates/gear-engine/src/session.rs", "crates/gear-app/src/config.rs", "crates/gear-app/src/tasks.rs", "crates/gear-app/src/seats.rs", "crates/gear-app/src/review.rs", "crates/gear-app/src/identity.rs"]
+kind = "codex"
+profile = "codex"
+# M4 2026-10-26 20:20 (user): hull switched to Codex GPT-6.1 Terra for the complex engine work; no fallback.
 models = [
-  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
-  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+  { model = "gpt-6.1-terra", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
 ]
 
 [[lanes]]
 name = "deck"
-duty = "M3.1 everything outside the engine: agent profiles (pi, Codex quota), skills and skill install, CLI, plan apply, packets, mail, docs"
-owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-board/", "crates/gear-herdr/", "crates/gear-forge/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
+duty = "M4 store schema v6, agent profiles, the gear-usage crate (token and quota readers), the board, the forge, docs and scripts"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-board/", "crates/gear-herdr/", "crates/gear-forge/", "crates/gear-usage/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
 kind = "pi"
 profile = "pi"
-# M3.1 kickoff (user): after the pi support lands, deck runs on pi to compare with hull on OpenCode.
+# M4 kickoff (user): MiniMax M3.1 Flash only, no fallback; a quota stop waits for the reset.
 models = [
-  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
   { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
 ]
 
 [[lanes]]
 name = "keel"
-duty = "M3.1 engine messaging: a message reaches a working lane at once (T-130), agents keep their Herdr names (T-134)"
-owns = ["crates/gear-engine/src/doorbell.rs", "crates/gear-engine/src/naming.rs"]
+duty = "M4 engine flow: dispatch, delivery, doorbells, rounds and tokens, the overrun question, declared waits, the friction ring, the Herdr connection, merge and PR landing"
+owns = ["crates/gear-engine/Cargo.toml", "crates/gear-engine/examples/", "crates/gear-engine/tests/", "crates/gear-engine/src/lib.rs", "crates/gear-engine/src/dispatch.rs", "crates/gear-engine/src/delivery.rs", "crates/gear-engine/src/doorbell.rs", "crates/gear-engine/src/ops.rs", "crates/gear-engine/src/observe.rs", "crates/gear-engine/src/stall.rs", "crates/gear-engine/src/busy.rs", "crates/gear-engine/src/blocked.rs", "crates/gear-engine/src/names.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/merge.rs", "crates/gear-engine/src/rounds.rs", "crates/gear-engine/src/overrun.rs", "crates/gear-engine/src/waits.rs"]
 kind = "pi"
 profile = "pi"
+# M4 kickoff (user): MiniMax M3.1 Flash only, no fallback; a quota stop waits for the reset.
 models = [
-  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
   { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
 ]
 
 [[lanes]]
 name = "mast"
-duty = "M3.1 app and CLI: gear learns its ancestry in process (T-131), a held lane is released from the plan (T-133); the skills"
-owns = ["crates/gear-app/", "crates/gear-cli/", "skills/"]
+duty = "M4 CLI and app: plan apply, mail, queue, friction and decision commands, the voyage report and landing, rebind, admin stop; the skills"
+owns = ["crates/gear-cli/", "crates/gear-app/Cargo.toml", "crates/gear-app/tests/", "crates/gear-app/src/admin.rs", "crates/gear-app/src/base.rs", "crates/gear-app/src/captain.rs", "crates/gear-app/src/draft.rs", "crates/gear-app/src/github.rs", "crates/gear-app/src/home.rs", "crates/gear-app/src/kickoff.rs", "crates/gear-app/src/lib.rs", "crates/gear-app/src/mail.rs", "crates/gear-app/src/plan.rs", "crates/gear-app/src/skill.rs", "crates/gear-app/src/standard.rs", "crates/gear-app/src/station.rs", "crates/gear-app/src/time.rs", "skills/"]
 kind = "pi"
 profile = "pi"
+# M4 kickoff (user): MiniMax M3.1 Flash only, no fallback; a quota stop waits for the reset.
 models = [
-  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
   { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
 ]
+
+# M4 2026-10-27 01:40 (user): GEAR lanes run pi without pi-lens. It ran clippy, cargo check and
+# LSPs at every turn end (extra builds fighting the lane's own for the target lock) and is the
+# prime suspect for pi losing its session writes (lesson 35). The gate and the reviewer cover quality.
+[profiles.pi]
+unattended_args = ["--approve", "--no-lens"]
 
 [temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, first; then OpenCode Go deepseek-v4-pro (M3.1 kickoff)
 kind = "codex"
@@ -72,14 +76,13 @@ profile = "codex"
 # Both exhausted: park quota_reset_h hours, then back to the first model.
 lanes = [
   "minimax-cn/MiniMax-M3.1-Flash",
-  "opencode-go/deepseek-v4.1-flash",
 ]
 # The reviewer never runs the model it reviews.
 review = [
   { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
   { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
 ]
-on_quota = { lanes = "fallback", review = "fallback" }
+on_quota = { lanes = "wait", review = "fallback" }   # M4 (user): lanes wait for the reset, no fallback
 quota_reset_h = 5
 
 # The in-place model switch (T-33): what `/model` shows in the picker and what

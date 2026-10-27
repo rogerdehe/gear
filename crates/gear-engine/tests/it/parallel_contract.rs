@@ -8,6 +8,12 @@ use gear_store::{testing, AttemptRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const SHARED: &str = "shared file.rs";
+/// A source file: two tasks that change it conflict.
+const SRC: &str = "src/lib.rs";
+/// A test file: two tasks that change it do not conflict (T-188).
+const TEST_FILE: &str = "tests/lib_test.rs";
+/// A contract file: a test file by another name (T-188).
+const CONTRACT_FILE: &str = "src/thing_contract.rs";
 
 struct Repo { root: tempfile::TempDir, path: PathBuf, base: String }
 impl Repo {
@@ -20,7 +26,11 @@ impl Repo {
         git(&path, &["config", "user.email", "a@b"]);
         git(&path, &["config", "commit.gpgsign", "false"]);
         git(&path, &["config", "core.hooksPath", "/dev/null"]);
-        for file in [SHARED, "other.rs", "third.rs"] { fs::write(path.join(file), "base\n").unwrap(); }
+        for file in [SHARED, "other.rs", "third.rs", SRC, TEST_FILE, CONTRACT_FILE] {
+            let full = path.join(file);
+            if let Some(dir) = full.parent() { fs::create_dir_all(dir).unwrap(); }
+            fs::write(full, "base\n").unwrap();
+        }
         git(&path, &["add", "."]);
         git(&path, &["commit", "-qm", "base"]);
         let base = git(&path, &["rev-parse", "HEAD"]);
@@ -46,6 +56,10 @@ impl Repo {
             }
             for (n, lane) in [(1, "heat"), (2, second_lane)] {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                     priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                     contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
@@ -106,11 +120,20 @@ fn git(path: &Path, args: &[&str]) -> String {
 fn scan(store: &mut Store, seconds: i64) -> parallel::Check {
     parallel::check(store, "p", T0+seconds).unwrap()
 }
+/// The information line of a task that overlaps the integration branch
+/// (T-188): the board and `gear queue` read it, the captain is not told.
+fn integration_info(store: &mut Store, task: &str) -> Option<String> {
+    store.read(|tx| tx.get_meta(&format!("parallel:p:integration:{task}"))).unwrap()
+}
 fn pair_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
     store.read(|tx| tx.thread_messages("p", "parallel:tasks:T-1:T-2")).unwrap()
 }
 fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
     store.write(|tx| tx.insert_attempt(&AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: "p".into(), task: task.into(), n, seat: seat.into(), generation: 1,
         contract_version: 1, adopted_version: 1, pending_update: None,
         state: AttemptState::Submitted, candidate: Some(candidate.into()), report: None,
@@ -118,6 +141,9 @@ fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
     })).unwrap();
 }
 
+/// T-188: a pair of tasks rings once — for its lifetime. Another shared file
+/// does not ring the captain again, and an overlap that clears and comes back
+/// does not either: the captain answered "known" once.
 #[test]
 fn overlapping_branches_name_both_tasks_and_the_shared_file_once() {
     let repo = Repo::new();
@@ -135,16 +161,41 @@ fn overlapping_branches_name_both_tasks_and_the_shared_file_once() {
         Some("ordered the work"), None, None, T0+1)).unwrap();
     assert!(scan(&mut store, 600).opened.is_empty());
     assert_eq!(pair_items(&mut store).len(), 1, "acknowledgment cannot repeat the same set");
+
+    // Another shared file: the pair does not ring again (T-188).
     repo.change("heat/t1", "other.rs", "heat");
     repo.change("steady/t2", "other.rs", "steady");
-    assert_eq!(scan(&mut store, 1200).opened.len(), 1);
+    assert!(scan(&mut store, 1200).opened.is_empty(), "a pair rings once");
     let items = pair_items(&mut store);
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1, "one item for the pair's lifetime: {items:?}");
     assert_eq!(items[0].state, MsgState::Resolved);
-    assert_eq!(items[1].state, MsgState::Open);
-    assert!(items[1].body.contains("other.rs"));
-    assert!(items[1].body.contains(SHARED));
+
+    // The overlap clears and comes back: still no second item.
+    let steady = git(&repo.path, &["rev-parse", "steady/t2"]);
+    git(&repo.path, &["update-ref", "refs/heads/steady/t2", &repo.base]);
     assert!(scan(&mut store, 1800).opened.is_empty());
+    git(&repo.path, &["update-ref", "refs/heads/steady/t2", &steady]);
+    assert!(scan(&mut store, 2400).opened.is_empty(), "the marker stays when the overlap clears");
+    assert_eq!(pair_items(&mut store).len(), 1, "one item for the pair's lifetime");
+
+    // Another pair rings once of its own.
+    repo.branch("steady/t3", SHARED);
+    store.write(|tx| {
+        tx.insert_task(&TaskRow {
+            repo: None, base: None, gate: None, rework_estimate_min: None,
+            project: "p".into(), id: "T-3".into(), rank: 3, state: TaskState::Running,
+            priority: "must".into(), lane: Some("steady".into()), milestone: None, required: false,
+            contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
+            wait_cond: None, rework_note: None, estimate_min: Some(30), issue: None, updated: T0,
+        })
+    }).unwrap();
+    let checked = scan(&mut store, 3000);
+    assert_eq!(checked.opened.len(), 1, "another pair rings once: {checked:?}");
+    let items = store
+        .read(|tx| tx.thread_messages("p", "parallel:tasks:T-1:T-3"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
 }
 
 #[test]
@@ -156,6 +207,7 @@ fn legacy_root_overlap_keeps_its_item_and_resolves_it() {
     // Seed the pre-multi-repo namespace, including its original open item.
     let item = store.write(|tx| {
         let item = tx.insert_message(&gear_store::NewMessage {
+            meta: None,
             project: "p".into(), thread: "parallel:tasks:T-1:T-2".into(),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: "p:captain".into(), kind: gear_model::MsgKind::System,
@@ -221,15 +273,17 @@ fn integration_changes_since_the_branch_base_count_too() {
     // Accepted work awaiting merge remains an open branch.
     store.write(|tx| { let mut t = tx.get_task("p", "T-1")?.unwrap(); t.state = TaskState::Done; tx.update_task(&t) }).unwrap();
     let result = scan(&mut store, 0);
-    assert_eq!(result.opened.len(), 1);
-    let item = store.read(|tx| tx.get_message("p", &result.opened[0])).unwrap().unwrap();
-    assert!(item.body.contains("T-1 (heat) and integration dev"), "{}", item.body);
-    assert!(item.body.contains(SHARED));
+    // An overlap with the integration branch is an information line, never a
+    // captain item (T-188).
+    assert!(result.opened.is_empty(), "no captain item: {result:?}");
     assert!(pair_items(&mut store).is_empty(), "disjoint task branches remain disjoint");
+    let info = integration_info(&mut store, "T-1").expect("the information line");
+    assert!(info.contains(SHARED), "{info}");
+    assert!(info.contains("\"integration\":\"dev\""), "{info}");
 }
 
 #[test]
-fn cleared_overlaps_resolve_and_can_report_a_later_recurrence() {
+fn cleared_overlaps_resolve_and_the_pair_does_not_ring_again() {
     let repo = Repo::new();
     repo.branch("heat/t1", SHARED);
     repo.branch("steady/t2", SHARED);
@@ -239,9 +293,10 @@ fn cleared_overlaps_resolve_and_can_report_a_later_recurrence() {
     git(&repo.path, &["update-ref", "refs/heads/steady/t2", &repo.base]);
     assert!(scan(&mut store, 600).opened.is_empty());
     assert_eq!(pair_items(&mut store)[0].state, MsgState::Resolved);
+    // The overlap comes back: the pair has already rung (T-188).
     git(&repo.path, &["update-ref", "refs/heads/steady/t2", &steady]);
-    assert_eq!(scan(&mut store, 1200).opened.len(), 1, "empty-to-shared is a set change");
-    assert_eq!(pair_items(&mut store).len(), 2);
+    assert!(scan(&mut store, 1200).opened.is_empty(), "a pair rings once for its lifetime");
+    assert_eq!(pair_items(&mut store).len(), 1);
 }
 
 #[test]
@@ -280,7 +335,7 @@ fn remote_tracking_task_refs_work_and_pair_state_survives_reopening() {
 }
 
 #[test]
-fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
+fn a_pair_rings_once_through_the_engine() {
     let repo = Repo::new();
     repo.branch("heat/t1", SHARED);
     repo.branch("steady/t2", SHARED);
@@ -302,13 +357,14 @@ fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
     assert!(tick(&mut store, &mut herdr, &cfg, T0+900).unwrap().parallel.is_empty());
     assert!(tick(&mut store, &mut herdr, &cfg, T0+1200).unwrap().parallel.is_empty());
     assert_eq!(herdr.prompts_to("w1:p1").len(), 1, "unchanged overlap must not get a stale-item reminder");
+    // Another shared file: the pair does not ring again (T-188).
     repo.change("heat/t1", "third.rs", "heat third");
     repo.change("steady/t2", "third.rs", "steady third");
-    assert_eq!(tick(&mut store, &mut herdr, &cfg, T0+1800).unwrap().parallel.len(), 1);
-    assert_eq!(herdr.prompts_to("w1:p1").len(), 2, "a changed set rings despite a view of the previous item");
+    assert!(tick(&mut store, &mut herdr, &cfg, T0+1800).unwrap().parallel.is_empty());
+    assert_eq!(herdr.prompts_to("w1:p1").len(), 1, "a pair rings once for its lifetime");
     let items = pair_items(&mut store);
-    assert_eq!(items[0].state, MsgState::Resolved);
-    assert_eq!(items[1].state, MsgState::Open);
+    assert_eq!(items.len(), 1, "one item for the pair: {items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
 }
 
 /// A project with a child repo (T-53): the lane "heat" works in the root,
@@ -324,6 +380,10 @@ fn multi_repo_store(root: &Repo) -> Store {
         }
         for (n, lane) in [(1, "heat"), (2, "steady"), (3, "web2")] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(), id: format!("T-{n}"), rank: n, state: TaskState::Running,
                 priority: "must".into(), lane: Some(lane.into()), milestone: None, required: false,
                 contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
@@ -419,9 +479,15 @@ fn the_scan_of_a_child_repo_reads_its_own_integration_branch() {
     let checked = scan(&mut store, 0);
 
     assert!(checked.problems.is_empty(), "{:?}", checked.problems);
-    assert_eq!(checked.opened.len(), 1, "{:?}", checked.opened);
-    let item = store.read(|tx| tx.get_message("p", &checked.opened[0])).unwrap().unwrap();
-    assert!(item.body.contains("integration web-dev"), "{}", item.body);
+    // An overlap with the integration branch is an information line, never a
+    // captain item (T-188).
+    assert!(checked.opened.is_empty(), "{:?}", checked.opened);
+    let info = store
+        .read(|tx| tx.get_meta("parallel:p:web:integration:T-2"))
+        .unwrap()
+        .expect("the information line of the child repo");
+    assert!(info.contains(SHARED), "{info}");
+    assert!(info.contains("web-dev"), "{info}");
 }
 
 /// T-64: a task whose candidate is already in the integration branch has
@@ -467,4 +533,78 @@ fn a_landed_task_is_not_an_open_change_and_open_tasks_still_pair() {
         pair[0].body
     );
     assert!(pair[0].body.contains(SHARED), "{}", pair[0].body);
+}
+
+/// T-188: an overlap with the integration branch is an information line (the
+/// board and `gear queue` show it), never a captain item: the lane merges
+/// dev in and the merge gate catches a conflict.
+#[test]
+fn a_task_that_overlaps_the_integration_branch_makes_no_captain_item() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SRC);
+    let mut store = repo.store();
+    // The integration branch moved on and changed the same file.
+    repo.change("dev", SRC, "integration changed it");
+    let result = scan(&mut store, 0);
+    assert!(result.problems.is_empty());
+    assert!(result.opened.is_empty(), "no captain item: {result:?}");
+    // Nothing at all was written to the captain's inbox.
+    let inbox = store
+        .read(|tx| tx.actionable_for("p", "p:captain", T0 + 1))
+        .unwrap();
+    assert!(inbox.is_empty(), "{inbox:?}");
+    // The information line is there for the board and `gear queue`.
+    let info = integration_info(&mut store, "T-1").expect("the information line");
+    assert!(info.contains(SRC), "{info}");
+
+    // The overlap is gone: the information line goes with it.
+    git(&repo.path, &["update-ref", "refs/heads/dev", &repo.base]);
+    assert!(scan(&mut store, 600).opened.is_empty());
+    assert!(integration_info(&mut store, "T-1").unwrap_or_default().is_empty());
+}
+
+/// T-188: two tasks that share only a test file do not conflict: a test that
+/// is written twice is not a merge conflict.
+#[test]
+fn two_tasks_that_share_only_a_test_file_make_no_item() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", TEST_FILE);
+    repo.branch("steady/t2", TEST_FILE);
+    let mut store = repo.store();
+    let result = scan(&mut store, 0);
+    assert!(result.problems.is_empty());
+    assert!(result.opened.is_empty(), "no item for a shared test file: {result:?}");
+    assert!(pair_items(&mut store).is_empty());
+}
+
+/// T-188: a contract file is a test file by another name: it does not count
+/// either.
+#[test]
+fn two_tasks_that_share_only_a_contract_file_make_no_item() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", CONTRACT_FILE);
+    repo.branch("steady/t2", CONTRACT_FILE);
+    let mut store = repo.store();
+    let result = scan(&mut store, 0);
+    assert!(result.problems.is_empty());
+    assert!(result.opened.is_empty(), "a contract file does not count: {result:?}");
+    assert!(pair_items(&mut store).is_empty());
+}
+
+/// T-188: two tasks that share a source file ring once per pair.
+#[test]
+fn two_tasks_that_share_a_source_file_make_one_item_once() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SRC);
+    repo.branch("steady/t2", SRC);
+    let mut store = repo.store();
+    let result = scan(&mut store, 0);
+    assert_eq!(result.opened.len(), 1, "{result:?}");
+    let item = pair_items(&mut store).remove(0);
+    assert!(item.body.contains("T-1 (heat) and T-2 (steady)"), "{}", item.body);
+    assert!(item.body.contains(SRC), "{}", item.body);
+
+    // The same pair rings once: the next scan opens nothing.
+    assert!(scan(&mut store, 600).opened.is_empty());
+    assert_eq!(pair_items(&mut store).len(), 1, "one item per pair");
 }

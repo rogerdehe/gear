@@ -22,6 +22,10 @@ const LANE_PANE: &str = "w1:p2";
 fn profile(kind: &str) -> gear_herdr::Profile {
     gear_herdr::Profile {
         kind: kind.into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],
@@ -32,6 +36,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
+        instructions_args: vec![],
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],
@@ -126,6 +131,7 @@ fn full_work_loop() {
     let args = mail::SendArgs {
         kind: MsgKind::Result, body: "Report: notes/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(1), candidate: Some("abc1234".into()), about: None, to: None, reply_to: None, urgent: false,
+        left: None, blocker: None, on: None, friction: None,
         verdict: None, request_id: "res-1".into(),
         blocking: None,
         base: None,

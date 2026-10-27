@@ -240,7 +240,7 @@ fn merge_takes_the_method() {
         number: 7,
         url: String::new(),
     };
-    let result = forge.merge(&pr, MergeMethod::Squash).expect("the merge");
+    let result = forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
     assert_eq!(
         argv(&dir),
         vec!["pr", "merge", "7", "--repo", "owner/name", "--squash"]
@@ -251,7 +251,7 @@ fn merge_takes_the_method() {
 
     let (dir, forge) = forge_with("merge-commit", None);
     ready_pr(&dir);
-    forge.merge(&pr, MergeMethod::Merge).expect("the merge");
+    forge.merge(&pr, MergeMethod::Merge, "").expect("the merge");
     assert_eq!(
         argv(&dir),
         vec!["pr", "merge", "7", "--repo", "owner/name", "--merge"]
@@ -273,7 +273,7 @@ fn a_draft_claim_is_made_ready_before_it_merges() {
         .open_claim("owner/name", "base/t78", "dev", "The forge layer", "Closes #12")
         .expect("the claim");
     assert!(pr.is_open());
-    let result = forge.merge(&pr, MergeMethod::Squash).expect("the merge");
+    let result = forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
 
     assert_eq!(
         calls(&dir),
@@ -298,7 +298,7 @@ fn a_ready_pull_request_is_not_made_ready_again() {
         number: 7,
         url: String::new(),
     };
-    forge.merge(&pr, MergeMethod::Squash).expect("the merge");
+    forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
     assert_eq!(calls(&dir), vec!["pr view", "pr merge"]);
 }
 
@@ -315,7 +315,7 @@ fn a_failed_readiness_is_a_typed_error() {
         number: 7,
         url: String::new(),
     };
-    match forge.merge(&pr, MergeMethod::Squash).unwrap_err() {
+    match forge.merge(&pr, MergeMethod::Squash, "").unwrap_err() {
         Error::Failed(said) => {
             assert!(said.contains("pr ready"), "{said}");
             assert!(said.contains("not allowed"), "{said}");
@@ -352,7 +352,7 @@ fn a_closed_pull_request_is_never_asked_about() {
     let (dir, forge) = forge_with("none", None);
     let none = PrRef::none("owner/name");
     forge.comment(&none, "x").expect("no call");
-    let merged = forge.merge(&none, MergeMethod::Squash).expect("no call");
+    let merged = forge.merge(&none, MergeMethod::Squash, "").expect("no call");
     assert!(!merged.merged, "{merged:?}");
     assert!(calls(&dir).is_empty(), "the forge was called: {:?}", calls(&dir));
 }
@@ -393,7 +393,7 @@ fn an_unreadable_answer_is_a_typed_error() {
         number: 7,
         url: String::new(),
     };
-    match forge.merge(&pr, MergeMethod::Squash).unwrap_err() {
+    match forge.merge(&pr, MergeMethod::Squash, "").unwrap_err() {
         Error::Unreadable(said) => assert!(said.contains("draft state"), "{said}"),
         other => panic!("expected an unreadable answer, got {other:?}"),
     }
@@ -445,4 +445,131 @@ fn without_a_fake_no_test_reaches_a_real_gh() {
     let said = err.to_string();
     assert!(said.contains("no gh in tests"), "{said}");
     assert!(said.contains("GEAR_GH"), "{said}");
+}
+
+/// Design §11.2: the merge carries the head the gate checked, so GitHub
+/// merges exactly that commit and never a head that landed in between.
+#[test]
+fn the_merge_passes_the_head_it_must_merge() {
+    let (dir, forge) = forge_with("merge-head", None);
+    ready_pr(&dir);
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    let result = forge
+        .merge(&pr, MergeMethod::Squash, "abc1234")
+        .expect("the merge");
+    assert_eq!(
+        argv(&dir),
+        vec![
+            "pr",
+            "merge",
+            "7",
+            "--repo",
+            "owner/name",
+            "--squash",
+            "--match-head-commit",
+            "abc1234"
+        ]
+    );
+    assert!(result.merged, "{result:?}");
+}
+
+/// Design §11.3: the pull request's own state is what an unknown merge asks
+/// the forge.
+#[test]
+fn the_state_of_a_pull_request_is_read() {
+    let (dir, forge) = forge_with("pr-state", None);
+    // `gh` names the merge commit as an object.
+    answer_for(
+        &dir,
+        "pr-view",
+        r#"{"state":"MERGED","mergeCommit":{"oid":"sha99"},"headRefOid":"abc1234"}"#,
+    );
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    let state = forge.pr_state(&pr).expect("the state");
+    assert_eq!(state.state, "MERGED");
+    assert!(state.is_merged(), "{state:?}");
+    assert_eq!(state.merge_commit.as_deref(), Some("sha99"));
+    assert_eq!(state.head_ref_oid.as_deref(), Some("abc1234"));
+    assert_eq!(
+        argv(&dir),
+        vec![
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "owner/name",
+            "--json",
+            "state,mergeCommit,headRefOid"
+        ]
+    );
+}
+
+/// Design §11.3: a pull request that is not merged yet names no commit.
+#[test]
+fn an_open_pull_request_names_no_merge_commit() {
+    let (dir, forge) = forge_with("pr-state-open", None);
+    answer_for(
+        &dir,
+        "pr-view",
+        r#"{"state":"OPEN","mergeCommit":null,"headRefOid":"abc1234"}"#,
+    );
+    let pr = PrRef {
+        repo: "owner/name".to_string(),
+        number: 7,
+        url: String::new(),
+    };
+    let state = forge.pr_state(&pr).expect("the state");
+    assert_eq!(state.state, "OPEN");
+    assert!(state.is_open(), "{state:?}");
+    assert_eq!(state.merge_commit, None, "no commit yet");
+    assert_eq!(state.head_ref_oid.as_deref(), Some("abc1234"));
+}
+
+/// Design §11.3: an interrupted claim is adopted by its branch.
+#[test]
+fn the_open_pull_request_of_a_branch_is_found() {
+    let (dir, forge) = forge_with("pr-by-head", None);
+    answer_for(
+        &dir,
+        "pr-list",
+        r#"[{"number":7,"url":"https://github.com/owner/name/pull/7"}]"#,
+    );
+    let pr = forge
+        .pr_by_head("owner/name", "heat/t1")
+        .expect("the pull request")
+        .expect("there is one");
+    assert_eq!(pr.number, 7);
+    assert_eq!(pr.repo, "owner/name");
+    assert_eq!(
+        argv(&dir),
+        vec![
+            "pr",
+            "list",
+            "--repo",
+            "owner/name",
+            "--head",
+            "heat/t1",
+            "--json",
+            "number,url"
+        ]
+    );
+
+    // A branch with no pull request is none, not an error.
+    let (dir, forge) = forge_with("pr-by-head-none", None);
+    answer_for(&dir, "pr-list", "[]");
+    assert!(
+        forge
+            .pr_by_head("owner/name", "heat/t2")
+            .expect("the lookup")
+            .is_none(),
+        "there is none"
+    );
 }

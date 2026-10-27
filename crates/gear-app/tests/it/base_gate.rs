@@ -7,7 +7,7 @@
 use gear_app::base::{require_current_base, BaseGate};
 use gear_app::identity::Fingerprint;
 use gear_app::mail::{self, SendArgs};
-use gear_app::tasks::{on_delivery_confirmed, start_attempt};
+use gear_app::tasks::{on_delivery_confirmed, settle, start_attempt, submit_result, Verdict};
 use gear_app::Env;
 use gear_model::{AttemptState, ErrorCode, GearCtx, MsgKind, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, Store, TaskRow};
@@ -161,6 +161,16 @@ impl Repos {
         commit
     }
 
+    /// A commit on top of `from`, published as `branch` — a rework that builds
+    /// on the earlier work.
+    fn candidate_building_on(&self, branch: &str, from: &str, text: &str) -> String {
+        let work = format!("work-{branch}");
+        git(&self.lane, &["switch", "-q", "-c", &work, from]);
+        let commit = commit(&self.lane, &format!("{}.txt", work.replace('/', "-")), text);
+        publish(&self.origin, &self.lane, &format!("refs/heads/{work}"), branch);
+        commit
+    }
+
     /// Advance `dev` on the remote (a commit the origin fetches from the seed).
     fn advance_dev(&self, text: &str) {
         git(&self.seed, &["switch", "-q", "dev"]);
@@ -226,6 +236,10 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -287,6 +301,10 @@ fn result(candidate: &str, gate: Option<BaseGate>) -> SendArgs {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None,
         request_id: "r-1".into(),
     }
 }
@@ -338,6 +356,99 @@ fn an_unpushed_candidate_is_refused() {
     assert!(s.read(|tx| tx.actionable_for("p", "p:captain", T0 + 6)).unwrap().is_empty());
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+}
+
+/// §10.7 row B03-08: a rework hand-in whose candidate does not contain the
+/// candidate of the attempt before it is refused, naming that commit.
+#[test]
+fn a_rework_off_the_earlier_candidate_is_refused() {
+    let r = repos();
+    let first = r.candidate("heat/t1", "origin/dev", "my work");
+    // The rework: cut from dev again, so it does not carry the first candidate.
+    let second = r.candidate("heat/t1b", "origin/dev", "other work");
+    let mut s = world();
+    // Attempt 1 hands the first candidate in and is failed: the task is ready
+    // for a rework.
+    s.write(|tx| {
+        submit_result(tx, "p", "T-1", 1, 1, &first, "report", T0 + 2)?;
+        settle(
+            tx,
+            &Verdict {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: first.clone(),
+                pass: false,
+                evidence: None,
+                rework: Some("edge cases".into()),
+                integrated_by: None,
+                by_seat: "p:captain".into(),
+            },
+            T0 + 3,
+        )?;
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 4)?;
+        on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 4)
+    })
+    .unwrap();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let mut args = result(&second, gate);
+    args.attempt = Some(2);
+
+    let err = mail::send(&mut s, &env, Some(&fp), &args, T0 + 5).unwrap_err();
+
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(err.detail.contains(&first), "the refusal names that commit: {}", err.detail);
+    // Nothing is stored: the attempt is still being worked on.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
+    assert_eq!((attempt.state, attempt.candidate), (AttemptState::Started, None));
+}
+
+/// The other half of B03-08: a rework that keeps the work the reviewer read
+/// (its candidate carries the earlier one) is handed in as usual.
+#[test]
+fn a_rework_that_keeps_the_earlier_candidate_is_accepted() {
+    let r = repos();
+    let first = r.candidate("heat/t1", "origin/dev", "my work");
+    // The rework builds on the first candidate, so it carries it.
+    let second = r.candidate_building_on("heat/t1", &first, "the fix");
+    let mut s = world();
+    s.write(|tx| {
+        submit_result(tx, "p", "T-1", 1, 1, &first, "report", T0 + 2)?;
+        settle(
+            tx,
+            &Verdict {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: first.clone(),
+                pass: false,
+                evidence: None,
+                rework: Some("edge cases".into()),
+                integrated_by: None,
+                by_seat: "p:captain".into(),
+            },
+            T0 + 3,
+        )?;
+        start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 4)?;
+        on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 4)
+    })
+    .unwrap();
+    let (env, fp) = lane();
+    let gate = Some(BaseGate { worktree: r.lane.clone(), integration: "dev".into() });
+    let mut args = result(&second, gate);
+    args.attempt = Some(2);
+
+    let sent = mail::send(&mut s, &env, Some(&fp), &args, T0 + 5).unwrap();
+
+    assert_eq!(sent.recipient, "p:captain");
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
+    assert_eq!(
+        (attempt.state, attempt.candidate.as_deref()),
+        (AttemptState::Submitted, Some(second.as_str()))
+    );
 }
 
 #[test]

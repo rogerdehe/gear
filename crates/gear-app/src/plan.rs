@@ -36,6 +36,10 @@ pub struct ApplyResult {
     /// cancelled done task, resolved "cancelled by the captain".
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// What the captain should know about this apply (design §7.2: a decision
+    /// line that is not structured is logged as a note).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Apply `draft` (parsed from `text`, which is stored verbatim as the plan row).
@@ -51,6 +55,11 @@ pub struct ApplyResult {
 ///    state is skipped (Staff is a target, not a command); an unknown seat, a
 ///    non-lane seat or a forbidden transition → `BadFormat`; `temp` lines →
 ///    `BadFormat` "not in this cut"; applied lines are listed in `staffed`.
+///    `release` (T-133, T-140): a named **lane** in Held goes back to Active or
+///    Queued (the session's agents say whether its agent is still there); a
+///    named **reviewer** seat in Standby goes to Releasing (the engine closes
+///    its pane); a reviewer that is reviewing is refused with the task it is
+///    reviewing.
 ///    `# Verdicts` (T-50):
 ///    after the queue writes, each line → `tasks::settle` (by_seat = the caller's
 ///    seat) in draft order, in the same transaction — any error aborts the whole
@@ -89,6 +98,9 @@ pub fn apply(
     // before the write transaction (the store is never held while a subprocess
     // runs) and only for the done tasks this draft cancels.
     let cancellable = cancellable_done_tasks(store, draft)?;
+    // The verdicts that name the merge that landed their work are checked
+    // before anything is written (git runs outside the store transaction).
+    require_integrated_by(store, draft)?;
 
     store.write(|tx| {
         // 1. identity: only the captain applies a plan.
@@ -183,6 +195,51 @@ fn apply_queue(
     // 4. sections that belong to later cuts (after the base check, as the doc
     // comment orders the steps).
     reject_sections(draft)?;
+
+    // The captain's decision lines (design §7): every line of `# Decisions` is
+    // read, structured or a note (§7.2), and recorded (§7.3).
+    let decisions: Vec<crate::decision::Decision> = draft
+        .decisions
+        .iter()
+        .map(|line| crate::decision::parse(line))
+        .collect();
+    let voyage = voyage_of(tx, project, draft)?;
+    let applied_version = current + 1;
+    let mut warnings: Vec<String> = Vec::new();
+    for (index, line) in draft.decisions.iter().enumerate() {
+        let decision = &decisions[index];
+        if decision.note {
+            warnings.push(format!(
+                "warning: decision line {} is not structured; logged as a note",
+                index + 1
+            ));
+        }
+        record_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            line,
+            decision,
+            now,
+        )?;
+    }
+
+    // Apply rebinds before taking the existing-task and config snapshots:
+    // an idle lane's NEW tasks belong to its destination repo. A deferred
+    // rebind keeps the old config until the lane's attempts finish.
+    let mut staffed: Vec<String> = Vec::new();
+    for item in &draft.staff {
+        if let StaffItem::Rebind { lane, repo, owns, line } = item {
+            let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
+            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
+                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            warnings.push(message.clone());
+            staffed.push(message);
+            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            continue;
+        }
+    }
 
     let existing: BTreeMap<String, TaskRow> = tx
         .tasks_of_project(project)?
@@ -290,6 +347,17 @@ fn apply_queue(
                 ));
             }
         }
+        // The follow-up names a task that exists (design §3.3): the field is
+        // live, and a task that does not exist cannot be the one whose
+        // session the lane continues.
+        if let Some(followup) = &item.followup_of {
+            if !existing.contains_key(followup) {
+                return Err(bad(
+                    item.line,
+                    format!("followup-of {followup} does not exist"),
+                ));
+            }
+        }
         let id = match &item.id {
             Some(id) => id.clone(),
             None => new_ids
@@ -310,6 +378,9 @@ fn apply_queue(
     let mut created: Vec<String> = Vec::new();
     let mut contract_changed: Vec<(String, i64)> = Vec::new();
     let mut mentioned: BTreeSet<String> = BTreeSet::new();
+    // The lane's repo, the base and the gate (design §1.1): a task keeps the
+    // ones it was created with. The config is read once for the whole apply.
+    let config = project_config(tx, project)?;
     for (position, item) in draft.queue.iter().enumerate() {
         let rank = position as i64 + 1;
         match &item.id {
@@ -318,7 +389,21 @@ fn apply_queue(
                     .get(&position)
                     .cloned()
                     .ok_or_else(|| bad(item.line, "cannot assign an id to this NEW block"))?;
+                // The repo, the base and the gate of the task (design §1.1):
+                // copied from the lane's config, so a lane that is rebound to
+                // another repo later leaves its old tasks where they were.
+                let (repo, base, gate) = match &config {
+                    Some(config) => {
+                        let repo = config.repo_of_lane(item.lane.as_deref().unwrap_or_default());
+                        (Some(repo.path), Some(repo.integration), Some(repo.gate))
+                    }
+                    None => (None, None, None),
+                };
                 let task = TaskRow {
+                    repo,
+                    base,
+                    gate,
+                    rework_estimate_min: None,
                     project: project.to_string(),
                     id: id.clone(),
                     rank,
@@ -368,6 +453,12 @@ fn apply_queue(
                 task.milestone = item.milestone.clone();
                 task.required = item.required;
                 task.deps = item.deps.clone();
+                // The follow-up (design §3.3): the captain sets it on an
+                // existing task too — the field is live. A block without the
+                // field keeps the follow-up the task has.
+                if let Some(followup) = &item.followup_of {
+                    task.followup_of = Some(followup.clone());
+                }
                 // The planned time (T-38): the draft may change it; a draft
                 // that says nothing keeps the estimate the task has.
                 if let Some(estimate) = item.estimate {
@@ -392,6 +483,21 @@ fn apply_queue(
                         task.state = TaskState::Cancelled;
                         if was != TaskState::Cancelled {
                             cancelled.push(id.clone());
+                            // The decision log (design §7.4): a cancelled task
+                            // is a cut, and the why is the one the captain
+                            // wrote about it.
+                            record_gear_decision(
+                                tx,
+                                project,
+                                &voyage,
+                                applied_version,
+                                "cut",
+                                &format!("{id} cancelled"),
+                                why_naming(&decisions, id)
+                                    .or_else(|| Some("(no why written)".to_string())),
+                                id,
+                                now,
+                            )?;
                         }
                         // T-112: a done task's open merge items close with it —
                         // the failed merge and the push refusal are history,
@@ -436,6 +542,16 @@ fn apply_queue(
                         };
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
+                        if task.wait_on.take().is_some() {
+                            task.wait_cond = None;
+                            let pauses = tx.pauses_of_project(project)?;
+                            let seats: std::collections::BTreeSet<_> = tx.attempts_of_task(project, id)?.into_iter().filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)).map(|a| a.seat).collect();
+                            for seat in seats {
+                                if pauses.iter().any(|p| p.seat == seat && p.kind == "wait" && p.end_at.is_none()) {
+                                    tx.close_pause(project, &seat, "wait", now)?;
+                                }
+                            }
+                        }
                         contract_changed.push((id.clone(), version));
 
                         // An attempt that is working on the task hears about the
@@ -481,20 +597,54 @@ fn apply_queue(
     // Staff (T-55): park/hold/retire/release move a lane seat of this project
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
-    let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
+        if matches!(item, StaffItem::Rebind { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
+            // The decision log (design §7.4): a staff line is a decision.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         if let StaffItem::Retry { lane, .. } = item {
             retry_lane(tx, project, lane, staff_line(item), now)?;
             staffed.push(format!("retry {lane}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
-        if let StaffItem::Release { lane, .. } = item {
-            release_lane(tx, project, lane, staff_line(item), agents, now)?;
-            staffed.push(format!("release {lane}"));
+        if let StaffItem::Release { name, .. } = item {
+            release_seat(tx, project, name, staff_line(item), agents, now)?;
+            staffed.push(format!("release {name}"));
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         let (lane, verb, target, reason) = match item {
@@ -523,6 +673,7 @@ fn apply_queue(
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
+            StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -536,6 +687,19 @@ fn apply_queue(
         }
         if seat.state == target {
             // Staff is a target, not a command: already there, nothing to do.
+            // The captain still made a decision (design §7.4), so it is
+            // logged — once.
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
         require_transition(
@@ -556,6 +720,18 @@ fn apply_queue(
         })?;
         tx.set_seat_state(&seat_id, target, Some(&reason), now)?;
         staffed.push(format!("{verb} {lane}"));
+        // The decision log (design §7.4): a staff line is a decision.
+        record_gear_decision(
+            tx,
+            project,
+            &voyage,
+            applied_version,
+            "staff",
+            &staff_text(item),
+            None,
+            &staff_text(item),
+            now,
+        )?;
     }
 
     let version = current + 1;
@@ -563,6 +739,17 @@ fn apply_queue(
     // an error aborts the whole apply, so nothing of it is kept.
     let mut settled: Vec<String> = Vec::new();
     for line in &draft.verdicts {
+        // A pass over a failed review says why (design §7.4): the captain
+        // overrules the reviewer, and the reason is recorded.
+        let failed_review = tx
+            .get_review_verdict(project, &line.task, line.attempt)?
+            .is_some_and(|review| !review.passed);
+        if line.pass && failed_review && line.why.is_none() {
+            return Err(bad(
+                line.line,
+                "a pass over a failed review needs why=\"…\"",
+            ));
+        }
         let verdict = crate::tasks::Verdict {
             project: project.to_string(),
             task: line.task.clone(),
@@ -572,9 +759,59 @@ fn apply_queue(
             pass: line.pass,
             evidence: line.evidence.clone(),
             rework: line.rework.clone(),
+            // The task whose merge landed this work (design §10.7, row
+            // B03-01); the settle decides what it means.
+            integrated_by: line.integrated_by.clone(),
             by_seat: by_seat.to_string(),
         };
         crate::tasks::settle(tx, &verdict, now)?;
+        // The review item of that attempt is settled with the verdict (T-187):
+        // the captain does not have to resolve it by hand.
+        crate::tasks::resolve_review_items(
+            tx,
+            project,
+            &line.task,
+            line.attempt,
+            &format!("settled in plan {applied_version}"),
+            now,
+        )?;
+        // The decision log (design §7.4): a pass over a failed review is an
+        // override, a fail is a rework.
+        if line.pass {
+            if failed_review {
+                record_gear_decision(
+                    tx,
+                    project,
+                    &voyage,
+                    applied_version,
+                    "override",
+                    &format!(
+                        "{} attempt {} passed over a failed review",
+                        line.task, line.attempt
+                    ),
+                    line.why.clone(),
+                    &format!("{}|{}", line.task, line.attempt),
+                    now,
+                )?;
+            }
+        } else {
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "rework",
+                line.rework.as_deref().unwrap_or_default(),
+                None,
+                &format!("{}|{}", line.task, line.attempt),
+                now,
+            )?;
+        }
+        // The minutes the rework round gets (design §5.1): written after the
+        // settle, which writes the task row itself.
+        if let Some(minutes) = line.estimate {
+            tx.set_task_rework_estimate(project, &line.task, Some(minutes))?;
+        }
         settled.push(format!(
             "{} attempt {} {}",
             line.task,
@@ -594,6 +831,7 @@ fn apply_queue(
 
     Ok(ApplyResult {
         version,
+        warnings,
         created,
         contract_changed,
         not_mentioned,
@@ -615,6 +853,55 @@ fn bad(line: usize, detail: impl std::fmt::Display) -> GearError {
 /// a fetch that fails, a candidate git cannot place — is an error: a
 /// cancellation is never accepted unchecked. A done task with no accepted
 /// candidate has no landed work, so it may be cancelled too.
+/// The verdicts that name the task whose merge landed the work
+/// (design §10.7, row B03-01): the named task must be merged, and the
+/// candidate's tree has to be in the integration branch — otherwise the work
+/// is not there and the verdict is refused.
+///
+/// The store is asked first, so the refusal names the task that is not
+/// merged. Git runs before the write transaction, like the cancellation
+/// check: a fetch comes first, and any doubt — a fetch that fails, a
+/// candidate git cannot place — is an error: a verdict is never accepted
+/// unchecked.
+fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
+    let wanted: Vec<(&String, &String, &String)> = draft
+        .verdicts
+        .iter()
+        .filter(|line| line.pass)
+        .filter_map(|line| {
+            line.integrated_by
+                .as_ref()
+                .map(|by| (&line.task, &line.candidate, by))
+        })
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let project = draft.project.clone();
+    for (task, candidate, by) in wanted {
+        // The named task must be merged: its merge is the one that landed
+        // this work.
+        let merged = store.read(|tx| crate::tasks::require_merged_at(tx, &project, by))?;
+        let _ = merged;
+        let config = crate::config::latest(store, &project)?;
+        let lane = store.read(|tx| tx.get_task(&project, task))?.and_then(|row| row.lane);
+        let repo = match lane.as_deref() {
+            Some(lane) => config.repo_of_lane(lane),
+            None => config.root_repo(),
+        };
+        if !crate::base::tree_on_integration(&repo.path, &repo.integration, candidate)? {
+            return Err(bad(
+                0,
+                format!(
+                    "{task}: the candidate {candidate} is not in {}: a pass may name the task whose merge landed the work only when that work is in the integration branch",
+                    repo.integration
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeSet<String>> {
     let wanted: Vec<&String> = draft
         .queue
@@ -791,7 +1078,7 @@ fn reject_sections(draft: &Draft) -> GearResult<()> {
 }
 
 /// The draft line of a staff item.
-fn staff_line(item: &StaffItem) -> usize {
+pub fn staff_line(item: &StaffItem) -> usize {
     match item {
         StaffItem::Temp { line, .. }
         | StaffItem::Park { line, .. }
@@ -799,8 +1086,116 @@ fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retire { line, .. }
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
-        | StaffItem::Remerge { line, .. } => *line,
+        | StaffItem::Remerge { line, .. }
+        | StaffItem::Rebind { line, .. } => *line,
     }
+}
+
+/// A durable rebind request; the engine calls `reconcile_rebinds` each tick.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RebindRequest { repo: String, owns: Vec<String> }
+
+pub fn rebind_pending_key(seat: &str) -> String { format!("lane-rebind:{seat}") }
+
+fn rebind_config(tx: &Tx<'_>, project: &str, lane: &str, request: &RebindRequest, line: usize) -> GearResult<String> {
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let current = crate::config::parse(&row.config_toml)?;
+    if !current.repos.iter().any(|r| r.name == request.repo) {
+        return Err(bad(line, format!("unknown repo {:?}", request.repo)));
+    }
+    let mut value: toml::Value = row.config_toml.parse().map_err(|e| bad(line, format!("invalid config: {e}")))?;
+    let lanes = value.get_mut("lanes").and_then(toml::Value::as_array_mut).ok_or_else(|| bad(line, "project has no lanes"))?;
+    let entry = lanes.iter_mut().find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
+        .and_then(toml::Value::as_table_mut).ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
+    entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
+    entry.insert("owns".into(), toml::Value::Array(request.owns.iter().cloned().map(toml::Value::String).collect()));
+    let text = toml::to_string(&value).map_err(|e| bad(line, format!("cannot serialize config: {e}")))?;
+    let new = crate::config::parse(&text)?;
+    let old_issues = crate::config::validate(&current);
+    if let Some(issue) = crate::config::validate(&new).into_iter().find(|issue| !old_issues.contains(issue)) {
+        return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
+    }
+    Ok(text)
+}
+
+fn request_rebind(tx: &Tx<'_>, project: &str, lane: &str, repo: &str, owns: &[String], line: usize) -> GearResult<Vec<String>> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx.get_seat(&seat_id)?.ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
+    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired { return Err(bad(line, "rebind needs a non-retired lane")); }
+    if tx.get_meta(&format!("lane-rebind-applied:{seat_id}"))?.is_some_and(|v| !v.is_empty()) {
+        return Err(bad(line, format!("lane {lane} is still moving to its new worktree")));
+    }
+    let request = RebindRequest { repo: repo.into(), owns: owns.to_vec() };
+    rebind_config(tx, project, lane, &request, line)?; // validate before recording anything
+    // Include other lanes' pending targets as reservations. A conflicting
+    // pair must be refused in this transaction, not discovered repeatedly by
+    // the engine after both attempts finish.
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let mut projected = crate::config::parse(&row.config_toml)?;
+    let old_issues = crate::config::validate(&projected);
+    for other in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane && s.id != seat_id) {
+        let Some(raw) = tx.get_meta(&rebind_pending_key(&other.id))?.filter(|v| !v.is_empty()) else { continue };
+        let pending: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(line, format!("invalid pending rebind: {e}")))?;
+        let target = projected.lanes.iter_mut().find(|l| l.name == other.name)
+            .ok_or_else(|| bad(line, format!("pending lane {:?} is not configured", other.name)))?;
+        target.repo = Some(pending.repo);
+        target.owns = pending.owns;
+    }
+    let target = projected.lanes.iter_mut().find(|l| l.name == lane)
+        .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
+    target.repo = Some(request.repo.clone());
+    target.owns = request.owns.clone();
+    if let Some(issue) = crate::config::validate(&projected).into_iter().find(|issue| !old_issues.contains(issue)) {
+        return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
+    }
+    let key = rebind_pending_key(&seat_id);
+    let data = serde_json::to_string(&request).map_err(|e| bad(line, e))?;
+    if tx.get_meta(&key)?.is_some_and(|old| !old.is_empty() && old != data) {
+        return Err(bad(line, format!("lane {lane} already has a pending rebind")));
+    }
+    tx.set_meta(&key, &data)?;
+    let mut waiting: Vec<_> = tx.open_attempts_of_seat(&seat_id)?.into_iter().map(|a| a.task).collect();
+    waiting.sort(); waiting.dedup();
+    if waiting.is_empty() { apply_rebind(tx, project, lane, &seat_id, &request)?; }
+    Ok(waiting)
+}
+
+fn apply_rebind(tx: &Tx<'_>, project: &str, lane: &str, seat: &str, request: &RebindRequest) -> GearResult<()> {
+    let mut row = tx.get_project(project)?.ok_or_else(|| bad(0, "project not found"))?;
+    let old_config = crate::config::parse(&row.config_toml)?;
+    let text = rebind_config(tx, project, lane, request, 0)?;
+    // Legacy tasks created before repo snapshots keep the old target as well.
+    let old = old_config.repo_of_lane(lane);
+    for mut task in tx.tasks_of_project(project)?.into_iter().filter(|t| t.lane.as_deref() == Some(lane) && t.repo.is_none()) {
+        task.repo = Some(old.path.clone());
+        if task.base.is_none() { task.base = Some(old.integration.clone()); }
+        if task.gate.is_none() { task.gate = Some(old.gate.clone()); }
+        tx.update_task(&task)?;
+    }
+    row.config_toml = text;
+    row.config_version += 1;
+    tx.update_project(&row)?;
+    // The engine-side rebind can use this durable marker to move the worktree.
+    if old.name != request.repo {
+        tx.set_meta(&format!("lane-rebind-applied:{seat}"), &serde_json::to_string(request).map_err(|e| bad(0, e))?)?;
+    }
+    tx.set_meta(&rebind_pending_key(seat), "")?;
+    Ok(())
+}
+
+/// Finish recorded requests after their last non-terminal attempt settles.
+pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
+    store.write(|tx| {
+        let mut changed = Vec::new();
+        for seat in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane) {
+            let Some(raw) = tx.get_meta(&rebind_pending_key(&seat.id))?.filter(|v| !v.is_empty()) else { continue };
+            if !tx.open_attempts_of_seat(&seat.id)?.is_empty() { continue; }
+            let request: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
+            apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
+            changed.push(seat.name);
+        }
+        Ok(changed)
+    })
 }
 
 /// `- retry <lane>` (T-82): a lane the engine parked in NeedsCheck, or lost
@@ -856,48 +1251,65 @@ fn retry_lane(
     Ok(())
 }
 
-/// `- release <lane>` (T-133): a lane the captain held goes back to the state
-/// the engine continues or onboards from. A held lane whose agent is still in
-/// its pane continues where it was — `Active`; one whose agent is gone goes back
-/// to `Queued`, so the engine onboards it again (`- retry` refuses Held, and
-/// editing the store was the captain's only way out, M3.1 machine recovery).
+/// `- release <lane>` (T-133) and `- release <reviewer>` (T-140): the captain
+/// takes a seat out of the way.
 ///
-/// Only a held lane is released: any other state is a transition this line
-/// cannot mean, and it is refused with the reason.
+/// A **lane**: a held lane goes back to the state the engine continues or
+/// onboards from. A held lane whose agent is still in its pane continues where
+/// it was — `Active`; one whose agent is gone goes back to `Queued`, so the
+/// engine onboards it again (`- retry` refuses Held, and editing the store was
+/// the captain's only way out, M3.1 machine recovery).
 ///
-/// Whether the agent is still there is the session's fact, not the store's
-/// (review F1): the store keeps the pane GEAR started an agent in, and an agent
-/// that exits leaves that binding Active. So the target is `Active` only when
-/// the caller brought the session's agents in and one of the binding's kind sits
-/// in the binding's pane; a binding with no such agent, and no binding at all,
-/// go back to `Queued`. An unread observation is not "gone": the release is
-/// refused instead of guessed.
-fn release_lane(
+/// A **reviewer** (design §3.6): a reviewer seat in Standby — its agent alive,
+/// its pane open, no job — goes to `Releasing`, and the engine closes the pane
+/// as for any release. A reviewer with a job is refused: the captain does not
+/// pull a reviewer out of the review it is doing.
+///
+/// Whether a lane's agent is still there is the session's fact, not the
+/// store's (review F1): the store keeps the pane GEAR started an agent in, and
+/// an agent that exits leaves that binding Active. So the target is `Active`
+/// only when the caller brought the session's agents in and one of the
+/// binding's kind sits in the binding's pane; a binding with no such agent,
+/// and no binding at all, go back to `Queued`. An unread observation is not
+/// "gone": the release is refused instead of guessed.
+fn release_seat(
     tx: &Tx<'_>,
     project: &str,
-    lane: &str,
+    name: &str,
     line: usize,
     agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<()> {
-    let seat_id = format!("{project}:{lane}");
+    let seat_id = format!("{project}:{name}");
     let seat = tx
         .get_seat(&seat_id)?
         .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
-    if seat.role != SeatRole::Lane {
-        return Err(bad(
+    match seat.role {
+        SeatRole::Lane => release_lane(tx, &seat, name, line, agents, now),
+        SeatRole::Temp => release_reviewer(tx, &seat, name, now),
+        role => Err(bad(
             line,
-            format!(
-                "seat {seat_id} is a {} seat, staff lines name lanes",
-                seat.role.as_str()
-            ),
-        ));
+            format!("seat {seat_id} is a {role} seat, staff lines name lanes and reviewers"),
+        )),
     }
+}
+
+/// `- release <lane>` (T-133): only a held lane is released: any other state is
+/// a transition this line cannot mean, and it is refused with the reason.
+fn release_lane(
+    tx: &Tx<'_>,
+    seat: &gear_store::SeatRow,
+    name: &str,
+    line: usize,
+    agents: Option<&[gear_herdr::AgentInfo]>,
+    now: Ts,
+) -> GearResult<()> {
+    let seat_id = seat.id.clone();
     if seat.state != SeatState::Held {
         return Err(GearError::new(
             ErrorCode::BadTransition,
             format!(
-                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {lane} reason=…` puts it there)",
+                "seat {seat_id} is {}, not held: only a lane in Held is released (`- hold {name} reason=…` puts it there)",
                 seat.state.as_str()
             ),
         ));
@@ -945,6 +1357,68 @@ fn release_lane(
     )?;
     tx.set_seat_state(&seat_id, target, Some(reason), now)?;
     Ok(())
+}
+
+/// `- release <reviewer>` (T-140, design §3.6): a reviewer seat in `Standby` —
+/// its agent alive, its pane open, no job — is released: the seat goes to
+/// `Releasing` and the engine closes the pane as for any release.
+///
+/// A reviewer **in a job** is refused: the captain does not pull a reviewer out
+/// of the review it is doing. The refusal names the task it is reviewing.
+///
+/// A reviewer in any other state (queued, starting, already released) is
+/// refused with the reason: only a reviewer in Standby is idle enough to let
+/// go of.
+fn release_reviewer(
+    tx: &Tx<'_>,
+    seat: &gear_store::SeatRow,
+    name: &str,
+    now: Ts,
+) -> GearResult<()> {
+    // A reviewer with a job binding is reviewing it (§3.6: the binding ends
+    // when the seat goes to Standby).
+    if let Some(task) = seat.task_id.as_deref() {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!("{name} is reviewing {task}"),
+        ));
+    }
+    if seat.state != SeatState::Standby {
+        return Err(GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "seat {} is {}, not standby: only a reviewer in Standby is released",
+                seat.id,
+                seat.state.as_str()
+            ),
+        ));
+    }
+    // Standby → Releasing: the engine closes the pane and the seat goes to
+    // Released. The model's transition table (gear-model, deck's file) knows no
+    // reviewer in Standby yet (§3.6 is new), so the transition is stated here.
+    tx.set_seat_state(
+        &seat.id,
+        SeatState::Releasing,
+        Some("released by the captain: it was idle"),
+        now,
+    )?;
+    Ok(())
+}
+
+/// The project's config, read from the store: `None` when the project has no
+/// config yet (nothing to copy, and a reader that finds empty columns falls
+/// back to the lane's current config).
+fn project_config(
+    tx: &Tx<'_>,
+    project: &str,
+) -> GearResult<Option<crate::config::ProjectConfig>> {
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    if row.config_toml.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(crate::config::parse(&row.config_toml)?))
 }
 
 /// `- remerge T-<n>` (T-92): the captain retries a merge that failed on
@@ -1238,7 +1712,7 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
 
 /// `YYYY-MM-DD` for unix seconds (civil-from-days, no extra crate) — enough to
 /// date a departure without pulling a time library in.
-fn utc_date(ts: i64) -> String {
+pub fn utc_date(ts: i64) -> String {
     let (days, _) = (ts.div_euclid(86_400), ts.rem_euclid(86_400));
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
@@ -1253,8 +1727,171 @@ fn utc_date(ts: i64) -> String {
 }
 
 /// Whether refill/idle warnings are suppressed by the captain's tail decision.
+///
+/// The tail can end by itself (B6): `- tail: heat until=T-12` stops silencing
+/// the lane when T-12 is done, `- tail: heat until=2026-10-26T18:00:00Z` when
+/// that time has come. The callers that have no clock of their own get the
+/// wall clock — a deadline is a wall-clock stamp, so that is the clock it is
+/// compared with.
 pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> {
-    Ok(tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() == Some("1"))
+    lane_in_tail_now(tx, project, lane, wall_clock(), true)
+}
+
+/// The same, with the caller's clock, writing nothing: the read-only callers
+/// (the plan's own checks) see the tail as it is, without ending it.
+pub fn lane_in_tail_at(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    now: Ts,
+) -> GearResult<bool> {
+    lane_in_tail_now(tx, project, lane, now, false)
+}
+
+/// Whether the captain's tail silences this lane now, and — when the caller
+/// writes — the end of a tail that has ended.
+///
+/// The end is written once: the lanes the tail silences go back to "not
+/// tailed" and the declaration is marked spent. A task that is reopened for a
+/// rework (a failed merge, a fail verdict) therefore never revives a tail
+/// that has already ended (design §10.7, row B6).
+fn lane_in_tail_now(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    now: Ts,
+    write: bool,
+) -> GearResult<bool> {
+    if tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() != Some("1") {
+        return Ok(false);
+    }
+    if !tail_is_over(tx, project, now)? {
+        return Ok(true);
+    }
+    if write {
+        persist_tail_end(tx, project)?;
+    }
+    Ok(false)
+}
+
+/// Write the end of a tail: the lanes it silences go back to "not tailed" and
+/// the declaration is marked spent — a later apply of the same line (it is
+/// still in the plan file) does not revive it.
+fn persist_tail_end(tx: &Tx<'_>, project: &str) -> GearResult<()> {
+    let mut lanes: Vec<String> = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        if tx.get_meta(&format!("lane-tail:{project}:{}", seat.name))?.as_deref() == Some("1") {
+            lanes.push(seat.name);
+        }
+    }
+    if lanes.is_empty() {
+        return Ok(());
+    }
+    lanes.sort();
+    let until = tx.get_meta(&format!("lane-tail-until:{project}"))?.unwrap_or_default();
+    let declaration = tail_declaration(&lanes, &until);
+    for lane in &lanes {
+        tx.set_meta(&format!("lane-tail:{project}:{lane}"), "0")?;
+    }
+    tx.set_meta(&format!("lane-tail-spent:{project}"), &declaration)?;
+    Ok(())
+}
+
+/// The fingerprint of a tail declaration: the lanes it silences and its end.
+/// The same declaration replayed (the line is still in the plan file) has the
+/// same fingerprint.
+fn tail_declaration(lanes: &[String], until: &str) -> String {
+    format!("{}|{}", lanes.join(","), until)
+}
+
+/// When the captain's tail ends by itself (B6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailUntil {
+    /// The tail ends when the task is over (done, failed or cancelled).
+    Task(String),
+    /// The tail ends at this moment (unix seconds).
+    At(Ts),
+}
+
+impl TailUntil {
+    /// The form the store keeps it in.
+    fn as_stored(&self) -> String {
+        match self {
+            TailUntil::Task(task) => format!("task:{task}"),
+            TailUntil::At(at) => format!("at:{at}"),
+        }
+    }
+
+    /// The form the store keeps it in, read back.
+    fn from_stored(text: &str) -> Option<TailUntil> {
+        let (kind, value) = text.split_once(':')?;
+        match kind {
+            "task" => Some(TailUntil::Task(value.to_string())),
+            "at" => value.parse().ok().map(TailUntil::At),
+            _ => None,
+        }
+    }
+
+    /// The text the captain reads (in the plan and in the apply's output).
+    pub fn as_text(&self) -> String {
+        match self {
+            TailUntil::Task(task) => format!("until={task}"),
+            TailUntil::At(at) => format!("until={}", rfc3339(*at)),
+        }
+    }
+}
+
+/// The tail's end, when it has one.
+pub fn tail_until(tx: &Tx<'_>, project: &str) -> GearResult<Option<TailUntil>> {
+    Ok(tx
+        .get_meta(&format!("lane-tail-until:{project}"))?
+        .and_then(|text| TailUntil::from_stored(&text)))
+}
+
+/// Whether the tail is over: its end has come (B6).
+fn tail_is_over(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<bool> {
+    let Some(until) = tail_until(tx, project)? else {
+        return Ok(false);
+    };
+    match until {
+        // The task the tail waits for is over: done, failed or cancelled. A
+        // task that failed can be reworked by a new attempt, but the wait is
+        // over — the captain decides what happens next.
+        TailUntil::Task(task) => Ok(match tx.get_task(project, &task)? {
+            Some(row) => matches!(row.state, TaskState::Done | TaskState::Failed | TaskState::Cancelled),
+            // A task that does not exist will never be done.
+            None => true,
+        }),
+        TailUntil::At(at) => Ok(now >= at),
+    }
+}
+
+/// The lanes the captain's tail silences right now (B5: the apply says which
+/// ones, so a lane that gets no warning is not a mystery). The end of a tail
+/// that has ended is written here, so the apply's path ends it too.
+pub fn tailed_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String>> {
+    let mut tailed = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        if lane_in_tail_now(tx, project, &seat.name, now, true)? {
+            tailed.push(seat.name);
+        }
+    }
+    Ok(tailed)
+}
+
+/// The wall clock, for the callers that have none. A tail's deadline is a
+/// wall-clock stamp, so the wall clock is the clock it is compared with.
+fn wall_clock() -> Ts {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// A lane that is about to stand idle after an apply (T-58, ops/lessons.md 7a).
@@ -1304,7 +1941,7 @@ impl IdleLane {
 /// one — and stands idle when there is none.
 ///
 /// Read-only: the apply is not changed by this, the captain is only told.
-pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
+pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLane>> {
     let tasks = tx.tasks_of_project(project)?;
     let done: BTreeSet<&str> = tasks
         .iter()
@@ -1318,8 +1955,9 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
         {
             continue;
         }
-        // The captain's tail: these lanes may stand idle (design/05).
-        if lane_in_tail(tx, project, &seat.name)? {
+        // The captain's tail: these lanes may stand idle (design/05). The
+        // read does not end a tail (the apply's path does).
+        if lane_in_tail_at(tx, project, &seat.name, now)? {
             continue;
         }
         let lane_tasks: Vec<&TaskRow> = tasks
@@ -1364,12 +2002,29 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<IdleLane>> {
 
 /// `# Decisions` / `- tail: heat wire` replaces the named tail lanes;
 /// `- tail: -` clears the declaration. Omitted declarations keep the state.
+///
+/// The tail can end by itself (B6): `- tail: heat until=T-12` (the tail ends
+/// when T-12 is over) or `- tail: heat until=2026-10-26T18:00:00Z` (at that
+/// time). The end belongs to the declaration: a tail without one lasts until
+/// the captain clears it.
 fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<()> {
     for decision in &draft.decisions {
-        let Some(names) = decision.strip_prefix("tail:") else { continue; };
-        let names = names.trim();
-        let lanes: BTreeSet<_> = names.split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|s| !s.is_empty()).collect();
+        let Some(rest) = decision.strip_prefix("tail:") else { continue; };
+        let mut lanes: BTreeSet<String> = BTreeSet::new();
+        let mut until: Option<TailUntil> = None;
+        for token in rest.split(|c: char| c.is_whitespace() || c == ',') {
+            if token.is_empty() {
+                continue;
+            }
+            if let Some(value) = token.strip_prefix("until=") {
+                if until.is_some() {
+                    return Err(bad(1, "tail: takes one `until=`"));
+                }
+                until = Some(parse_tail_until(value)?);
+                continue;
+            }
+            lanes.insert(token.to_string());
+        }
         if lanes.is_empty() {
             return Err(bad(1, "tail: needs lane names, or - to clear"));
         }
@@ -1382,12 +2037,196 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
         if lanes.contains("-") && lanes.len() != 1 {
             return Err(bad(1, "tail: - cannot be combined with lane names"));
         }
+        // The end of the tail: a task that must be over, or a moment.
+        if let Some(TailUntil::Task(task)) = &until {
+            if tx.get_task(project, task)?.is_none() {
+                return Err(bad(1, format!("tail: unknown task {task}")));
+            }
+        }
+        if lanes.contains("-") && until.is_some() {
+            return Err(bad(1, "tail: - clears the tail, it takes no `until=`"));
+        }
+        let until_stored = until.as_ref().map(TailUntil::as_stored).unwrap_or_default();
+        // The same declaration, replayed (its line is still in the plan file),
+        // must not revive a tail that has already ended: only a genuinely new
+        // declaration resets it.
+        let declaration = tail_declaration(&lanes.iter().cloned().collect::<Vec<_>>(), &until_stored);
+        let spent = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+        let spent = spent == declaration;
         for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
             tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-                if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
+                if spent { "0" } else if lanes.contains(seat.name.as_str()) { "1" } else { "0" })?;
         }
+        if !spent {
+            tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
+        }
+        tx.set_meta(&format!("lane-tail-until:{project}"), &until_stored)?;
     }
     Ok(())
+}
+
+/// The end of a tail: a task id or an RFC3339 moment.
+fn parse_tail_until(value: &str) -> GearResult<TailUntil> {
+    let is_task = match value.strip_prefix("T-") {
+        Some(number) => !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    };
+    if is_task {
+        return Ok(TailUntil::Task(value.to_string()));
+    }
+    match parse_rfc3339(value) {
+        Some(at) => Ok(TailUntil::At(at)),
+        None => Err(bad(
+            1,
+            format!("tail: `until=` needs a task id or an RFC3339 time, got {value:?}"),
+        )),
+    }
+}
+
+/// An RFC3339 moment (`2026-10-26T18:00:00Z`, with an optional `+HH:MM` or
+/// `-HH:MM` offset) as unix seconds. `None` when the text is not one.
+///
+/// No time library: the civil date is counted from the Unix epoch, the same
+/// way [`utc_date`] counts back.
+pub fn parse_rfc3339(text: &str) -> Option<Ts> {
+    let text = text.trim();
+    let (date, time) = text.split_once(['T', 't', ' '])?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    // The day must exist in that month: 2026-02-31 is not a date, and
+    // counting it as one would end the tail in March.
+    if date_parts.next().is_some()
+        || !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+    {
+        return None;
+    }
+    // The zone: `Z`, `+HH:MM`, `-HH:MM` or nothing (UTC).
+    let (clock, zone) = match time.find(['+', '-']) {
+        Some(at) => (&time[..at], &time[at..]),
+        None => {
+            // The zone may be the `Z` at the end: it is not part of the clock.
+            let clock = time
+                .strip_suffix('Z')
+                .or_else(|| time.strip_suffix('z'))
+                .unwrap_or(time);
+            (clock, "Z")
+        }
+    };
+    let mut clock_parts = clock.split(':');
+    let hour: i64 = clock_parts.next()?.parse().ok()?;
+    let minute: i64 = clock_parts.next().unwrap_or("0").parse().ok()?;
+    // The seconds, with an optional fraction (`18:00:00.123`).
+    let (seconds_text, fraction) = match clock_parts.next() {
+        Some(text) => match text.split_once('.') {
+            Some((seconds, fraction)) => (seconds, Some(fraction)),
+            None => (text, None),
+        },
+        None => ("0", None),
+    };
+    let second: i64 = seconds_text.parse().ok()?;
+    if clock_parts.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    // The fraction: digits only, and a nonzero one rounds the moment up to the
+    // next second — the tail must not end before the instant the captain
+    // named.
+    let mut second = second;
+    if let Some(fraction) = fraction {
+        if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        if fraction.bytes().any(|byte| byte != b'0') {
+            second += 1;
+        }
+    }
+    let offset = match zone {
+        "Z" | "z" => 0,
+        _ => {
+            let sign = match zone.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let (hours, minutes) = zone[1..].split_once(':')?;
+            let hours: i64 = hours.parse().ok()?;
+            let minutes: i64 = minutes.parse().ok()?;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset)
+}
+
+/// The civil date of a moment as `YYYY-MM-DDTHH:MM:SSZ` (the inverse of
+/// [`parse_rfc3339`]).
+fn rfc3339(ts: Ts) -> String {
+    let days = ts.div_euclid(86_400);
+    let seconds = ts.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
+/// The days in a month of a year (0 for a month that does not exist).
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// The days since the Unix epoch of a civil date (Howard Hinnant's civil
+/// calendar algorithms).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = floor_div(year, 400);
+    let year_of_era = year - era * 400;
+    let month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The civil date of a number of days since the Unix epoch.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = floor_div(z, 146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// The floor of a division (Rust's `/` truncates towards zero).
+fn floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b;
+    if a % b != 0 && (a < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    }
 }
 
 /// Fix the departure of every milestone that has tasks and no departure yet:
@@ -1519,6 +2358,7 @@ fn cancel_task(
     let lane_seat = format!("{project}:{lane}");
     if closed && tx.get_seat(&lane_seat)?.is_some() {
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("{}:cancel", task.id),
             task: Some(task.id.clone()),
@@ -1536,6 +2376,129 @@ fn cancel_task(
         })?;
     }
     Ok(())
+}
+
+
+/// The voyage a plan is for: the last milestone block of the file (the
+/// current one). A plan with no milestone block — a decisions-only or
+/// staff-only apply — belongs to the voyage the project is in, the one that
+/// departed last (the same rule the config logging uses).
+fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
+    if let Some((header, _)) = draft.milestones.last() {
+        return Ok(crate::draft::milestone_parts(header).0.to_string());
+    }
+    current_voyage(tx, project)
+}
+
+/// The voyage the project is in: the one that departed last.
+pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
+    let mut latest: Option<(Ts, String)> = None;
+    for voyage in tx.voyages_of_project(project)? {
+        let Some(departure) = voyage.departure else { continue };
+        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
+            latest = Some((departure, voyage.milestone));
+        }
+    }
+    Ok(latest.map(|(_, milestone)| milestone).unwrap_or_default())
+}
+
+/// Record a decision of the captain (§7.3): the line as it was written, its
+/// parts, and its key — the sha256 of the line with its whitespace collapsed.
+/// A line that is already in the log is skipped, and an edited line is a new
+/// decision (the table is append-only).
+fn record_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    line: &str,
+    decision: &crate::decision::Decision,
+    now: Ts,
+) -> GearResult<()> {
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key(line),
+        voyage: voyage.to_string(),
+        at: if decision.at.is_empty() {
+            crate::decision::apply_time(now)
+        } else {
+            decision.at.clone()
+        },
+        kind: decision.kind.clone(),
+        what: decision.what.clone(),
+        why: decision.why.clone(),
+        alt: decision.alt.clone(),
+        changes: decision.changes.clone(),
+        star: decision.star,
+        source: "plan".to_string(),
+        line: Some(line.to_string()),
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// Record an entry GEAR writes itself (§7.4): the event, its kind and what it
+/// was about. The key is the sha256 of the entry's own text, so the same event
+/// is recorded once.
+fn record_gear_decision(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: &str,
+    version: i64,
+    kind: &str,
+    what: &str,
+    why: Option<String>,
+    event: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let text = format!("{kind}|{event}|{what}|{}", why.clone().unwrap_or_default());
+    tx.insert_decision_if_new(&gear_store::NewDecision {
+        project: project.to_string(),
+        key: crate::decision::key_of(&text),
+        voyage: voyage.to_string(),
+        at: crate::decision::apply_time(now),
+        kind: kind.to_string(),
+        what: what.to_string(),
+        why,
+        alt: None,
+        changes: None,
+        // GEAR's own entries are never starred (§7.2).
+        star: false,
+        source: "gear".to_string(),
+        line: None,
+        plan_version: Some(version),
+    })?;
+    Ok(())
+}
+
+/// The text of a staff line as the captain wrote it (§7.4: the `staff`
+/// entry's "what" is the line).
+fn staff_text(item: &StaffItem) -> String {
+    match item {
+        StaffItem::Temp { id, task, .. } => format!("temp {id} task={task}"),
+        StaffItem::Park { lane, until, until_task, .. } => match (until, until_task) {
+            (Some(until), _) => format!("park {lane} until={until}"),
+            (_, Some(task)) => format!("park {lane} until-task={task}"),
+            _ => format!("park {lane}"),
+        },
+        StaffItem::Hold { lane, reason, .. } => format!("hold {lane} reason={reason}"),
+        StaffItem::Retire { lane, .. } => format!("retire {lane}"),
+        StaffItem::Retry { lane, .. } => format!("retry {lane}"),
+        StaffItem::Release { name, .. } => format!("release {name}"),
+        StaffItem::Remerge { task, .. } => format!("remerge {task}"),
+        StaffItem::Rebind { lane, repo, owns, .. } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+    }
+}
+
+/// The why of the decision line that names this task (§7.4: the `cut` entry's
+/// why is the one the captain wrote, or `(no why written)`).
+///
+/// A whole identifier only: `T-1` does not name `T-10`.
+fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<String> {
+    decisions
+        .iter()
+        .filter(|decision| crate::decision::names_task(&decision.what, task))
+        .find_map(|decision| decision.why.clone())
 }
 
 /// The departure is fixed when the milestone gets its first task: the time of
@@ -1640,6 +2603,17 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if let Some(minutes) = row.estimate_min {
         text.push_str(&format!("Estimate: {minutes} minutes\n"));
     }
+    // The round's budget (design §5.1) and what a hand-in past it must carry
+    // (design §6.2): the friction report is then required.
+    if let Some(n) = open_n {
+        let role = if n >= 2 { "rework" } else { "dev" };
+        let budget = tx.round_budget_min(project, task, n, role, None)?;
+        text.push_str(&format!(
+            "Budget: {budget} min. Past it, your hand-in must carry --friction \"…\" \
+             (a permission you lacked and worked around, a test or build that took far too long, \
+             an unclear contract, a missing tool or fixture, a step that cost much time).\n"
+        ));
+    }
     // The project standard (T-84): the writer judges against it too.
     if let Some(line) = crate::standard::line_for(tx, project)? {
         text.push_str(&line);
@@ -1704,6 +2678,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     if row.contract_version > adopted {
         text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
     }
+    text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     Ok(text)
 }
 
@@ -1731,4 +2706,17 @@ fn failed_round_of(
         note(verdict.attempt, verdict.passed);
     }
     Ok(failed)
+}
+
+#[cfg(test)]
+mod tail_time_tests {
+    use super::parse_rfc3339;
+
+    #[test]
+    fn parses() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339("2026-10-26T18:00:00Z"), Some(1793037600));
+        assert_eq!(parse_rfc3339("2026-10-26T18:00:00+01:00"), Some(1793037600 - 3600));
+        assert_eq!(parse_rfc3339("tomorrow"), None);
+    }
 }

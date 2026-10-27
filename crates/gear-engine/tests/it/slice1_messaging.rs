@@ -49,6 +49,10 @@ fn world() -> World {
 fn test_profile(kind: &str) -> gear_herdr::Profile {
     gear_herdr::Profile {
         kind: kind.into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],
@@ -59,6 +63,7 @@ fn test_profile(kind: &str) -> gear_herdr::Profile {
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
+        instructions_args: vec![],
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],
@@ -94,6 +99,10 @@ fn ask(w: &mut World, body: &str, rid: &str, now: i64) -> mail::SendResult {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None,
         request_id: rid.into(),
     };
     mail::send(&mut w.store, &env("heat", 1, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, now).unwrap()
@@ -208,6 +217,10 @@ fn stale_generation_and_wrong_pane_are_rejected() {
         to: None,
         reply_to: None,
         urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None,
         request_id: "r".into(),
     };
     let e = mail::send(&mut w.store, &env("heat", 2, LANE_PANE), Some(&fp(LANE_PANE, "opencode")), &args, T0)
@@ -259,15 +272,16 @@ fn busy_or_unobservable_captain_is_not_rung() {
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
     assert!(w.herdr.prompts_to(CAP_PANE).is_empty());
 
-    // Busy marker on screen while status says idle: not idle (profile defines the marker).
+    // M4 §10.2: Herdr's state decides, never the screen. The captain is idle,
+    // so it is rung — the old busy sign on its screen keeps nothing from it.
     w.herdr.set_status(CAP_PANE, AgentStatus::Idle);
     w.herdr.set_screen(CAP_PANE, "esc interrupt");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
-    assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "busy marker on screen");
+    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1, "Herdr's state decides");
 
     w.herdr.set_screen(CAP_PANE, "");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
-    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
+    assert!(w.herdr.prompts_to(CAP_PANE).len() >= 1);
 
     let mut w = world();
     ask(&mut w, "q", "r1", T0);

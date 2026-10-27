@@ -72,7 +72,7 @@ confirm_rounds = 2
 
 /// The engine's configuration: the built-ins plus the project's own profiles.
 fn cfg(config_text: &str) -> (EngineCfg, BTreeMap<String, Profile>) {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
     for (name, profile) in gear_herdr::builtins() {
         c.profiles.insert(name, profile);
     }
@@ -135,6 +135,10 @@ fn active_world(config_text: &str) -> Store {
             testing::seed_active_seat(tx, "toy", "heat", SeatRole::Lane, PANE, "pi", T0)?;
             testing::seed_active_seat(tx, "toy", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "toy".into(),
                 id: "T-1".into(),
                 rank: 1,
@@ -192,7 +196,7 @@ fn closing_calls(herdr: &FakeHerdr) -> Vec<String> {
     herdr.calls
         .iter()
         .filter_map(|call| match call {
-            Call::Prompt { pane, text } if pane == PANE => Some(format!("command:{text}")),
+            Call::Prompt { pane, text, .. } if pane == PANE => Some(format!("command:{text}")),
             Call::SendKeys { pane, keys } if pane == PANE => {
                 Some(format!("keys:{}", keys.join("+")))
             }
@@ -259,6 +263,8 @@ fn a_pi_lane_starts_with_its_model() {
         starts[0].2,
         vec![
             "--approve".to_string(),
+            "--append-system-prompt".to_string(),
+            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
         ],
@@ -311,6 +317,8 @@ fn a_pi_lane_starts_with_the_arguments_of_its_chain_entry() {
         starts[0].2,
         vec![
             "--approve".to_string(),
+            "--append-system-prompt".to_string(),
+            std::path::Path::new(&cfg.db_path).parent().unwrap().join("rules/lane.md").to_string_lossy().into_owned(),
             "--model".to_string(),
             FIRST.to_string(),
             "--thinking".to_string(),
@@ -427,4 +435,22 @@ fn an_exhausted_chain_parks_the_pi_lane() {
     );
     // Nothing was closed: the agent stays until the chain has an entry again.
     assert!(agent_starts(&herdr).is_empty(), "no restart: {starts:?}", starts = agent_starts(&herdr));
+}
+
+#[test]
+fn pi_lane_start_injects_its_rules_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = config(&format!("\"{FIRST}\""));
+    let (mut cfg, _) = cfg(&text);
+    cfg.db_path = dir.path().join("gear.db").to_string_lossy().into();
+    let mut store = queued_world(&text);
+    let mut herdr = FakeHerdr::new();
+    assert_eq!(gear_engine::onboard::onboard_queued(&mut store, &mut herdr, &cfg, T0+1).unwrap(), vec!["toy:heat"]);
+    let starts = agent_starts(&herdr);
+    let args = &starts[0].2;
+    let path = dir.path().join("rules/lane.md");
+    assert!(args.windows(2).any(|w| w[0] == "--append-system-prompt" && w[1] == path.to_string_lossy()));
+    let rules = std::fs::read_to_string(path).unwrap();
+    assert!(rules.starts_with(include_str!("../../../../skills/gear/references/rules/lane.md").trim_end()));
+    assert!(rules.ends_with("Voyage done: -\nBar: -\n"));
 }

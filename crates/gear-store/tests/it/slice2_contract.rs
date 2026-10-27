@@ -14,6 +14,10 @@ fn store() -> Store {
 
 fn task(id: &str, rank: i64) -> TaskRow {
     TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(), id: id.into(), rank, state: TaskState::Ready, priority: "must".into(),
         lane: Some("heat".into()), milestone: None, required: true, contract_version: 1,
         deps: vec!["T-0".into()], followup_of: None, wait_on: None, wait_cond: None,
@@ -23,6 +27,10 @@ fn task(id: &str, rank: i64) -> TaskRow {
 
 fn attempt(t: &str, n: i64, seat: &str, state: AttemptState) -> AttemptRow {
     AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: "p".into(), task: t.into(), n, seat: seat.into(), generation: 1,
         contract_version: 1, adopted_version: 1, pending_update: None, state,
         candidate: None, report: None, safe_point: None, started: NOW, updated: NOW,

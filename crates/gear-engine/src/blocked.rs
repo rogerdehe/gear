@@ -69,14 +69,27 @@ pub fn check(tx: &Tx<'_>, project: &str, observed: &[SeatObs], now: Ts) -> GearR
         if now - since <= BLOCKED_S {
             continue; // not blocked for long enough yet
         }
-        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
-            continue; // this blocked spell already has its item
-        }
         let Some(captain) = tx.captain_of(project)? else {
             continue; // no captain: nobody to tell
         };
         let screen = obs.screen.as_deref().unwrap_or_default().trim();
+        if tx.get_meta(&format!("{key}:alert"))?.is_some_and(|s| !s.is_empty()) {
+            if !crate::attention::due(tx, project, &thread(&seat.id), &captain.id, now)? {
+                if let Some(id) = tx.get_meta(&format!("{key}:alert"))? {
+                    if let Some(item) = tx.get_message(project, &id)? {
+                        let screen = obs.screen.as_deref().unwrap_or_default().trim();
+                        let body = format!("seat {} has been blocked for more than {BLOCKED_S} seconds: its agent waits on a dialog and cannot work. Look at its pane, answer the dialog (or restart the agent), then resolve this item. Last screen lines:\n{}", seat.name, screen);
+                        if matches!(item.state, MsgState::Open | MsgState::Waiting) && item.body != body {
+                            tx.update_message_body(project, &item.id, &body)?;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
         let message = tx.insert_message(&NewMessage {
+            meta: None,
             project: project.into(),
             thread: thread(&seat.id),
             task: None,

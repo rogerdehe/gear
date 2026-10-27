@@ -43,6 +43,10 @@ quota_reset_h = 1
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "claude", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-1".into(),
                 rank: 1,
@@ -78,9 +82,11 @@ quota_reset_h = 1
     herdr.add_agent(CAP, "claude", AgentStatus::Idle);
     herdr.add_agent(LANE, "opencode", AgentStatus::Idle);
     let mut cfg = EngineCfg::default();
+    cfg.review_git = std::sync::Arc::new(crate::FakeReviewGit);
     for kind in ["claude", "opencode", "codex"] {
         let mut profile = gear_herdr::builtin(kind).unwrap();
         profile.confirm_rounds = 1;
+        if kind == "opencode" { profile.new_session.clear(); }
         cfg.profiles.insert(kind.into(), profile);
     }
     (store, herdr, cfg)
@@ -162,7 +168,13 @@ fn current_work_can_continue_and_hand_in_but_the_next_task_waits() {
         .unwrap();
     herdr.set_screen(CAP, &screen(100));
     tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
-    assert!(herdr.prompts_to(LANE)[0].starts_with("Continue T-1"));
+    // T-150 (design §10.3): the attempt already started — the lane got its
+    // packet and checked in — so the engine sends no second one.
+    assert!(
+        herdr.prompts_to(LANE).is_empty(),
+        "no second packet: {:?}",
+        herdr.prompts_to(LANE)
+    );
     store
         .write(|tx| {
             tx.insert_view(&ViewRecord {
@@ -180,7 +192,7 @@ fn current_work_can_continue_and_hand_in_but_the_next_task_waits() {
         })
         .unwrap();
     tick(&mut store, &mut herdr, &cfg, T0 + 30).unwrap();
-    assert_eq!(herdr.prompts_to(LANE).len(), 1);
+    assert_eq!(herdr.prompts_to(LANE).len(), 0, "the captain is on quota: the next task waits");
     assert_eq!(
         store
             .read(|tx| tx.get_task("p", "T-2"))
@@ -207,20 +219,11 @@ fn a_handed_in_task_still_gets_its_reviewer() {
         })
         .unwrap();
     herdr.set_screen(CAP, &screen(100));
-    tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
-    let token = store
-        .read(|tx| tx.get_meta("engine.review_checkout.p:review-1.1"))
-        .unwrap()
-        .unwrap();
+    let report = tick(&mut store, &mut herdr, &cfg, T0 + 10).unwrap();
     let binding = store
         .read(|tx| tx.get_binding("p:review-1", 1))
         .unwrap()
         .unwrap();
-    herdr.set_screen(
-        &binding.pane_id,
-        &format!("GEAR_CK_OK_{token}_abc1234_review/t1"),
-    );
-    let report = tick(&mut store, &mut herdr, &cfg, T0 + 20).unwrap();
     assert_eq!(report.reviewers, vec!["p:review-1"]);
     assert!(herdr
         .prompts_to(&binding.pane_id)

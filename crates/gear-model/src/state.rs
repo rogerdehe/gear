@@ -173,6 +173,17 @@ impl SeatState {
                     | (Starting, Active | Unknown | Queued)
                     | (Unknown, Active | Released | NeedsCheck)
                     | (Active, Releasing | Missing | NeedsCheck)
+                    // Design §3.6: a reviewer that handed in its verdict
+                    // waits for the next one: its agent stays alive, its pane
+                    // stays open, and its job binding ends.
+                    | (Active, Standby)
+                    // The idle reviewers the rule releases (and the captain's
+                    // `- release <reviewer>`) go on their way out.
+                    | (Standby, Releasing)
+                    // A reviewer that is still starting and whose job is gone
+                    // is cancelled: its start op is voided, its pane closed,
+                    // the seat free (B03-05).
+                    | (Starting, Released)
                     | (Releasing, Released | Unknown)
                     | (Released, Starting | Retired)
                     | (Missing, Starting | NeedsCheck | Retired)
@@ -204,6 +215,11 @@ impl OpState {
             (self, to),
             (Intended, Executing | Void)
                 | (Executing, Submitted | Failed | Unknown)
+                // T-149 (design §10.1): an op whose text was never typed — the
+                // agent had lost its name (it was renamed) or the pane could
+                // not be read — goes back to Intended: the next tick tries it
+                // again, and nothing is restarted.
+                | (Executing, Intended)
                 | (Submitted, Confirmed | Failed)
                 | (Unknown, Confirmed | Failed)
         )

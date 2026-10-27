@@ -64,6 +64,7 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         // would ever ring for it — M2 sat finished for 36 h (L-78).
         if left == 0 && done > 0 && tx.get_meta(&format!("{key}:land"))?.is_none() {
             let message = tx.insert_message(&NewMessage {
+                meta: None,
                 project: project.into(), thread: format!("station:{}", report.milestone),
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
@@ -78,15 +79,21 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         }
         if crossed.is_empty() { continue; }
         let pace = report.pace().map(|p| format!("{p:.2}x")).unwrap_or_else(|| "-".into());
-        let slowest = report.slowest.as_ref().map(|(id, min)| format!("{id} {min}m"))
+        // The lane that sets the finish is named (§10.7 row B4): the
+        // slowest task alone does not say which lane holds the voyage back.
+        let slowest = report
+            .slowest_lane
+            .as_ref()
+            .map(|(lane, min)| format!("{lane} {min}m"))
             .unwrap_or_else(|| "-".into());
         let body = format!(
-            "Station {} [{}] · elapsed {} / eta {} · pace {pace} · projected finish {} from departure · tasks left {left} ({}) · slowest {slowest}",
+            "Station {} [{}] · elapsed {} / eta {} · pace {pace} · projected finish {} from departure · tasks left {left} ({}) · slowest lane {slowest}",
             report.milestone, crossed.join(", "), minutes(report.elapsed_min),
             report.eta.as_deref().unwrap_or("-"), minutes(report.projected_min),
             minutes(report.remaining_estimate_min),
         );
         let message = tx.insert_message(&NewMessage {
+            meta: None,
             project: project.into(), thread: format!("station:{}", report.milestone),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,

@@ -13,17 +13,21 @@ mod captain_handover_contract;
 mod captain_take_contract;
 mod config_change_contract;
 mod config_contract;
+mod decision_contract;
 mod draft_contract;
 mod github_contract;
 mod home_task_contract;
+mod integrated_by_contract;
 mod kickoff_contract;
 mod packet_contract;
 mod plan_apply_contract;
+mod plan_fields_contract;
 mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
 mod result_contract;
 mod review_contract;
+mod reviewer_mail_contract;
 mod seats_contract;
 mod settle_review_contract;
 mod tasks_contract;
@@ -33,6 +37,7 @@ mod verdict_item_contract;
 mod voyage_contract;
 mod standard_contract;
 mod station_contract;
+mod tail_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about

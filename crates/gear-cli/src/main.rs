@@ -29,7 +29,9 @@ struct Cli {
 enum Cmd {
     /// Report: progress | question | result | instruction | review.
     Send(SendCmd),
-    /// Captain: handle exact message ids.
+    /// Captain: handle exact message ids. Without a mode the item is
+    /// resolved (the default) and its sender is answered; `--wait`, `--note`
+    /// and `--reopen` are the other modes.
     Reply(ReplyCmd),
     /// Captain: plan operations.
     Plan {
@@ -49,6 +51,8 @@ enum Cmd {
     },
     /// User: run the engine loop (plugin pane entrypoint).
     Run,
+    /// Captain: the friction reports (design §6).
+    Friction(FrictionCmd),
     /// User: project/seat administration.
     Admin {
         #[command(subcommand)]
@@ -59,6 +63,9 @@ enum Cmd {
         #[command(subcommand)]
         op: CaptainOp,
     },
+    /// Who am I: the pane this call runs in, the seat bound to it, the store,
+    /// and why a claim fails (design §10.7, row B9).
+    Whoami,
 }
 
 #[derive(Subcommand, Debug)]
@@ -79,7 +86,7 @@ enum CaptainOp {
     },
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 struct SendCmd {
     #[arg(long)]
     kind: String,
@@ -107,6 +114,20 @@ struct SendCmd {
     /// Review only: the ids of the findings that block (T-23), comma separated.
     #[arg(long)]
     blocking: Option<String>,
+    /// Progress only (design §5.2): the minutes the lane says are left.
+    #[arg(long, value_name = "MIN")]
+    left: Option<i64>,
+    /// Progress only (design §5.2): what stops the lane ("none" when nothing
+    /// does).
+    #[arg(long, value_name = "TEXT")]
+    blocker: Option<String>,
+    /// Blocked only (design §5.3): the task the lane waits for.
+    #[arg(long, value_name = "T-N")]
+    on: Option<String>,
+    /// Result/review only (design §6.1): what cost you time that the captain
+    /// could fix.
+    #[arg(long, value_name = "TEXT")]
+    friction: Option<String>,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -122,7 +143,8 @@ struct ReplyCmd {
     /// Message ids to handle (M-…).
     #[arg(required = true)]
     ids: Vec<String>,
-    /// Close the item; the text is answered to its sender when that is a live seat.
+    /// Close the item; this is the default. The text is answered to its
+    /// sender when that is a live seat.
     #[arg(long, conflicts_with_all = ["wait", "note"])]
     resolve: bool,
     /// Keep the item waiting until WHO can answer; the text is answered to its
@@ -134,6 +156,10 @@ struct ReplyCmd {
     /// Keep the item open with the text as the captain's record on it; sent to nobody.
     #[arg(long)]
     note: bool,
+    /// Reopen an item that was resolved by mistake: it goes back to the
+    /// captain's inbox. Nothing is sent to the seat that asked.
+    #[arg(long, conflicts_with_all = ["resolve", "wait", "note"])]
+    reopen: bool,
     #[arg(long)]
     downgrade: bool,
     #[arg(long = "request-id")]
@@ -176,6 +202,30 @@ enum ReportOp {
         /// Only this voyage (milestone), e.g. M2.
         #[arg(long)]
         voyage: Option<String>,
+    },
+}
+
+/// `gear friction`: the friction reports of the project (design §6.3, §6.4).
+#[derive(Args, Debug)]
+struct FrictionCmd {
+    /// What the captain did about a report.
+    #[command(subcommand)]
+    op: Option<FrictionOp>,
+    /// Include the closed reports too.
+    #[arg(long)]
+    all: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum FrictionOp {
+    /// Close a report: `gear friction close F-<n> -m "<outcome>"`.
+    Close {
+        /// The report's id (F-<n>).
+        id: String,
+        /// What the captain did: fixed (what), lesson (which), not worth it
+        /// (why).
+        #[arg(long, short)]
+        message: String,
     },
 }
 
@@ -258,6 +308,7 @@ fn run(cli: Cli) -> GearResult<()> {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
         },
         Some(Cmd::Run) => cmd_run(),
+        Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
         Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -268,6 +319,7 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_captain_handover(&pane, cli.json)
         }
         Some(Cmd::Captain { op: CaptainOp::Take { project } }) => cmd_captain_take(project.as_deref(), cli.json),
+        Some(Cmd::Whoami) => cmd_whoami(cli.json),
     }
 }
 
@@ -293,6 +345,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
             | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
             | Some(Cmd::Board { .. })
             | Some(Cmd::Report { .. })
+            | Some(Cmd::Whoami)
             | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
             | Some(Cmd::Captain { .. })
     )
@@ -691,6 +744,81 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
         herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
 }
 
+/// `gear whoami`: who this call is (design §10.7, row B9) — the pane it
+/// really runs in, the seat bound to it, the store it would write to, and why
+/// a claim fails.
+///
+/// It only reads: no engine, no write.
+fn cmd_whoami(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    // `whoami` takes the ancestry in the signed form of the packet.
+    let ancestors: Vec<i32> = gear_app::identity::process_ancestors()
+        .into_iter()
+        .map(|pid| pid as i32)
+        .collect();
+    let who = gear_app::identity::whoami(&mut store, &env, &mut herdr, &ancestors);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "pane": who.pane,
+                "seat": who.seat,
+                "store": who.store,
+                "reason": who.reason,
+            })
+        );
+        return Ok(());
+    }
+    print!("{who}");
+    Ok(())
+}
+
+/// `gear friction`: the friction reports of the project (design §6.3, §6.4) —
+/// what cost a lane or a reviewer time that the captain could fix, and what
+/// the captain did about it.
+fn cmd_friction(c: FrictionCmd, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_friction(&mut store, &env, &mut herdr, &c, now_ts())?;
+    if json {
+        println!("{}", serde_json::json!({ "friction": out }));
+        return Ok(());
+    }
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear friction` body, over injected state.
+fn run_friction(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    c: &FrictionCmd,
+    now: i64,
+) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "the friction reports are the captain's: run gear in the captain's pane",
+            )
+        })?;
+    match &c.op {
+        Some(FrictionOp::Close { id, message }) => {
+            let fp = observe_identity(store, env, herdr)?;
+            gear_app::friction::close(store, env, fp.as_ref(), &project, id, message, now)
+        }
+        None => gear_app::friction::list(store, &project, c.all),
+    }
+}
+
 /// `gear report time`: where the time went (T-38). The captain's view of the
 /// project's time accounting: per task and per voyage — estimate, dev time,
 /// review time, the wait for the captain, merge time, rework rounds and their
@@ -1083,14 +1211,26 @@ fn run_plan(
     })?;
     let draft = gear_app::draft::parse(&text)?;
     let fp = observe_identity(store, env, herdr)?;
-    // T-133 (review F1): a `- release` line must know whether the lane's agent
-    // is really in its pane, and only the session can say so. The agents are
-    // read here, before the write transaction (Herdr is never touched inside
-    // one); a read that fails refuses the apply rather than guessing.
-    let releasing = draft
-        .staff
-        .iter()
-        .any(|item| matches!(item, gear_app::draft::StaffItem::Release { .. }));
+    // T-133 (review F1): a `- release` of a **lane** must know whether the
+    // lane's agent is really in its pane, and only the session can say so. The
+    // agents are read here, before the write transaction (Herdr is never
+    // touched inside one); a read that fails refuses the apply rather than
+    // guessing. A `- release` of a **reviewer** needs no session fact (T-140):
+    // its seat is idle or it is refused, and the agents say nothing about that.
+    let releasing = draft.staff.iter().any(|item| {
+        let gear_app::draft::StaffItem::Release { name, .. } = item else {
+            return false;
+        };
+        let Some(project) = env.ctx.as_ref().map(|ctx| ctx.project.clone()) else {
+            return false;
+        };
+        store
+            .read(|tx| tx.get_seat(&format!("{project}:{name}")))
+            .ok()
+            .flatten()
+            .map(|seat| seat.role == gear_model::SeatRole::Lane)
+            .unwrap_or(false)
+    });
     let agents = if releasing {
         Some(herdr.agents().map_err(|e| {
             GearError::new(
@@ -1117,8 +1257,16 @@ fn run_plan(
     // The file is the voyage's plan: after a successful apply it is rewritten
     // in place (a temp file, then a rename) so it stays the current plan
     // (T-34): base= the applied version, each NEW block gets its id, the
-    // Verdicts section goes (verdicts live in the store).
-    let rewritten = gear_app::draft::rewrite_applied(&text, result.version, &result.created);
+    // Verdicts section goes (verdicts live in the store), and the staff
+    // lines the apply used go with it (B5: an instruction that was carried
+    // out must not be carried out again).
+    let used_staff: Vec<usize> = draft
+        .staff
+        .iter()
+        .map(gear_app::plan::staff_line)
+        .collect();
+    let rewritten =
+        gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
     write_in_place(path, &rewritten).map_err(|e| {
         GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -1129,22 +1277,45 @@ fn run_plan(
         )
     })?;
     // After a successful apply: the captain hears about a lane that would
-    // stand idle (T-58, ops/lessons.md 7a). Printed only — the apply itself
-    // is unchanged.
-    let warnings: Vec<String> = store
-        .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project))?
-        .iter()
-        .map(|lane| lane.warning())
-        .collect();
+    // stand idle (T-58, ops/lessons.md 7a) and about the lanes his own tail
+    // silences (B5: a lane that gets no warning is not a mystery). Printed
+    // only — the apply itself is unchanged.
+    // The warnings the captain reads: the apply's own (design §7.2: a decision
+    // line that is not structured) and the lanes that would stand idle. The
+    // text and the JSON carry the same list.
+    let mut warnings: Vec<String> = result.warnings.clone();
+    warnings.extend(
+        store
+            .read(|tx| gear_app::plan::idle_lanes(tx, &draft.project, now))?
+            .iter()
+            .map(|lane| lane.warning()),
+    );
+    let (tailed, until) = store.write(|tx| {
+        let lanes = gear_app::plan::tailed_lanes(tx, &draft.project, now)?;
+        let until = gear_app::plan::tail_until(tx, &draft.project)?;
+        Ok((lanes, until))
+    })?;
     if json {
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
+        value["tailed"] = serde_json::json!(tailed);
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
-    for warning in warnings {
+    // The warnings, one list for the text and the JSON.
+    for warning in &warnings {
         lines.push('\n');
-        lines.push_str(&warning);
+        lines.push_str(warning);
+    }
+    for lane in &tailed {
+        lines.push('\n');
+        let until = until
+            .as_ref()
+            .map(|until| format!(" {}", until.as_text()))
+            .unwrap_or_default();
+        lines.push_str(&format!(
+            "tail: lane {lane} is silenced{until} (it may stand idle)"
+        ));
     }
     Ok(lines)
 }
@@ -1233,6 +1404,13 @@ fn run_send(
         to: c.to.clone(),
         reply_to: c.reply_to.clone(),
         urgent: c.urgent,
+        // The minutes left and what stops the lane (design §5.2).
+        left: c.left,
+        blocker: c.blocker.clone(),
+        // The task the lane waits for (design §5.3).
+        on: c.on.clone(),
+        // What cost time that the captain could fix (design §6.1).
+        friction: c.friction.clone(),
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
@@ -1246,7 +1424,15 @@ fn run_send(
         ring_recipient_now(store, herdr, &result, now)?
     };
     if json {
-        return serde_json::to_string(&result).map_err(json_error);
+        let mut doc = serde_json::to_value(&result).map_err(json_error)?;
+        // The answer to a hand-in travels with the receipt (design §10.7, row
+        // B03-04/10).
+        if kind == gear_model::MsgKind::Result && !result.replayed {
+            if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
+                doc["hand_in"] = serde_json::Value::String(hand_in);
+            }
+        }
+        return serde_json::to_string(&doc).map_err(json_error);
     }
     {
         let mut line = format!(
@@ -1259,8 +1445,44 @@ fn run_send(
         if result.replayed {
             line.push_str(" [replayed]");
         }
+        // The answer to a hand-in (design §10.7, row B03-04/10): the work is
+        // in, the next task comes by itself, and the task branch is not
+        // pushed again. The lane reads the line where it handed in.
+        if kind == gear_model::MsgKind::Result && !result.replayed {
+            if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
+                line.push('\n');
+                line.push_str(&hand_in);
+            }
+        }
         Ok(line)
     }
+}
+
+/// The reply a hand-in gets (design §10.7, row B03-04/10): "Handed in. End
+/// your turn: the next task comes by itself; do not push to <lane>/t<n>
+/// again."
+///
+/// The branch is the task's own: the lane that owns the task, else the seat
+/// that hands in (a lane's seat name is its lane name). `None` when the
+/// hand-in names no task.
+fn hand_in_reply(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    task: Option<&str>,
+) -> GearResult<Option<String>> {
+    let Some(task) = task else { return Ok(None) };
+    let project = env.ctx.as_ref().map(|ctx| ctx.project.clone()).unwrap_or_default();
+    let lane = store
+        .read(|tx| tx.get_task(&project, task))
+        .ok()
+        .flatten()
+        .and_then(|row| row.lane)
+        .or_else(|| env.ctx.as_ref().map(|ctx| ctx.seat.clone()))
+        .unwrap_or_default();
+    let branch = gear_app::base::task_branch(&lane, task);
+    Ok(Some(format!(
+        "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
+    )))
 }
 
 /// Type the doorbell of a message that must reach the recipient while it works
@@ -1371,20 +1593,25 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Question
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Instruction
-        | gear_model::MsgKind::Review => Ok(kind),
+        | gear_model::MsgKind::Review
+        | gear_model::MsgKind::Blocked => Ok(kind),
         _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
-                "--kind {text} is not a `gear send` kind: progress, question, result, instruction or review"
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review or blocked"
             ),
         )),
     }
 }
 
-/// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`, or
-/// `--resolve` (the default; `--downgrade` alone also means a note).
+/// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`,
+/// `--reopen`, or `--resolve` (the default; `--downgrade` alone also means a
+/// note).
 fn reply_mode(c: &ReplyCmd, now: i64) -> GearResult<(gear_app::mail::ReplyMode, Option<String>, Option<i64>)> {
     use gear_app::mail::ReplyMode;
+    if c.reopen {
+        return Ok((ReplyMode::Reopen, None, None));
+    }
     if let Some(who) = &c.wait {
         let until = c.until.as_deref().ok_or_else(|| {
             GearError::new(gear_model::ErrorCode::BadFormat, "--wait needs --until <t>".to_string())
@@ -1903,6 +2130,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-8".into(),
                     rank: 1,
@@ -1935,6 +2166,52 @@ mod tests {
         assert!(text.contains("heat · agent working · no current task · 0 queued"), "{text}");
     }
 
+    /// The world with a task the lane works on, so a hand-in goes through.
+    fn world_with_task() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
     fn send_cmd(kind: &str) -> SendCmd {
         SendCmd {
             kind: kind.into(),
@@ -1946,6 +2223,10 @@ mod tests {
             to: None,
             reply_to: None,
             urgent: false,
+            left: None,
+            blocker: None,
+            on: None,
+            friction: None,
             candidate: None,
             verdict: None,
             blocking: None,
@@ -1963,6 +2244,7 @@ mod tests {
             wait: None,
             until: None,
             note: false,
+            reopen: false,
             downgrade: false,
             request_id: Some("r-2".into()),
             message: "Use v2".into(),
@@ -2073,6 +2355,164 @@ mod tests {
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
     }
 
+    /// A task that passed and whose merge failed: the captain retries it with
+    /// `- remerge T-1`.
+    fn world_with_a_failed_merge() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&TaskRow {
+                    project: "p".into(),
+                    id: "T-1".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    updated: T0,
+                })?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "report", T0)?;
+                // The review passed: the attempt is accepted and the task done.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "all good".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0,
+                })?;
+                gear_app::tasks::settle_review(tx, "p", "T-1", 1, T0)?;
+                // The merge failed.
+                let op = tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: gear_model::OpKind::Merge,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({}),
+                    created: T0,
+                })?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("conflict"), T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// B5: a staff line the apply used is gone from the plan file. A
+    /// `- remerge T-<n>` line that was carried out must not be carried out
+    /// again — the second apply would refuse it.
+    #[test]
+    fn an_applied_remerge_line_is_gone_from_the_plan_file() {
+        let (mut store, mut herdr) = world_with_a_failed_merge();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- remerge T-1\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("remerge"), "the line is gone: {rewritten}");
+        assert!(!rewritten.contains("# Staff"), "the empty section is gone: {rewritten}");
+    }
+
+    /// B5: the apply says which lanes the captain's own tail silences, so a
+    /// lane that gets no warning is not a mystery.
+    #[test]
+    fn the_apply_prints_the_tailed_lanes() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Decisions\n- tail: heat\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 10,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            out.contains("tail: lane heat is silenced"),
+            "the tailed lane is named: {out}"
+        );
+    }
+
+    /// T-140: the captain's `- release <reviewer>` line releases a reviewer
+    /// seat in Standby, through the real command.
+    #[test]
+    fn plan_apply_releases_a_standby_reviewer() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p5", "codex", T0)?;
+                tx.set_seat_state("p:review-1", gear_model::SeatState::Standby, Some("review done"), T0 + 1)
+            })
+            .unwrap();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- release review-1\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, gear_model::SeatState::Releasing);
+    }
+
     /// T-58: after a successful apply the captain hears about a lane that
     /// would stand idle — its only queued task waits for a dependency that is
     /// not done.
@@ -2106,11 +2546,47 @@ mod tests {
         assert!(summary < warning, "the warning comes after the summary: {out}");
     }
 
-    /// The JSON output carries the same warnings.
+    #[test]
+    fn plan_apply_prints_the_tasks_a_rebind_is_waiting_for() {
+        let (mut store, mut herdr) = world_with_task();
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = r#"
+[project]
+id="p"
+repo="/repo"
+herdr_session="sess"
+[quota]
+lanes=1
+temps=0
+[captain]
+pane="w1:p1"
+kind="codex"
+profile="codex"
+[[lanes]]
+name="heat"
+duty="work"
+owns=["src/"]
+kind="opencode"
+profile="opencode"
+[[repos]]
+name="api"
+path="api"
+"#.into();
+            tx.update_project(&project)
+        }).unwrap();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
+        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+    }
+
+    /// The JSON output carries the same warnings as the text: the lanes that
+    /// would stand idle and the apply's own (design §7.2: a decision line
+    /// that is not structured).
     #[test]
     fn plan_apply_json_carries_the_warnings() {
         let (mut store, mut herdr) = world_with_waiting_dep();
-        let draft = "<!-- gear-plan project=p base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
+        let draft = "<!-- gear-plan project=p base=0 -->\n# Decisions\n- we talked about it\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: T-8\n";
         let path = write_draft(draft);
 
         let out = run_plan(
@@ -2128,9 +2604,21 @@ mod tests {
 
         let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(doc["version"], 1);
-        assert_eq!(
-            doc["warnings"][0],
-            "warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"
+        let warnings: Vec<String> = doc["warnings"]
+            .as_array()
+            .expect("the warnings")
+            .iter()
+            .map(|warning| warning.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            warnings.contains(&"warning: lane heat has nothing to start after now (1 queued behind deps: T-1)".to_string()),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("is not structured; logged as a note")),
+            "the apply's own warning is in the JSON too: {warnings:?}"
         );
     }
 
@@ -2174,6 +2662,10 @@ mod tests {
     /// A task of the project, for the plan tests.
     fn lane_task(id: &str, lane: &str, state: gear_model::TaskState, deps: &[&str]) -> TaskRow {
         TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: id.into(),
             rank: 1,
@@ -2345,6 +2837,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -2363,6 +2859,10 @@ mod tests {
                      issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
                     project: "p".into(),
                     task: "T-7".into(),
                     n: 1,
@@ -2438,6 +2938,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -2494,6 +2998,10 @@ mod tests {
             .write(|tx| {
                 testing::seed_temp_seat(tx, "p", "r-1", "T-7", TEMP_PANE, "opencode", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-7".into(),
                     rank: 1,
@@ -2628,8 +3136,11 @@ mod tests {
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
-        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
-        herdr.add_agent(LANE_PANE, lane_kind, status);
+        // Every agent carries the name of its seat (T-149: a text aims at the
+        // live agent name, and Herdr refuses a prompt to an agent that lost
+        // its name).
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Idle, "p-captain");
+        herdr.add_agent_named(LANE_PANE, lane_kind, status, "p-heat");
         (store, herdr)
     }
 
@@ -2669,7 +3180,9 @@ mod tests {
         let said = herdr.prompts_to(LANE_PANE);
         assert_eq!(said.len(), 1, "typed inside gear send: {said:?}");
         assert!(said[0].contains("M-1"), "the doorbell names the message: {said:?}");
-        assert!(said[0].contains("Run `gear` now."), "{said:?}");
+        // T-150 (design §10.4): the lane has no open attempt, so the doorbell
+        // says so and tells it to stop working on earlier things.
+        assert!(said[0].contains("You have no task now"), "{said:?}");
         assert!(out.contains("doorbell typed into"), "{out}");
 
         // The next tick sees the message covered: no second doorbell.
@@ -2749,13 +3262,14 @@ mod tests {
         );
         let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(stored.body, "stop and read this", "the message is stored all the same");
-        // The claim is recorded, and recorded as failed: a definitely refused
-        // doorbell covers nothing, so the engine rings the message (T-130 F2).
+        // The claim is recorded, and it waits: design §10.1 recovers a refused
+        // prompt by naming the agent of the seat again and typing it on the
+        // next tick (nothing is lost).
         let ops = store
             .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
             .unwrap();
         assert_eq!(ops.len(), 1, "{ops:?}");
-        assert_eq!(ops[0].state, OpState::Failed, "{ops:?}");
+        assert_eq!(ops[0].state, OpState::Intended, "{ops:?}");
 
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
         let said = herdr.prompts_to(LANE_PANE);
@@ -2797,6 +3311,725 @@ mod tests {
         let reply = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
         assert_eq!(reply.kind, MsgKind::Reply);
         assert_eq!(reply.recipient, "p:heat");
+    }
+
+    #[test]
+    fn a_reopen_reopens_a_resolved_item() {
+        // §10.7 row B03-07: an item resolved by mistake goes back to the
+        // captain's inbox.
+        let (mut store, mut herdr) = world();
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &send_cmd("question"),
+            "v1 or v2?".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        run_reply(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &reply_cmd(&["M-1"]),
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
+            MsgState::Resolved
+        );
+
+        let mut c = reply_cmd(&["M-1"]);
+        c.reopen = true;
+        c.request_id = Some("r-3".into());
+        let out = run_reply(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &c,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("M-1: open"), "{out}");
+        assert_eq!(
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
+            MsgState::Open
+        );
+        // The item is back in the captain's inbox.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 4)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+    }
+
+    #[test]
+    fn the_reply_help_says_the_default_resolves() {
+        // §10.7 row B03-07: the help says what the default does, and names
+        // the way back.
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let help = command
+            .get_subcommands_mut()
+            .find(|command| command.get_name() == "reply")
+            .expect("the reply command")
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("resolved"), "the default resolves: {help}");
+        assert!(help.contains("--reopen"), "the way back: {help}");
+    }
+
+    #[test]
+    fn a_hand_in_answers_with_the_next_task_line() {
+        // §10.7 row B03-04/10: after a hand-in the lane is told that its
+        // work is in, that the next task comes by itself and that its task
+        // branch is not pushed again.
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/tasks/T-1.md".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap();
+        assert!(
+            out.contains(
+                "Handed in. End your turn: the next task comes by itself; do not push to heat/t1 again."
+            ),
+            "{out}"
+        );
+    }
+
+    /// A lane working on T-1 (its attempt is open) and a task T-2 it can
+    /// wait for.
+    fn world_with_a_wait() -> (Store, FakeHerdr) {
+        let (mut store, herdr) = world();
+        store
+            .write(|tx| {
+                for (id, state, lane) in [
+                    ("T-1", gear_model::TaskState::Ready, "heat"),
+                    ("T-2", gear_model::TaskState::Ready, "wire"),
+                ] {
+                    tx.insert_task(&TaskRow {
+                        project: "p".into(),
+                        id: id.into(),
+                        rank: 1,
+                        state,
+                        priority: "must".into(),
+                        lane: Some(lane.into()),
+                        milestone: None,
+                        required: false,
+                        contract_version: 1,
+                        deps: vec![],
+                        followup_of: None,
+                        wait_on: None,
+                        wait_cond: None,
+                        rework_note: None,
+                        estimate_min: None,
+                        issue: None,
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
+                        updated: T0,
+                    })?;
+                    tx.insert_contract(&ContractRow {
+                        project: "p".into(),
+                        task: id.into(),
+                        version: 1,
+                        goal: "g".into(),
+                        accept: "a".into(),
+                        evidence_files: vec![],
+                        evidence_due_min: None,
+                        body: String::new(),
+                        created: T0,
+                    })?;
+                }
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+            })
+            .unwrap();
+        (store, herdr)
+    }
+
+    /// §5.2: a progress answer carries the minutes left and what stops the
+    /// lane, in the message's meta.
+    #[test]
+    fn a_progress_answer_stores_its_meta() {
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("progress");
+        c.left = Some(30);
+        c.blocker = Some("the api is late".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser is done; the api is not".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(message.meta.as_deref().expect("the answer has a meta")).unwrap();
+        assert_eq!(meta["left"], serde_json::json!(30));
+        assert_eq!(meta["blocker"], serde_json::json!("the api is late"));
+    }
+
+    /// §5.3: a declared wait is written on the task; the attempt stays
+    /// Started, and the captain gets the info item.
+    #[test]
+    fn a_blocked_message_declares_a_wait() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap();
+
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on.as_deref(), Some("T-2"));
+        assert_eq!(task.wait_cond.as_deref(), Some("merged"));
+        // The attempt goes on: a wait is not a hand-in.
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Started
+        );
+        // The captain has the info item.
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(message.recipient, "p:captain");
+        assert_eq!(message.kind, MsgKind::Blocked);
+        assert_eq!(message.state, MsgState::Info);
+    }
+
+    /// §5.3: a wait for a task that is already done would never end.
+    #[test]
+    fn a_blocked_message_on_a_done_task_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-2")?.unwrap();
+                task.state = gear_model::TaskState::Done;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("T-2 is done"), "{}", error.detail);
+        // Nothing was written: the task waits for nothing.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+    }
+
+    /// §5.3: the contract the lane names must be the one the task carries
+    /// now: a captain who changed the contract (and ended the wait with it)
+    /// must not have the lane's old command park the task on an obsolete
+    /// dependency.
+    #[test]
+    fn a_blocked_message_with_a_stale_contract_is_refused() {
+        let (mut store, mut herdr) = world_with_a_wait();
+        // The captain changed the task's contract.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut c = send_cmd("blocked");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1); // the contract the lane still works to
+        c.on = Some("T-2".into());
+
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "the parser waits for the api of T-2".into(),
+            None,
+            T0 + 5,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("is on contract v2"), "{}", error.detail);
+        // Nothing was written: no wait and no message.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.wait_on, None);
+        assert!(store.read(|tx| tx.get_message("p", "M-1")).unwrap().is_none());
+    }
+
+    /// The request fingerprint carries the answer's fields: a request id
+    /// reused with a changed field is a conflict, not a replay of the old
+    /// answer.
+    #[test]
+    fn a_reused_request_id_with_a_changed_field_is_a_conflict() {
+        let (mut store, mut herdr) = world();
+        let mut first = send_cmd("progress");
+        first.left = Some(30);
+        first.blocker = Some("none".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        // The same request id, another answer: a conflict, not a replay.
+        let mut changed = send_cmd("progress");
+        changed.left = Some(60);
+        changed.blocker = Some("the api is late".into());
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &changed,
+            "the parser is done".into(),
+            None,
+            T0 + 2,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::RequestConflict,
+            "{}",
+            error.detail
+        );
+
+        // The same request id with the same answer: a replay.
+        let out = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &first,
+            "the parser is done".into(),
+            None,
+            T0 + 3,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("[replayed]"), "{out}");
+    }
+
+    /// §6.2: a round that passed its budget must carry a friction report.
+    #[test]
+    fn an_over_budget_hand_in_without_a_friction_report_is_refused() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+
+        // Forty minutes into a thirty minute budget (the default budget of a
+        // task without an estimate).
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 40 * 60,
+            false,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::FrictionRequired,
+            "{}",
+            error.detail
+        );
+        assert!(
+            error.detail.contains("T-1 took 40 min against 30 min"),
+            "{}",
+            error.detail
+        );
+        assert!(error.detail.contains("--friction"), "{}", error.detail);
+        // Nothing was written: the attempt is not handed in.
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Started
+        );
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// §6.1: the report is stored with the round's own facts.
+    #[test]
+    fn an_over_budget_hand_in_with_a_friction_report_is_stored() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        c.friction = Some("the api test needs a fixture that is missing".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 40 * 60,
+            false,
+        )
+        .unwrap();
+
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].task, "T-1");
+        assert_eq!(reports[0].attempt, 1);
+        assert_eq!(reports[0].role, "dev");
+        assert_eq!(
+            reports[0].body,
+            "the api test needs a fixture that is missing"
+        );
+        assert!(reports[0].required, "the round passed its budget");
+    }
+
+    /// §6.2: the budget is compared in seconds, so a round that is one second
+    /// over its budget is over.
+    #[test]
+    fn a_hand_in_one_second_over_the_budget_needs_a_friction_report() {
+        // Exactly the 30 minute budget: no report needed.
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1800,
+            false,
+        )
+        .unwrap();
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+
+        // One second more: the report is required.
+        let (mut store, mut herdr) = world_with_task();
+        let error = run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1801,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::FrictionRequired,
+            "{}",
+            error.detail
+        );
+
+        // With the report the hand-in goes through, and the report says it
+        // was required.
+        let mut with_report = c.clone();
+        with_report.friction = Some("the fixture was missing".into());
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &with_report,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 1801,
+            false,
+        )
+        .unwrap();
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(reports[0].required, "the round passed its budget");
+    }
+
+    /// §6.2: under the budget the report is optional.
+    #[test]
+    fn a_hand_in_under_budget_needs_no_friction_report() {
+        let (mut store, mut herdr) = world_with_task();
+        let mut c = send_cmd("result");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.contract = Some(1);
+        c.candidate = Some("abc1234".into());
+
+        run_send(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            &c,
+            "Report: ops/reports/T-1.md".into(),
+            None,
+            T0 + 10 * 60,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+            gear_model::AttemptState::Submitted
+        );
+        assert!(store
+            .read(|tx| tx.frictions_of_project("p"))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// §5.1: a review is charged from the reviewer's own start — its delivery
+    /// confirmation — and never from the writer's check-in.
+    #[test]
+    fn a_review_is_charged_from_the_reviewers_own_start() {
+        let (mut store, mut herdr) = world_with_task();
+        herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
+        // The lane hands the candidate in.
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "abc1234",
+                    "ops/reports/T-1.md",
+                    T0,
+                )
+            })
+            .unwrap();
+        // The reviewer gets the packet an hour later.
+        store
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 3600))
+            .unwrap();
+        // A reviewer seat, bound to the task.
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
+                tx.set_seat_task("p:review-1", "T-1")
+            })
+            .unwrap();
+
+        // The verdict five minutes after the delivery: well inside the review's
+        // own budget, even though the writer checked in an hour before.
+        let mut c = send_cmd("review");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.verdict = Some("pass".into());
+        run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 300,
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .read(|tx| tx.frictions_of_project("p"))
+                .unwrap()
+                .is_empty(),
+            "the reviewer was inside its own budget"
+        );
+    }
+
+    /// §6.3, §6.4: the captain reads the reports and closes one.
+    #[test]
+    fn gear_friction_lists_the_reports_and_closes_one() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_friction(&gear_store::NewFriction {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                    seat: "p:heat".into(),
+                    body: "the api test needs a fixture that is missing".into(),
+                    required: true,
+                })
+            })
+            .unwrap();
+
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(false),
+            T0,
+        )
+        .unwrap();
+        assert!(out.contains("F-1"), "{out}");
+        assert!(
+            out.contains("the api test needs a fixture that is missing"),
+            "{out}"
+        );
+        assert!(out.contains("required"), "{out}");
+
+        // The captain closes it: what the captain did about it.
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_close("F-1", "fixed: the fixture is in the repo"),
+            T0 + 1,
+        )
+        .unwrap();
+        assert!(out.contains("closed F-1"), "{out}");
+
+        // The open list is empty now; `--all` still shows the report.
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(false),
+            T0 + 2,
+        )
+        .unwrap();
+        assert!(out.contains("no open friction reports"), "{out}");
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_cmd(true),
+            T0 + 3,
+        )
+        .unwrap();
+        assert!(out.contains("F-1"), "{out}");
+        assert!(out.contains("closed: fixed"), "{out}");
+    }
+
+    /// §6.4: the outcome is one of the three kinds.
+    #[test]
+    fn closing_a_friction_report_needs_a_known_outcome() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_friction(&gear_store::NewFriction {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                    seat: "p:heat".into(),
+                    body: "a permission it lacked".into(),
+                    required: false,
+                })
+            })
+            .unwrap();
+
+        // The word must end at a word boundary and something must follow it.
+        for outcome in ["we looked at it", "fixedwhatever", "fixed", "lesson"] {
+            let error = run_friction(
+                &mut store,
+                &env("captain", CAP_PANE),
+                &mut herdr,
+                &friction_close("F-1", outcome),
+                T0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                gear_model::ErrorCode::BadFormat,
+                "{outcome:?}: {}",
+                error.detail
+            );
+            assert!(error.detail.contains("not worth it"), "{}", error.detail);
+        }
+
+        // The word and what changed: the report closes.
+        let out = run_friction(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &friction_close("F-1", "fixed: the fixture is in the repo"),
+            T0 + 1,
+        )
+        .unwrap();
+        assert!(out.contains("closed F-1"), "{out}");
+    }
+
+    fn friction_cmd(all: bool) -> FrictionCmd {
+        FrictionCmd { op: None, all }
+    }
+
+    fn friction_close(id: &str, message: &str) -> FrictionCmd {
+        FrictionCmd {
+            op: Some(FrictionOp::Close { id: id.into(), message: message.into() }),
+            all: false,
+        }
     }
 
     #[test]
@@ -3082,6 +4315,7 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_message(&gear_store::NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "T-1:1".into(),
                     task: None,
@@ -3136,6 +4370,10 @@ mod tests {
         store
             .write(|tx| {
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: id.into(),
                     rank: 1,

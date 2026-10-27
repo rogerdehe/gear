@@ -5,6 +5,19 @@
 /// such tests at once write into each other's home.
 pub static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+thread_local! {
+    static REVIEW_GIT_CALLS: std::cell::RefCell<Vec<Vec<String>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static REVIEW_GIT_FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[derive(Debug)]
+pub struct FakeReviewGit;
+impl gear_engine::review::ReviewGit for FakeReviewGit {
+    fn run(&self, _path: &str, args: &[&str]) -> Result<String, String> {
+        REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().push(args.iter().map(|s| (*s).into()).collect()));
+        if REVIEW_GIT_FAIL.with(|fail| fail.get()) { Err("injected Git failure".into()) } else { Ok(String::new()) }
+    }
+}
+
 mod backoff_contract;
 mod cancel_tick_contract;
 mod config_profile_onboard;
@@ -21,6 +34,7 @@ mod eng_execute;
 mod eng_intend_recover;
 mod eng_reconcile;
 mod feed_contract;
+mod friction_ring_contract;
 mod lane_view_contract;
 mod onboard_contract;
 mod onboard_run_contract;
@@ -43,6 +57,12 @@ mod multi_repo_contract;
 mod reviewer_quota_contract;
 mod pi_lane_contract;
 mod agent_names_contract;
+mod rounds_contract;
+mod waits_contract;
+mod session_dispatch_contract;
+mod ready_state_contract;
+mod delivery_grace_contract;
+mod targeting_contract;
 mod all_tail_contract;
 mod dead_temp_slot_contract;
 

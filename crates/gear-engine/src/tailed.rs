@@ -70,17 +70,18 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
         .get_meta(&active_key(project))?
         .is_some_and(|value| !value.is_empty());
     if all_tailed && !required.is_empty() {
-        // One item per state. The marker, not the message, says whether this
-        // state was announced: a captain who resolves the item (an
-        // acknowledgement) still gets no second one, because the lanes are
-        // still tailed and the same work still waits.
-        if !announced {
-            tx.set_meta(&active_key(project), "1")?;
-        }
-        if announced || open.is_some() {
+        if let Some(item) = open {
+            let current = body(&tailed, &required);
+            if item.body != current { tx.update_message_body(project, &item.id, &current)?; }
+            if !announced { tx.set_meta(&active_key(project), "1")?; }
             return Ok(None);
         }
+        if announced && !crate::attention::due(tx, project, thread(), &captain.id, now)? {
+            return Ok(None);
+        }
+        tx.set_meta(&active_key(project), "1")?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: thread().to_string(),
             task: None,
@@ -179,6 +180,10 @@ mod tests {
                 seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
                 seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p2", "opencode", T0)?;
                 tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-1".into(),
                     rank: 1,
@@ -341,6 +346,27 @@ mod tests {
             .unwrap();
         assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), None);
         assert!(open_items(&mut store).is_empty());
+    }
+
+    #[test]
+    fn persistent_fact_rings_again_and_changed_fact_updates_same_item() {
+        let mut store = world(TaskState::Ready);
+        tail(&mut store, &["heat", "wire"]);
+        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        let original = open_items(&mut store).remove(0);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Waiting;
+            tx.update_task(&task)
+        }).unwrap();
+        watch(&mut store, "p", T0 + 2).unwrap();
+        let updated = open_items(&mut store).remove(0);
+        assert_eq!(updated.id, original.id);
+        assert_ne!(updated.body, original.body);
+        store.write(|tx| tx.update_message_state("p", &updated.id, MsgState::Resolved, Some("seen"), None, None, T0 + 3)).unwrap();
+        assert_eq!(watch(&mut store, "p", T0 + 902).unwrap(), None);
+        assert_eq!(watch(&mut store, "p", T0 + 903).unwrap(), Some(Change::Opened));
+        assert_eq!(open_items(&mut store).len(), 1);
     }
 
     /// F1 of the review: resolving the item is an acknowledgement, not the end

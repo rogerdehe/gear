@@ -11,6 +11,21 @@ pub(crate) fn period(tx: &Tx<'_>, project: &str) -> GearResult<i64> {
     Ok(i64::from(config.map(|c| c.timing.captain_item_stale_min).unwrap_or(15).max(1)) * 60)
 }
 
+/// Whether the last alert in an ongoing incident can be raised again.
+pub(crate) fn due(tx: &Tx<'_>, project: &str, thread: &str, captain: &str, now: Ts) -> GearResult<bool> {
+    let last = tx.thread_messages(project, thread)?.into_iter()
+        .filter(|m| m.sender == "engine" && m.recipient == captain && m.kind == gear_model::MsgKind::System)
+        .max_by_key(|m| (m.created, m.resolved.unwrap_or(0)));
+    match last {
+        Some(m) if matches!(m.state, MsgState::Open | MsgState::Waiting) => Ok(false),
+        Some(m) => {
+            let interval = period(tx, project)?;
+            Ok(m.resolved.is_some_and(|t| now - t >= interval))
+        },
+        None => Ok(true),
+    }
+}
+
 fn key(project: &str, message: &str) -> String {
     format!("captain-reminder:{project}:{message}")
 }
@@ -18,7 +33,11 @@ fn key(project: &str, message: &str) -> String {
 fn stale(message: &MessageRow, period: i64, now: Ts) -> bool {
     // T-51 overlap warnings ring once per shared-file set. A changed set
     // creates a fresh message; ordinary stale reminders would defeat that latch.
-    !(message.kind == gear_model::MsgKind::System && message.thread.starts_with("parallel:"))
+    // T-169's friction item waits in the inbox until its reports are closed:
+    // the ordinary stale reminder would turn it urgent and ring the captain a
+    // second time for the same reports (design §6.4).
+    !(message.kind == gear_model::MsgKind::System
+        && (message.thread.starts_with("parallel:") || message.thread == "friction"))
         && message.state == MsgState::Open && now - message.created >= period
 }
 

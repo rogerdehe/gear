@@ -174,7 +174,13 @@ pub(crate) fn start_args(
             Lookup::Invalid(error) => return Err(error),
             Lookup::Unavailable => return Ok(Vec::new()),
             Lookup::NotLoaded if began.elapsed() < limit => {
-                std::thread::sleep(std::time::Duration::from_millis(model_list_poll_ms));
+                // The wait between two asks for the catalogue. A poll of 0
+                // asks again at once: the caller drives the answers (T-127
+                // F5 — no test sleeps on the wall clock). Production keeps
+                // its positive poll interval.
+                if model_list_poll_ms > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(model_list_poll_ms));
+                }
             }
             Lookup::NotLoaded => {
                 return Err(format!(

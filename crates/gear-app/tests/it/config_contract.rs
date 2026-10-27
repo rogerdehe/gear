@@ -59,7 +59,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
         }
     );
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10 });
+    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
@@ -231,7 +231,7 @@ fn captain_stale_period_is_configurable_and_nonzero() {
 fn a_model_entry_names_its_cli_and_its_arguments() {
     let text = format!(
         "{MINIMAL}\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\", \
-         {{ model = \"gpt-6.1-sol\", cli = \"codex\", args = [\"-c\", \"model_reasoning_effort=medium\"] }}]\n"
+         {{ model = \"gpt-6.1-sol\", cli = \"codex\", args = [\"-c\", \"model_reasoning_effort=medium\"], context_window_k = 500 }}]\n"
     );
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.models.lanes.len(), 2);
@@ -243,6 +243,8 @@ fn a_model_entry_names_its_cli_and_its_arguments() {
     assert_eq!(cfg.models.lanes[1].model(), "gpt-6.1-sol");
     assert_eq!(cfg.models.lanes[1].cli(), Some("codex"));
     assert_eq!(cfg.models.lanes[1].args(), ["-c", "model_reasoning_effort=medium"]);
+    assert_eq!(cfg.models.lanes[1].context_window_k(), Some(500));
+    assert_eq!(cfg.models.lanes[0].context_window_k(), None);
     // It is valid: the review chain still holds a model no lane runs.
     assert!(validate(&cfg).is_empty());
 }
@@ -526,4 +528,56 @@ fn owns_overlap_is_checked_between_lanes_of_the_same_repo() {
         vec!["lanes[1].owns"],
         "two lanes of one repo own the same paths"
     );
+}
+
+// ---- [[quota.sources]] (design §9.1)
+
+const SOURCES: &str = r#"
+[[quota.sources]]
+provider = "minimax-cn"
+reader = "minimax"
+key_file = "~/.pi/agent/auth.json"
+key_path = "minimax-cn.key"
+"#;
+
+#[test]
+fn the_quota_sources_parse() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert!(cfg.quota.sources.is_empty(), "no source without the section");
+    let cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
+    assert_eq!(cfg.quota.sources.len(), 1);
+    assert_eq!(cfg.quota.sources[0].provider, "minimax-cn");
+    assert_eq!(cfg.quota.sources[0].reader, "minimax");
+    assert_eq!(cfg.quota.sources[0].key_file, "~/.pi/agent/auth.json");
+    assert_eq!(cfg.quota.sources[0].key_path, "minimax-cn.key");
+    assert_eq!(validate(&cfg), vec![], "a source the engine knows is valid");
+}
+
+#[test]
+fn an_unknown_reader_is_a_finding() {
+    let text = SOURCES.replace("reader = \"minimax\"", "reader = \"zen\"");
+    let cfg = parse(&format!("{MINIMAL}{text}")).unwrap();
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["quota.sources.minimax-cn.reader"]
+    );
+    let mut cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
+    cfg.quota.sources[0].provider = "  ".into();
+    assert_eq!(fields(&validate(&cfg)), vec!["quota.sources.provider"]);
+}
+
+#[test]
+fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
+    let text=format!("{MINIMAL}\n[timing]\ndelivery_grace_s=45\n[prices.\"openai/model\"]\ninput=1.5\noutput=2.0\ncache_read=0.25\ncache_write=0.0\n");
+    let cfg=parse(&text).unwrap();
+    assert_eq!(cfg.timing.delivery_grace_s,45);
+    let price=&cfg.prices["openai/model"];
+    assert_eq!((price.input,price.output,price.cache_read,price.cache_write),(1.5,2.0,0.25,0.0));
+    assert!(validate(&cfg).is_empty());
+    let mut bad=cfg.clone(); bad.timing.delivery_grace_s=0; bad.prices.get_mut("openai/model").unwrap().cache_read=-1.0;
+    let issues=validate(&bad); let fields=fields(&issues);
+    assert!(fields.contains(&"timing.delivery_grace_s"),"{issues:?}");
+    assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
+    assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
+    assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
 }

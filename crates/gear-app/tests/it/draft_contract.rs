@@ -105,6 +105,94 @@ fn verdict_shape_is_strict() {
     assert!(bad_line(&both).starts_with("line 33: "));
 }
 
+/// T-141 (rework F1, F2): the quoted value of a verdict line is the **last**
+/// field and runs from its first quote to its closing quote, so the prose may
+/// contain quotes of its own; the `key=value` fields come before it.
+#[test]
+fn a_verdict_quoted_value_keeps_its_quotes_and_comes_last() {
+    /// A draft with one verdict line.
+    fn draft(line: &str) -> String {
+        format!("<!-- gear-plan project=p base=0 -->\n# Verdicts\n{line}\n")
+    }
+    let quoted = "return the literal \"unknown\" on missing input";
+
+    // The reviewer's example: a quoted literal inside the rework text.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"return the literal \"unknown\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(d.verdicts[0].rework.as_deref(), Some(quoted));
+
+    // The same with the quotes escaped.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"return the literal \\\"unknown\\\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].rework.as_deref(),
+        Some("return the literal \\\"unknown\\\" on missing input")
+    );
+
+    // The estimate comes before the quoted value.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"return the literal \"unknown\" on missing input\"",
+    ))
+    .unwrap();
+    assert_eq!(d.verdicts[0].rework.as_deref(), Some(quoted));
+    assert_eq!(d.verdicts[0].estimate, Some(25));
+
+    // A value without a closing quote is refused (F2).
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case",
+    ));
+    assert!(detail.contains("no closing quote"), "{detail}");
+
+    // A field after the quoted value is refused, and the error names the
+    // order.
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case\" estimate=25",
+    ));
+    assert!(detail.contains("last field"), "{detail}");
+    assert!(detail.contains("estimate=25"), "{detail}");
+}
+
+/// T-141 (round 2, F1): the closing quote of a quoted value is the **last**
+/// quote on the line, so the prose may quote a field of its own.
+#[test]
+fn a_quoted_value_keeps_a_literal_field_inside_it() {
+    /// A draft with one verdict line.
+    fn draft(line: &str) -> String {
+        format!("<!-- gear-plan project=p base=0 -->\n# Verdicts\n{line}\n")
+    }
+
+    // The reviewer's line: a rework that quotes `estimate=25`.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail estimate=25 rework=\"accept \"estimate=25\" before the quoted reason\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].rework.as_deref(),
+        Some("accept \"estimate=25\" before the quoted reason")
+    );
+    assert_eq!(d.verdicts[0].estimate, Some(25));
+
+    // And a why that quotes it.
+    let d = parse(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=x why=\"the reviewer rejected \"estimate=25\" inside prose\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        d.verdicts[0].why.as_deref(),
+        Some("the reviewer rejected \"estimate=25\" inside prose")
+    );
+
+    // A value without a closing quote is still refused.
+    let detail = bad_line(&draft(
+        "- T-1 attempt=1 contract=1 candidate=abc1234 fail rework=\"fix the edge case",
+    ));
+    assert!(detail.contains("no closing quote"), "{detail}");
+}
+
 #[test]
 fn staff_lines_are_strict() {
     let park_both = FULL.replace("park media until-task=T-12", "park media until=2026-10-21T15:30Z until-task=T-12");
@@ -117,7 +205,7 @@ fn staff_lines_are_strict() {
 #[test]
 fn release_is_a_staff_line() {
     let d = parse("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat\n").unwrap();
-    assert!(matches!(&d.staff[0], StaffItem::Release { lane, .. } if lane == "heat"));
+    assert!(matches!(&d.staff[0], StaffItem::Release { name, .. } if name == "heat"));
     assert!(bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release\n").contains("`release` needs a lane"));
     assert!(
         bad_line("<!-- gear-plan project=p base=1 -->\n# Staff\n- release heat now\n")

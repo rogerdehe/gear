@@ -36,6 +36,9 @@ pub struct ProjectConfig {
     pub conventions: Conventions,
     #[serde(default)]
     pub timing: Timing,
+    /// API-equivalent USD per million tokens, keyed by provider/model.
+    #[serde(default)]
+    pub prices: BTreeMap<String, Price>,
     /// Model chains per role, agreed at kickoff (17 §0). Empty = not managed.
     #[serde(default)]
     pub models: Models,
@@ -134,6 +137,36 @@ pub struct Quota {
     pub temps: u32,
     #[serde(default)]
     pub includes_captain: bool,
+    /// The quota sources of §9.1: the providers whose quota the engine
+    /// reads. Empty = the quota comes from the screen alone.
+    #[serde(default)]
+    pub sources: Vec<QuotaSource>,
+}
+
+/// One quota source of §9.1: a provider whose quota the engine reads.
+///
+/// ```toml
+/// [[quota.sources]]
+/// provider = "minimax-cn"            # the provider part of the model ids
+/// reader = "minimax"                 # minimax | opencode-go | codex
+/// key_file = "~/.pi/agent/auth.json" # the file the key is in
+/// key_path = "minimax-cn.key"        # the dotted path of the key in it
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuotaSource {
+    /// The provider part of the model ids this source is about.
+    pub provider: String,
+    /// The reader that knows the provider's API: `minimax`, `opencode-go`
+    /// or `codex`.
+    pub reader: String,
+    /// The file the API key is in (`~` is the home folder). The `codex`
+    /// reader reads the rollout of a session and needs no key.
+    #[serde(default)]
+    pub key_file: String,
+    /// The dotted path of the key inside that file.
+    #[serde(default)]
+    pub key_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -408,6 +441,9 @@ pub struct ModelSpec {
     /// effort of codex, the effort of Claude Code…
     #[serde(default)]
     pub args: Vec<String>,
+    /// Model context window in thousands of tokens, when configured.
+    #[serde(default)]
+    pub context_window_k: Option<u64>,
 }
 
 impl ModelEntry {
@@ -433,6 +469,10 @@ impl ModelEntry {
             ModelEntry::Plain(_) => &[],
             ModelEntry::Entry(spec) => &spec.args,
         }
+    }
+
+    pub fn context_window_k(&self) -> Option<u64> {
+        match self { ModelEntry::Plain(_) => None, ModelEntry::Entry(spec) => spec.context_window_k }
     }
 
     /// The entry as one line, for a log or a message: the model id, and the
@@ -484,6 +524,7 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
         let mut model: Option<String> = None;
         let mut cli: Option<String> = None;
         let mut args: Vec<String> = Vec::new();
+        let mut context_window_k = None;
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
                 "model" => {
@@ -499,16 +540,17 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
                     cli = Some(map.next_value()?);
                 }
                 "args" => args = map.next_value()?,
+                "context_window_k" => context_window_k = Some(map.next_value()?),
                 other => {
                     return Err(serde::de::Error::unknown_field(
                         other,
-                        &["model", "cli", "args"],
+                        &["model", "cli", "args", "context_window_k"],
                     ))
                 }
             }
         }
         let model = model.ok_or_else(|| serde::de::Error::missing_field("model"))?;
-        Ok(ModelEntry::Entry(ModelSpec { model, cli, args }))
+        Ok(ModelEntry::Entry(ModelSpec { model, cli, args, context_window_k }))
     }
 }
 
@@ -538,6 +580,16 @@ impl Default for Models {
     }
 }
 
+/// Per-million-token rates for one provider/model.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Price {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
 /// Defaults: tick_s 4, cooldown_s 90, sample_min 20, review_timer_min 45.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -550,6 +602,7 @@ pub struct Timing {
     pub captain_item_stale_min: u32,
     /// Working with no attempt in development while ready work waits.
     pub lane_busy_idle_min: u32,
+    pub delivery_grace_s: u32,
 }
 
 impl Default for Timing {
@@ -561,6 +614,7 @@ impl Default for Timing {
             review_timer_min: 45,
             captain_item_stale_min: 15,
             lane_busy_idle_min: 10,
+            delivery_grace_s: 180,
         }
     }
 }
@@ -645,6 +699,8 @@ pub fn profile_table(
 ///   `src/a` vs `src/ab` do not) — only between lanes of the **same** repo
 ///   (T-52): the same paths in two repos are two different files;
 /// - number of lanes ≤ `quota.lanes`;
+/// - every `[[quota.sources]]`: a provider name and a reader the engine knows
+///   (`minimax`, `opencode-go`, `codex`);
 /// - every `[[repos]]` name: `[a-z][a-z0-9-]*` and unique;
 /// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
@@ -663,6 +719,20 @@ pub fn profile_table(
 /// Empty chains are valid: models are not managed by GEAR then.
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
+
+    if cfg.timing.delivery_grace_s == 0 {
+        issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
+    }
+    for (model, price) in &cfg.prices {
+        if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {
+            issues.push(issue(&format!("prices.{model}"), "must name a provider/model".to_string()));
+        }
+        for (field, value) in [("input",price.input),("output",price.output),("cache_read",price.cache_read),("cache_write",price.cache_write)] {
+            if !value.is_finite() || value < 0.0 {
+                issues.push(issue(&format!("prices.{model}.{field}"), "must be a finite non-negative rate".to_string()));
+            }
+        }
+    }
 
     // ---- the gate runs before every merge: it must be the project's own
     // build + test command, never left as the skeleton's TODO.
@@ -686,6 +756,28 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 format!(
                     "on_quota is \"fallback\" but {field} has no next model: a quota stop would park for {}h. Add a fallback model, or set on_quota to \"wait\"",
                     cfg.models.quota_reset_h
+                ),
+            ));
+        }
+    }
+
+    // ---- quota sources (§9.1): the engine reads the quota of these
+    // providers; a reader it does not know is a finding, not a silent skip.
+    for source in &cfg.quota.sources {
+        let provider = source.provider.trim();
+        if provider.is_empty() {
+            issues.push(issue(
+                "quota.sources.provider",
+                "a quota source needs the provider it is about".to_string(),
+            ));
+            continue;
+        }
+        if gear_usage::QuotaReader::from_name(&source.reader).is_none() {
+            issues.push(issue(
+                &format!("quota.sources.{provider}.reader"),
+                format!(
+                    "the reader {:?} is not one of them: minimax, opencode-go, codex",
+                    source.reader
                 ),
             ));
         }
@@ -1036,16 +1128,6 @@ fn github_issues(section: &GithubSection, field: &str, issues: &mut Vec<ConfigIs
                 "an issue label is empty after trimming".to_string(),
             ));
         }
-    }
-    // Landing a task through its pull request is not in this release (T-91's
-    // review, F1): the engine's merge still lands locally, and the forge merge
-    // would run after it had consumed the branch. Refused here until M4, so no
-    // project is configured for a landing that cannot work.
-    if section.merge == MergeMode::Pr {
-        issues.push(issue(
-            &format!("{field}.merge"),
-            "`merge = \"pr\"` is not in this release: a task lands through the engine's merge and its pull request comments it; use `merge = \"push\"` (M4 brings the pull-request landing)".to_string(),
-        ));
     }
 }
 

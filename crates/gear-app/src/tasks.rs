@@ -75,6 +75,10 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
         .unwrap_or(0)
         + 1;
     let row = AttemptRow {
+        session_ref: None,
+        session_cli: None,
+        session_action: None,
+        sent_at: None,
         project: project.to_string(),
         task: task.to_string(),
         n,
@@ -179,6 +183,47 @@ pub fn adopt_contract(
     Ok(Some(shown))
 }
 
+/// The candidate of the attempt before `n` — the work a rework must build on
+/// (design §10.7, row B03-08). `None` for a first attempt: there is no
+/// earlier work to keep.
+pub fn rework_base_candidate(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    n: i64,
+) -> GearResult<Option<String>> {
+    if n <= 1 {
+        return Ok(None);
+    }
+    Ok(tx
+        .get_attempt(project, task, n - 1)?
+        .and_then(|attempt| attempt.candidate))
+}
+
+/// Refuse a rework hand-in whose candidate does not contain the candidate of
+/// the attempt before it (design §10.7, row B03-08): a rework keeps the work
+/// the reviewer read, so the new candidate carries the old one. The refusal
+/// names that commit — the one the lane has to merge in.
+///
+/// Git answers outside the store transaction (the worktree is the lane's), so
+/// the caller runs this before it writes anything.
+pub fn require_rework_contains(
+    worktree: &std::path::Path,
+    previous: &str,
+    candidate: &str,
+) -> GearResult<()> {
+    if crate::base::contains(worktree, previous, candidate)? {
+        return Ok(());
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!(
+            "the rework candidate {candidate} does not contain {previous}: a rework keeps the work \
+             the reviewer read (merge {previous} into your branch)"
+        ),
+    ))
+}
+
 /// `gear send --kind result`: the exact attempt, under its adopted contract
 /// version (else `BadFormat`). Attempt Started/Stopped/Unknown → Submitted with
 /// candidate and report; task Running → Verifying.
@@ -216,6 +261,12 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
                 failed.n
             ),
         ));
+    }
+    // A result is also a check-in: the owner may finish before a delivery
+    // view is recorded. Both transitions happen in this transaction.
+    if attempt.state == AttemptState::Delivered {
+        on_delivery_confirmed(tx, project, task, n, now)?;
+        attempt = tx.get_attempt(project, task, n)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "attempt disappeared"))?;
     }
     require_transition(
         AttemptState::can_transition(attempt.state, AttemptState::Submitted),
@@ -258,6 +309,12 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     attempt.pending_update = None;
     attempt.updated = now;
     tx.update_attempt(&attempt)?;
+    // A restart or compaction can change the binding since check-in.
+    if let Some(seat) = tx.get_seat(&attempt.seat)? {
+        if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+            tx.refresh_attempt_session(project, task, n, binding.session_ref.as_deref().filter(|s| !s.is_empty()), &binding.kind)?;
+        }
+    }
     // The hand-in has its own time (T-38): the dev time ends here, the review
     // time begins.
     tx.set_attempt_time(project, task, n, AttemptStep::HandedIn, now)?;
@@ -286,6 +343,10 @@ pub struct VerdictHint {
     /// `T-<n> attempt=<a> contract=<c> candidate=<sha> fail rework="…"` with
     /// the real values. The rework is the captain's words.
     pub line: String,
+    /// The task whose merge failed (B5): the captain retries it with a
+    /// `# Staff` `- remerge T-<n>` line, not with a verdict. `None` when the
+    /// item is settled by a verdict.
+    pub remerge: Option<String>,
 }
 
 /// The verdict that settles `message`, with the real values filled in
@@ -354,6 +415,9 @@ pub fn verdict_hint(
             "{task} attempt={attempt} contract={} candidate={candidate} fail rework=\"…\"",
             attempt_row.adopted_version
         ),
+        // A failed merge is retried with `- remerge T-<n>` (B5): the work
+        // passed, the merge did not — a rework is the other way round.
+        remerge: if merge_failed { Some(task.to_string()) } else { None },
     }))
 }
 
@@ -372,6 +436,61 @@ fn reopened(
     }))
 }
 
+/// The time the work of `task` was merged, if it is merged (design §10.7,
+/// row B03-01): the attempt that landed it, and the time it landed.
+///
+/// `None` when the task has no merged attempt yet.
+pub fn merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<Ts>> {
+    let mut merged = None;
+    for (_, times) in tx.attempt_times_of_task(project, task)? {
+        if let Some(at) = times.merged {
+            merged = Some(at);
+        }
+    }
+    Ok(merged)
+}
+
+/// The time the work of `task` was merged, or a refusal naming why not
+/// (design §10.7, row B03-01): a pass that names the task whose merge landed
+/// this work is only settled when that task is merged.
+pub fn require_merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Ts> {
+    if tx.get_task(project, task)?.is_none() {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("no task {task} in project {project}"),
+        ));
+    }
+    match merged_at(tx, project, task)? {
+        Some(at) => Ok(at),
+        None => Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is not merged yet: a pass may name it as the merge that landed this work only when it is merged"
+            ),
+        )),
+    }
+}
+
+/// The work is merged by the named task's merge (design §10.7, row B03-01):
+/// the attempt carries that merge's time, and the fact is kept so the board
+/// and the report can say which merge landed it.
+///
+/// Written once: the attempt's merge time is the first one (the store keeps
+/// it) and the attribution names the same merge, so a replay of the verdict
+/// changes nothing.
+fn mark_integrated_by(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    attempt: i64,
+    by: &str,
+    merged_at: Ts,
+) -> GearResult<()> {
+    tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, merged_at)?;
+    tx.set_meta(&format!("integrated-by:{project}:{task}"), by)?;
+    Ok(())
+}
+
 /// An acceptance verdict (design/05 `# Verdicts`, design/06 `settle`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Verdict {
@@ -385,6 +504,9 @@ pub struct Verdict {
     pub evidence: Option<String>,
     /// required for fail
     pub rework: Option<String>,
+    /// The task whose merge landed this work (design §10.7, row B03-01):
+    /// `integrated-by=T-m`. The settle decides what it means.
+    pub integrated_by: Option<String>,
     pub by_seat: String,
 }
 
@@ -417,6 +539,18 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             continue;
         }
         if settled.passed == v.pass && settled.candidate == v.candidate {
+            // The same verdict again settles nothing; but a pass that names
+            // the merge that landed the work (design §10.7, row B03-01) still
+            // has to be marked: the attribution arrives after the attempt was
+            // accepted — the normal path after an auto-settled review or a
+            // failed merge. The marking is written once, so the replay of the
+            // same plan changes nothing.
+            if v.pass {
+                if let Some(by) = v.integrated_by.as_deref() {
+                    let merged_at = require_merged_at(tx, &v.project, by)?;
+                    mark_integrated_by(tx, &v.project, &v.task, v.attempt, by, merged_at)?;
+                }
+            }
             return Ok(());
         }
         // The one conflict a captain may make (T-90): a pass that already
@@ -483,6 +617,17 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
             format!("no task {} in project {}", v.task, v.project),
         )
     })?;
+    // A pass may name the task whose merge landed this work (design §10.7,
+    // row B03-01): the work is already on the integration branch, so this
+    // task is marked merged by that merge instead of waiting for a merge of
+    // its own. The named task must be merged already; the git side of the
+    // rule (the candidate's tree is in the integration branch) is answered
+    // by the caller, before the write.
+    let integrated_at = match v.integrated_by.as_deref() {
+        Some(by) if v.pass => Some((by.to_string(), require_merged_at(tx, &v.project, by)?)),
+        Some(_) => None,
+        None => None,
+    };
     // A pass must be against the contract the task carries now; a fail may
     // settle an older one.
     if v.pass && v.contract_version != task_row.contract_version {
@@ -554,6 +699,13 @@ pub fn settle(tx: &Tx<'_>, v: &Verdict, now: Ts) -> GearResult<()> {
     }
     task_row.updated = now;
     tx.update_task(&task_row)?;
+
+    // The work is merged by the named task's merge: the attempt carries that
+    // merge's time, and the fact is kept so the board and the report can say
+    // which merge landed it (design §10.7, row B03-01).
+    if let Some((by, merged_at)) = integrated_at {
+        mark_integrated_by(tx, &v.project, &v.task, v.attempt, &by, merged_at)?;
+    }
     Ok(())
 }
 
@@ -882,6 +1034,7 @@ fn tell_captain_cap(
         return Ok(());
     }
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread: format!("{task}:cap"),
         task: Some(task.to_string()),
@@ -922,7 +1075,11 @@ fn rework_rank(tx: &Tx<'_>, task: &gear_store::TaskRow) -> GearResult<i64> {
 /// handled now) and leave one silent System/Info line for the captain in the
 /// first item's thread, or a fresh line when no item is there any more. A
 /// duplicate review submission must not survive as an action item (R-67 P1).
-fn resolve_review_items(
+///
+/// The plan's apply uses it too (T-187): a `# Verdicts` line that settles an
+/// attempt closes the review item of that attempt, so the captain does not
+/// have to resolve it by hand.
+pub fn resolve_review_items(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
@@ -959,6 +1116,7 @@ fn resolve_review_items(
         None => (format!("{task}:review"), None),
     };
     tx.insert_message(&NewMessage {
+        meta: None,
         project: project.to_string(),
         thread,
         task: Some(task.to_string()),

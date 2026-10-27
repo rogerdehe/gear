@@ -143,6 +143,10 @@ struct Finished {
 enum Report {
     /// Merged and pushed: the result line.
     Merged(String),
+    /// The gate passed and the pull request's head is pushed (design §11.2
+    /// step 2): the pull request's number and the head the gate checked. The
+    /// merge op waits for the land op (step 3).
+    Pr { pr: u64, head: String },
     /// The worktree is busy: another engine still holds the merge lock.
     Busy,
     /// The merge waits: the candidate carries the work of other tasks that
@@ -176,6 +180,10 @@ pub fn merge_passed(
         Ok(config) => config,
         Err(_) => return Ok(merged),
     };
+
+    // 0. the pull-request merges that landed (design §11.2 step 5): a merge
+    //    op that waits for its land op is confirmed with it.
+    merged.extend(confirm_pr_merges(store, herdr, cfg, project, &config, now)?);
 
     // 1. queue a merge for every passed task that has none.
     let passed = passed_tasks(store, project)?;
@@ -257,6 +265,20 @@ pub fn merge_passed(
                 resolve_wait(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
                 resolve_failed(store, project, &op.task.clone().unwrap_or_default(), finished.at)?;
             }
+            Report::Pr { pr, head } => {
+                // §11.2 step 3: the merge op waits for the land op, which is
+                // the forge's call. Nothing is deleted: the pull request's
+                // head is the task's branch until the pull request is merged.
+                let result = serde_json::json!({"mode":"pr","pr":pr,"head":head}).to_string();
+                let method = merge_method_of(&repo_of_op(store, project, &op, &config)?);
+                store.write(|tx| {
+                    let current = tx.get_op(project, &op.id)?.unwrap();
+                    if current.state == OpState::Executing {
+                        tx.set_op_state(project, &op.id, OpState::Submitted, Some(&result), finished.at)?;
+                    }
+                    insert_land_op(tx, project, &op, pr, &head, method, finished.at)
+                })?;
+            }
             Report::Busy => retry_merge(store, project, op, "merge will retry from origin", finished.at)?,
             // The merge waits for another task: it is not a failure. The op
             // goes back to Unknown and the captain is told once which task it
@@ -289,6 +311,15 @@ pub fn merge_passed(
     // resets to origin before doing any merges, and adopts a completed push.
     for op in merge_order(ready_merges(store, project)?) {
         let task = op.task.clone().unwrap_or_default();
+        // The work of this attempt is already on the integration branch: it
+        // landed with another task's merge (design §10.7, row B03-01). The
+        // queued merge is voided instead of run — a second gate and push would
+        // merge the same work twice.
+        let already_merged = store.read(|tx| attempt_already_merged(tx, project, &op))?;
+        if already_merged {
+            store.write(|tx| void_merged_op(tx, project, &op.id, now))?;
+            continue;
+        }
         let valid_task = store.read(|tx| {
             Ok(tx
                 .get_task(project, &task)?
@@ -302,6 +333,26 @@ pub fn merge_passed(
         }
         // The repo the work is in: the repo of the task's lane (T-53).
         let repo = repo_of_op(store, project, &op, &config)?;
+        // A repo in pull-request mode lands through its pull request
+        // (design §11.2): the merge needs the claim's pull request.
+        let pr = match pr_claim(store, project, &op, &repo)? {
+            PrClaim::Local => None,
+            PrClaim::Pr(target) => Some(target),
+            // §11.3, row 1: no pull request: the merge fails and says so.
+            PrClaim::NoPullRequest => {
+                fail_merge(
+                    store,
+                    project,
+                    &op,
+                    &format!("no pull request for {task}: the claim PR was never opened"),
+                    now,
+                )?;
+                continue;
+            }
+            // The claim is opening: the merge waits for it (the op stays
+            // queued and runs again on a later tick).
+            PrClaim::Pending => continue,
+        };
         let key = worker_key(project, &repo);
         // A merge of this repo is already running: this one waits for it.
         if workers.contains_key(&key) {
@@ -314,7 +365,10 @@ pub fn merge_passed(
                 return Ok(merged);
             }
         };
-        if op.state == OpState::Intended {
+        // A merge op the engine recovered (Unknown) runs again: it is
+        // Executing while its worker runs, so the completion writes the
+        // Submitted result (design §11.2 step 3).
+        if matches!(op.state, OpState::Intended | OpState::Unknown) {
             store.write(|tx| tx.set_op_state(project, &op.id, OpState::Executing, None, now))?;
         }
         // The other tasks of the project with a candidate: the merge waits for
@@ -327,6 +381,7 @@ pub fn merge_passed(
         let remote = cfg.remote.clone();
         let job_wait = cfg.merge_retry_wait.clone();
         let progress = cfg.merges.progress.clone();
+        let pr = pr.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("merge-{project}-{}", repo.name))
             .spawn(move || {
@@ -344,8 +399,10 @@ pub fn merge_passed(
                         &others,
                         remote.as_ref(),
                         &job_wait,
+                        pr.as_ref(),
                     ) {
                         Step::Merged(lines) => Report::Merged(lines),
+                        Step::Pr { pr, head } => Report::Pr { pr, head },
                         Step::Waiting(tasks) => Report::Waiting(tasks),
                         Step::Failed(failed) => Report::Failed(failed),
                     }
@@ -520,6 +577,9 @@ impl Failed {
 enum Step {
     /// Merged and pushed: the result line.
     Merged(String),
+    /// The gate passed and the pull request's head is pushed (design §11.2
+    /// step 2): the pull request's number and the head the gate checked.
+    Pr { pr: u64, head: String },
     /// The merge waits: the candidate carries the work of other tasks that
     /// have not landed yet. Each task is named with whether it has passed.
     Waiting(Vec<(String, bool)>),
@@ -538,11 +598,13 @@ fn merge_with_retries(
     others: &[(String, String, bool)],
     remote: &dyn Remote,
     wait: &RetryWait,
+    pr: Option<&PrTarget>,
 ) -> Step {
     let mut attempt = 0;
     loop {
-        match merge_one_locked(worktree, repo, op, lock, others, remote) {
+        match merge_one_locked(worktree, repo, op, lock, others, remote, pr) {
             Step::Merged(lines) => return Step::Merged(lines),
+            Step::Pr { pr, head } => return Step::Pr { pr, head },
             Step::Waiting(tasks) => return Step::Waiting(tasks),
             Step::Failed(mut failed) => {
                 if failed.blocker != Blocker::Clear || attempt >= MERGE_RETRIES {
@@ -768,6 +830,7 @@ fn tell_captain_failed(
             return Ok(());
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread,
             task: Some(task.clone()),
@@ -847,8 +910,47 @@ fn neutrino_void(tx: &gear_store::Tx<'_>, project: &str, id: &str, now: Ts) -> G
     Ok(())
 }
 
+/// Void a queued merge whose work is already on the integration branch
+/// (design §10.7, row B03-01): the attempt carries the merge time of the
+/// merge that landed it, so this merge has nothing left to do.
+///
+/// A merge that is already running (Executing) is left alone: its worker
+/// finishes on its own and the completion is kept.
+fn void_merged_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    id: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let from = tx.get_op(project, id)?.map(|op| op.state).unwrap_or(OpState::Intended);
+    match from {
+        OpState::Intended => tx.set_op_state(project, id, OpState::Void, Some("the work is already merged"), now)?,
+        OpState::Unknown => tx.set_op_state(project, id, OpState::Failed, Some("the work is already merged"), now)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Has the attempt of this merge op already landed on the integration branch?
+/// (design §10.7, row B03-01: the attempt carries the merge time of the
+/// merge that landed it.)
+fn attempt_already_merged(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    op: &OpRow,
+) -> GearResult<bool> {
+    let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
+        return Ok(false);
+    };
+    Ok(tx.attempt_times(project, task, attempt)?.merged.is_some())
+}
+
 /// The tasks of the project whose **current** attempt has a passing verdict:
 /// (task, lane, candidate, attempt, the attempt's candidate).
+///
+/// An attempt that already carries a merge time is left out (design §10.7, row
+/// B03-01): its work is on the integration branch — it landed with another
+/// task's merge — so the engine must not merge it again.
 fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String)>> {
     store.read(|tx| {
         let mut passed = Vec::new();
@@ -865,6 +967,11 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
                 continue;
             };
+            // The work is already on the integration branch (it landed with
+            // another task's merge): no merge of its own.
+            if tx.attempt_times(project, &task.id, latest.n)?.merged.is_some() {
+                continue;
+            }
             let Some(verdict) = tx
                 .verdicts_of_task(project, &task.id)?
                 .into_iter()
@@ -927,6 +1034,152 @@ fn other_candidates(
     })
 }
 
+/// The pull-request merges that landed (design §11.2 step 5): the merge op
+/// waits for the land op, and the land op's answer is the merge.
+///
+/// The merge op is `Submitted` while the forge merges the pull request. When
+/// the land op is confirmed, the merge op is confirmed too (with the merge
+/// commit the pull request names), the task's branches are closed, and the
+/// waits and failures of the task are settled. When the land op failed, the
+/// merge op fails with the forge's own message and the captain hears about it
+/// (design §11.3, row 2).
+fn confirm_pr_merges(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<Vec<Merged>> {
+    let mut merged = Vec::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    let mut ops = Vec::new();
+    for seat in &seats {
+        ops.extend(store.read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Merge))?);
+    }
+    for op in ops {
+        if op.state != OpState::Submitted {
+            continue;
+        }
+        // Only a pull-request merge waits for a land op.
+        let Some(pr) = pr_number_of(op.result.as_deref()) else {
+            continue;
+        };
+        let task = op.task.clone().unwrap_or_default();
+        let Some(land) = land_op_of(store, project, &task)? else {
+            continue;
+        };
+        match land.state {
+            OpState::Confirmed => {
+                let commit = merge_commit_of(land.result.as_deref()).unwrap_or_default();
+                let repo = repo_of_op(store, project, &op, config)?;
+                let line = format!(
+                    "merged {task} into {} by PR #{pr}: {commit}",
+                    repo.integration
+                );
+                store.write(|tx| {
+                    tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&line), now)?;
+                    if let (Some(attempt), Some(task)) = (op.attempt, op.task.as_deref()) {
+                        tx.set_attempt_time(project, task, attempt, AttemptStep::Merged, now)?;
+                    }
+                    Ok(())
+                })?;
+                // The branches the merge consumed are closed now: the pull
+                // request is merged (design §11.2 step 5).
+                close_pr_branches(herdr, cfg, project, &op, &repo)?;
+                // The wait is over and the failure (if any) is settled.
+                resolve_wait(store, project, &task, now)?;
+                resolve_failed(store, project, &task, now)?;
+                merged.push(Merged {
+                    task,
+                    branch: op.payload["branch"].as_str().unwrap_or_default().to_string(),
+                });
+            }
+            OpState::Failed => {
+                // §11.3, row 2: the forge refused the merge. The captain hears
+                // about it, with the plan line that retries it.
+                let reason = land
+                    .result
+                    .as_deref()
+                    .unwrap_or("the pull request was not merged")
+                    .to_string();
+                fail_merge(store, project, &op, &reason, now)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(merged)
+}
+
+/// The pull request a merge op waits for: the number in its result
+/// (`{"mode":"pr","pr":<n>,"head":"<sha>"}`, design §11.2 step 3).
+fn pr_number_of(result: Option<&str>) -> Option<u64> {
+    let result = result?;
+    let value = serde_json::from_str::<serde_json::Value>(result).ok()?;
+    if value.get("mode").and_then(|mode| mode.as_str()) != Some("pr") {
+        return None;
+    }
+    value.get("pr").and_then(|number| number.as_u64())
+}
+
+/// The land op of a task (design §11.2 step 3): the forge op that merges its
+/// pull request, the newest one.
+fn land_op_of(store: &mut Store, project: &str, task: &str) -> GearResult<Option<OpRow>> {
+    let seat = format!("{project}:forge");
+    let ops = store.read(|tx| tx.ops_of_seat_kind(&seat, OpKind::Forge))?;
+    Ok(ops
+        .into_iter()
+        .filter(|op| {
+            op.payload.get("forge").and_then(|forge| forge.as_str()) == Some("land")
+                && op.task.as_deref() == Some(task)
+        })
+        .next_back())
+}
+
+/// The commit a land op names: the merge commit the pull request carries.
+fn merge_commit_of(result: Option<&str>) -> Option<String> {
+    let result = result?;
+    let value = serde_json::from_str::<serde_json::Value>(result).ok()?;
+    value
+        .get("merge_commit")
+        .and_then(|commit| commit.as_str())
+        .map(|commit| commit.to_string())
+}
+
+/// The branches a pull-request merge consumed (design §11.2 step 5): the
+/// task's own branch (the pull request's head, merged already) and the
+/// review's branch.
+fn close_pr_branches(
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    project: &str,
+    op: &OpRow,
+    repo: &Repo,
+) -> GearResult<()> {
+    let worktree = match integration_worktree(herdr, repo, project, &cfg.merges) {
+        Ok(worktree) => worktree,
+        // Without the worktree the branches stay: they hold no work that is
+        // lost, and the captain sees them on the next landing.
+        Err(_) => return Ok(()),
+    };
+    let dir = Path::new(&worktree.path);
+    let remote = cfg.remote.as_ref();
+    let task_branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
+    let review = op
+        .payload
+        .get("review")
+        .and_then(|review| review.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| review_branch(&op.task.clone().unwrap_or_default()));
+    if !task_branch.is_empty() {
+        delete_remote(dir, &task_branch, remote);
+    }
+    if !review.is_empty() {
+        delete_remote(dir, &review, remote);
+    }
+    Ok(())
+}
+
 /// The branch a lane cut for a task (`<lane>/t<n>`, 17 §3).
 fn branch_of(lane: &str, task: &str) -> String {
     format!("{lane}/{}", task.to_lowercase().replace('-', ""))
@@ -935,6 +1188,97 @@ fn branch_of(lane: &str, task: &str) -> String {
 /// The reviewers' branch of a task: `review/t<n>`.
 fn review_branch(task: &str) -> String {
     format!("review/{}", task.to_lowercase().replace('-', ""))
+}
+
+/// The pull request a task lands through (design §11.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrTarget {
+    /// The pull request's number: the forge names it.
+    number: u64,
+    /// The branch the pull request's head is: the task's own branch. The
+    /// engine pushes the gated head there (a fast-forward of it).
+    branch: String,
+}
+
+/// What a merge in a pull-request mode finds (design §11.2, §11.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PrClaim {
+    /// Not a pull-request merge: the engine merges locally, as today.
+    Local,
+    /// The claim opened a pull request: this is it.
+    Pr(PrTarget),
+    /// The claim pull request was never opened (design §11.3, row 1): the
+    /// merge fails and says so.
+    NoPullRequest,
+    /// The claim is there but not confirmed yet: the pull request may still
+    /// come, so the merge waits for it.
+    Pending,
+}
+
+/// The claim pull request of a task (design §11.2 step 3): the forge op that
+/// opened it, and what it says.
+fn claim_pr(store: &mut Store, project: &str, task: &str) -> GearResult<PrClaim> {
+    let seat = format!("{project}:forge");
+    let key = format!("{task}:claim");
+    let ops = store.read(|tx| tx.ops_of_seat_kind(&seat, OpKind::Forge))?;
+    let claims: Vec<&OpRow> = ops
+        .iter()
+        .filter(|op| op.payload.get("key").and_then(|key| key.as_str()) == Some(key.as_str()))
+        .collect();
+    // The newest confirmed claim names the pull request.
+    if let Some(op) = claims
+        .iter()
+        .rev()
+        .find(|op| op.state == OpState::Confirmed)
+    {
+        let number = op
+            .result
+            .as_deref()
+            .and_then(|result| serde_json::from_str::<serde_json::Value>(result).ok())
+            .and_then(|value| value.get("number").and_then(|number| number.as_u64()));
+        if let Some(number) = number {
+            return Ok(PrClaim::Pr(PrTarget {
+                number,
+                branch: op
+                    .payload
+                    .get("branch")
+                    .and_then(|branch| branch.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            }));
+        }
+    }
+    // A claim that is there but not confirmed: the pull request may still
+    // come. A claim that failed will not: the pull request was never opened.
+    if claims
+        .iter()
+        .any(|op| matches!(op.state, OpState::Intended | OpState::Executing | OpState::Submitted | OpState::Unknown))
+    {
+        return Ok(PrClaim::Pending);
+    }
+    Ok(PrClaim::NoPullRequest)
+}
+
+/// The pull request a merge in a pull-request mode lands through, if the repo
+/// is in that mode (design §11.2).
+fn pr_claim(store: &mut Store, project: &str, op: &OpRow, repo: &Repo) -> GearResult<PrClaim> {
+    let Some(github) = repo.github.as_ref() else {
+        return Ok(PrClaim::Local);
+    };
+    if github.merge != gear_app::config::MergeMode::Pr {
+        return Ok(PrClaim::Local);
+    }
+    let task = op.task.clone().unwrap_or_default();
+    let mut claim = claim_pr(store, project, &task)?;
+    if let PrClaim::Pr(mut target) = claim {
+        // The pull request's head is the task's own branch (the claim opened
+        // it): the engine pushes the gated head there.
+        if target.branch.is_empty() {
+            target.branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
+        }
+        claim = PrClaim::Pr(target);
+    }
+    Ok(claim)
 }
 
 /// The merge op of a task, if one is queued, running or done (a Failed or
@@ -1092,6 +1436,7 @@ fn merge_one(
         &lock_of(worktree)?,
         &[],
         &FetchRemote,
+        None,
     ))
 }
 
@@ -1107,6 +1452,7 @@ fn lock_of(worktree: &gear_herdr::Worktree) -> Result<File, Failed> {
 fn step_result(step: Step) -> Result<String, Failed> {
     match step {
         Step::Merged(line) => Ok(line),
+        Step::Pr { pr, head } => Ok(format!("pr {pr} head {head}")),
         Step::Waiting(tasks) => Err(Failed::stuck(format!(
             "waits for {}",
             tasks
@@ -1126,6 +1472,7 @@ fn merge_one_locked(
     lock: &File,
     others: &[(String, String, bool)],
     remote: &dyn Remote,
+    pr: Option<&PrTarget>,
 ) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
@@ -1338,7 +1685,14 @@ fn merge_one_locked(
         });
     }
 
-    // 9. push, then close the branches the merge consumed.
+    // 9. PR mode (design §11.2 step 2): the integration branch is not pushed.
+    //    The review's commits go onto the pull request's head, and the pull
+    //    request is what lands the task.
+    if let Some(pr) = pr {
+        return pr_head(dir, &git, &task, &sha, &review_ref, has_review, pr, remote);
+    }
+
+    // 9b. push, then close the branches the merge consumed.
     // A push the remote rejects because the integration branch moved (the
     // captain or another merge pushed meanwhile) is a race, not a failure: the
     // merge starts again from the new tip.
@@ -1459,6 +1813,178 @@ impl Pushed {
         }
         pushed
     }
+}
+
+/// The pull request's head (design §11.2 step 2): the candidate with the
+/// review's commits on it, pushed to the task's branch. The push is a
+/// fast-forward of the pull request's head: the head is the candidate plus
+/// the review, and the candidate is what the branch held.
+///
+/// Nothing of the integration branch is touched: the pull request is merged
+/// by the forge, into the integration branch of the pull request.
+fn pr_head(
+    dir: &Path,
+    git: &impl Fn(&Path, &[&str]) -> Result<String, String>,
+    task: &str,
+    candidate: &str,
+    review_ref: &str,
+    has_review: bool,
+    pr: &PrTarget,
+    remote: &dyn Remote,
+) -> Step {
+    // The candidate is the base of the head: the review's commits go on top
+    // of it, and the push is a fast-forward of the branch the claim opened.
+    if let Err(reason) = git(dir, &["reset", "--hard", candidate]) {
+        return Step::Failed(Failed::stuck(format!(
+            "reset to the candidate {candidate}: {reason}"
+        )));
+    }
+    // The review branch is merged only when it holds commits the candidate
+    // does not have (design §11.2 step 2).
+    if has_review && !is_ancestor(dir, review_ref, candidate) {
+        if let Err(reason) = git(
+            dir,
+            &[
+                "merge",
+                "--no-ff",
+                review_ref,
+                "-m",
+                &format!("merge({task}): {review_ref}"),
+            ],
+        ) {
+            let _ = git(dir, &["merge", "--abort"]);
+            return Step::Failed(Failed::stuck(format!(
+                "conflict merging {review_ref}: {reason}"
+            )));
+        }
+    }
+    let head = match git(dir, &["rev-parse", "HEAD"]) {
+        Ok(head) => head.trim().to_string(),
+        Err(reason) => {
+            return Step::Failed(Failed::clear(format!(
+                "the head of the pull request: {reason}"
+            )))
+        }
+    };
+    // A push that was made and not confirmed (the engine stopped, the answer
+    // was lost) leaves the branch with a head that is the engine's own merge
+    // of the candidate and the review, but with another sha (the commit's
+    // timestamp is the clock). Such a head is the head the gate checked: it
+    // is reused, and nothing is pushed (a push would not be a fast-forward).
+    // A head that is anything else is refused: the branch moved on, and the
+    // engine never forces a push.
+    let branch_ref = format!("origin/{}", pr.branch);
+    if let Some(pushed) = git(dir, &["rev-parse", "--verify", &branch_ref]).ok() {
+        let pushed = pushed.trim().to_string();
+        if pushed != head && is_own_head(dir, &pushed, &head) {
+            return Step::Pr { pr: pr.number, head: pushed };
+        }
+    }
+    // The head goes onto the pull request's branch (a fast-forward of it).
+    if let Err(reason) = remote.push(dir, &pr.branch) {
+        if reason.contains("non-fast-forward")
+            || reason.contains("fetch first")
+            || reason.contains("cannot lock ref")
+        {
+            return Step::Failed(Failed::clear(format!("{RACE}{reason}")));
+        }
+        return Step::Failed(Failed::clear(format!("push failed: {reason}")));
+    }
+    Step::Pr { pr: pr.number, head }
+}
+
+/// Is the commit `pushed` the engine's own merge that `head` is? The two
+/// must have the same parents and the same tree: the engine's merge of the
+/// candidate and the review, built twice (the commit's timestamp is the
+/// clock, so the two shas differ). A head that holds anything else — another
+/// commit on the branch — is not the engine's and is never reused.
+fn is_own_head(dir: &Path, pushed: &str, head: &str) -> bool {
+    let parents = |commit: &str| -> Vec<String> {
+        git(dir, &["rev-list", "--parents", "-n", "1", commit])
+            .ok()
+            .map(|line| {
+                line.split_whitespace()
+                    .skip(1)
+                    .map(|parent| parent.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tree = |commit: &str| -> String {
+        git(dir, &["rev-parse", &format!("{commit}^{{tree}}")])
+            .map(|tree| tree.trim().to_string())
+            .unwrap_or_default()
+    };
+    let pushed_parents = parents(pushed);
+    let head_parents = parents(head);
+    !pushed_parents.is_empty()
+        && pushed_parents == head_parents
+        && tree(pushed) == tree(head)
+}
+
+/// Is `a` an ancestor of `b`? (`git merge-base --is-ancestor`.)
+fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+    git(dir, &["merge-base", "--is-ancestor", a, b]).is_ok()
+}
+
+/// The method a pull request is merged with (design §11.1): the repo's
+/// `merge_method`, `squash` by default.
+fn merge_method_of(repo: &Repo) -> &'static str {
+    repo.github
+        .as_ref()
+        .map(|github| github.merge_method.as_str())
+        .unwrap_or("squash")
+}
+
+/// The land op of a task (design §11.2 step 3): the forge op that merges the
+/// pull request, with the head the gate checked.
+fn insert_land_op(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    op: &OpRow,
+    pr: u64,
+    head: &str,
+    method: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let task = op.task.clone().unwrap_or_default();
+    let attempt = op.attempt.unwrap_or(1);
+    let key = format!("{task}:{attempt}:land");
+    let seat = format!("{project}:forge");
+    // One land op per task and attempt: the op the sync runs is the one the
+    // engine inserted. A failed or void land op is followed by a new one: the
+    // captain's `- remerge` retries the landing (design §11.3, row 2), and
+    // the new op carries the head and the method of this attempt.
+    if tx
+        .ops_of_seat_kind(&seat, OpKind::Forge)?
+        .iter()
+        .any(|op| {
+            op.payload.get("key").and_then(|key| key.as_str()) == Some(key.as_str())
+                && !matches!(op.state, OpState::Failed | OpState::Void)
+        })
+    {
+        return Ok(());
+    }
+    tx.insert_op(&NewOp {
+        project: project.to_string(),
+        seat,
+        generation: 0,
+        kind: OpKind::Forge,
+        task: Some(task),
+        attempt: Some(attempt),
+        ref_msg: None,
+        plan_version: None,
+        payload: serde_json::json!({
+            "forge": "land",
+            "key": key,
+            "pr": pr,
+            "head": head,
+            "method": method,
+            "attempts": 1,
+        }),
+        created: now,
+    })?;
+    Ok(())
 }
 
 fn close_branches(
@@ -1596,6 +2122,7 @@ fn tell_captain(
             )
         })?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread: format!("merge:{}", now),
             task: task.map(|(task, _)| task.to_string()),
@@ -1685,6 +2212,7 @@ fn tell_captain_waiting(
             return Ok(());
         }
         tx.insert_message(&NewMessage {
+            meta: None,
             project: project.to_string(),
             thread,
             task: Some(task.clone()),
@@ -2178,6 +2706,10 @@ mod tests {
                     [("T-1", 1, candidate_a), ("T-2", 2, candidate_b)]
                 {
                     tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
                         project: "p".into(),
                         id: id.into(),
                         rank,
@@ -2376,7 +2908,7 @@ mod tests {
         // The first merge fails on the gate; nothing is pushed.
         let merged = wait_merge(&mut store, &mut herdr, &cfg);
         assert!(merged.is_empty(), "{merged:?}");
-        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        let op = merge_op(&mut store);
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         assert_eq!(scratch.dev_log(), "dev", "nothing was pushed");
         // The item names the plan line that retries it.
@@ -2544,6 +3076,10 @@ mod tests {
                 for (index, candidate) in candidates.iter().enumerate() {
                     let id = format!("T-{}", index + 1);
                     tx.insert_task(&gear_store::TaskRow {
+                        repo: None,
+                        base: None,
+                        gate: None,
+                        rework_estimate_min: None,
                         project: "p".into(),
                         id: id.clone(),
                         rank: index as i64 + 1,
@@ -2869,6 +3405,10 @@ gate = "{gate}"
                 gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
                 gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
                 tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
                     project: "p".into(),
                     id: "T-5".into(),
                     rank: 1,
@@ -2904,6 +3444,450 @@ gate = "{gate}"
             })
             .unwrap();
         store
+    }
+
+    /// The project config of a repo in pull-request mode (design §11.1).
+    fn pr_config_text(gate: &str) -> String {
+        format!(
+            r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[github]
+repo = "owner/name"
+merge = "pr"
+merge_method = "squash"
+
+[quota]
+lanes = 1
+temps = 0
+
+[captain]
+pane = "w1:p1"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[conventions]
+gate = "{gate}"
+"#
+        )
+    }
+
+    /// A project in pull-request mode with one passed task (T-5) whose
+    /// candidate is `candidate` (design §11.2).
+    fn pr_world(candidate: &str) -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                tx.insert_project(&gear_store::ProjectRow {
+                    id: "p".into(),
+                    herdr_session: "sess".into(),
+                    config_toml: pr_config_text("true"),
+                    config_version: 1,
+                    quota_lanes: 1,
+                    quota_temps: 0,
+                    quota_includes_captain: false,
+                    plan_version: 0,
+                    created: 0,
+                })?;
+                gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
+                gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
+                tx.insert_task(&gear_store::TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-5".into(),
+                    rank: 1,
+                    state: TaskState::Ready,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: Some(3),
+                    updated: 0,
+                })?;
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, candidate, "report", 0)?;
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: "T-5".into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.into(),
+                    passed: true,
+                    evidence: Some("ops/reviews/T-5.md".into()),
+                    by_seat: "p:captain".into(),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// The claim op of a task: the forge op that opened its pull request.
+    fn claim_op(store: &mut Store, task: &str, number: u64) {
+        let op = store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:forge".into(),
+                    generation: 0,
+                    kind: OpKind::Forge,
+                    task: Some(task.into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "forge": "claim",
+                        "key": format!("{task}:claim"),
+                        "attempts": 1,
+                    }),
+                    created: 0,
+                })
+            })
+            .unwrap();
+        let result = serde_json::json!({
+            "repo": "owner/name",
+            "number": number,
+            "url": format!("https://github.com/owner/name/pull/{number}"),
+        })
+        .to_string();
+        store
+            .write(|tx| tx.set_op_state("p", &op.id, OpState::Confirmed, Some(&result), 1))
+            .unwrap();
+    }
+
+    /// A forge that merges the pull request (design §11.2 step 4), or refuses
+    /// it with the message `gh` gave. It counts its merge calls: a second
+    /// call is the retry a `- remerge` line asks for.
+    struct FakeForge {
+        refuse: Option<String>,
+        commit: String,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeForge {
+        fn merging() -> FakeForge {
+            FakeForge {
+                refuse: None,
+                commit: "cafe1234".to_string(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn refusing(reason: &str) -> FakeForge {
+            FakeForge {
+                refuse: Some(reason.to_string()),
+                commit: "cafe1234".to_string(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        /// How many times the forge was asked to merge.
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl gear_forge::Forge for FakeForge {
+        fn issues(
+            &self,
+            _repo: &str,
+            _filter: &gear_forge::Filter,
+        ) -> gear_forge::ForgeResult<Vec<gear_forge::Issue>> {
+            Ok(Vec::new())
+        }
+
+        fn open_claim(
+            &self,
+            repo: &str,
+            _branch: &str,
+            _base: &str,
+            _title: &str,
+            _body: &str,
+        ) -> gear_forge::ForgeResult<gear_forge::PrRef> {
+            Ok(gear_forge::PrRef { repo: repo.to_string(), number: 1, url: String::new() })
+        }
+
+        fn comment(&self, _pr: &gear_forge::PrRef, _body: &str) -> gear_forge::ForgeResult<()> {
+            Ok(())
+        }
+
+        fn merge(
+            &self,
+            _pr: &gear_forge::PrRef,
+            _method: gear_forge::MergeMethod,
+            _head: &str,
+        ) -> gear_forge::ForgeResult<gear_forge::MergeResult> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.refuse {
+                Some(reason) => Err(gear_forge::Error::Failed(reason.clone())),
+                None => Ok(gear_forge::MergeResult { merged: true, message: "merged".to_string() }),
+            }
+        }
+
+        fn pr_state(&self, _pr: &gear_forge::PrRef) -> gear_forge::ForgeResult<gear_forge::PrState> {
+            Ok(gear_forge::PrState {
+                state: "MERGED".to_string(),
+                merge_commit: Some(self.commit.clone()),
+                head_ref_oid: None,
+            })
+        }
+
+        fn pr_by_head(
+            &self,
+            _repo: &str,
+            _branch: &str,
+        ) -> gear_forge::ForgeResult<Option<gear_forge::PrRef>> {
+            Ok(None)
+        }
+
+        fn close_issue(
+            &self,
+            _repo: &str,
+            _number: u64,
+            _comment: &str,
+        ) -> gear_forge::ForgeResult<()> {
+            Ok(())
+        }
+    }
+
+    /// One merge step and the wait for the worker it launched: the step that
+    /// collects the worker is the next one (design §11.2).
+    fn pr_step(
+        store: &mut Store,
+        herdr: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &EngineCfg,
+        now: Ts,
+    ) -> Vec<Merged> {
+        let seen = cfg.merges.progress();
+        let merged = merge_passed(store, herdr, cfg, "p", now).unwrap();
+        if cfg.merges.running("p") {
+            assert!(
+                cfg.merges.wait_progress(seen, WAIT),
+                "the merge worker did not report within {WAIT:?}"
+            );
+        }
+        merged
+    }
+
+    /// The forge ops of a project, by their key.
+    fn forge_ops(store: &mut Store) -> Vec<gear_store::OpRow> {
+        store.read(|tx| tx.ops_of_seat_kind("p:forge", OpKind::Forge)).unwrap()
+    }
+
+    /// The merge op of a task (the ids are the store's, so the op is found by
+    /// what it is).
+    fn merge_op(store: &mut Store) -> gear_store::OpRow {
+        let mut all = Vec::new();
+        for state in [
+            OpState::Intended,
+            OpState::Executing,
+            OpState::Submitted,
+            OpState::Unknown,
+            OpState::Confirmed,
+            OpState::Failed,
+            OpState::Void,
+        ] {
+            all.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        all.pop().expect("a merge op")
+    }
+
+    /// The land op of a task: the forge op that merges its pull request.
+    fn land_op(store: &mut Store, task: &str) -> Option<gear_store::OpRow> {
+        forge_ops(store)
+            .into_iter()
+            .find(|op| op.payload.get("forge").and_then(|forge| forge.as_str()) == Some("land"))
+            .filter(|op| op.task.as_deref() == Some(task))
+    }
+
+    /// The captain's items about a task's failed merge.
+    fn failed_items(store: &mut Store, task: &str) -> Vec<gear_store::MessageRow> {
+        store
+            .read(|tx| tx.thread_messages("p", &format!("merge-failed:{task}")))
+            .unwrap()
+    }
+
+    /// A pull-request merge (design §11.2): the gate runs as today, the
+    /// review's commits go onto the pull request's head, the merge op waits
+    /// for the land op, and the land op's answer is the merge.
+    #[test]
+    fn a_pr_mode_merge_pushes_the_pull_request_head_and_waits_for_the_land_op() {
+        let scratch = Scratch::new("pr");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pr_world(&candidate);
+        claim_op(&mut store, "T-5", 7);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        // The engine queues the merge op, runs it, and collects the result.
+        pr_step(&mut store, &mut herdr, &cfg, 20);
+        pr_step(&mut store, &mut herdr, &cfg, 21);
+
+        // The merge op waits for the land op, with the pull request and the
+        // head the gate checked (design §11.2 step 3).
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Submitted, "{op:?}");
+        let result: serde_json::Value =
+            serde_json::from_str(op.result.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(result["mode"], "pr", "{result}");
+        assert_eq!(result["pr"], 7, "{result}");
+        let head = result["head"].as_str().unwrap_or_default().to_string();
+        assert_eq!(head.len(), 40, "the head is a commit: {result}");
+
+        // The land op is the forge's call, with the head and the method.
+        let land = land_op(&mut store, "T-5").expect("the land op is inserted");
+        assert_eq!(land.state, OpState::Intended, "{land:?}");
+        assert_eq!(land.payload["forge"], "land");
+        assert_eq!(land.payload["pr"], 7, "{land:?}");
+        assert_eq!(land.payload["head"], head.as_str(), "{land:?}");
+        assert_eq!(land.payload["method"], "squash", "{land:?}");
+
+        // Only the pull request's head moved: the integration branch is
+        // untouched, and the head holds the candidate and the review.
+        assert!(!scratch.dev_has_task_commit(), "the integration branch is not pushed");
+        assert_eq!(scratch.head_of("heat/t5"), head, "the head is on the task's branch");
+        let log = sh(&scratch.root, "git -C origin.git log --format=%s heat/t5");
+        assert!(log.contains("task"), "{log}");
+        assert!(log.contains("review"), "the review's commits are on the head: {log}");
+        // Nothing is deleted yet (design §11.2 step 3).
+        let branches = scratch.origin_branches();
+        assert!(branches.contains("heat/t5"), "{branches}");
+        assert!(branches.contains("review/t5"), "{branches}");
+
+        // The forge merges the pull request (design §11.2 step 4).
+        gear_forge::sync_with(&mut store, "p", &FakeForge::merging(), 30).unwrap();
+        let land = land_op(&mut store, "T-5").expect("the land op is there");
+        assert_eq!(land.state, OpState::Confirmed, "{land:?}");
+
+        // The next tick confirms the merge with the pull request's commit
+        // (design §11.2 step 5).
+        let merged = pr_step(&mut store, &mut herdr, &cfg, 40);
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Confirmed, "{op:?}");
+        let line = op.result.clone().unwrap_or_default();
+        assert!(line.contains("merged T-5 into dev by PR #7"), "{line}");
+        assert!(line.contains("cafe1234"), "{line}");
+        assert_eq!(
+            store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged,
+            Some(op.updated)
+        );
+        // The branches the merge consumed are gone now.
+        let branches = scratch.origin_branches();
+        assert!(!branches.contains("heat/t5"), "{branches}");
+        assert!(!branches.contains("review/t5"), "{branches}");
+    }
+
+    /// §11.3, row 1: a task whose claim pull request was never opened cannot
+    /// land through a pull request: the merge fails and says so.
+    #[test]
+    fn no_claim_pull_request_fails_the_merge_with_the_text() {
+        let scratch = Scratch::new("pr-nopr");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pr_world(&candidate);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        pr_step(&mut store, &mut herdr, &cfg, 20);
+
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let reason = op.result.clone().unwrap_or_default();
+        assert!(
+            reason.contains("no pull request for T-5: the claim PR was never opened"),
+            "{reason}"
+        );
+        // The captain hears about it, with the plan line that retries it.
+        let items = failed_items(&mut store, "T-5");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].body.contains("- remerge T-5"), "{}", items[0].body);
+        // Nothing was pushed.
+        assert!(!scratch.dev_has_task_commit());
+    }
+
+    /// §11.3, row 2: a forge that refuses the merge fails the land op and the
+    /// merge op, with the forge's own message.
+    #[test]
+    fn a_refused_land_fails_the_merge_with_the_forges_message() {
+        let scratch = Scratch::new("pr-refused");
+        let worktree = scratch.merge_worktree();
+        let candidate = scratch.head_of("heat/t5");
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut store = pr_world(&candidate);
+        claim_op(&mut store, "T-5", 7);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] {
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+
+        pr_step(&mut store, &mut herdr, &cfg, 20);
+        pr_step(&mut store, &mut herdr, &cfg, 21);
+        assert_eq!(merge_op(&mut store).state, OpState::Submitted);
+
+        // The forge refuses the merge.
+        gear_forge::sync_with(
+            &mut store,
+            "p",
+            &FakeForge::refusing("not mergeable: required checks are missing"),
+            30,
+        )
+        .unwrap();
+        let land = land_op(&mut store, "T-5").expect("the land op is there");
+        assert_eq!(land.state, OpState::Failed, "{land:?}");
+        assert!(
+            land.result.as_deref().unwrap_or_default().contains("required checks"),
+            "{land:?}"
+        );
+
+        // The merge op fails with the forge's message, and the captain hears
+        // about it (design §11.3, row 2).
+        pr_step(&mut store, &mut herdr, &cfg, 40);
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let reason = op.result.clone().unwrap_or_default();
+        assert!(reason.contains("required checks"), "{reason}");
+        let items = failed_items(&mut store, "T-5");
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].body.contains("- remerge T-5"), "{}", items[0].body);
     }
 
     #[test]
@@ -2958,6 +3942,69 @@ gate = "{gate}"
     ) -> (Store, gear_herdr::fake::FakeHerdr, EngineCfg) {
         let candidate = scratch.head_of("heat/t5");
         queued_merge_candidate(scratch, gate, &candidate)
+    }
+
+    /// T-165 (review F2, design §10.7 row B03-01): a task whose work is
+    /// already on the integration branch — it landed with another task's
+    /// merge — is not merged again: no merge op is queued for it, and a merge
+    /// op that was queued before is voided instead of run.
+    #[test]
+    fn a_task_already_merged_by_another_task_is_not_merged_again() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let mut cfg = test_cfg();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        store
+            .write(|tx| {
+                // T-5's attempt was accepted and carries the merge time of
+                // the merge that landed it (another task's merge).
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                attempt.candidate = Some("abc1234".into());
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Verifying;
+                tx.update_task(&task)?;
+                tx.set_attempt_time("p", "T-5", 1, gear_store::AttemptStep::Merged, 5)?;
+                // A merge op was queued in an earlier tick, before the
+                // attribution arrived.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t5",
+                        "candidate": "abc1234",
+                        "review": "review/t5",
+                    }),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let merged = merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+
+        assert!(merged.is_empty(), "the work was already merged: {merged:?}");
+        // The queued op is void, not run: no worker was launched.
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Void, "{op:?}");
+        assert!(!cfg.merges.running("p"), "no merge worker was launched");
+        // And no second merge op was queued for the same attempt.
+        let merges = store
+            .read(|tx| tx.ops_in_state("p", OpState::Void))
+            .unwrap()
+            .iter()
+            .filter(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some("T-5"))
+            .count();
+        assert_eq!(merges, 1, "one merge op for the task, not two");
     }
 
     /// A project with a handed-in task and a queued merge op for it, whose
@@ -3188,6 +4235,7 @@ gate = "{gate}"
             &[],
             remote,
             wait,
+            None,
         ))
     }
 
@@ -3286,7 +4334,7 @@ gate = "{gate}"
         let merged = wait_merge(&mut store, &mut herdr, &cfg);
 
         assert!(merged.is_empty(), "{merged:?}");
-        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        let op = merge_op(&mut store);
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         let reason = op.result.clone().unwrap_or_default();
         assert!(reason.contains("no pushed ref"), "{reason}");
@@ -3528,7 +4576,8 @@ gate = "{project_gate}"
         let done = scratch.root.join("gate-finished");
         let (running, release, gate) =
             held_gate(&scratch.root, "gate", &format!("touch '{}'", done.display()));
-        let (mut store, mut herdr, cfg) = queued_merge(&scratch, &gate);
+        let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, &gate);
+        cfg.profiles.get_mut("opencode").unwrap().new_session.clear();
         merge_passed(&mut store, &mut herdr, &cfg, "p", 10).unwrap();
         // The worker is in the gate, which stays there until the test says go.
         await_fifo(&running);
@@ -3553,6 +4602,7 @@ gate = "{project_gate}"
                     created: 0,
                 })?;
                 tx.insert_message(&NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "question:1".into(),
                     task: None,
@@ -4238,7 +5288,7 @@ gate = "{project_gate}"
         let merged = wait_merge(&mut store, &mut herdr, &cfg);
 
         assert!(merged.is_empty(), "{merged:?}");
-        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        let op = merge_op(&mut store);
         assert_eq!(op.state, OpState::Failed, "{op:?}");
         let reason = op.result.clone().unwrap_or_default();
         assert!(reason.contains("review branch"), "{reason}");
@@ -4376,5 +5426,274 @@ gate = "{project_gate}"
         assert!(herdr.prompts_to("w9:p1").is_empty(), "the unavailable captain is not rung");
     }
 
+
+/// The three regressions of the review of attempt 1 (F1-F3): the landing must
+/// survive a restart, a refusal the captain retries, and a push whose answer
+/// was lost.
+use gear_herdr::fake::FakeHerdr;
+use gear_model::OpKind;
+
+/// A project in pull-request mode with one passed task (T-5) whose
+/// candidate is `candidate`, and the claim pull request #7.
+fn pr_setup(candidate: &str) -> (Store, FakeHerdr, EngineCfg) {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            tx.insert_project(&gear_store::ProjectRow {
+                id: "p".into(),
+                herdr_session: "sess".into(),
+                config_toml: pr_config_text("true"),
+                config_version: 1,
+                quota_lanes: 1,
+                quota_temps: 0,
+                quota_includes_captain: false,
+                plan_version: 0,
+                created: 0,
+            })?;
+            gear_store::testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p1", "opencode", 0)?;
+            gear_store::testing::seed_active_seat(tx, "p", "captain", gear_model::SeatRole::Captain, "w9:p1", "claude", 0)?;
+            tx.insert_task(&gear_store::TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-5".into(),
+                rank: 1,
+                state: TaskState::Ready,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: None,
+                issue: Some(3),
+                updated: 0,
+            })?;
+            gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+            gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+            gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, candidate, "report", 0)?;
+            tx.insert_verdict(&gear_store::VerdictRow {
+                project: "p".into(),
+                task: "T-5".into(),
+                attempt: 1,
+                contract_version: 1,
+                candidate: candidate.into(),
+                passed: true,
+                evidence: Some("ops/reviews/T-5.md".into()),
+                by_seat: "p:captain".into(),
+                created: 10,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    claim_op(&mut store, "T-5", 7);
+    let herdr = FakeHerdr::new();
+    let mut cfg = EngineCfg {
+        remote: std::sync::Arc::new(FetchRemote),
+        merge_retry_wait: RetryWait::immediate(),
+        ..Default::default()
+    };
+    for kind in ["opencode", "claude"] {
+        cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+    }
+    (store, herdr, cfg)
 }
 
+/// A merge op for the task, in the state a restart leaves it in.
+fn merge_op_in(store: &mut Store, candidate: &str, state: OpState) -> String {
+    let op = store
+        .write(|tx| {
+            tx.insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                kind: OpKind::Merge,
+                task: Some("T-5".into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "branch": "heat/t5",
+                    "candidate": candidate,
+                    "review": "review/t5",
+                }),
+                created: 0,
+            })
+        })
+        .unwrap();
+    store
+        .write(|tx| tx.set_op_state("p", &op.id, state, None, 0))
+        .unwrap();
+    op.id
+}
+
+/// The land ops of the task: the forge ops that merge its pull request.
+fn land_ops(store: &mut Store) -> Vec<gear_store::OpRow> {
+    store
+        .read(|tx| tx.ops_of_seat_kind("p:forge", OpKind::Forge))
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.payload.get("forge").and_then(|forge| forge.as_str()) == Some("land"))
+        .collect()
+}
+
+/// The state of a merge op.
+fn state_of(store: &mut Store, id: &str) -> OpState {
+    store.read(|tx| tx.get_op("p", id)).unwrap().unwrap().state
+}
+
+/// The result of a merge op.
+fn result_of(store: &mut Store, id: &str) -> String {
+    store.read(|tx| tx.get_op("p", id)).unwrap().unwrap().result.unwrap_or_default()
+}
+
+/// One merge step and the wait for the worker it launched.
+fn pr_tick(store: &mut Store, herdr: &mut FakeHerdr, cfg: &EngineCfg, now: Ts) {
+    let seen = cfg.merges.progress();
+    merge_passed(store, herdr, cfg, "p", now).unwrap();
+    if cfg.merges.running("p") {
+        assert!(
+            cfg.merges.wait_progress(seen, std::time::Duration::from_secs(60)),
+            "the merge worker did not report"
+        );
+    }
+}
+
+/// F1: a refused land is retried by the captain's `- remerge T-5`: a new
+/// land op is inserted (the old one failed), the forge is called again,
+/// and the merge is confirmed.
+#[test]
+fn a_refused_land_is_retried_by_a_remerge() {
+    let scratch = Scratch::new("pr-remerge");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    // The merge runs and the pull request's head is pushed.
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+    let first = merge_op_in(&mut store, &candidate, OpState::Unknown);
+    let _ = first;
+
+    // The forge refuses the landing.
+    let refusing = FakeForge::refusing("not mergeable: required checks are missing");
+    gear_forge::sync_with(&mut store, "p", &refusing, 30).unwrap();
+    assert_eq!(refusing.calls(), 1, "the forge was asked once");
+    assert_eq!(land_ops(&mut store).len(), 1);
+    assert_eq!(land_ops(&mut store)[0].state, OpState::Failed);
+
+    // The captain remerges: a new merge op for the same attempt (what
+    // `- remerge T-5` in the plan queues).
+    let remerge = merge_op_in(&mut store, &candidate, OpState::Intended);
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    pr_tick(&mut store, &mut herdr, &cfg, 41);
+
+    // A new land op was inserted: the old one failed.
+    let lands = land_ops(&mut store);
+    assert_eq!(lands.len(), 2, "a new land op: {lands:?}");
+    assert_eq!(lands[1].state, OpState::Intended, "{lands:?}");
+
+    // The forge merges this time, and the merge is confirmed.
+    let merging = FakeForge::merging();
+    gear_forge::sync_with(&mut store, "p", &merging, 50).unwrap();
+    assert_eq!(merging.calls(), 1, "the forge was asked again");
+    pr_tick(&mut store, &mut herdr, &cfg, 60);
+    assert_eq!(state_of(&mut store, &remerge), OpState::Confirmed, "{:?}", result_of(&mut store, &remerge));
+    assert!(
+        result_of(&mut store, &remerge).contains("by PR #7"),
+        "{}",
+        result_of(&mut store, &remerge)
+    );
+    assert!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged.is_some());
+}
+
+/// F2: a merge op the engine recovered (Unknown) becomes Submitted after
+/// the worker, and the merge is confirmed when the land op is.
+#[test]
+fn a_recovered_merge_op_becomes_submitted_and_confirms() {
+    let scratch = Scratch::new("pr-recovered");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    // The op is Unknown: the engine stopped while its worker ran.
+    let id = merge_op_in(&mut store, &candidate, OpState::Unknown);
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+
+    // The recovered op carries the result of a pull-request merge.
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["mode"], "pr", "{result}");
+    assert_eq!(result["pr"], 7, "{result}");
+    // One land op: the one the merge inserted.
+    assert_eq!(land_ops(&mut store).len(), 1);
+
+    // The forge merges, and the next tick confirms the merge.
+    gear_forge::sync_with(&mut store, "p", &FakeForge::merging(), 30).unwrap();
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    assert_eq!(state_of(&mut store, &id), OpState::Confirmed, "{:?}", result_of(&mut store, &id));
+    assert!(store.read(|tx| tx.attempt_times("p", "T-5", 1)).unwrap().merged.is_some());
+}
+
+/// F3: a head that was pushed and whose answer was lost is reused: the
+/// retry does not build a sibling merge commit and does not fail with a
+/// non-fast-forward.
+#[test]
+fn a_pushed_head_is_reused_after_a_restart() {
+    let scratch = Scratch::new("pr-reuse");
+    let worktree = scratch.merge_worktree();
+    let candidate = scratch.head_of("heat/t5");
+    let (mut store, mut herdr, cfg) = pr_setup(&candidate);
+    herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+
+    let id = merge_op_in(&mut store, &candidate, OpState::Intended);
+    pr_tick(&mut store, &mut herdr, &cfg, 20);
+    pr_tick(&mut store, &mut herdr, &cfg, 21);
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let pushed = scratch.head_of("heat/t5");
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["head"], pushed.as_str(), "{result}");
+
+    // The head on the branch is rewritten with another timestamp: the same
+    // tree and the same parents, another sha — what a lost answer leaves
+    // behind.
+    let older = sh(
+        &scratch.root,
+        "set -e\n\
+         tree=$(git -C origin.git rev-parse 'heat/t5^{tree}')\n\
+         p1=$(git -C origin.git rev-parse 'heat/t5^1')\n\
+         p2=$(git -C origin.git rev-parse 'heat/t5^2')\n\
+         new=$(GIT_AUTHOR_DATE='2001-01-01T00:00:00Z' GIT_COMMITTER_DATE='2001-01-01T00:00:00Z' \
+           git -C origin.git commit-tree $tree -p $p1 -p $p2 -m 'merge(T-5): origin/review/t5')\n\
+         git -C origin.git update-ref refs/heads/heat/t5 $new\n\
+         echo $new",
+    );
+    let older = older.trim().to_string();
+    assert_ne!(older, pushed, "the head on the branch has another sha");
+
+    // The engine starts again: the op is Unknown, the merge runs again.
+    store
+        .write(|tx| tx.set_op_state("p", &id, OpState::Unknown, None, 30))
+        .unwrap();
+    pr_tick(&mut store, &mut herdr, &cfg, 40);
+    pr_tick(&mut store, &mut herdr, &cfg, 41);
+
+    // The head on the branch is reused: no non-fast-forward, no new sha.
+    assert_eq!(state_of(&mut store, &id), OpState::Submitted, "{:?}", result_of(&mut store, &id));
+    let result: serde_json::Value =
+        serde_json::from_str(&result_of(&mut store, &id)).unwrap();
+    assert_eq!(result["head"], older.as_str(), "the head on the branch is reused: {result}");
+    assert_eq!(scratch.head_of("heat/t5"), older, "nothing was pushed");
+}
+}

@@ -5,7 +5,7 @@
 use gear_engine::{feed, tick, EngineCfg};
 use gear_herdr::{fake::FakeHerdr, AgentStatus};
 use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, SeatState, TaskState};
-use gear_store::{testing, NewMessage, Store, TaskRow};
+use gear_store::{testing, AttemptRow, AttemptStep, NewMessage, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -14,6 +14,10 @@ const LANE_PANE: &str = "w1:p2";
 fn profile(kind: &str) -> gear_herdr::Profile {
     gear_herdr::Profile {
         kind: kind.into(),
+        new_session: String::new(),
+        compact: String::new(),
+        usage_log: None,
+        error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec![],
         quota_markers: vec![],
@@ -24,6 +28,7 @@ fn profile(kind: &str) -> gear_herdr::Profile {
         tail_lines: 16,
         confirm_rounds: 2,
         unattended_args: vec!["--auto".into()],
+        instructions_args: vec![],
         session_ref: false,
         resume_args: None,
         exit_keys: vec![],
@@ -66,6 +71,10 @@ fn world(lane: AgentStatus, tasks: usize) -> World {
 
 fn task(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<()> {
     tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
         project: "p".into(),
         id: id.into(),
         rank,
@@ -155,6 +164,7 @@ fn an_item_from_a_previous_engine_is_not_duplicated() {
     w.store
         .write(|tx| {
             tx.insert_message(&NewMessage {
+                meta: None,
                 project: "p".into(),
                 thread: "lane:heat".into(),
                 task: None,
@@ -187,6 +197,10 @@ fn a_task_taken_by_a_delivery_is_not_ready_work() {
     w.store
         .write(|tx| {
             tx.insert_attempt(&gear_store::AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(),
                 task: "T-1".into(),
                 n: 1,
@@ -304,6 +318,10 @@ fn measured_history(w: &mut World) {
         done.state = TaskState::Done;
         tx.update_task(&done)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-90".into(), n: 1, seat: "p:heat".into(),
             generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Accepted, candidate: None, report: None, safe_point: None,
@@ -361,6 +379,7 @@ fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
     w.store.write(|tx| tx.set_seat_state("p:heat", SeatState::Held,
         Some("captain reminder fixture"), T0)).unwrap();
     let id = w.store.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "question".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),
@@ -424,6 +443,10 @@ fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
         task.state = TaskState::Running;
         tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: "T-1".into(), n: 1, seat: "p:heat".into(),
             generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Started, candidate: None, report: None, safe_point: None,
@@ -451,9 +474,9 @@ fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
     assert_eq!(items(&mut w.store, "heat").len(), 1);
     feed::keep_lanes_fed(&mut w.store, "p", T0 + 45 * 60).unwrap();
     let all = items(&mut w.store, "heat");
-    assert_eq!(all.len(), 2);
-    assert_eq!(all[0].state, MsgState::Resolved);
-    assert_eq!(all[1].body, "lane heat runs dry in ~15 min");
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].state, MsgState::Open);
+    assert_eq!(all[0].body, "lane heat runs dry in ~15 min");
 }
 
 #[test]
@@ -493,6 +516,7 @@ captain_item_stale_min = 30
 "#.into();
         tx.update_project(&project)?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(), thread: "question".into(), task: None, attempt: None,
             sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
             kind: MsgKind::Question, urgent: false, body: "needs a decision".into(),
@@ -517,4 +541,266 @@ captain_item_stale_min = 30
     assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1);
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3600).unwrap();
     assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 2);
+}
+
+// ---- the imbalance item and the one-task-from-dry warning (T-162)
+
+/// A task of a lane, with an estimate and a state.
+fn lane_task(
+    tx: &gear_store::Tx<'_>,
+    id: &str,
+    lane: &str,
+    rank: i64,
+    state: TaskState,
+    estimate: Option<i64>,
+    deps: Vec<&str>,
+) -> gear_model::GearResult<()> {
+    tx.insert_task(&TaskRow {
+        repo: None,
+        base: None,
+        gate: None,
+        rework_estimate_min: None,
+        project: "p".into(),
+        id: id.into(),
+        rank,
+        state,
+        priority: "must".into(),
+        lane: Some(lane.into()),
+        milestone: None,
+        required: false,
+        contract_version: 1,
+        deps: deps.into_iter().map(str::to_string).collect(),
+        followup_of: None,
+        wait_on: None,
+        wait_cond: None,
+        rework_note: None,
+        estimate_min: estimate,
+        issue: None,
+        updated: T0,
+    })
+}
+
+/// The imbalance item of the project.
+fn balance_items(store: &mut Store) -> Vec<gear_store::MessageRow> {
+    store
+        .read(|tx| tx.thread_messages("p", "balance"))
+        .unwrap()
+}
+
+/// A project with two lanes: `mast` has nothing left, `deck` has three
+/// ready tasks of 40 minutes each.
+fn imbalance_world() -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "opencode", T0)?;
+            for n in 1..=3 {
+                lane_task(
+                    tx,
+                    &format!("T-{n}"),
+                    "deck",
+                    n as i64,
+                    TaskState::Ready,
+                    Some(40),
+                    vec![],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    // The lane with the pile of work is busy: its tasks stay queued.
+    herdr.add_agent("w1:p3", "opencode", AgentStatus::Working);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+#[test]
+fn an_idle_lane_next_to_a_pile_of_work_gives_one_balance_item() {
+    let mut w = imbalance_world();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
+    assert_eq!(items[0].thread, "balance");
+    assert_eq!(items[0].recipient, "p:captain");
+    assert_eq!(
+        items[0].body,
+        "mast has nothing left; deck has 3 tasks (120m) left: move some (lane ownership allowing) or plan more for mast."
+    );
+
+    // The next tick does not repeat the fact.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert_eq!(balance_items(&mut w.store).len(), 1, "no duplicate");
+
+    // The imbalance ends: the idle lane gets work.
+    w.store
+        .write(|tx| lane_task(tx, "T-9", "mast", 9, TaskState::Ready, Some(20), vec![]))
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved, "the item closed");
+}
+
+#[test]
+fn a_lane_one_task_from_dry_warns_once() {
+    let mut w = world(AgentStatus::Working, 0);
+    // The lane works on its last task; the one behind it waits for a
+    // dependency that is not done.
+    w.store
+        .write(|tx| {
+            lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
+            lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec!["T-3"])?;
+            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])?;
+            // The lane works on T-1.
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+
+    let lane_items = items(&mut w.store, "heat");
+    assert_eq!(lane_items.len(), 1, "{lane_items:?}");
+    assert_eq!(lane_items[0].state, MsgState::Open);
+    assert_eq!(
+        lane_items[0].body,
+        "lane heat has nothing to start after T-1 (1 queued behind deps: T-2)"
+    );
+
+    // The next tick does not repeat the warning: one item per state.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "no duplicate");
+}
+
+/// F2: the warning about the work in flight is not the idle state. When the
+/// lane hands its last task in, it stands idle — a fresh, worse fact, with
+/// its own item.
+#[test]
+fn a_lane_that_hands_its_last_task_in_says_it_is_idle() {
+    let mut w = world(AgentStatus::Working, 0);
+    w.store
+        .write(|tx| {
+            lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
+            lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec!["T-3"])?;
+            lane_task(tx, "T-3", "wire", 3, TaskState::Running, Some(30), vec![])?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "the warning about the work in flight");
+
+    // The lane hands the task in: the review runs, the lane has nothing left.
+    w.store
+        .write(|tx| {
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.expect("the attempt");
+            attempt.state = AttemptState::Submitted;
+            tx.update_attempt(&attempt)?;
+            let mut task = tx.get_task("p", "T-1")?.expect("the task");
+            task.state = TaskState::Verifying;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+
+    let lane_items = items(&mut w.store, "heat");
+    assert_eq!(lane_items.len(), 1, "{lane_items:?}");
+    assert_eq!(lane_items[0].state, MsgState::Open, "the idle state updates the existing item");
+    assert_eq!(lane_items[0].body, "lane heat is IDLE");
+
+    // And the next tick is silent: the idle lane is not told again.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
+    assert_eq!(items(&mut w.store, "heat").len(), 1, "no duplicate");
+}
+
+/// F1: a balance item the captain resolved is not told again while the same
+/// imbalance lasts; a later imbalance is told again.
+#[test]
+fn a_resolved_balance_item_is_not_told_again() {
+    let mut w = imbalance_world();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
+    assert_eq!(balance_items(&mut w.store).len(), 1, "{:?}", balance_items(&mut w.store));
+
+    // The captain resolves the item.
+    let id = balance_items(&mut w.store)[0].id.clone();
+    w.store
+        .write(|tx| {
+            tx.update_message_state("p", &id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+        })
+        .unwrap();
+
+    // The next tick does not tell the same fact again.
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 1, "no new item is opened: {items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved, "the one item stays resolved");
+
+    // The imbalance ends: the idle lane gets work.
+    w.store
+        .write(|tx| lane_task(tx, "T-9", "mast", 9, TaskState::Ready, Some(20), vec![]))
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+
+    // And it is back: the fact is told again.
+    w.store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-9")?.expect("the task");
+            task.state = TaskState::Done;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
+    let items = balance_items(&mut w.store);
+    assert_eq!(items.len(), 2, "{items:?}");
+    assert_eq!(items[1].state, MsgState::Open, "the imbalance is told again");
 }

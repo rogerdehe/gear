@@ -4,11 +4,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScreenFlag {
-    /// Still running a turn/tool despite an idle/done status.
-    Busy,
     RateLimit,
     Quota,
     Auth,
+    /// The provider answered with an error (M4 §12 item 6): the seat waits
+    /// for the provider, and the engine reads the quota source to tell a
+    /// spent quota from a provider error (§9.2).
+    Error,
     /// The provider is in a back-off: the agent waits for it (T-75). The
     /// agent is not stuck, so no stall is raised for it.
     Backoff,
@@ -21,6 +23,8 @@ pub enum ScreenFlag {
 pub struct Profile {
     /// Herdr agent kind: `opencode`, `claude`, `codex`, `pi`…
     pub kind: String,
+    /// Kept so that an old config still loads; it decides nothing any more
+    /// (§10.2: whether an agent is busy is Herdr's state, never the screen).
     pub busy_markers: Vec<String>,
     pub ratelimit_markers: Vec<String>,
     pub quota_markers: Vec<String>,
@@ -37,6 +41,19 @@ pub struct Profile {
     /// told to do something it may not do. Empty for the kinds without
     /// guardrails.
     pub blocked_markers: Vec<String>,
+    /// The signs on screen that the provider answered with an error (§12 item
+    /// 6): the agent cannot go on, and the engine reads the quota source to
+    /// tell a spent quota from a provider error (§9.2).
+    pub error_markers: Vec<String>,
+    /// The slash command that starts a new session in this CLI, typed into
+    /// the pane (§2, §3.4). Empty = the CLI has none.
+    pub new_session: String,
+    /// The slash command that compacts the session, typed into the pane
+    /// (§2, §3.4). Empty = the CLI has none.
+    pub compact: String,
+    /// Which reader of §4.3 reads this CLI's records: `pi-jsonl`,
+    /// `codex-rollout`, `claude-jsonl`, `opencode-db`. None = unknown.
+    pub usage_log: Option<String>,
     /// Only the last `tail_lines` lines are matched.
     pub tail_lines: u32,
     /// A flag counts only after this many consecutive observations.
@@ -46,6 +63,12 @@ pub struct Profile {
     /// stops on a permission dialog cannot be driven unattended, so a profile
     /// with this empty is never `verified`.
     pub unattended_args: Vec<String>,
+    /// The CLI flags that carry the role rules into the agent as a system
+    /// prompt (T-195): the rules of the role the seat works in, given at
+    /// every start. `{rules_file}` is the rules file's absolute path,
+    /// `{rules_toml}` the rules text as one TOML basic string. Empty for the
+    /// kinds that take the rules another way (their packets carry them).
+    pub instructions_args: Vec<String>,
     /// Herdr reports `agent_session` for this kind.
     pub session_ref: bool,
     /// Args to resume a session; `{session}` is replaced. None = unsupported.
@@ -65,6 +88,9 @@ pub struct Profile {
 ///
 /// Only the tail window is inspected: an error that scrolled out of it is not
 /// a current fact. Empty markers are ignored (they would match every line).
+///
+/// There is no busy class (§10.2): whether an agent is busy is Herdr's
+/// state, never the text on its screen.
 pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
     let lines: Vec<&str> = tail.lines().collect();
     let start = lines.len().saturating_sub(profile.tail_lines as usize);
@@ -72,9 +98,6 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
 
     let mut flags = BTreeSet::new();
     for line in window {
-        if matches_any(&profile.busy_markers, line) {
-            flags.insert(ScreenFlag::Busy);
-        }
         if matches_any(&profile.ratelimit_markers, line) {
             flags.insert(ScreenFlag::RateLimit);
         }
@@ -83,6 +106,9 @@ pub fn classify_screen(profile: &Profile, tail: &str) -> BTreeSet<ScreenFlag> {
         }
         if matches_any(&profile.auth_markers, line) {
             flags.insert(ScreenFlag::Auth);
+        }
+        if matches_any(&profile.error_markers, line) {
+            flags.insert(ScreenFlag::Error);
         }
         if matches_any(&profile.backoff_markers, line) {
             flags.insert(ScreenFlag::Backoff);
@@ -117,12 +143,15 @@ pub fn render_args(args: &[String], repo_root: &str) -> Vec<String> {
 /// Reject a prompt template that contains any marker of `profile`
 /// (old keeper incident: the nudge text tripped its own rate-limit detector).
 /// Returns the offending marker in the error.
+///
+/// The busy markers are not among them any more: they decide nothing
+/// (§10.2), so a template that holds one is harmless.
 pub fn validate_template(profile: &Profile, template: &str) -> Result<(), String> {
     let lists = [
-        ("busy", &profile.busy_markers),
         ("ratelimit", &profile.ratelimit_markers),
         ("quota", &profile.quota_markers),
         ("auth", &profile.auth_markers),
+        ("error", &profile.error_markers),
     ];
     for (kind, markers) in lists {
         for marker in markers {
@@ -145,28 +174,37 @@ fn matches_any(markers: &[String], line: &str) -> bool {
 /// Built-in profile for an agent kind, from the verified facts in
 /// `gear --skill agent:<kind>` (design/04, /16). Only kinds with a verified SOP
 /// are built in: today `opencode`, `claude`, `codex`, `grok` and `pi` —
-/// opencode: busy `esc interrupt`; quota `Session failed`, `Token Plan`, `(2056)`,
+/// opencode: quota `Session failed`, `Token Plan`, `(2056)`,
 /// `Free usage limit reached`; no rate-limit/auth markers yet; tail 16 lines,
 /// confirm 2 rounds; unattended `--auto`; session_ref false; resume
-/// `["-s", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// codex: busy `esc to interrupt`; quota `Usage limit reached` and the
+/// `["-s", "{session}"]`; exit `["ctrl+c"]`; new session `/new`; compact
+/// `/compact`; usage log `opencode-db`; verified.
+/// codex: quota `Usage limit reached` and the
 /// other spent-limit texts of codex 0.164.0 (T-115) — the "only N% left"
 /// warning is not one of them; no rate-limit/auth markers yet; tail 16
 /// lines, confirm 2
 /// rounds; unattended `--dangerously-bypass-approvals-and-sandbox` and
 /// `-c check_for_update_on_startup=false`;
 /// session_ref true (Herdr reports the session uuid); resume
-/// `["resume", "{session}"]`; exit `["ctrl+c"]`; verified.
-/// grok: busy `Ctrl+c:cancel`; unattended `--always-approve`; session_ref
+/// `["resume", "{session}"]`; exit by the typed `/quit` command
+/// (`exit_command`, no keys — §12 item 4); new session `/new`; compact
+/// `/compact`; usage log `codex-rollout`; verified.
+/// grok: unattended `--always-approve`; session_ref
 /// true; resume `["-r", "{session}"]`; exit by the `/exit` command
-/// (`exit_command`, no keys).
-/// pi: busy ` Working` (the spinner line); quota `insufficient_quota`;
+/// (`exit_command`, no keys). The session fields are empty: grok is not one
+/// of the kinds of §2 and its live checks were never run (M4).
+/// pi: quota `insufficient_quota`;
 /// rate limit `rate_limit_error`; auth `No API key found for`; back-off
-/// `Retrying (`; guardrails `Command auto-denied:` and
+/// `Retrying (`; provider error `overloaded_error` and `Retry failed after`
+/// (§12 item 6); guardrails `Command auto-denied:` and
 /// `is blocked (outside working directory)`; unattended `--approve`;
 /// session_ref true (Herdr reports the session file); resume
 /// `["--session", "{session}"]`; exit by the `/quit` command
-/// (`exit_command`, no keys).
+/// (`exit_command`, no keys); new session `/new`; compact `/compact`;
+/// usage log `pi-jsonl`.
+///
+/// The busy markers of the older profiles are still there, so that an old
+/// config loads; they decide nothing (§10.2).
 /// Any other kind → None.
 impl Profile {
     /// The starting point for a profile the config defines (T-31): the screen
@@ -212,6 +250,9 @@ pub struct ProfilePatch {
     pub kind: Option<String>,
     /// The CLI flags that turn off interactive permission prompts.
     pub unattended_args: Option<Vec<String>>,
+    /// The CLI flags that carry the role rules into the agent as a system
+    /// prompt (T-195).
+    pub instructions_args: Option<Vec<String>>,
     pub busy_markers: Option<Vec<String>>,
     pub quota_markers: Option<Vec<String>>,
     pub quota_bar: Option<crate::QuotaBar>,
@@ -222,6 +263,16 @@ pub struct ProfilePatch {
     /// The lines that say the agent's own guardrails refused something
     /// (T-113).
     pub blocked_markers: Option<Vec<String>>,
+    /// The signs on screen that the provider answered with an error (§12
+    /// item 6).
+    pub error_markers: Option<Vec<String>>,
+    /// The slash command that starts a new session (§2).
+    pub new_session: Option<String>,
+    /// The slash command that compacts the session (§2); empty = none.
+    pub compact: Option<String>,
+    /// Which reader of §4.3 reads this CLI's records (§2): `pi-jsonl`,
+    /// `codex-rollout`, `claude-jsonl`, `opencode-db`.
+    pub usage_log: Option<String>,
     /// The keys that make the agent exit cleanly.
     pub exit_keys: Option<Vec<String>>,
     /// The args to resume a session; `{session}` is replaced.
@@ -245,6 +296,9 @@ impl Profile {
         if let Some(args) = &patch.unattended_args {
             profile.unattended_args = args.clone();
         }
+        if let Some(args) = &patch.instructions_args {
+            profile.instructions_args = args.clone();
+        }
         if let Some(markers) = &patch.busy_markers {
             profile.busy_markers = markers.clone();
         }
@@ -265,6 +319,18 @@ impl Profile {
         }
         if let Some(markers) = &patch.blocked_markers {
             profile.blocked_markers = markers.clone();
+        }
+        if let Some(markers) = &patch.error_markers {
+            profile.error_markers = markers.clone();
+        }
+        if let Some(command) = &patch.new_session {
+            profile.new_session = command.clone();
+        }
+        if let Some(command) = &patch.compact {
+            profile.compact = command.clone();
+        }
+        if let Some(log) = &patch.usage_log {
+            profile.usage_log = Some(log.clone());
         }
         if let Some(keys) = &patch.exit_keys {
             profile.exit_keys = keys.clone();
@@ -301,6 +367,21 @@ pub fn builtins() -> BTreeMap<String, Profile> {
     table
 }
 
+/// The args that carry the role rules into a start (T-195).
+///
+/// `{rules_file}` is the rules file's absolute path; `{rules_toml}` is the
+/// rules text as one TOML basic string — the form a `codex -c` value takes, so
+/// a text with a quote or a newline survives the round trip.
+pub fn render_rules(args: &[String], rules_file: &str, rules_text: &str) -> Vec<String> {
+    let rules_toml = toml::Value::String(rules_text.to_string()).to_string();
+    args.iter()
+        .map(|arg| {
+            arg.replace("{rules_file}", rules_file)
+                .replace("{rules_toml}", &rules_toml)
+        })
+        .collect()
+}
+
 pub fn builtin(kind: &str) -> Option<Profile> {
     match kind {
         "opencode" => Some(Profile {
@@ -317,9 +398,16 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("opencode-db".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--auto".into()],
+            // T-195: opencode takes the rules in its packet, not as a system
+            // prompt.
+            instructions_args: vec![],
             session_ref: false,
             resume_args: Some(vec!["-s".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into()],
@@ -338,9 +426,15 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/clear".into(),
+            compact: "/compact".into(),
+            usage_log: Some("claude-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--dangerously-skip-permissions".into()],
+            // T-195: claude reads the rules from a file.
+            instructions_args: vec!["--append-system-prompt-file".into(), "{rules_file}".into()],
             session_ref: true,
             resume_args: Some(vec!["--resume".into(), "{session}".into()]),
             exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
@@ -407,6 +501,10 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec!["Reconnecting...".into()],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("codex-rollout".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec![
@@ -422,12 +520,17 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "-c".into(),
                 "projects={\"{repo_root}\"={trust_level=\"trusted\"}}".into(),
             ],
+            // T-195: codex takes the rules as a developer instruction, in one
+            // TOML value.
+            instructions_args: vec!["-c".into(), "developer_instructions={rules_toml}".into()],
             session_ref: true,
             resume_args: Some(vec!["resume".into(), "{session}".into()]),
-            // Two: after a turn the first ctrl+c only interrupts ("Conversation
-            // interrupted"); the second exits (seen 2026-10-23, L-63).
-            exit_keys: vec!["ctrl+c".into(), "ctrl+c".into()],
-            exit_command: None,
+            // M4 §12 item 4: the typed command `/quit` exits Codex, and
+            // ctrl+c twice is not safe (the second one reached the shell
+            // after Codex had gone and broke the next typed start). The
+            // exit is a command now, not keys.
+            exit_keys: vec![],
+            exit_command: Some("/quit".into()),
             verified: true,
         }),
         // Grok (verified 2026-10-23, grok 1.0.62 — the SOP
@@ -445,9 +548,15 @@ pub fn builtin(kind: &str) -> Option<Profile> {
             auth_markers: vec![],
             backoff_markers: vec![],
             blocked_markers: vec![],
+            error_markers: vec![],
+            new_session: String::new(),
+            compact: String::new(),
+            usage_log: None,
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--always-approve".into()],
+            // T-195: grok takes the rules in its packet.
+            instructions_args: vec![],
             session_ref: true,
             resume_args: Some(vec!["-r".into(), "{session}".into()]),
             exit_keys: vec![],
@@ -498,9 +607,20 @@ pub fn builtin(kind: &str) -> Option<Profile> {
                 "Command auto-denied:".into(),
                 "is blocked (outside working directory)".into(),
             ],
+            // M4 §12 item 6: the provider answered with an overload error
+            // (`529 … overloaded_error`) and pi gave up after three tries
+            // (`Error: Retry failed after 3 attempts: 529`). That is a
+            // provider error, not a spent quota: §9.2 reads the quota source
+            // to tell the two apart.
+            error_markers: vec!["overloaded_error".into(), "Retry failed after".into()],
+            new_session: "/new".into(),
+            compact: "/compact".into(),
+            usage_log: Some("pi-jsonl".into()),
             tail_lines: 16,
             confirm_rounds: 2,
             unattended_args: vec!["--approve".into()],
+            // T-195: pi reads the rules from a file.
+            instructions_args: vec!["--append-system-prompt".into(), "{rules_file}".into()],
             session_ref: true,
             resume_args: Some(vec!["--session".into(), "{session}".into()]),
             exit_keys: vec![],
@@ -522,6 +642,85 @@ mod tests {
     /// the TUI renders it as the status header, above the composer.
     const CODEX_RETRYING: &str =
         "• Working (12s • esc to interrupt)\n• Reconnecting... 2/5 (14s • esc to interrupt)";
+
+    /// T-195: the rules of the role go into the agent as a system prompt
+    /// where the CLI allows it; the kinds that take them another way carry
+    /// none.
+    #[test]
+    fn the_built_in_profiles_carry_the_rules_where_the_cli_allows_it() {
+        assert_eq!(
+            builtin("pi").unwrap().instructions_args,
+            vec!["--append-system-prompt".to_string(), "{rules_file}".to_string()]
+        );
+        assert_eq!(
+            builtin("claude").unwrap().instructions_args,
+            vec![
+                "--append-system-prompt-file".to_string(),
+                "{rules_file}".to_string()
+            ]
+        );
+        assert_eq!(
+            builtin("codex").unwrap().instructions_args,
+            vec!["-c".to_string(), "developer_instructions={rules_toml}".to_string()]
+        );
+        assert!(builtin("opencode").unwrap().instructions_args.is_empty());
+        assert!(builtin("grok").unwrap().instructions_args.is_empty());
+    }
+
+    /// T-195: the rules file's path goes into the args.
+    #[test]
+    fn the_rules_file_is_rendered_into_the_args() {
+        let pi = builtin("pi").unwrap();
+        let args = render_rules(
+            &pi.instructions_args,
+            "/tmp/gear/rules.md",
+            "the rules of the lane",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--append-system-prompt".to_string(),
+                "/tmp/gear/rules.md".to_string()
+            ]
+        );
+    }
+
+    /// T-195: the codex value is one TOML string: a text with a quote and a
+    /// newline comes back as the same text.
+    #[test]
+    fn the_rules_text_is_rendered_as_one_toml_value() {
+        let codex = builtin("codex").unwrap();
+        let text = "the lane reports:\n  \"progress\" and \"blocked\"";
+        let args = render_rules(&codex.instructions_args, "/tmp/gear/rules.md", text);
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        // The argument is one TOML `key = value` pair: it parses back to the
+        // same text.
+        let parsed: toml::Table = toml::from_str(&args[1]).expect("the argument is TOML");
+        assert_eq!(
+            parsed.get("developer_instructions").and_then(toml::Value::as_str),
+            Some(text),
+            "the same text comes back"
+        );
+    }
+
+    /// T-195: a project's config may set the args.
+    #[test]
+    fn a_config_patch_overrides_the_rules_args() {
+        let pi = builtin("pi").unwrap();
+        let patch = ProfilePatch {
+            instructions_args: Some(vec!["--system-prompt".to_string(), "{rules_file}".to_string()]),
+            ..ProfilePatch::default()
+        };
+        let patched = pi.patched(&patch, "pi");
+        assert_eq!(
+            patched.instructions_args,
+            vec!["--system-prompt".to_string(), "{rules_file}".to_string()]
+        );
+        // A patch without the field keeps the profile's own.
+        let untouched = pi.patched(&ProfilePatch::default(), "pi");
+        assert_eq!(untouched.instructions_args, pi.instructions_args);
+    }
 
     #[test]
     fn the_codex_back_off_is_recognised() {

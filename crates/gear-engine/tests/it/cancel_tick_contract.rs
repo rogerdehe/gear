@@ -33,6 +33,10 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE, "opencode", T0)?;
         for (id, rank, deps) in [("T-1", 1, vec![]), ("T-2", 2, vec![])] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: id.into(),
                 rank,

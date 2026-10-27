@@ -4,10 +4,10 @@
 
 use crate::delivery::FailedDelivery;
 use crate::observe::SeatObs;
-use gear_herdr::{AgentStatus, ScreenFlag};
-use gear_model::{AttemptState, OpKind, SeatRole, SeatState, TaskState, Ts};
+use gear_herdr::ScreenFlag;
+use gear_model::{AttemptState, MsgKind, MsgState, OpKind, SeatRole, SeatState, TaskState, Ts};
 use gear_model::GearResult;
-use gear_store::{AttemptRow, OpRow, SeatRow, TaskRow, Tx};
+use gear_store::{AttemptRow, NewMessage, OpRow, SeatRow, Store, TaskRow, Tx};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LaneView {
@@ -70,6 +70,8 @@ pub enum Action {
 ///    `nudges_since_progress >= nudge_budget` (a Delivered attempt was
 ///    confirmed but the agent never started, so it is nudged like a stopped
 ///    one);
+///    a Started attempt gets no delivery at all (design §10.3: one packet per
+///    round);
 ///    attempt Submitted → Assign the first ready task if `safe_for_next`, else None;
 ///    attempt Unknown → None (an unknown outcome is never retried);
 ///    no attempt (or a terminal one, which the view contract excludes) →
@@ -96,12 +98,12 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     if v.switch_pending {
         return none("a model switch is under way for this seat");
     }
-    // 4. Never type into a working agent. A blocked one is not working: it
-    //    may be handed work, and the delivery waits for the dialog to clear
-    //    instead of failing every tick (T-68).
-    let blocked = obs.status == Some(AgentStatus::Blocked);
-    if !obs.idle && !blocked {
-        return none("the agent is not idle");
+    // 4. Design §10.2: only `idle` and `done` are ready. A working, blocked
+    //    or unknown agent is never ready for a delivery — the text waits for
+    //    the agent to be idle again (T-68: a seat on a dialog is not
+    //    re-delivered every tick).
+    if !obs.idle {
+        return none("the agent is not ready");
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
     if obs.flags.iter().any(|flag| {
@@ -143,12 +145,20 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
                 // before any continue (T-8, design/06). The marker holds the
                 // newest version, so two bumps still give one delivery.
                 if let Some(version) = attempt.pending_update {
-                    if version > attempt.adopted_version {
+                    if version > attempt.adopted_version
+                        && !(attempt.state == AttemptState::Delivered && attempt.sent_at.is_none()) {
                         return Action::Adopt {
                             task: attempt.task.clone(),
                             version,
                         };
                     }
+                }
+                // Design §10.3: an attempt that already Started got its packet
+                // and the lane checked in — the engine never delivers it a
+                // second one. The lane that stops working is reached by the
+                // overrun question of design §5.2, not by a second packet.
+                if attempt.state == AttemptState::Started {
+                    return none("the attempt already started; no second packet");
                 }
                 if v.nudges_since_progress >= cfg.nudge_budget {
                     Action::Escalate {
@@ -268,6 +278,9 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
+            if task.as_ref().is_some_and(|task| task.wait_on.is_some()) {
+                return Ok(empty_view(obs));
+            }
             let continues = task
                 .map(|task| match task.state {
                     TaskState::Running | TaskState::Verifying => true,
@@ -296,10 +309,8 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         safe_for_next,
         // The plan is durable in meta (T-33): a switch in progress is not
         // forgotten while the quota line is gone.
-        switch_pending: tx
-            .get_meta(&format!("engine.switch.{}", seat.id))?
-            .map(|value| !value.is_empty())
-            .unwrap_or(false),
+        switch_pending: tx.get_meta(&format!("engine.switch.{}", seat.id))?.is_some_and(|value| !value.is_empty())
+            || tx.get_meta(&crate::restart::pending_meta_key(&seat.id))?.is_some_and(|value| !value.is_empty()),
         failed_delivery: crate::delivery::failed(tx, &seat.id)?,
     })
 }
@@ -361,12 +372,125 @@ pub fn plan_dispatch(tx: &Tx<'_>, project: &str, observed: &[SeatObs], cfg: &Dis
         let obs = observed.iter().find(|o| o.seat.id == seat.id).cloned();
         let view = lane_view(tx, &seat, obs, now)?;
         let action = decide(&view, cfg, now);
+        let action = rebind_action(tx, &seat.id, action)?;
         let action = if matches!(action, Action::Assign { .. }) && tx.captain_quota_paused(project)? {
             none("captain quota: current tasks may finish; new tasks are paused")
         } else { action };
         decisions.push((seat, action));
     }
     Ok(decisions)
+}
+
+/// A pending rebind permits current work to finish, but does not start more.
+/// After config changes, nothing goes to the old worktree while it is moving.
+fn rebind_action(tx: &Tx<'_>, seat: &str, action: Action) -> GearResult<Action> {
+    let applied = tx.get_meta(&format!("lane-rebind-applied:{seat}"))?.is_some_and(|s| !s.is_empty());
+    let pending = tx.get_meta(&gear_app::plan::rebind_pending_key(seat))?.is_some_and(|s| !s.is_empty());
+    let continuing_unsent = if let Action::Assign { task } = &action {
+        tx.open_attempts_of_seat(seat)?.iter().any(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none())
+    } else { false };
+    Ok(if applied {
+        none("lane rebind is waiting for the new worktree")
+    } else if pending && matches!(action, Action::Assign { .. }) && !continuing_unsent {
+        none("lane rebind is waiting for open attempts")
+    } else { action })
+}
+
+/// Create the attempt before preparing its session. An unsent attempt is
+/// retained across ticks, including engine restarts, while preparation waits.
+pub fn prepare_dispatch(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &crate::EngineCfg,
+    project: &str,
+    planned: &[(SeatRow, Action)],
+    now: Ts,
+) -> GearResult<Vec<(SeatRow, Action)>> {
+    let mut ready = Vec::new();
+    for (seat, action) in planned {
+        let task = match action {
+            Action::Assign { task } | Action::Continue { task } => task,
+            _ => { ready.push((seat.clone(), action.clone())); continue; }
+        };
+        let attempt = store.write(|tx| {
+            if matches!(rebind_action(tx, &seat.id, action.clone())?, Action::None { .. }) {
+                return Ok(None);
+            }
+            if let Some(existing) = tx.open_attempts_of_seat(&seat.id)?.into_iter()
+                .find(|a| a.task == *task && a.state == AttemptState::Delivered) {
+                return Ok(Some(existing));
+            }
+            if matches!(action, Action::Assign { .. }) {
+                return gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now).map(Some);
+            }
+            tx.open_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.task == *task)
+                .map(Some).ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
+        })?;
+        let Some(attempt) = attempt else { continue };
+        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
+            let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
+                Action::Assign { task: task.clone() }
+            } else { action.clone() };
+            ready.push((seat.clone(), action));
+        }
+    }
+    Ok(ready)
+}
+
+/// Resume an open lane round after its agent disappears or is restarted.
+/// Preparing never sends another task packet for an already-started attempt.
+pub fn recover_open_rounds(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    cfg: &crate::EngineCfg,
+    project: &str,
+    observed: &[SeatObs],
+    planned: &[(SeatRow, Action)],
+    now: Ts,
+) -> GearResult<()> {
+    for obs in observed {
+        let seat = &obs.seat;
+        if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Retiring) { continue; }
+        if planned.iter().any(|(s, action)| s.id == seat.id && matches!(action, Action::Assign { .. } | Action::Continue { .. })) { continue; }
+        let recovery = store.read(|tx| {
+            if !tx.slot_ops(&seat.id)?.is_empty() { return Ok(None); }
+            let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(None) };
+            let Some(attempt) = tx.get_attempt(project, &round.task, round.attempt)? else { return Ok(None) };
+            let unsent = attempt.state == AttemptState::Delivered && attempt.sent_at.is_none();
+            if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped) { return Ok(None); }
+            let mismatch = crate::session::round_session(tx, &round)?.as_ref().is_some_and(|session| {
+                obs.presence == crate::observe::Presence::Missing
+                    || (obs.presence == crate::observe::Presence::Present
+                        && obs.session.as_deref().is_some_and(|current| current != session))
+            });
+            let running = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .is_some_and(|s| {
+                    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+                    s["round"] == identity && (unsent || s["action"] == "resume")
+                        && (s["generation"].as_i64() != Some(seat.generation)
+                            || (s["step"] != "done" && s["step"] != "failed"))
+                });
+            Ok((mismatch || running).then_some((round.task, round.attempt)))
+        })?;
+        if let Some((task, attempt)) = recovery {
+            if crate::session::prepare_lane(store, herdr, cfg, seat, &task, attempt, now)? == crate::session::Prep::Ready {
+                // A restarted agent can resume the same session. It is a new
+                // recipient for the failed packet even though its session id
+                // is unchanged; allow one retry and clear the marker on send.
+                store.write(|tx| {
+                    if let Some(mut failed) = crate::delivery::failed(tx, &seat.id)? {
+                        if failed.task == task && failed.attempt == attempt {
+                            failed.retry_now = true;
+                            crate::delivery::record(tx, &seat.id, &failed)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Turn decisions into Deliver ops in the caller's transaction:
@@ -380,27 +504,30 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
     // T-84: the project standard travels with the assignment and the continue.
     let standard = gear_app::standard::line_for(tx, project)?;
     for (seat, action) in actions {
-        match action {
+        let guarded = rebind_action(tx, &seat.id, action.clone())?;
+        match &guarded {
             Action::Assign { task } => {
                 if tx.captain_quota_paused(project)? { continue; }
                 // The attempt exists before the delivery that announces it.
-                let attempt =
-                    gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?;
+                let attempt = match tx.open_attempts_of_seat(&seat.id)?.into_iter()
+                    .find(|a| a.task == *task && a.state == AttemptState::Delivered && a.sent_at.is_none()) {
+                    Some(attempt) => attempt,
+                    None => gear_app::tasks::start_attempt(tx, project, task, &seat.id, seat.generation, now)?,
+                };
+                let mut text = assign_text(task, attempt.contract_version, &task_branch(&seat.name, task), &packet_ref(task));
+                let action = attempt.session_action.as_deref().unwrap_or("");
+                if attempt.n == 1 && (action.starts_with("new") || action == "fresh" || action == "resume-fallback") {
+                    if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of) {
+                        text.push_str(&format!("\nThis task follows {followup}; read its report: gear --show {followup}"));
+                    }
+                }
                 deliveries.push(DeliverAction {
                     project: project.to_string(),
                     seat: seat.id.clone(),
                     generation: seat.generation,
                     task: task.clone(),
                     attempt: attempt.n,
-                    text: with_standard(
-                        assign_text(
-                            task,
-                            attempt.contract_version,
-                            &task_branch(&seat.name, task),
-                            &packet_ref(task),
-                        ),
-                        &standard,
-                    ),
+                    text: with_standard(text, &standard),
                 });
             }
             Action::Continue { task } => {
@@ -434,14 +561,23 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                 else {
                     continue;
                 };
-                deliveries.push(DeliverAction {
-                    project: project.to_string(),
-                    seat: seat.id.clone(),
-                    generation: seat.generation,
-                    task: task.clone(),
-                    attempt: attempt.n,
-                    text: contract_changed_text(task, *version),
-                });
+                if attempt.state == AttemptState::Started {
+                    // Design §10.3: an attempt that already started got its
+                    // packet — the engine never delivers it a second one. The
+                    // contract change goes as an instruction message, which the
+                    // doorbell rings; the lane adopts the new contract at its
+                    // next view (T-8).
+                    contract_notice(tx, seat, task, attempt.n, *version, now)?;
+                } else {
+                    deliveries.push(DeliverAction {
+                        project: project.to_string(),
+                        seat: seat.id.clone(),
+                        generation: seat.generation,
+                        task: task.clone(),
+                        attempt: attempt.n,
+                        text: contract_changed_text(task, *version),
+                    });
+                }
             }
             // A seat that must wait, or one handed to the captain: no delivery.
             Action::None { .. } | Action::Escalate { .. } => {}
@@ -454,6 +590,49 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
         crate::delivery::clear(tx, &delivery.seat)?;
     }
     Ok(ops)
+}
+
+/// The notice that the contract of an open attempt changed, for an attempt
+/// that already started (T-8, design §10.3).
+///
+/// It is an instruction message, not a delivery: the doorbell rings it (at
+/// once, so a working lane reads it), and the lane adopts the new contract at
+/// its next view. One notice per task and version: the lane's answer closes
+/// it, so the engine does not write a second one every tick.
+fn contract_notice(
+    tx: &Tx<'_>,
+    seat: &SeatRow,
+    task: &str,
+    attempt: i64,
+    version: i64,
+    now: Ts,
+) -> GearResult<bool> {
+    let thread = format!("contract:{task}:{version}");
+    let open = tx
+        .thread_messages(&seat.project, &thread)?
+        .into_iter()
+        .any(|message| matches!(message.state, MsgState::Open | MsgState::Waiting));
+    if open {
+        return Ok(false);
+    }
+    tx.insert_message(&NewMessage {
+        project: seat.project.clone(),
+        thread,
+        task: Some(task.to_string()),
+        attempt: Some(attempt),
+        sender: "engine".to_string(),
+        sender_gen: 0,
+        recipient: seat.id.clone(),
+        kind: MsgKind::Instruction,
+        urgent: true,
+        body: contract_changed_text(task, version),
+        reply_to: None,
+        needs_ack: false,
+        state: MsgState::Open,
+        created: now,
+        meta: None,
+    })?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -492,6 +671,10 @@ mod tests {
 
     fn attempt(state: AttemptState) -> AttemptRow {
         AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(),
             task: "T-1".into(),
             n: 1,
@@ -518,6 +701,10 @@ mod tests {
             last_deliver_at: Some(NOW - 1000),
             nudges_since_progress: 0,
             ready_tasks: vec![TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: "T-2".into(),
                 rank: 1,
@@ -568,4 +755,30 @@ mod tests {
         let action = decide(&view(Some(attempt(AttemptState::Unknown))), &DispatchCfg::default(), NOW);
         assert!(matches!(action, Action::None { .. }));
     }
+    #[test]
+    fn rebind_waits_for_existing_work_and_blocks_the_old_worktree() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            tx.set_meta(&gear_app::plan::rebind_pending_key("p:heat"), "pending")?;
+            assert!(matches!(rebind_action(tx, "p:heat", Action::Assign {task:"T-2".into()})?, Action::None {..}));
+            assert_eq!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::Continue {task:"T-1".into()});
+            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+            assert!(matches!(rebind_action(tx, "p:heat", Action::Continue {task:"T-1".into()})?, Action::None {..}));
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn planned_assignment_is_rechecked_after_a_rebind_is_requested() {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store.write(|tx| {
+            gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+            let seat = gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", NOW)?;
+            tx.set_meta("lane-rebind-applied:p:heat", "moving")?;
+            let actions = vec![(seat, Action::Assign { task:"T-1".into() })];
+            assert!(intend_dispatch(tx, "p", &actions, NOW)?.is_empty());
+            Ok(())
+        }).unwrap();
+    }
+
 }

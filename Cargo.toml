@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gear-model",
     "crates/gear-store",
+    "crates/gear-usage",
     "crates/gear-herdr",
     "crates/gear-app",
     "crates/gear-engine",
@@ -12,13 +13,14 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
 
 [workspace.dependencies]
 gear-model = { path = "crates/gear-model" }
 gear-store = { path = "crates/gear-store" }
+gear-usage = { path = "crates/gear-usage" }
 gear-herdr = { path = "crates/gear-herdr" }
 gear-app = { path = "crates/gear-app" }
 gear-engine = { path = "crates/gear-engine" }

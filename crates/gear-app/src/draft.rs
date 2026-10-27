@@ -5,6 +5,7 @@
 //! `plan apply`'s job, not this parser's.
 
 use gear_model::{ErrorCode, GearError, GearResult};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Priority {
@@ -58,13 +59,18 @@ pub enum StaffItem {
     Retry { line: usize, lane: String },
     /// `- release heat`: a held lane goes back to Active (its agent continues)
     /// or Queued (its agent is gone, the engine onboards it again) (T-133).
-    Release { line: usize, lane: String },
+    /// `- release review-1`: a reviewer seat in Standby is released (T-140).
+    Release { line: usize, name: String },
+    /// `- rebind heat repo=backend owns=[src/, tests/]`.
+    Rebind { line: usize, lane: String, repo: String, owns: Vec<String> },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
 
 /// `- T-29 attempt=2 contract=3 candidate=abc1234 pass evidence=<path>`
 /// `- T-33 attempt=1 contract=1 candidate=def5678 fail rework="<text>"`
+/// `- T-34 attempt=1 contract=1 candidate=abc1234 fail rework="<text>" estimate=25`
+/// `- T-35 attempt=1 contract=1 candidate=abc1234 pass evidence=<path> why="<text>"`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerdictLine {
     pub line: usize,
@@ -77,6 +83,15 @@ pub struct VerdictLine {
     pub evidence: Option<String>,
     /// required for fail, absent for pass
     pub rework: Option<String>,
+    /// The minutes the fail verdict asks for (design §5.1): the budget of the
+    /// rework round. `estimate=25`.
+    pub estimate: Option<i64>,
+    /// Why the captain passes over a failed review (design §7.4): `why="…"`.
+    /// Required for that case.
+    pub why: Option<String>,
+    /// The task whose merge landed this work (design §10.7, row B03-01):
+    /// `integrated-by=T-m`.
+    pub integrated_by: Option<String>,
 }
 
 /// `V-9 keep plan=12: <text>; next=<RFC3339>`
@@ -691,13 +706,26 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
             Ok(StaffItem::Retry { line, lane: lane.to_string() })
         }
         "release" => {
-            let lane = tokens
+            let name = tokens
                 .next()
-                .ok_or_else(|| bad(line, "`release` needs a lane"))?;
+                .ok_or_else(|| bad(line, "`release` needs a lane or a reviewer"))?;
             if tokens.next().is_some() {
-                return Err(bad(line, "`release` takes only a lane"));
+                return Err(bad(line, "`release` takes only a lane or a reviewer"));
             }
-            Ok(StaffItem::Release { line, lane: lane.to_string() })
+            Ok(StaffItem::Release { line, name: name.to_string() })
+        }
+        "rebind" => {
+            let lane = tokens.next().ok_or_else(|| bad(line, "`rebind` needs a lane"))?;
+            let repo = tokens.next().and_then(|s| s.strip_prefix("repo="))
+                .filter(|s| !s.is_empty()).ok_or_else(|| bad(line, "`rebind` needs `repo=<name>`"))?;
+            let remaining = tokens.collect::<Vec<_>>().join(" ");
+            let list = remaining.strip_prefix("owns=[").and_then(|s| s.strip_suffix(']'))
+                .ok_or_else(|| bad(line, "`rebind` needs `owns=[<path>, ...]`"))?;
+            let owns: Vec<String> = list.split(',').map(|s| s.trim().to_string()).collect();
+            if owns.iter().any(|s| s.is_empty() || s.chars().any(char::is_whitespace) || s.contains(['[', ']'])) {
+                return Err(bad(line, "`rebind` needs a nonempty comma-separated list of paths"));
+            }
+            Ok(StaffItem::Rebind { line, lane: lane.into(), repo: repo.into(), owns })
         }
         "remerge" => {
             let task = tokens
@@ -713,7 +741,7 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         other => Err(bad(
             line,
-            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry or remerge"),
+            format!("unknown staff verb {other:?}, expected temp, park, hold, release, retire, retry, rebind or remerge"),
         )),
     }
 }
@@ -753,42 +781,88 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         }
     };
 
-    // The tail runs to the end of the line: `evidence=<path>` or `rework="<text>"`.
+    // The tail runs to the end of the line: `evidence=<path>`, `estimate=<min>`,
+    // `integrated-by=T-m` and the quoted value (`rework="<text>"` or
+    // `why="<text>"`).
     let tail = rest
         .splitn(6, char::is_whitespace)
         .nth(5)
         .unwrap_or("")
         .trim();
+    let (fields, quoted) = parse_verdict_tail(tail, line)?;
     let mut evidence = None;
     let mut rework = None;
-    if let Some(value) = tail.strip_prefix("evidence=") {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
+    let mut estimate = None;
+    let mut why = None;
+    let mut integrated_by = None;
+    for (key, value) in fields {
+        match key.as_str() {
+            "evidence" => {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(bad(line, "a `pass` verdict needs a non-empty `evidence=`"));
+                }
+                evidence = Some(value.to_string());
+            }
+            "estimate" => {
+                let minutes = value.trim().parse::<i64>().map_err(|_| {
+                    bad(line, format!("`estimate=` takes a number of minutes, got {value:?}"))
+                })?;
+                estimate = Some(minutes);
+            }
+            "integrated-by" => {
+                let task = value.trim();
+                if !is_task_id(task) {
+                    return Err(bad(line, format!("`integrated-by=` takes a task id, got {task:?}")));
+                }
+                integrated_by = Some(task.to_string());
+            }
+            other => {
+                return Err(bad(line, format!("unexpected verdict field {other:?}")));
+            }
         }
-        // A pass verdict carries exactly one `evidence=<path>`: a second field
-        // after it (or a path with a space) is a different tail.
-        if pass && value.chars().any(char::is_whitespace) {
-            return Err(bad(
-                line,
-                "a `pass` verdict carries exactly `evidence=<path>` (no other field, no spaces)",
-            ));
+    }
+    // The quoted value: the rework text or the why.
+    if let Some((key, value)) = quoted {
+        match key.as_str() {
+            "rework" => {
+                if value.trim().is_empty() {
+                    return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
+                }
+                rework = Some(value.trim().to_string());
+            }
+            "why" => {
+                if value.trim().is_empty() {
+                    return Err(bad(line, "`why=\"<text>\"` takes a non-empty text"));
+                }
+                why = Some(value.trim().to_string());
+            }
+            other => {
+                return Err(bad(line, format!("unexpected verdict field {other:?}")));
+            }
         }
-        evidence = Some(value.to_string());
-    } else if let Some(value) = tail.strip_prefix("rework=") {
-        let quoted = value.trim();
-        let inner = quoted
-            .strip_prefix('"')
-            .and_then(|text| text.strip_suffix('"'))
-            .ok_or_else(|| bad(line, "a `fail` verdict needs `rework=\"<text>\"`"))?;
-        if inner.trim().is_empty() {
-            return Err(bad(line, "a `fail` verdict needs a non-empty rework reason"));
-        }
-        rework = Some(inner.to_string());
-    } else if !tail.is_empty() {
-        return Err(bad(line, format!("unexpected verdict text {tail:?}")));
     }
 
+    // The fields that belong to the other verdict are refused first: they say
+    // what the captain meant to write.
+    if !pass && why.is_some() {
+        return Err(bad(
+            line,
+            "`why=` belongs to a pass over a failed review: a fail carries its rework text",
+        ));
+    }
+    if !pass && integrated_by.is_some() {
+        return Err(bad(
+            line,
+            "`integrated-by=` belongs to a pass: only a pass can be landed by another task's merge",
+        ));
+    }
+    if pass && estimate.is_some() {
+        return Err(bad(
+            line,
+            "a `pass` verdict must not carry `estimate=`: the minutes a rework asks for belong to a fail",
+        ));
+    }
     if pass && evidence.is_none() {
         return Err(bad(line, "a `pass` verdict needs `evidence=<path>`"));
     }
@@ -801,6 +875,9 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
     if !pass && evidence.is_some() {
         return Err(bad(line, "a `fail` verdict must not carry `evidence=`"));
     }
+    if !pass && estimate.map(|min| min <= 0).unwrap_or(false) {
+        return Err(bad(line, "`estimate=` takes a positive number of minutes"));
+    }
 
     Ok(VerdictLine {
         line,
@@ -811,6 +888,92 @@ fn parse_verdict(text: &str, line: usize) -> GearResult<VerdictLine> {
         pass,
         evidence,
         rework,
+        estimate,
+        why,
+        integrated_by,
+    })
+}
+
+/// The tail of a verdict line: the `key=value` fields and the one quoted
+/// value (the rework text or the why).
+///
+/// The captain's rule (design §10.7, T-141's rework): the tail carries at
+/// most one quoted value, and it is the **last** field — it runs from its
+/// first quote to its closing quote, so the prose may contain quotes of its
+/// own. The `key=value` fields (`estimate=`, `integrated-by=`, `evidence=`)
+/// come before it; one after it is refused, and a value without a closing
+/// quote is refused too.
+fn parse_verdict_tail(
+    tail: &str,
+    line: usize,
+) -> GearResult<(Vec<(String, String)>, Option<(String, String)>)> {
+    let tail = tail.trim();
+    let Some(open) = tail.find('"') else {
+        // No quoted value: the tail is `key=value` fields.
+        return Ok((key_value_fields(tail, line)?, None));
+    };
+    // The quoted value belongs to the last key of the head: its value starts
+    // at the quote.
+    let mut fields = key_value_fields(tail[..open].trim_end(), line)?;
+    let quoted_key = match fields.last() {
+        Some((key, value)) if value.is_empty() => {
+            let key = key.clone();
+            fields.pop();
+            key
+        }
+        _ => {
+            return Err(bad(
+                line,
+                "a verdict line's quoted value needs its key: `rework=\"…\"` or `why=\"…\"`",
+            ))
+        }
+    };
+    // The closing quote: the first quote that ends the value. The prose
+    // between the quotes may contain quotes.
+    let rest = &tail[open + 1..];
+    let closing = find_closing_quote(rest, line)?;
+    let value = rest[..closing].to_string();
+    let after = rest[closing + 1..].trim();
+    if !after.is_empty() {
+        // The order is the captain's rule: the quoted value is the last field.
+        return Err(bad(
+            line,
+            format!("a verdict line's quoted value is the last field: {after:?} comes after it"),
+        ));
+    }
+    Ok((fields, Some((quoted_key, value))))
+}
+
+/// The `key=value` fields of a verdict line's tail.
+fn key_value_fields(head: &str, line: usize) -> GearResult<Vec<(String, String)>> {
+    let mut fields = Vec::new();
+    for token in head.split(char::is_whitespace) {
+        if token.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = token.split_once('=') else {
+            return Err(bad(line, format!("unexpected verdict text {token:?}")));
+        };
+        if key.is_empty() {
+            return Err(bad(line, format!("unexpected verdict text {token:?}")));
+        }
+        fields.push((key.to_string(), value.to_string()));
+    }
+    Ok(fields)
+}
+
+/// The closing quote of a quoted value: the **last** quote on the line (the
+/// captain's rule). The prose between the quotes may hold quotes of its own
+/// (T-141, round 2, F1): a literal `estimate=25` inside the text is text, not
+/// the start of a field.
+///
+/// A line without a closing quote is refused.
+fn find_closing_quote(rest: &str, line: usize) -> GearResult<usize> {
+    rest.rfind('"').ok_or_else(|| {
+        bad(
+            line,
+            "a verdict line's quoted value has no closing quote",
+        )
     })
 }
 
@@ -866,15 +1029,42 @@ fn parse_review(text: &str, line: usize) -> GearResult<ReviewLine> {
 /// - every `## NEW` block header becomes `## T-<id>`, in draft order (the ids
 ///   the apply assigned);
 /// - the `# Verdicts` section is dropped: verdicts live in the store, and a
-///   re-applied file must settle nothing.
+///   re-applied file must settle nothing;
+/// - the `# Staff` lines the apply used are dropped (B5): a staff line is an
+///   instruction, and an instruction that was carried out must not be carried
+///   out again (a `- remerge T-<n>` line would be refused the second time).
+///   A `# Staff` section that keeps no line is dropped with them: an empty
+///   section is noise, and a second one would be refused by the parser.
 ///
 /// Everything else — comments, sections, field lines, spacing — is kept as the
 /// captain wrote it, so the file is edited in place and re-applied as is.
-pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
+pub fn rewrite_applied(
+    text: &str,
+    version: i64,
+    created: &[String],
+    used_staff: &[usize],
+) -> String {
+    let source: Vec<&str> = text.lines().collect();
+    // The staff lines the apply used, by their number in the text.
+    let used: BTreeSet<usize> = used_staff.iter().copied().collect();
+    // The `# Staff` section, and whether it keeps a line of its own.
+    let staff_header = source
+        .iter()
+        .position(|line| is_section_named(line.trim(), "Staff"));
+    let staff_empty = staff_header.is_some_and(|header| {
+        source
+            .iter()
+            .enumerate()
+            .skip(header + 1)
+            .take_while(|(_, line)| !line.trim().starts_with("# "))
+            .filter(|(_, line)| !line.trim().is_empty())
+            .all(|(index, _)| used.contains(&(index + 1)))
+    });
     let mut lines: Vec<String> = Vec::new();
     let mut ids = created.iter();
     let mut dropping = false;
-    for line in text.lines() {
+    for (index, line) in source.iter().enumerate() {
+        let line_no = index + 1;
         let trimmed = line.trim();
         if dropping {
             // The section ends at the next `# ` header (which is kept) or at
@@ -886,6 +1076,15 @@ pub fn rewrite_applied(text: &str, version: i64, created: &[String]) -> String {
             }
         }
         if is_section_named(trimmed, "Verdicts") {
+            dropping = true;
+            continue;
+        }
+        // The staff lines the apply used are gone (B5), and a section that
+        // keeps nothing goes with them.
+        if used.contains(&line_no) {
+            continue;
+        }
+        if staff_empty && staff_header == Some(index) {
             dropping = true;
             continue;
         }
@@ -965,7 +1164,7 @@ mod tests {
         let text = format!(
             "{HEADER}# Goal\nthe goal\n\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\ndeps: -\n\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\ndeps: T-1\n\n# Verdicts\n- T-9 attempt=1 contract=1 candidate=abc pass evidence=x\n\n# Staff\n- hold heat reason=test\n"
         );
-        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()]);
+        let rewritten = rewrite_applied(&text, 7, &["T-1".to_string(), "T-2".to_string()], &[]);
         assert!(rewritten.starts_with("<!-- gear-plan project=p base=7 -->"), "{rewritten}");
         assert!(rewritten.contains("## T-1 [must] lane=heat milestone=M1"), "{rewritten}");
         assert!(rewritten.contains("## T-2 [should] lane=heat milestone=M1"), "{rewritten}");
@@ -985,9 +1184,33 @@ mod tests {
     }
 
     #[test]
+    fn the_staff_lines_the_apply_used_are_gone() {
+        // B5: a staff line is an instruction, and an instruction that was
+        // carried out must not be carried out again (a `- remerge T-<n>` line
+        // would be refused the second time).
+        let text = format!(
+            "{HEADER}# Staff\n- remerge T-12\n- hold heat reason=test\n\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"
+        );
+        // The remerge line was used (line 3), the hold line was not.
+        let rewritten = rewrite_applied(&text, 2, &[], &[3]);
+        assert!(!rewritten.contains("remerge"), "{rewritten}");
+        assert!(rewritten.contains("- hold heat reason=test"), "{rewritten}");
+        assert!(rewritten.contains("# Staff"), "the section keeps a line: {rewritten}");
+
+        // A section that keeps nothing goes with its lines: no empty section
+        // and no second one.
+        let rewritten = rewrite_applied(&text, 2, &[], &[3, 4]);
+        assert!(!rewritten.contains("# Staff"), "{rewritten}");
+        assert!(!rewritten.contains("remerge"), "{rewritten}");
+        assert!(!rewritten.contains("hold heat"), "{rewritten}");
+        // The file still parses as a draft.
+        parse(&rewritten).unwrap();
+    }
+
+    #[test]
     fn a_verdicts_section_at_the_end_leaves_no_tail() {
         let text = format!("{HEADER}# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc fail rework=\"x\"\n");
-        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()]);
+        let rewritten = rewrite_applied(&text, 2, &["T-1".to_string()], &[]);
         assert!(rewritten.ends_with("deps: -\n"), "{rewritten:?}");
         assert!(!rewritten.contains("Verdicts"), "{rewritten}");
     }

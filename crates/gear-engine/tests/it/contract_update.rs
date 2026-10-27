@@ -11,7 +11,7 @@ use gear_model::GearCtx;
 use gear_engine::{tick, EngineCfg};
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::{builtin, AgentStatus};
-use gear_model::{AttemptState, SeatRole, TaskState};
+use gear_model::{AttemptState, MsgKind, OpKind, SeatRole, TaskState};
 use gear_store::{testing, ContractRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
@@ -26,6 +26,10 @@ fn world() -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -62,7 +66,7 @@ fn world() -> Store {
 }
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), ..Default::default() };
+    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
     c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
     c
 }
@@ -115,14 +119,24 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((a.adopted_version, a.pending_update), (1, Some(2)));
 
-    let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
-    assert_eq!(report.intended.len(), 1, "{report:?}");
-    let prompts = herdr.prompts_to(LANE_PANE);
-    assert_eq!(prompts.len(), 1, "one delivery: {prompts:?}");
+    tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
+    // T-150 (design §10.3): the attempt already started, so the contract
+    // change goes as an instruction message — never as a delivery.
+    let delivers = s
+        .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
+        .unwrap();
+    assert!(delivers.is_empty(), "no delivery for a started attempt: {delivers:?}");
+    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:2")).unwrap();
+    assert_eq!(notices.len(), 1, "one notice: {notices:?}");
     assert_eq!(
-        prompts[0],
+        notices[0].body,
         "T-1 contract changed to v2: run `gear` and `gear --show T-1`"
     );
+    assert_eq!(notices[0].kind, MsgKind::Instruction);
+    // The doorbell rings it.
+    let prompts = herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(), 1, "one doorbell: {prompts:?}");
+    assert!(prompts[0].contains(&notices[0].id), "the doorbell names it: {prompts:?}");
 
     // The lane's view adopts it.
     let (env, fp) = lane();
@@ -132,11 +146,14 @@ fn a_bump_is_delivered_once_and_the_view_adopts_it() {
     let a = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!((a.adopted_version, a.pending_update), (2, None));
 
-    // Nothing left to deliver.
+    // Nothing left to deliver: the lane adopted the contract, so there is no
+    // pending update and no notice.
     let mut herdr = idle_herdr();
     let report = tick(&mut s, &mut herdr, &cfg(), T0 + 40).unwrap();
     assert_eq!(report.intended.len(), 0, "{report:?}");
     assert!(herdr.prompts_to(LANE_PANE).is_empty());
+    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:2")).unwrap();
+    assert_eq!(notices.len(), 1, "no second notice: {notices:?}");
 }
 
 #[test]
@@ -148,11 +165,17 @@ fn two_bumps_before_the_lane_looks_give_one_delivery_with_the_latest() {
     assert_eq!(a.pending_update, Some(3));
 
     let mut herdr = idle_herdr();
-    let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
-    assert_eq!(report.intended.len(), 1, "{report:?}");
+    tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
+    // One notice, with the latest version: no delivery for a started attempt.
+    let delivers = s
+        .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Deliver))
+        .unwrap();
+    assert!(delivers.is_empty(), "no delivery for a started attempt: {delivers:?}");
+    let notices = s.read(|tx| tx.thread_messages("p", "contract:T-1:3")).unwrap();
+    assert_eq!(notices.len(), 1, "one notice: {notices:?}");
+    assert!(notices[0].body.contains("v3"), "{}", notices[0].body);
     let prompts = herdr.prompts_to(LANE_PANE);
     assert_eq!(prompts.len(), 1, "{prompts:?}");
-    assert!(prompts[0].contains("v3"), "{}", prompts[0]);
 
     // The view adopts the latest.
     let (env, fp) = lane();
@@ -190,4 +213,16 @@ fn a_restart_between_the_bump_and_the_delivery_still_delivers_once() {
     let report = tick(&mut s, &mut herdr, &cfg(), T0 + 20).unwrap();
     assert_eq!(report.intended.len(), 1, "{report:?}");
     assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1);
+}
+
+#[test]
+fn contract_change_atomically_clears_wait_and_closes_pause() {
+    let mut s=world();
+    s.write(|tx| { tx.set_task_wait("p","T-1","T-2","merged")?; tx.open_pause("p","p:heat","wait","waiting for T-2",T0+5) }).unwrap();
+    bump(&mut s,0,"updated goal","clear-wait");
+    let task=s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap();
+    assert!(task.wait_on.is_none() && task.wait_cond.is_none());
+    let pauses=s.read(|tx|tx.pauses_of_project("p")).unwrap();
+    let pause=pauses.iter().find(|p|p.kind=="wait").unwrap();
+    assert_eq!(pause.end_at,Some(T0+10));
 }

@@ -24,6 +24,10 @@ fn world_verdict(passed: bool) -> Store {
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
         tx.insert_task(&TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: "T-1".into(),
             rank: 1,
@@ -65,6 +69,7 @@ fn world_verdict(passed: bool) -> Store {
             created: T0 + 2,
         })?;
         tx.insert_message(&NewMessage {
+            meta: None,
             project: "p".into(),
             thread: "T-1:1".into(),
             task: Some("T-1".into()),
@@ -133,8 +138,10 @@ const LANE_PANE: &str = "w1:p2";
 const BOARD_PANE: &str = "w1:p3";
 
 fn cfg() -> EngineCfg {
-    let mut c = EngineCfg { db_path: "/state/gear.db".into(), auto_settle: true, ..Default::default() };
-    c.profiles.insert("opencode".into(), builtin("opencode").unwrap());
+    let mut c = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), auto_settle: true, ..Default::default() };
+    let mut profile = builtin("opencode").unwrap();
+    profile.new_session.clear();
+    c.profiles.insert("opencode".into(), profile);
     c
 }
 
@@ -163,6 +170,10 @@ fn world_with_ready_work() -> Store {
         testing::seed_active_seat(tx, "p", "board", SeatRole::Lane, BOARD_PANE, "opencode", T0)?;
         for (id, lane, rank) in [("T-2", "heat", 2), ("T-3", "board", 3)] {
             tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
                 project: "p".into(),
                 id: id.into(),
                 rank,
@@ -240,7 +251,11 @@ fn a_failing_settlement_does_not_abort_the_tick() {
 
 /// Automatic settlement is opt-in (L-57).
 fn auto() -> EngineCfg {
-    EngineCfg { auto_settle: true, ..Default::default() }
+    let mut cfg = EngineCfg { auto_settle: true, ..Default::default() };
+    let mut profile = gear_herdr::builtin("opencode").unwrap();
+    profile.new_session.clear();
+    cfg.profiles.insert("opencode".into(), profile);
+    cfg
 }
 
 #[test]

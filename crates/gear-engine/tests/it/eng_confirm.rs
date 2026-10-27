@@ -226,6 +226,7 @@ fn message(store: &mut Store, state: gear_model::MsgState) -> String {
         .write(|tx| {
             Ok(tx
                 .insert_message(&gear_store::NewMessage {
+                    meta: None,
                     project: "p".into(),
                     thread: "t".into(),
                     task: None,

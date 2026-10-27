@@ -5,7 +5,7 @@
 //! nothing, so the engine calls the same methods in both modes and a
 //! local-only project behaves exactly as it did before the forge existed.
 
-use crate::{Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef};
+use crate::{Filter, Forge, ForgeResult, Issue, MergeMethod, MergeResult, PrRef, PrState};
 
 /// A project without a forge: every call is a no-op that succeeds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -40,11 +40,22 @@ impl Forge for Local {
     }
 
     /// Nothing is merged here: the merge is GEAR's own, as before the forge.
-    fn merge(&self, _pr: &PrRef, _method: MergeMethod) -> ForgeResult<MergeResult> {
+    fn merge(&self, _pr: &PrRef, _method: MergeMethod, _head: &str) -> ForgeResult<MergeResult> {
         Ok(MergeResult {
             merged: false,
             message: "the project has no forge".to_string(),
         })
+    }
+
+    /// A pull request of a project without a forge is never open: nothing is
+    /// merged, so nothing is to reconcile.
+    fn pr_state(&self, _pr: &PrRef) -> ForgeResult<PrState> {
+        Ok(PrState::default())
+    }
+
+    /// There is no pull request to adopt.
+    fn pr_by_head(&self, _repo: &str, _branch: &str) -> ForgeResult<Option<PrRef>> {
+        Ok(None)
     }
 
     fn close_issue(&self, _repo: &str, _number: u64, _comment: &str) -> ForgeResult<()> {

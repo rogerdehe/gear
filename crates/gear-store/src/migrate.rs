@@ -18,6 +18,12 @@
 //! gone (T-108), and the step only drops the table.
 //! **v4** adds `tasks.issue` (the GitHub issue a task came from, T-79).
 //! **v5** drops `push_destinations` (T-108: no push allow-list).
+//! **v6** is the M4 schema (§1 of ops/plan/m4-design.md): the session of an
+//! attempt, the repo/base/gate a task keeps, the rounds and their tokens, the
+//! stretches a seat could not work, the friction reports and the captain's
+//! decision log. The migration leaves every new column NULL: the store
+//! cannot read the project config, so a reader of `tasks.repo/base/gate`
+//! that finds NULL falls back to the lane's current config.
 
 use gear_model::{ErrorCode, GearError, GearResult};
 use rusqlite::{params, Transaction};
@@ -25,7 +31,7 @@ use rusqlite::{params, Transaction};
 use crate::{map_sqlite, SCHEMA_SQL};
 
 /// The version this binary writes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// The oldest version the steps know. A store without a stamp is this old:
 /// nothing ever wrote a version before v1.
@@ -46,6 +52,7 @@ pub const STEPS: &[Step] = &[
     Step { from: 2, apply: step_2_to_3 },
     Step { from: 3, apply: step_3_to_4 },
     Step { from: 4, apply: step_4_to_5 },
+    Step { from: 5, apply: step_5_to_6 },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -151,6 +158,65 @@ fn step_3_to_4(tx: &Transaction<'_>) -> GearResult<()> {
     Ok(())
 }
 
+/// v5 → v6: the M4 schema (§1 of ops/plan/m4-design.md).
+///
+/// The new tables (`rounds`, `seat_pauses`, `frictions`, `decisions`) are
+/// created by the schema itself (every statement of it is `IF NOT EXISTS`).
+/// The new columns of the old tables are added here, each nullable: a store
+/// of v5 keeps every row it has, and the new columns are NULL until a writer
+/// fills them (the store cannot read the project config, so `tasks.repo`,
+/// `tasks.base` and `tasks.gate` stay NULL for the old tasks and their
+/// readers fall back to the lane's current config).
+fn step_5_to_6(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(SCHEMA_SQL).map_err(map_sqlite)?;
+
+    for (table, column, decl) in [
+        ("attempts", "session_ref", "TEXT"),
+        ("attempts", "session_cli", "TEXT"),
+        ("attempts", "session_action", "TEXT"),
+        ("attempts", "sent_at", "INTEGER"),
+        ("tasks", "repo", "TEXT"),
+        ("tasks", "base", "TEXT"),
+        ("tasks", "gate", "TEXT"),
+        ("tasks", "rework_estimate_min", "INTEGER"),
+        ("messages", "meta", "TEXT"),
+    ] {
+        if !column_exists(tx, table, column)? {
+            tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+                .map_err(map_sqlite)?;
+        }
+    }
+
+    // The `seat_pauses` key carries the kind (§5.4): a quota park and a
+    // declared wait of one seat are independent and may overlap. A store that
+    // a first attempt of this task migrated has the older key (without the
+    // kind); it is rebuilt with its rows.
+    if table_exists(tx, "seat_pauses")? {
+        let key = primary_key_of(tx, "seat_pauses")?;
+        if key != ["project", "seat", "kind", "start_at"] {
+            rebuild_seat_pauses(tx)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rebuild the `seat_pauses` table with the key of §5.4, carrying the rows
+/// over.
+fn rebuild_seat_pauses(tx: &Transaction<'_>) -> GearResult<()> {
+    tx.execute_batch(
+        "CREATE TABLE seat_pauses_v6 (project TEXT NOT NULL, seat TEXT NOT NULL,
+           kind TEXT NOT NULL, reason TEXT,
+           start_at INTEGER NOT NULL, end_at INTEGER,
+           PRIMARY KEY (project, seat, kind, start_at));
+         INSERT OR IGNORE INTO seat_pauses_v6 (project, seat, kind, reason, start_at, end_at)
+           SELECT project, seat, kind, reason, start_at, end_at FROM seat_pauses;
+         DROP TABLE seat_pauses;
+         ALTER TABLE seat_pauses_v6 RENAME TO seat_pauses;",
+    )
+    .map_err(map_sqlite)?;
+    Ok(())
+}
+
 /// Rebuild the `voyages` table in the canonical shape, carrying the rows over.
 fn rebuild_voyages(tx: &Transaction<'_>) -> GearResult<()> {
     for key in ["project", "milestone"] {
@@ -227,6 +293,28 @@ fn column_is_not_null(tx: &Transaction<'_>, table: &str, column: &str) -> GearRe
         }
     }
     Ok(false)
+}
+
+/// The primary key of a table: the columns of it, in the order of the key.
+/// Empty for a table without one.
+fn primary_key_of(tx: &Transaction<'_>, table: &str) -> GearResult<Vec<String>> {
+    if !table_exists(tx, table)? {
+        return Ok(Vec::new());
+    }
+    let mut stmt = tx
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(map_sqlite)?;
+    let mut rows = stmt.query([]).map_err(map_sqlite)?;
+    let mut keyed: Vec<(i64, String)> = Vec::new();
+    while let Some(row) = rows.next().map_err(map_sqlite)? {
+        let name: String = row.get(1).map_err(map_sqlite)?;
+        let position: i64 = row.get(5).map_err(map_sqlite)?;
+        if position > 0 {
+            keyed.push((position, name));
+        }
+    }
+    keyed.sort_by_key(|(position, _)| *position);
+    Ok(keyed.into_iter().map(|(_, name)| name).collect())
 }
 
 /// The columns of a table: `(name, NOT NULL)` in the order of the table.

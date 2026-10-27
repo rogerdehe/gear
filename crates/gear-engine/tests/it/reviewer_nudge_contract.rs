@@ -19,7 +19,7 @@ fn world() -> (Store, SeatRow) {
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
             testing::seed_active_seat(tx, "p", "heat", gear_model::SeatRole::Lane, "w1:p2", "opencode", T0)?;
-            tx.insert_task(&TaskRow { project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready,
+            tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready,
                 priority: "must".into(), lane: Some("heat".into()), milestone: None, required: false, contract_version: 1,
                 deps: vec![], followup_of: None, wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
             tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(),
@@ -105,4 +105,64 @@ fn a_lost_packet_is_sent_again_by_the_nudge() {
     let nudge = s.read(|tx| tx.last_op(&seat.id, OpKind::Deliver)).unwrap().unwrap();
     let text = nudge.payload["text"].as_str().unwrap();
     assert!(text.contains("Review T-7"), "the packet rides along: {text}");
+}
+
+#[test]
+fn overrun_answer_resets_reviewer_stall_and_starts_a_new_nudge_budget() {
+    use gear_herdr::{fake::FakeHerdr, AgentStatus};
+    use gear_model::{MsgKind, MsgState, SeatRole};
+    use gear_store::{NewMessage, NewRound, RoundKey};
+    let (mut s, seat) = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p1","codex",T0)?;
+        tx.insert_round(&NewRound { key:RoundKey {project:"p".into(),task:"T-7".into(),attempt:1,role:"review".into()},seat:seat.id.clone(),generation:1,cli:"codex".into(),model:None,start_at:T0 })?;
+        let op=tx.insert_op(&NewOp {project:"p".into(),seat:seat.id.clone(),generation:1,kind:OpKind::Deliver,task:Some("T-7".into()),attempt:Some(1),ref_msg:None,plan_version:None,payload:serde_json::json!({"text":"continue review", "nudge":3}),created:T0+1700})?;
+        tx.set_op_state("p",&op.id,OpState::Confirmed,None,T0+1701)?;
+        Ok(())
+    }).unwrap();
+    let mut h=FakeHerdr::new();
+    h.add_agent_named("w1:p1","codex",AgentStatus::Idle,"p-captain");
+    h.add_agent_named("w1:p2","opencode",AgentStatus::Working,"p-heat");
+    h.add_agent_named("w9:p1","codex",AgentStatus::Idle,"p-review-t7");
+    let mut cfg=gear_engine::EngineCfg::default(); cfg.cooldown_s=COOLDOWN; cfg.profiles=gear_herdr::builtins();
+    gear_engine::overrun::tick(&mut s,&mut h,&cfg,T0+1800).unwrap();
+    s.write(|tx| {
+        tx.insert_message(&NewMessage {project:"p".into(),thread:"T-7:1".into(),task:Some("T-7".into()),attempt:Some(1),sender:seat.id.clone(),sender_gen:1,recipient:"p:captain".into(),kind:MsgKind::Progress,urgent:false,body:"review in progress".into(),reply_to:None,needs_ack:false,state:MsgState::Info,created:T0+1801,meta:Some(serde_json::json!({"left":15,"blocker":"none"}).to_string())})?;
+        Ok(())
+    }).unwrap();
+    let report=gear_engine::tick(&mut s,&mut h,&cfg,T0+1802).unwrap();
+    assert!(!report.flagged.contains(&seat.id),"{report:?}");
+    let stalls=s.read(|tx|tx.thread_messages("p","stall:p:r-1")).unwrap();
+    assert!(stalls.iter().all(|m|m.state!=MsgState::Open),"{stalls:?}");
+    let items=s.read(|tx|tx.thread_messages("p","overrun:T-7:review")).unwrap();
+    assert_eq!(items.len(),1); assert!(items[0].body.contains("review in progress"));
+    let (nudged, flagged)=nudge_stopped_reviewers(&mut s,"p",&idle(&seat),COOLDOWN,T0+1892).unwrap();
+    assert_eq!((nudged,flagged),(vec![seat.id.clone()],vec![]));
+    let op=s.read(|tx|tx.last_op(&seat.id,OpKind::Deliver)).unwrap().unwrap();
+    assert_eq!(op.payload["nudge"],1);
+
+    // An unrelated missing-agent flag still reaches the captain, even though
+    // the reviewer recently answered the overrun question.
+    h.exit_agent("w9:p1");
+    let report=gear_engine::tick(&mut s,&mut h,&cfg,T0+1893).unwrap();
+    assert!(report.flagged.contains(&seat.id),"{report:?}");
+    let stalls=s.read(|tx|tx.thread_messages("p","stall:p:r-1")).unwrap();
+    assert!(stalls.iter().any(|m|m.state==MsgState::Open),"{stalls:?}");
+}
+
+#[test]
+fn progress_from_an_earlier_generation_of_the_same_review_still_counts() {
+    let (mut s,mut seat)=world();
+    s.write(|tx| tx.set_seat_generation(&seat.id,2)).unwrap();
+    seat.generation=2;
+    s.write(|tx| {
+        let op=tx.insert_op(&NewOp {project:"p".into(),seat:seat.id.clone(),generation:1,kind:OpKind::Deliver,task:Some("T-7".into()),attempt:Some(1),ref_msg:None,plan_version:None,payload:serde_json::json!({"nudge":3}),created:T0+100})?;
+        tx.set_op_state("p",&op.id,OpState::Confirmed,None,T0+101)?;
+        tx.insert_message(&gear_store::NewMessage {project:"p".into(),thread:"T-7:1".into(),task:Some("T-7".into()),attempt:Some(1),sender:seat.id.clone(),sender_gen:1,recipient:"p:captain".into(),kind:gear_model::MsgKind::Progress,urgent:false,body:"progress".into(),reply_to:None,needs_ack:false,state:gear_model::MsgState::Info,created:T0+200,meta:Some(serde_json::json!({"left":15,"blocker":"none"}).to_string())})?;
+        Ok(())
+    }).unwrap();
+    let (nudged,flagged)=nudge_stopped_reviewers(&mut s,"p",&idle(&seat),COOLDOWN,T0+291).unwrap();
+    assert_eq!((nudged,flagged),(vec![seat.id.clone()],vec![]));
+    let op=s.read(|tx|tx.last_op(&seat.id,OpKind::Deliver)).unwrap().unwrap();
+    assert_eq!(op.payload["nudge"],1);
 }

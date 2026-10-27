@@ -11,22 +11,25 @@ use gear_store::{testing, ContractRow, ReviewVerdictRow, Store, TaskRow};
 const T0: i64 = 1_800_000_000;
 const LANE_PANE: &str = "w1:p2";
 
-fn world() -> Store {
+fn world_initial(started: bool) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
-        tx.insert_task(&TaskRow { project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
+        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
             evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
-        on_delivery_confirmed(tx, "p", "T-1", 1, T0)
+        if started { on_delivery_confirmed(tx, "p", "T-1", 1, T0)?; }
+        Ok(())
     }).unwrap();
     s
 }
+
+fn world() -> Store { world_initial(true) }
 
 fn lane() -> (Env, Fingerprint) {
     (Env { ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }), pane_id: Some(LANE_PANE.into()), admin: false },
@@ -36,7 +39,11 @@ fn lane() -> (Env, Fingerprint) {
 fn result(contract: i64, candidate: Option<&str>, rid: &str) -> SendArgs {
     SendArgs { kind: MsgKind::Result, body: "Report: ops/tasks/T-1.md".into(), task: Some("T-1".into()), attempt: Some(1),
         contract: Some(contract), candidate: candidate.map(String::from), about: None, to: None, reply_to: None,
-        verdict: None, blocking: None, base: None, urgent: false, request_id: rid.into() }
+        verdict: None, blocking: None, base: None, urgent: false,
+        left: None,
+        blocker: None,
+        on: None,
+        friction: None, request_id: rid.into() }
 }
 
 #[test]
@@ -108,4 +115,77 @@ fn a_result_with_an_already_failed_candidate_is_refused() {
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
     assert_eq!((attempt.state, attempt.candidate.as_deref()), (AttemptState::Submitted, Some("bbb2222")));
     assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state, TaskState::Verifying);
+}
+
+#[test]
+fn delivered_owner_can_hand_in_and_refreshes_session_atomically() {
+    let mut s=world_initial(false);
+    s.write(|tx| {
+        tx.set_attempt_session("p","T-1",1,"old-session","opencode")?;
+        tx.set_binding_session_ref("p:heat",1,"new-session")
+    }).unwrap();
+    let (env,fp)=lane(); mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"delivered-result"),T0+20).unwrap();
+    let attempt=s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
+    assert_eq!(attempt.state,AttemptState::Submitted); assert_eq!(attempt.session_ref.as_deref(),Some("new-session"));
+    assert_eq!(attempt.session_cli.as_deref(),Some("opencode"));
+    let times=s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap();
+    assert_eq!(times.started,Some(T0+20)); assert_eq!(times.handed_in,Some(T0+20));
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().state,TaskState::Verifying);
+}
+
+#[test]
+fn another_seat_cannot_hand_in_a_delivered_attempt() {
+    let mut s=world_initial(false);
+    s.write(|tx| {
+        testing::seed_active_seat(tx,"p","other",SeatRole::Lane,"w1:p3","opencode",T0)
+    }).unwrap();
+    let env=Env {ctx:Some(GearCtx{project:"p".into(),seat:"other".into(),generation:1}),pane_id:Some("w1:p3".into()),admin:false};
+    let fp=Fingerprint{pane_id:"w1:p3".into(),kind:Some("opencode".into()),session_ref:None};
+    assert_eq!(mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"other-result"),T0+20).unwrap_err().code,ErrorCode::Forbidden);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().state,TaskState::Ready);
+}
+
+#[test]
+fn hand_in_refreshes_session_after_normal_check_in() {
+    let mut s=world(); let (env,fp)=lane();
+    s.write(|tx| {tx.set_attempt_session("p","T-1",1,"old","opencode")?;tx.set_binding_session_ref("p:heat",1,"new")}).unwrap();
+    mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"refreshed-session"),T0+20).unwrap();
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_ref.as_deref(),Some("new"));
+}
+
+#[test]
+fn stale_delivered_generation_cannot_be_handed_in() {
+    let mut s=world_initial(false);
+    s.write(|tx| {let mut a=tx.get_attempt("p","T-1",1)?.unwrap();a.generation=2;tx.update_attempt(&a)}).unwrap();
+    let (env,fp)=lane();
+    assert_eq!(mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"old-generation"),T0+20).unwrap_err().code,ErrorCode::Forbidden);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
+}
+
+#[test]
+fn rejected_delivered_hand_in_does_not_start_attempt() {
+    let mut s=world_initial(false); let (env,fp)=lane();
+    assert_eq!(mail::send(&mut s,&env,Some(&fp),&result(2,Some("abc1234"),"bad-delivered-contract"),T0+20).unwrap_err().code,ErrorCode::BadFormat);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
+    assert_eq!(s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap().started,None);
+}
+
+#[test]
+fn current_contract_mismatch_rolls_back_the_implicit_start() {
+    let mut s=world_initial(false); let (env,fp)=lane();
+    s.write(|tx| {let mut task=tx.get_task("p","T-1")?.unwrap();task.contract_version=2;tx.update_task(&task)}).unwrap();
+    assert_eq!(mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"new-current-contract"),T0+20).unwrap_err().code,ErrorCode::BadFormat);
+    assert_eq!(s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().state,AttemptState::Delivered);
+    assert_eq!(s.read(|tx|tx.attempt_times("p","T-1",1)).unwrap().started,None);
+    assert_eq!(s.read(|tx|tx.get_task("p","T-1")).unwrap().unwrap().state,TaskState::Ready);
+}
+
+#[test]
+fn hand_in_clears_a_stale_session_when_current_binding_has_none() {
+    let mut s=world(); let (env,fp)=lane();
+    s.write(|tx|tx.set_attempt_session("p","T-1",1,"old-session","pi")).unwrap();
+    mail::send(&mut s,&env,Some(&fp),&result(1,Some("abc1234"),"missing-current-session"),T0+20).unwrap();
+    let attempt=s.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap();
+    assert_eq!(attempt.session_ref,None); assert_eq!(attempt.session_cli.as_deref(),Some("opencode"));
 }

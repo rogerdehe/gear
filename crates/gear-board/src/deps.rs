@@ -91,7 +91,7 @@ fn walk(
         waits: task
             .deps
             .iter()
-            .filter(|dep| !done.iter().any(|done| *done == dep.as_str()))
+            .filter(|dep| !done.contains(&dep.as_str()))
             .cloned()
             .collect(),
         depth,
@@ -110,6 +110,10 @@ mod tests {
     /// A task with the given id, state and dependencies.
     fn task(id: &str, state: TaskState, deps: &[&str]) -> TaskRow {
         TaskRow {
+            repo: None,
+            base: None,
+            gate: None,
+            rework_estimate_min: None,
             project: "p".into(),
             id: id.into(),
             rank: 0,

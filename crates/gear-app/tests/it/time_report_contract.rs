@@ -165,6 +165,10 @@ fn a_successful_rework_reports_its_merge_for_task_and_voyage() {
             (2, AttemptState::Accepted, 30),
         ] {
             tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
                 project: "p".into(), task: "T-1".into(), n, seat: "p:heat".into(),
                 generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
                 state, candidate: Some(CANDIDATE.into()), report: None, safe_point: None,

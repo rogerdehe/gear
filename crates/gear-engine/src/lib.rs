@@ -23,6 +23,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod doorbell;
 pub mod feed;
+pub mod friction;
 pub mod guardrails;
 pub mod merge;
 pub mod model;
@@ -31,16 +32,23 @@ pub mod observe;
 pub mod onboard;
 mod opencode;
 pub mod ops;
+pub mod overrun;
 pub mod parallel;
 pub mod quota;
+pub mod quiet;
 pub mod release;
 pub mod restart;
+pub mod rounds;
+mod rules;
+pub mod session;
+mod session_runner;
 pub mod review;
 pub mod start;
 pub mod switch;
 pub mod trust;
 pub mod stall;
 pub mod tailed;
+pub mod waits;
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, Ts};
@@ -55,6 +63,11 @@ pub struct EngineCfg {
     /// Ticks a Submitted/Unknown doorbell may wait for evidence before the seat
     /// is flagged "needs check" (no resend either way).
     pub doorbell_check_budget: i64,
+    /// How long a delivery waits for the lane's check-in, in wall-clock
+    /// seconds (design §10.3: `timing.delivery_grace_s`, default 180). The
+    /// window is not a number of checks: a lane that reads its packet after a
+    /// minute still confirms it.
+    pub delivery_grace_s: i64,
     /// Observation profiles by name (seat.profile). Unknown profile name ⇒ the
     /// seat is not observed as idle (fail closed) and is flagged.
     pub profiles: std::collections::BTreeMap<String, gear_herdr::Profile>,
@@ -82,6 +95,8 @@ pub struct EngineCfg {
     /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
     /// moves the refs from the remote's own side, so no test runs `git push`.
     pub remote: std::sync::Arc<dyn merge::Remote>,
+    /// Executor for review worktree Git operations.
+    pub review_git: std::sync::Arc<dyn review::ReviewGit>,
     /// The wait between two attempts of a merge that failed for a reason that
     /// can clear: the engine sleeps, doubling from 2 s up to 30 s (T-61). A
     /// field so a test injects a hook that never touches the clock (T-127).
@@ -90,7 +105,7 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, delivery_grace_s: 180, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), review_git: std::sync::Arc::new(review::RealReviewGit), merge_retry_wait: merge::RetryWait::backoff() }
     }
 }
 
@@ -104,6 +119,9 @@ pub struct TickReport {
     pub executed: Vec<(String, String)>,
     /// Op ids confirmed by evidence this tick.
     pub confirmed: Vec<String>,
+    /// Attempts confirmed by a **late** check-in (design §10.3): the delivery
+    /// op had already failed, and the view that showed the attempt came after.
+    pub late_confirmed: Vec<String>,
     /// Seats flagged for attention (e.g. doorbell evidence budget exhausted).
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
@@ -131,6 +149,10 @@ pub struct TickReport {
     /// The all-tail item opened or closed this tick (`all-tail:opened|closed`):
     /// every lane in the tail while required work remains (B02-08).
     pub tail: Vec<String>,
+    /// The friction item opened, updated or closed this tick
+    /// (`friction:opened|updated|closed`): the captain hears about the open
+    /// friction reports when it has nothing else to do (design §6.4).
+    pub friction: Vec<String>,
     /// Station message ids opened at ETA/task checkpoints (`project:M-n`).
     pub stations: Vec<String>,
     /// Lanes alerted for being Working without their own development attempt.
@@ -153,11 +175,18 @@ pub struct TickReport {
     pub parallel: Vec<String>,
     /// Git evidence that could not be read during a parallel-change scan.
     pub parallel_failed: Vec<String>,
+    /// The rounds that ended or learned a session this tick (design §4.1).
+    pub rounds: crate::rounds::RoundReport,
 }
 
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
     let mut report = TickReport::default();
+
+    // Settle recorded lane rebinds before onboarding or dispatch sees config.
+    for project in store.read(|tx| tx.project_ids())? {
+        gear_app::plan::reconcile_rebinds(store, &project)?;
+    }
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
@@ -174,6 +203,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.settle_failed = settle_failed;
     }
 
+    // Reconcile waits before dispatch and stall decisions in this tick.
+    waits::tick(store, herdr, cfg, now)?;
     let projects = store.read(|tx| tx.project_ids())?;
     for project in &projects {
         let checked = parallel::check(store, project, now)?;
@@ -216,6 +247,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     };
 
+    let mut reviewer_nudge_flags = Vec::new();
+    let mut missing_seats = std::collections::BTreeSet::new();
+    let mut present_seats = Vec::new();
+    let mut observed_seats = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -237,6 +272,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             Err(_) => cfg.profiles.clone(),
         };
         let observed = store.read(|tx| observe::reconcile(tx, herdr, &project, &agents, &profiles))?;
+        for obs in &observed {
+            observed_seats.push((project.clone(), obs.seat.id.clone(), obs.presence == observe::Presence::Present));
+            if obs.presence == observe::Presence::Missing {
+                missing_seats.insert(obs.seat.id.clone());
+            } else if obs.presence == observe::Presence::Present {
+                present_seats.push((project.clone(), obs.seat.id.clone()));
+            }
+        }
         // A hand restart of an agent is a new session in the same generation
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
@@ -275,17 +318,34 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             }
         }
 
+        // Configuration changes take effect through the same durable in-place
+        // restart machinery before quota and dispatch act on the lane.
+        restart::reconcile_config(store, herdr, cfg, &profiles, &project, now)?;
+
         // 1b. quota: a lane on a provider limit switches model or parks
         //     (design/01 `[models].on_quota`). It runs before the confirm, so a
         //     lane that is on quota does not have its delivery budget spent.
         let quota = quota::apply_quota_policy(store, herdr, cfg, &profiles, &project, &observed, now)?;
         report.quota.extend(quota.events);
 
+        // The loop guard acts on the observed working session before dispatch;
+        // its message also resets the ordinary push reminder clock.
+        quiet::loops(store, herdr, &project, &observed, now)?;
+        store.write(|tx| quiet::tick(tx, &project, now))?;
+
         // 2. confirm: settle Submitted/Unknown doorbells from view evidence.
+        let delivery_grace = gear_app::config::latest(store, &project)
+            .map(|config| i64::from(config.timing.delivery_grace_s))
+            .unwrap_or(cfg.delivery_grace_s);
         let (confirmed, flagged) =
-            ops::confirm_pending(store, &project, cfg.doorbell_check_budget, now)?;
+            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
+
+        // 2b. a late check-in (design §10.3): a view that shows the attempt
+        //     after its delivery op failed confirms the attempt anyway and
+        //     closes the stall item.
+        report.late_confirmed.extend(ops::confirm_late_views(store, &project, now)?);
 
         attention::promote(store, &project, now)?;
 
@@ -305,8 +365,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 report.flagged.push(seat.id.clone());
             }
         }
-        // … then the attempts and their deliveries in one write transaction.
-        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &planned, now))?;
+        // Session setup may take several ticks; no packet goes before Ready.
+        dispatch::recover_open_rounds(store, herdr, cfg, &project, &observed, &planned, now)?;
+        let prepared = dispatch::prepare_dispatch(store, herdr, cfg, &project, &planned, now)?;
+        let deliveries = store.write(|tx| dispatch::intend_dispatch(tx, &project, &prepared, now))?;
         report.intended.extend(deliveries.into_iter().map(|op| op.id));
 
         // 6. feed: a lane running dry gets one item in the captain's inbox,
@@ -331,6 +393,15 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 .map(|change| format!("all-tail:{}", change.as_str())),
         );
 
+        // 6d. the friction ring (design §6.4): an idle captain hears about
+        //     the open friction reports — one item on the thread `friction`,
+        //     at most once per 30 min, updated by a new report and closed
+        //     when every report it lists is closed.
+        report.friction.extend(
+            friction::ring(store, &project, now)?
+                .map(|change| format!("friction:{}", change.as_str())),
+        );
+
         // 7. review: a lane handed a result in → a temp reviewer starts. The
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
@@ -341,9 +412,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let (_nudged, stuck) =
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
-            if !report.flagged.contains(&seat) {
-                report.flagged.push(seat);
-            }
+            reviewer_nudge_flags.push((project.clone(), seat));
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
@@ -374,7 +443,24 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.intended.extend(intended.into_iter().map(|op| op.id));
 
         // 11. execute: re-check each op, call Herdr, record the outcome.
-        report.executed.extend(ops::execute_intended(store, herdr, &project, now)?);
+        quiet::prepare_pending_deliveries(store, herdr, cfg, &project, now)?;
+        let executed = ops::execute_intended(store, herdr, &project, now)?;
+        store.write(|tx| {
+            for (id, state) in &executed {
+                if state != "submitted" { continue; }
+                let Some(op) = tx.get_op(&project, id)? else { continue };
+                if op.kind != gear_model::OpKind::Deliver { continue; }
+                let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+                if seat.role != gear_model::SeatRole::Lane { continue; }
+                if let (Some(task), Some(n)) = (op.task.as_deref(), op.attempt) {
+                    if tx.get_attempt(&project, task, n)?.is_some_and(|a| a.sent_at.is_none()) {
+                        tx.set_attempt_sent(&project, task, n, now)?;
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        report.executed.extend(executed);
 
         // 12. merge: collect a finished background merge or launch the next
         //     one. Git and the gate run beside the tick (T-36).
@@ -382,10 +468,69 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
         }
     }
+    // 13. the rounds bookkeeping of every project (design §4.1): the session of
+    //     a seat joins its open round, and a round ends at the next round on
+    //     its seat or at the seat's release. The overrun question (§5.2) and
+    //     the declared waits (§5.3) tick with it; both are empty until their
+    //     own tasks land.
+    report.rounds = rounds::tick(store, herdr, cfg, now)?;
+    waits::tick(store, herdr, cfg, now)?;
+    overrun::tick(store, herdr, cfg, now)?;
+    for (project, seat) in reviewer_nudge_flags {
+        if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
+            && !report.flagged.contains(&seat) {
+            report.flagged.push(seat);
+        }
+    }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
+    // A failed delivery remains a live fact until its retry is cleared or
+    // confirmed. The initial failure is emitted only once by the op, so
+    // revisit it on later ticks to allow a resolved item to ring again.
+    for (project, seat, present) in &observed_seats {
+        let other_cause = report.flagged.contains(seat);
+        let outstanding = store.write(|tx| {
+            let Some(failed) = delivery::failed(tx, seat)? else { return Ok(false) };
+            let task = tx.get_task(project, &failed.task)?;
+            let attempt = tx.get_attempt(project, &failed.task, failed.attempt)?;
+            let ended = task.as_ref().is_some_and(|t| t.state.is_terminal())
+                || attempt.as_ref().is_some_and(|a| a.state.is_terminal());
+            if ended {
+                delivery::clear(tx, seat)?;
+                // A missing agent or independent escalation is still a live
+                // fact; keep its item and let the normal flag update it.
+                if !other_cause { stall::resolve(tx, project, seat, now, None)?; }
+                return Ok(false);
+            }
+            Ok(*present && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))
+        })?;
+        if outstanding && !report.flagged.contains(seat) {
+            report.flagged.push(seat.clone());
+        }
+    }
+    let mut actionable = Vec::new();
+    for seat in &report.flagged {
+        if !store.read(|tx| waits::waiting_seat(tx, seat))? { actionable.push(seat.clone()); }
+    }
+    report.flagged = actionable;
+    for (project, seat) in present_seats {
+        if !report.flagged.contains(&seat) {
+            store.write(|tx| {
+                if tx.get_meta(&format!("stall-missing:{seat}"))?.as_deref() == Some("1") {
+                    stall::resolve(tx, &project, &seat, now, None)?;
+                    tx.set_meta(&format!("stall-missing:{seat}"), "")?;
+                }
+                Ok(())
+            })?;
+        }
+    }
     for seat in report.flagged.clone() {
-        if let Err(e) = store.write(|tx| stall::alert(tx, &seat, now)) {
+        if let Err(e) = store.write(|tx| {
+            let missing = missing_seats.contains(&seat);
+            tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
+            let fact = if missing { "its agent is gone from its pane" } else { "a delivery was not confirmed or continuing it made no progress" };
+            stall::alert_fact(tx, &seat, now, fact)
+        }) {
             // One seat's alert failing never stops the tick.
             report.settle_failed.push(format!("stall alert {seat}: {}", e.detail));
         }
@@ -421,7 +566,43 @@ fn settle_reviews(store: &mut Store, now: Ts) -> GearResult<(Vec<String>, Vec<St
     Ok((settled, failed))
 }
 
+/// Does this seat have no open attempt? (design §10.4: a lane with no open
+/// attempt gets the doorbell text that tells it to stop.)
+///
+/// Only a **lane** counts: the captain and the reviewers have no attempt of
+/// their own by design, and their doorbell keeps its usual text.
+pub(crate) fn no_task_of(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+    if seat.role != gear_model::SeatRole::Lane {
+        return Ok(false);
+    }
+    Ok(tx.open_attempts_of_seat(&seat.id)?.is_empty())
+}
+
 /// What the doorbell decision needs to know about one seat (design/07).
+/// Session preparation owns the pane until its current round is ready.
+fn session_preparation_pending(tx: &gear_store::Tx<'_>, obs: &observe::SeatObs) -> GearResult<bool> {
+    let seat = &obs.seat;
+    let Some(round) = tx.open_round_of_seat(&seat.id)? else { return Ok(false) };
+    let identity = format!("{}:{}:{}:{}", round.project, round.task, round.attempt, round.role);
+    let state = tx.get_meta(&format!("engine.session_step.{}", seat.id))?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+    if let Some(state) = state.filter(|s| s["round"] == identity && s["generation"].as_i64() == Some(seat.generation)) {
+        match state["step"].as_str() {
+            Some("failed") => return Ok(false),
+            Some("done") => {},
+            _ => return Ok(true),
+        }
+    }
+    // A round can exist before the runner has written its first step (or when
+    // no profile is available); an unsent assignment still reserves the pane.
+    let Some(attempt) = tx.get_attempt(&round.project, &round.task, round.attempt)? else { return Ok(false) };
+    if attempt.state == gear_model::AttemptState::Delivered && attempt.sent_at.is_none() { return Ok(true) }
+    if !matches!(attempt.state, gear_model::AttemptState::Delivered | gear_model::AttemptState::Started | gear_model::AttemptState::Stopped) { return Ok(false) }
+    let expected = crate::session::round_session(tx, &round)?;
+    Ok(expected.is_some_and(|session| obs.presence == observe::Presence::Missing
+        || (obs.presence == observe::Presence::Present && obs.session.as_deref().is_some_and(|current| current != session))))
+}
+
 fn doorbell_inputs(
     tx: &gear_store::Tx<'_>,
     project: &str,
@@ -495,7 +676,10 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let declared_wait = waits::waiting_seat(tx, &seat.id)?;
+        let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
+            if declared_wait && message.thread.starts_with("overrun-question:") { continue; }
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
                 // ring until they are answered, whatever generation took the
@@ -506,12 +690,14 @@ fn doorbell_inputs(
                     && !shown.contains(&message.id)
             };
             if include && !doorbelled.contains(&message.id) {
+                if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
                 waiting.push(item(&message));
             }
         }
 
         // Reply/Instruction messages this generation has not shown yet.
         for message in tx.messages_to_since(project, &seat.id, since)? {
+            if declared_wait && message.thread.starts_with("overrun-question:") { continue; }
             if shown.contains(&message.id)
                 || doorbelled.contains(&message.id)
                 || !gear_app::seats::message_belongs(seat, &message, since)
@@ -519,12 +705,25 @@ fn doorbell_inputs(
             {
                 continue;
             }
+            if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
             waiting.push(item(&message));
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_ops = tx.slot_ops(&seat.id)?;
+        // A review delivery stays submitted until the verdict. Its reviewer
+        // must still receive the urgent overrun question during the review.
+        let review_question = seat.role == gear_model::SeatRole::Temp
+            && !overrun_questions.is_empty()
+            && !slot_ops.is_empty()
+            && slot_ops.iter().all(|op| op.kind == OpKind::Deliver
+                && op.state == OpState::Submitted
+                && op.task == seat.task_id);
+        if review_question {
+            waiting.retain(|item| overrun_questions.contains(&item.id));
+        }
+        let slot_busy = (!slot_ops.is_empty() && !review_question) || session_preparation_pending(tx, seat_obs)?;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))
@@ -538,8 +737,12 @@ fn doorbell_inputs(
             // Only a seat that may receive work is rung, even if its agent is
             // idle (a parked/held seat must not be woken by a doorbell).
             idle: seat_obs.idle && observe::reachable(seat.state),
+            status: if observe::reachable(seat.state) { seat_obs.status } else { None },
             slot_busy,
             last_settled_at,
+            // Design §10.4: a lane with no open attempt gets the text that
+            // tells it to stop working on earlier things.
+            no_task: no_task_of(tx, seat)?,
             waiting,
         });
     }

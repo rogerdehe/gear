@@ -50,6 +50,10 @@ fn finish(store: &mut Store, n: i64) {
         task.state = TaskState::Done;
         tx.update_task(&task)?;
         tx.insert_attempt(&AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
             project: "p".into(), task: id.clone(), n: 1, seat: "p:heat".into(), generation: 1,
             contract_version: 1, adopted_version: 1, pending_update: None,
             state: AttemptState::Accepted, candidate: None, report: None, safe_point: None,
@@ -91,7 +95,7 @@ fn eta_quarters_open_once_and_keep_their_snapshots_open() {
 }
 
 #[test]
-fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_task() {
+fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     let mut store = world("8h", 5);
     for n in 1..=3 { finish(&mut store, n); }
     let ids = check(&mut store, 3600);
@@ -101,7 +105,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_task() {
     assert_eq!(report.pace(), Some(2.0));
     assert_eq!(report.remaining_estimate_min, Some(90));
     assert_eq!(report.projected_min, Some(60 + 90*2));
-    assert_eq!(message.body, "Station M2 [3 done] · elapsed 60m / eta 8h · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · slowest T-1 20m");
+    assert_eq!(message.body, "Station M2 [3 done] · elapsed 60m / eta 8h · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · slowest lane heat 180m");
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
@@ -192,6 +196,7 @@ fn invalid_station_decisions_and_mixed_replies_are_atomic() {
         assert_eq!(item(&mut store, &id).state, MsgState::Open);
     }
     let ordinary = store.write(|tx| Ok(tx.insert_message(&NewMessage {
+        meta: None,
         project: "p".into(), thread: "ordinary".into(), task: None, attempt: None,
         sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
         kind: MsgKind::Question, urgent: false, body: "question".into(), reply_to: None,

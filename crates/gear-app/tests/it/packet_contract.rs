@@ -18,7 +18,7 @@ fn world(attempt: bool) -> Store {
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", T0)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
-        tx.insert_task(&TaskRow { project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
+        tx.insert_task(&TaskRow { repo: None, base: None, gate: None, rework_estimate_min: None, project: "p".into(), id: "T-7".into(), rank: 1, state: TaskState::Ready, priority: "must".into(),
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
@@ -33,6 +33,7 @@ fn world(attempt: bool) -> Store {
 fn packet_has_contract_and_copyable_commands() {
     let mut s = world(true);
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(text.ends_with("You implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n"));
     for needle in [
         "# T-7 — Fix the login crash",
         "Lane: heat · Contract: v1 · State: ready",
@@ -43,6 +44,20 @@ fn packet_has_contract_and_copyable_commands() {
         assert!(text.contains(needle), "missing {needle:?} in\n{text}");
     }
     assert!(!text.contains("Pending update"));
+}
+
+/// T-168 (design §6.2): the packet says what the round's budget is and
+/// what a hand-in past it must carry.
+#[test]
+fn the_packet_says_the_budget_and_the_friction_flag() {
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(
+        text.contains("Budget: 30 min. Past it, your hand-in must carry --friction"),
+        "{text}"
+    );
+    // The packet lists what belongs in a friction report (design §6.1).
+    assert!(text.contains("a permission you lacked"), "{text}");
 }
 
 #[test]
