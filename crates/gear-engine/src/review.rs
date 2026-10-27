@@ -3176,6 +3176,8 @@ profile = "opencode"
         assert_eq!(action["action"], "resume");
         assert_eq!(action["session_ref"], "review-session");
         assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id))).unwrap().as_deref(), Some("gpt-6-astra"));
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 16).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Starting, "the earlier delivery must not cancel the new attempt");
     }
 
     #[test]

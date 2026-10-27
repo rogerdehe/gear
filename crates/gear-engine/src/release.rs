@@ -301,9 +301,11 @@ fn under_review(
             return Ok(false);
         }
         // A newer attempt handed in means this reviewer read an older one.
-        if let Some(job) = tx.last_op(&seat.id, OpKind::Deliver)? {
-            if job.task.as_deref() == Some(task) && job.attempt != Some(latest.n) {
-                return Ok(false);
+        if seat.task_id.as_deref() == Some(task) {
+            if let Some(job) = tx.last_op(&seat.id, OpKind::Deliver)? {
+                if job.task.as_deref() == Some(task) && job.attempt != Some(latest.n) {
+                    return Ok(false);
+                }
             }
         }
         // Its verdict is in: the reviewer's job is done, whoever settles it
