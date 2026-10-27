@@ -15,7 +15,7 @@
 
 use gear_herdr::HerdrAct;
 use gear_model::{GearResult, SeatState, Ts};
-use gear_store::{RoundKey, Store, Tx};
+use gear_store::{RoundKey, RoundTokens, Store, Tx};
 
 use crate::EngineCfg;
 
@@ -30,12 +30,10 @@ pub struct RoundReport {
 
 /// The rounds bookkeeping of every project (design §4.1).
 ///
-/// The token counting of the closed rounds (§4.3-4.4) is not here yet: it
-/// needs the usage reader, which lands with its own task.
 pub fn tick(
     store: &mut Store,
     _herdr: &mut dyn HerdrAct,
-    _cfg: &EngineCfg,
+    cfg: &EngineCfg,
     now: Ts,
 ) -> GearResult<RoundReport> {
     let mut report = RoundReport::default();
@@ -96,8 +94,18 @@ pub fn tick(
             }
             Ok(())
         })?;
+        let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
+        for round in rounds {
+            let Some(end) = round.end_at else { continue };
+            if now < end.saturating_add(60) || round.counted_at.is_some_and(|at| round.input.is_some() || now < at.saturating_add(60)) { continue }
+            let tokens = count_round(store, cfg, &round, now)?;
+            store.write(|tx| {
+                tx.set_round_tokens(&key_of(&round), &tokens, now)?;
+                // The overrun pass owns active-time and pause accounting.
+                tx.set_round_active(&key_of(&round), round.active_s)
+            })?;
+        }
     }
-    let _ = now;
     Ok(report)
 }
 
@@ -122,4 +130,41 @@ pub fn open_round(
     seat: &str,
 ) -> GearResult<Option<gear_store::RoundRow>> {
     tx.open_round_of_seat(seat)
+}
+
+/// Count a round without writing it. Reports can use this for an open round;
+/// its exclusive upper boundary is `now`. Unreadable logs remain unknown.
+pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::RoundRow, now: Ts) -> GearResult<RoundTokens> {
+    let unknown = || RoundTokens { input:None, output:None, cache_read:None, cache_write:None, reasoning:None, cost_usd:None, cost_source:"none".into() };
+    let (seat, project) = store.read(|tx| Ok((tx.get_seat(&round.seat)?, tx.get_project(&round.project)?)))?;
+    let (Some(seat), Some(project)) = (seat, project) else { return Ok(unknown()) };
+    let config = project.config_toml.parse::<toml::Value>().ok();
+    let resolve = |name: &str| {
+        let raw = config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(name));
+        let mut profile = cfg.profiles.get(name).cloned().or_else(|| gear_herdr::builtin(name))
+            .or_else(|| raw.map(|_| gear_herdr::Profile::for_new()))?;
+        if let Some(raw) = raw {
+            if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() { profile = profile.patched(&patch, name); }
+        }
+        Some(profile)
+    };
+    // A seat may have switched CLI after this round ended. Its new profile
+    // must not decide how the old CLI's session logs are read.
+    let profile = resolve(&seat.profile).filter(|p| p.kind == round.cli)
+        .or_else(|| resolve(&round.cli).filter(|p| p.kind == round.cli));
+    let Some(log) = profile.as_ref().and_then(|p|p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name) else { return Ok(unknown()) };
+    if round.sessions.is_empty() { return Ok(unknown()) }
+    let end = round.end_at.unwrap_or(now).min(now);
+    let mut prices = std::collections::BTreeMap::new();
+    if let Some(table) = config.as_ref().and_then(|c|c.get("prices")).and_then(toml::Value::as_table) {
+        for (model, price) in table {
+            let rate = |key: &str| price.get(key).and_then(|n| n.as_float().or_else(|| n.as_integer().map(|i|i as f64)));
+            if let (Some(input),Some(output),Some(cache_read),Some(cache_write)) = (rate("input"),rate("output"),rate("cache_read"),rate("cache_write")) {
+                prices.insert(model.clone(), gear_usage::Price {input, output, cache_read, cache_write});
+            }
+        }
+    }
+    let Some(result) = gear_usage::round_usage(log, &round.sessions, round.start_at, end, round.model.as_deref(), &prices) else { return Ok(unknown()) };
+    let u = result.usage;
+    Ok(RoundTokens { input:Some(u.input), output:Some(u.output), cache_read:Some(u.cache_read), cache_write:Some(u.cache_write), reasoning:Some(u.reasoning), cost_usd:u.cost_usd, cost_source:result.cost_source.into() })
 }
