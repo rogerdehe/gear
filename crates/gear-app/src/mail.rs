@@ -822,13 +822,12 @@ fn check_friction(
     let model = round.and_then(|round| round.model.as_deref());
     let budget = tx.round_budget_min(project, task, attempt, role, model)?;
     // The round's own clock (design §5.1). A review is charged from the
-    // reviewer's own start — its delivery confirmation, else the round's
-    // start — and never from the writer's check-in: the reviewer did not
-    // spend the writer's time.
+    // reviewer's own start — the review round's start — and never from the
+    // writer's check-in: the reviewer did not spend the writer's time. The
+    // writer's attempt carries the writer's times, so reading them here would
+    // charge the reviewer for the writer's hour (T-193).
     let started = if role == "review" {
-        tx.get_attempt(project, task, attempt)?
-            .and_then(|attempt| attempt.sent_at)
-            .or_else(|| round.map(|round| round.start_at))
+        round.map(|round| round.start_at)
     } else {
         tx.attempt_times(project, task, attempt)
             .ok()
