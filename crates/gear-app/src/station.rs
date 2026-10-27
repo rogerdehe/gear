@@ -87,7 +87,11 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
                 body: format!(
-                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}). Land it: write the voyage report, freeze the voyage file, ask the user whether to reclaim the lanes; close this with `station <id>: land`.",
+                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}).\n\
+1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
+2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
+3. Only then ask about reclaiming the lanes and the release.\n\
+Close this with `station <id>: land`.",
                     report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
                 ),
                 reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
