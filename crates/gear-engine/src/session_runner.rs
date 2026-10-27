@@ -56,7 +56,13 @@ pub(crate) fn run(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, 
     let occupant = match herdr.agent_get(&binding.pane_id) { Ok(value) => value, Err(_) => return Ok(Prep::Wait) };
     let identity = format!("{}:{task}:{attempt}:{}", seat.project, role.as_str());
     let existing = store.read(|tx| tx.get_meta(&key(seat)))?.and_then(|s| serde_json::from_str::<Value>(&s).ok()).filter(|s| str_field(s, "round") == identity)
-        .filter(|state| !(str_field(state, "step") == "done" && matches!(action, Action::Resume(_)) && occupant.is_none()));
+        .filter(|state| {
+            if str_field(state, "step") != "done" || str_field(state, "result") == "resume-fallback" { return true }
+            match action {
+                Action::Resume(target) if !target.is_empty() => occupant.is_some() && binding.session_ref.as_deref() == Some(target.as_str()),
+                _ => true,
+            }
+        });
     let mut state = if let Some(state) = existing { state } else {
         let target = match action { Action::Resume(s) => Some(s.as_str()), _ => None };
         let old = binding.session_ref.as_deref().filter(|s| !s.is_empty());

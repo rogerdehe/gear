@@ -590,6 +590,31 @@ mod tests {
     const T0: i64 = 1_800_000_000;
 
     #[test]
+    fn completed_step_resumes_the_round_after_an_idle_replacement() {
+        let mut store = world();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w1:p1", "codex", gear_herdr::AgentStatus::Idle);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let key = gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "dev".into() };
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0).unwrap(), Prep::Wait);
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 1).unwrap(), Prep::Wait);
+        store.write(|tx| { tx.set_binding_session_ref(&seat.id, 1, "round-session")?; tx.add_round_session(&key, "round-session") }).unwrap();
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 6).unwrap(), Prep::Ready);
+        store.write(|tx| tx.set_binding_session_ref(&seat.id, 1, "replacement")).unwrap();
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 10).unwrap(), Prep::Wait);
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 11).unwrap(), Prep::Wait);
+        herdr.exit_agent("w1:p1");
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 12).unwrap(), Prep::Wait);
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 13).unwrap(), Prep::Wait);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::AgentStart { args, .. } if args.contains(&"round-session".to_string()))));
+        store.write(|tx| tx.set_binding_session_ref(&seat.id, 1, "round-session")).unwrap();
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 14).unwrap(), Prep::Ready);
+        let calls = herdr.calls.len();
+        assert_eq!(prepare_lane(&mut store, &mut herdr, &cfg(), &seat, "T-1", 1, T0 + 15).unwrap(), Prep::Ready);
+        assert_eq!(herdr.calls.len(), calls);
+    }
+
+    #[test]
     fn new_session_is_typed_then_waits_five_seconds_for_codex() {
         let mut store = world();
         let mut herdr = FakeHerdr::new();
@@ -745,6 +770,11 @@ lanes = [{ model = "test-model", context_window_k = 10 }]
             if fallback { assert!(!args[1].contains(&"wanted-session".to_string())); }
             let actual = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().session_action.unwrap();
             assert_eq!(actual, if fallback { "resume-fallback" } else { "resume" });
+            if fallback {
+                let starts_before = herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })).count();
+                assert_eq!(run(&mut store, &mut herdr, T0 + 6), Prep::Ready);
+                assert_eq!(herdr.calls.iter().filter(|call| matches!(call, gear_herdr::fake::Call::AgentStart { .. })).count(), starts_before);
+            }
         }
     }
 
