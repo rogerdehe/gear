@@ -38,6 +38,7 @@ pub mod release;
 pub mod restart;
 pub mod rounds;
 pub mod session;
+mod session_runner;
 pub mod review;
 pub mod start;
 pub mod switch;
@@ -91,6 +92,8 @@ pub struct EngineCfg {
     /// `merge::GitRemote`; the engine's tests use `merge::FetchRemote`, which
     /// moves the refs from the remote's own side, so no test runs `git push`.
     pub remote: std::sync::Arc<dyn merge::Remote>,
+    /// Executor for review worktree Git operations.
+    pub review_git: std::sync::Arc<dyn review::ReviewGit>,
     /// The wait between two attempts of a merge that failed for a reason that
     /// can clear: the engine sleeps, doubling from 2 s up to 30 s (T-61). A
     /// field so a test injects a hook that never touches the clock (T-127).
@@ -99,7 +102,7 @@ pub struct EngineCfg {
 
 impl Default for EngineCfg {
     fn default() -> Self {
-        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, delivery_grace_s: 180, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), merge_retry_wait: merge::RetryWait::backoff() }
+        EngineCfg { tick_s: 4, cooldown_s: 90, doorbell_check_budget: 3, delivery_grace_s: 180, profiles: Default::default(), db_path: String::new(), auto_settle: false, merges: Default::default(), pane_busy_ticks: start::MAX_TICKS, model_list_wait_s: 60, model_list_poll_ms: 500, remote: std::sync::Arc::new(merge::GitRemote), review_git: std::sync::Arc::new(review::RealReviewGit), merge_retry_wait: merge::RetryWait::backoff() }
     }
 }
 
@@ -230,6 +233,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     };
 
+    let mut reviewer_nudge_flags = Vec::new();
     for project in projects {
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
@@ -360,9 +364,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let (_nudged, stuck) =
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
-            if !report.flagged.contains(&seat) {
-                report.flagged.push(seat);
-            }
+            reviewer_nudge_flags.push((project.clone(), seat));
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
@@ -409,6 +411,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     report.rounds = rounds::tick(store, herdr, cfg, now)?;
     overrun::tick(store, herdr, cfg, now)?;
     waits::tick(store, herdr, cfg, now)?;
+    for (project, seat) in reviewer_nudge_flags {
+        if store.read(|tx| review::nudge_flag_current(tx, &project, &seat, now))?
+            && !report.flagged.contains(&seat) {
+            report.flagged.push(seat);
+        }
+    }
     // 10. every flagged seat reaches its captain (L-52): a flag that only goes
     //     to the log leaves a lane standing still with nobody knowing.
     for seat in report.flagged.clone() {
@@ -534,6 +542,7 @@ fn doorbell_inputs(
             ),
         };
         let mut waiting: Vec<doorbell::DoorbellItem> = Vec::new();
+        let mut overrun_questions = BTreeSet::new();
         for message in tx.actionable_for(project, &seat.id, now)? {
             let include = if seat.role == gear_model::SeatRole::Captain {
                 // The captain's open items are the engine's business: they
@@ -545,6 +554,7 @@ fn doorbell_inputs(
                     && !shown.contains(&message.id)
             };
             if include && !doorbelled.contains(&message.id) {
+                if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
                 waiting.push(item(&message));
             }
         }
@@ -558,12 +568,25 @@ fn doorbell_inputs(
             {
                 continue;
             }
+            if message.urgent && message.thread.starts_with("overrun-question:") { overrun_questions.insert(message.id.clone()); }
             waiting.push(item(&message));
         }
 
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
-        let slot_busy = !tx.slot_ops(&seat.id)?.is_empty();
+        let slot_ops = tx.slot_ops(&seat.id)?;
+        // A review delivery stays submitted until the verdict. Its reviewer
+        // must still receive the urgent overrun question during the review.
+        let review_question = seat.role == gear_model::SeatRole::Temp
+            && !overrun_questions.is_empty()
+            && !slot_ops.is_empty()
+            && slot_ops.iter().all(|op| op.kind == OpKind::Deliver
+                && op.state == OpState::Submitted
+                && op.task == seat.task_id);
+        if review_question {
+            waiting.retain(|item| overrun_questions.contains(&item.id));
+        }
+        let slot_busy = !slot_ops.is_empty() && !review_question;
         let last_settled_at = tx
             .last_op(&seat.id, OpKind::Doorbell)?
             .filter(|op| matches!(op.state, OpState::Confirmed | OpState::Failed | OpState::Void))

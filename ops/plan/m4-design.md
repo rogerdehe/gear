@@ -318,6 +318,8 @@ The engine fills `<a>` and `<c>` with the open attempt's numbers, so the lane co
 
 - The overrun item is written with sender = the lane's seat and its generation (recipient the captain), so `gear reply` reaches the lane; the engine reads the lane's answer from its progress messages for that task and attempt carrying `left` (M4 T-160: the sender was unspecified).
 
+- After an answer, the next question comes when active_s passes the active time at that answer + max(10, left) minutes; `budget + max(10, left)` holds for the first answer only (M4 T-160, M-2782).
+
 ### 5.3 A declared wait (B03-09)
 
 A lane whose task cannot finish until another task lands says so:
