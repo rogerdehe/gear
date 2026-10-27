@@ -1191,7 +1191,9 @@ fn apply_rebind(tx: &Tx<'_>, project: &str, lane: &str, seat: &str, request: &Re
     tx.update_project(&row)?;
     // The engine-side rebind can use this durable marker to move the worktree.
     if old.name != request.repo {
-        tx.set_meta(&format!("lane-rebind-applied:{seat}"), &serde_json::to_string(request).map_err(|e| bad(0, e))?)?;
+        let mut marker = serde_json::to_value(request).map_err(|e| bad(0, e))?;
+        marker["old_repo"] = serde_json::Value::String(old.path.clone());
+        tx.set_meta(&format!("lane-rebind-applied:{seat}"), &marker.to_string())?;
     }
     tx.set_meta(&rebind_pending_key(seat), "")?;
     Ok(())

@@ -334,6 +334,8 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
 pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<TaskRow>> {
     use std::collections::BTreeSet;
     let tasks = tx.tasks_of_project(&seat.project)?;
+    let lane_repo = tx.get_project(&seat.project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok())
+        .map(|config| config.repo_of_lane(&seat.name).path);
     let done: BTreeSet<String> = tasks
         .iter()
         .filter(|task| task.state == TaskState::Done)
@@ -342,6 +344,7 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
     Ok(tasks
         .into_iter()
         .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
+        .filter(|task| task.repo.as_ref().zip(lane_repo.as_ref()).is_none_or(|(repo, current)| repo == current))
         .filter(|task| task.state == TaskState::Ready)
         .filter(|task| task.priority != "wont")
         .filter(|task| task.deps.iter().all(|dep| done.contains(dep)))
