@@ -44,6 +44,13 @@ enum Cmd {
         #[arg(long)]
         deps: bool,
     },
+    /// Captain: the queue of the project (design §8.3) — what every lane
+    /// does now, why an idle lane is idle, and what it has left.
+    Queue {
+        /// The queue as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Captain: reports about the project.
     Report {
         #[command(subcommand)]
@@ -108,6 +115,9 @@ struct SendCmd {
     urgent: bool,
     #[arg(long)]
     candidate: Option<String>,
+    /// Result of a direction check, as text (not a task hand-in).
+    #[arg(long, value_name = "TEXT", conflicts_with = "body")]
+    direction: Option<String>,
     /// Review only: the verdict a temp reviewer hands in (pass|fail).
     #[arg(long)]
     verdict: Option<String>,
@@ -180,6 +190,14 @@ enum PlanOp {
         #[arg(long = "request-id")]
         request_id: Option<String>,
     },
+    /// Print one task's block as it would stand in the plan file (design §8.3).
+    Show {
+        /// The task to show (T-n).
+        task: String,
+    },
+    /// End the parks whose time has come (T-190): a lane the plan parked
+    /// until a time that has passed works again.
+    Check {},
     /// Print `## NEW` blocks for the open issues the plan does not carry yet.
     ImportIssues {
         /// The voyage file to check against; default: the plan the store holds.
@@ -202,6 +220,19 @@ enum ReportOp {
         /// Only this voyage (milestone), e.g. M2.
         #[arg(long)]
         voyage: Option<String>,
+    },
+    /// The voyage report of the project (design §7.5): the voyage's lines,
+    /// its `done:` sentence clause by clause, its time and tokens, the ★
+    /// decisions, the friction reports and the tasks that took more than one
+    /// round.
+    Voyage {
+        /// The voyage (milestone) to report on, e.g. M4. The project's
+        /// current voyage when it is not given.
+        #[arg(long)]
+        voyage: Option<String>,
+        /// Print every decision, not only the ★ ones.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -299,13 +330,17 @@ fn run(cli: Cli) -> GearResult<()> {
             PlanOp::Apply { path, keep, next, request_id } => {
                 cmd_plan(path, keep, next, request_id, cli.json)
             }
+            PlanOp::Show { task } => cmd_plan_show(&task),
+            PlanOp::Check {} => cmd_plan_check(cli.json),
             PlanOp::ImportIssues { path, label } => {
                 cmd_import_issues(path, label, cli.json)
             }
         },
         Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
+        Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
+            ReportOp::Voyage { voyage, all } => cmd_report_voyage(voyage, all, cli.json),
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
@@ -718,6 +753,68 @@ fn output_error(e: std::io::Error) -> GearError {
 /// `gear board`: the plan board (PRD §15). The board itself lives in
 /// `gear-board`; the CLI opens the store, names the project and hands the
 /// terminal over.
+/// `gear queue`: the captain's plain view of the work (design §8.3) — every
+/// lane, what it does now, why an idle lane is idle, and what it has left.
+///
+/// Read-only, so it starts no engine.
+fn cmd_queue(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_queue(&mut store, &env, json, now_ts())?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `gear queue` body, over injected state.
+fn run_queue(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    json: bool,
+    now: i64,
+) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    let queue = gear_app::queue::build(store, &project, now)?;
+    if json {
+        return serde_json::to_string(&queue).map_err(json_error);
+    }
+    Ok(gear_app::queue::render(&queue))
+}
+
+/// `gear plan show T-n`: one task's block as it would stand in the plan file
+/// (design §8.3).
+///
+/// Read-only, so it starts no engine.
+fn cmd_plan_show(task: &str) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    let out = store.read(|tx| gear_app::plan::show(tx, &project, task))?;
+    println!("{out}");
+    Ok(())
+}
+
 fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
@@ -819,6 +916,134 @@ fn run_friction(
     }
 }
 
+/// `gear report voyage`: the captain's landing report of the project (design
+/// §7.5) — the voyage's lines, its `done:` sentence clause by clause, its
+/// time and tokens, the ★ decisions, the friction reports and the tasks that
+/// took more than one round.
+///
+/// Read-only, so it starts no engine.
+fn cmd_report_voyage(voyage: Option<String>, all: bool, json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_report_voyage(&mut store, &env, &mut herdr, voyage.as_deref(), all, json, now_ts())?;
+    println!("{out}");
+    Ok(())
+}
+
+/// The counted usage of the open rounds of a project (T-207).
+///
+/// A round that is still running has no counted tokens in the store yet: the
+/// report counts it as it reads (design §4.3) and passes the count to the
+/// report as an override. Nothing is written — a closed round keeps its
+/// stored numbers, and the store is left as it was.
+fn open_round_usage(
+    store: &mut gear_store::Store,
+    cfg: &gear_engine::EngineCfg,
+    project: &str,
+    now: i64,
+) -> gear_app::time::UsageOverrides {
+    let mut overrides = gear_app::time::UsageOverrides::default();
+    let rounds = match store.read(|tx| tx.rounds_of_project(project)) {
+        Ok(rounds) => rounds,
+        Err(error) => {
+            eprintln!("gear: cannot read the rounds of {project}: {error}");
+            return overrides;
+        }
+    };
+    for round in rounds.iter().filter(|round| round.end_at.is_none()) {
+        match gear_engine::rounds::count_round(store, cfg, round, now) {
+            Ok(counted) => {
+                // A log that cannot be read leaves the round unknown: the
+                // store's own numbers stand (a round that was never counted
+                // has none, and stays a question mark).
+                if counted.input.is_some() {
+                    overrides.set(&round.task, round.attempt, &round.role, (&counted).into());
+                }
+            }
+            // A round that cannot be counted stays unknown: the report shows
+            // a question mark, never a zero.
+            Err(error) => eprintln!(
+                "gear: cannot count the open round {} attempt {} {}: {error}",
+                round.task, round.attempt, round.role
+            ),
+        }
+    }
+    overrides
+}
+
+/// The counted usage of the open rounds of the caller's project (T-207).
+fn caller_open_round_usage(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    now: i64,
+) -> gear_app::time::UsageOverrides {
+    let Some(project) = env.ctx.as_ref().map(|ctx| ctx.project.clone()) else {
+        return gear_app::time::UsageOverrides::default();
+    };
+    open_round_usage(store, &report_cfg(), &project, now)
+}
+
+/// `gear report voyage` body, over injected state.
+fn run_report_voyage(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+    voyage: Option<&str>,
+    all: bool,
+    json: bool,
+    now: i64,
+) -> GearResult<String> {
+    let fp = observe_identity(store, env, herdr)?;
+    // The voyage to report on: the one named, else the project's current one
+    // (the voyage with open work first, then by id — the home page's order).
+    let milestone = match voyage {
+        Some(milestone) => milestone.to_string(),
+        None => current_voyage(store, env)?,
+    };
+    let overrides = caller_open_round_usage(store, env, now);
+    let report = gear_app::voyage::build_with(
+        store,
+        env,
+        fp.as_ref(),
+        &milestone,
+        all,
+        now,
+        &overrides,
+    )?;
+    if json {
+        return serde_json::to_string(&report).map_err(json_error);
+    }
+    Ok(gear_app::voyage::render(&report))
+}
+
+/// The project's current voyage: the one with open work, else the first by id
+/// (the home page's order).
+fn current_voyage(store: &mut gear_store::Store, env: &gear_app::Env) -> GearResult<String> {
+    let project = env
+        .ctx
+        .as_ref()
+        .map(|ctx| ctx.project.clone())
+        .ok_or_else(|| {
+            GearError::new(
+                gear_model::ErrorCode::NotRegistered,
+                "no GEAR_CTX in the environment",
+            )
+        })?;
+    // The voyage the landing is about: the one that departed last (the
+    // plan's own rule, `gear_app::plan::current_voyage`), so a finished
+    // voyage never hands the captain an older one.
+    let milestone = store.read(|tx| gear_app::plan::current_voyage(tx, &project))?;
+    if milestone.is_empty() {
+        return Err(GearError::new(
+            gear_model::ErrorCode::NoTarget,
+            format!("the project {project} has no voyage"),
+        ));
+    }
+    Ok(milestone)
+}
+
 /// `gear report time`: where the time went (T-38). The captain's view of the
 /// project's time accounting: per task and per voyage — estimate, dev time,
 /// review time, the wait for the captain, merge time, rework rounds and their
@@ -831,7 +1056,7 @@ fn cmd_report_time(task: Option<String>, voyage: Option<String>, json: bool) -> 
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     let filter = gear_app::time::Filter { task, voyage };
-    let out = run_report_time(&mut store, &env, &mut herdr, &filter, json)?;
+    let out = run_report_time(&mut store, &env, &mut herdr, &filter, json, now_ts())?;
     println!("{out}");
     Ok(())
 }
@@ -843,9 +1068,11 @@ fn run_report_time(
     herdr: &mut dyn gear_herdr::HerdrRead,
     filter: &gear_app::time::Filter,
     json: bool,
+    now: i64,
 ) -> GearResult<String> {
     let fp = observe_identity(store, env, herdr)?;
-    let report = gear_app::time::build(store, env, fp.as_ref(), filter)?;
+    let overrides = caller_open_round_usage(store, env, now);
+    let report = gear_app::time::build_with(store, env, fp.as_ref(), filter, now, &overrides)?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
     }
@@ -855,7 +1082,7 @@ fn run_report_time(
 fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
-    let body = match c.body.clone() {
+    let body = match c.direction.clone().or_else(|| c.body.clone()) {
         Some(body) => body,
         None => read_stdin()?,
     };
@@ -867,7 +1094,7 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     // A hand-in must contain the project's current integration branch (T-19);
     // the gate is built here, from this process's worktree and config.
     let base = match parse_kind(&c.kind)? {
-        gear_model::MsgKind::Result => Some(gear_app::base::gate_for(&mut store, &env)?),
+        gear_model::MsgKind::Result if c.direction.is_none() => Some(gear_app::base::gate_for(&mut store, &env)?),
         _ => None,
     };
     let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
@@ -1053,6 +1280,72 @@ fn cmd_plan(
     Ok(())
 }
 
+/// `gear plan check`: end the parks whose time has come (T-190).
+///
+/// A lane the captain parked until a time that has passed works again: its
+/// agent continues (Active) or the engine onboards it again (Queued). A lane
+/// parked on quota is left to the quota path.
+///
+/// It prints one line per lane that was let go.
+///
+/// The caller is the captain, proved as for `gear plan apply` (T-216, F2):
+/// the caller's seat is resolved (its pane, or its `GEAR_CTX`) and its
+/// identity is checked against the store inside the write transaction, so a
+/// stale or unknown captain cannot end a park.
+fn cmd_plan_check(json: bool) -> GearResult<()> {
+    let env = env_from_process()?;
+    let mut store = open_store()?;
+    let mut herdr = open_herdr()?;
+    let env = resolve_caller(&mut store, &mut herdr, env)?;
+    let out = run_plan_check(&mut store, &env, &mut herdr)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "ended": out })).map_err(json_error)?
+        );
+    } else {
+        for line in &out {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+/// `gear plan check` body, over injected state.
+///
+/// The caller's identity is observed first (as `gear plan apply` does) and
+/// checked inside the write transaction: only the captain, at the generation
+/// the store holds, may end a park (T-216, F2). A caller that cannot be
+/// proved is refused, and nothing is written.
+///
+/// The session's agents say whether a lane's agent is still in its pane.
+/// Without them nothing is guessed: a park stays (fail-closed, T-190) and the
+/// command says so.
+fn run_plan_check(
+    store: &mut gear_store::Store,
+    env: &gear_app::Env,
+    herdr: &mut dyn gear_herdr::HerdrRead,
+) -> GearResult<Vec<String>> {
+    let fp = observe_identity(store, env, herdr)?;
+    let agents = herdr.agents().ok();
+    let ended = store.write(|tx| {
+        let (ctx, _seat) = gear_app::identity::require_seat(
+            tx,
+            env,
+            fp.as_ref(),
+            Some(&[gear_model::SeatRole::Captain]),
+            Some(&[gear_model::SeatState::Active]),
+        )?;
+        gear_app::plan::end_parked_lanes(tx, &ctx.project, agents.as_deref(), now_ts())
+    })?;
+    if ended.is_empty() && agents.is_none() {
+        return Ok(vec![
+            "the session's agents could not be read: no park was ended".to_string(),
+        ]);
+    }
+    Ok(ended)
+}
+
 /// `gear plan import-issues`: the open issues a GitHub-mode project has not
 /// turned into tasks yet, as `## NEW` blocks (T-81).
 ///
@@ -1231,18 +1524,26 @@ fn run_plan(
             .map(|seat| seat.role == gear_model::SeatRole::Lane)
             .unwrap_or(false)
     });
-    let agents = if releasing {
-        Some(herdr.agents().map_err(|e| {
-            GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                format!(
-                    "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
-                    e.0
-                ),
-            )
-        })?)
-    } else {
-        None
+    // T-216 (F4): the agents are read for **every** apply, not only for a
+    // release: an ordinary apply ends the parks whose time has come, and that
+    // needs the same fact (is the lane's agent still in its pane?). A read
+    // that fails refuses a release (the release cannot be carried out
+    // unchecked) and leaves the automatic expiry fail-closed: a park whose
+    // lane has a live binding stays, a park whose lane has none still ends.
+    let agents = match herdr.agents() {
+        Ok(agents) => Some(agents),
+        Err(e) => {
+            if releasing {
+                return Err(GearError::new(
+                    gear_model::ErrorCode::BadFormat,
+                    format!(
+                        "cannot read the session's agents, so `- release` cannot tell whether a lane's agent is still running: {} — nothing was applied",
+                        e.0
+                    ),
+                ));
+            }
+            None
+        }
     };
     let result = gear_app::plan::apply(
         store,
@@ -1414,7 +1715,9 @@ fn run_send(
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
-    let result = gear_app::mail::send(store, env, fp.as_ref(), &args, now)?;
+    let result = if c.direction.is_some() {
+        gear_app::mail::send_direction(store, env, fp.as_ref(), &args, now)?
+    } else { gear_app::mail::send(store, env, fp.as_ref(), &args, now)? };
     // T-130: an urgent message, and every captain instruction to a lane whose
     // agent queues input (pi, claude), is typed into the pane before this call
     // returns. A replay already typed it once.
@@ -1427,7 +1730,7 @@ fn run_send(
         let mut doc = serde_json::to_value(&result).map_err(json_error)?;
         // The answer to a hand-in travels with the receipt (design §10.7, row
         // B03-04/10).
-        if kind == gear_model::MsgKind::Result && !result.replayed {
+        if kind == gear_model::MsgKind::Result && c.direction.is_none() && !result.replayed {
             if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
                 doc["hand_in"] = serde_json::Value::String(hand_in);
             }
@@ -1448,7 +1751,7 @@ fn run_send(
         // The answer to a hand-in (design §10.7, row B03-04/10): the work is
         // in, the next task comes by itself, and the task branch is not
         // pushed again. The lane reads the line where it handed in.
-        if kind == gear_model::MsgKind::Result && !result.replayed {
+        if kind == gear_model::MsgKind::Result && c.direction.is_none() && !result.replayed {
             if let Some(hand_in) = hand_in_reply(store, env, c.task.as_deref())? {
                 line.push('\n');
                 line.push_str(&hand_in);
@@ -1940,11 +2243,26 @@ fn engine_cfg(db_path: &str) -> gear_engine::EngineCfg {
     // A passing review merges without the captain; a failing one waits for
     // the captain's judgement (the engine settles passes only).
     cfg.auto_settle = true;
+    cfg.profiles = builtin_profiles();
+    cfg
+}
+
+/// Every built-in agent profile, by name.
+fn builtin_profiles() -> std::collections::BTreeMap<String, gear_herdr::Profile> {
+    let mut profiles = std::collections::BTreeMap::new();
     for kind in ["opencode", "claude", "codex", "grok", "pi"] {
         if let Some(profile) = gear_herdr::builtin(kind) {
-            cfg.profiles.insert(kind.to_string(), profile);
+            profiles.insert(kind.to_string(), profile);
         }
     }
+    profiles
+}
+
+/// The configuration the reports count their rounds with: the built-in agent
+/// profiles (each kind's log) and nothing else.
+fn report_cfg() -> gear_engine::EngineCfg {
+    let mut cfg = gear_engine::EngineCfg::default();
+    cfg.profiles = builtin_profiles();
     cfg
 }
 
@@ -2091,7 +2409,7 @@ mod tests {
     use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
     use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
-    use gear_store::{testing, ContractRow, Store, TaskRow};
+    use gear_store::{testing, BindingRow, ContractRow, SeatRow, Store, TaskRow};
     use std::collections::BTreeMap;
 
     const T0: i64 = 1_800_000_000;
@@ -2228,6 +2546,7 @@ mod tests {
             on: None,
             friction: None,
             candidate: None,
+            direction: None,
             verdict: None,
             blocking: None,
             preempted: None,
@@ -2513,6 +2832,153 @@ mod tests {
         assert_eq!(seat.state, gear_model::SeatState::Releasing);
     }
 
+    /// T-216 (F2): the captain seat was replaced (the store holds generation
+    /// 2); a caller that still carries generation 1 is stale and may not end
+    /// a park.
+    fn world_with_a_replaced_captain() -> (Store, FakeHerdr) {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                tx.insert_seat(&SeatRow {
+                    id: "p:captain".into(),
+                    project: "p".into(),
+                    role: SeatRole::Captain,
+                    name: "captain".into(),
+                    profile: "codex".into(),
+                    generation: 2,
+                    state: gear_model::SeatState::Active,
+                    state_since: T0,
+                    state_reason: None,
+                    task_id: None,
+                })?;
+                tx.insert_binding(&BindingRow {
+                    seat: "p:captain".into(),
+                    generation: 2,
+                    session: "sess".into(),
+                    pane_id: CAP_PANE.into(),
+                    kind: "codex".into(),
+                    session_ref: None,
+                    status: gear_store::BindingStatus::Active,
+                    handover_id: None,
+                    created: T0,
+                })?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+        herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+        (store, herdr)
+    }
+
+    /// A lane parked until a time that has passed, with its agent still in its
+    /// pane.
+    fn park_heat_until_the_past(store: &mut Store) {
+        store
+            .write(|tx| {
+                tx.set_seat_state(
+                    "p:heat",
+                    gear_model::SeatState::Parked,
+                    Some("until=2020-01-01T00:00:00Z"),
+                    T0,
+                )
+            })
+            .unwrap();
+    }
+
+    /// T-216 (F2): `gear plan check` proves its caller as `gear plan apply`
+    /// does: a stale captain (an older generation) is refused and nothing is
+    /// written.
+    #[test]
+    fn plan_check_refuses_a_stale_captain_and_writes_nothing() {
+        let (mut store, mut herdr) = world_with_a_replaced_captain();
+        park_heat_until_the_past(&mut store);
+        let stale = gear_app::Env {
+            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        };
+
+        let error = run_plan_check(&mut store, &stale, &mut herdr).unwrap_err();
+
+        assert_eq!(
+            error.code,
+            gear_model::ErrorCode::StaleGeneration,
+            "the stale caller is refused: {error}"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(
+            seat.state,
+            gear_model::SeatState::Parked,
+            "nothing was written: the park stays"
+        );
+    }
+
+    /// T-216 (F2): a captain found from its own pane, without `GEAR_CTX`, may
+    /// end a park: the seat is resolved from the pane and proved.
+    #[test]
+    fn plan_check_from_the_captains_pane_without_geom_ctx_ends_an_expired_park() {
+        let (mut store, mut herdr) = world();
+        park_heat_until_the_past(&mut store);
+        // The caller runs in the captain's pane; there is no GEAR_CTX.
+        let anonymous = gear_app::Env {
+            ctx: None,
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        };
+        let env = resolve_caller(&mut store, &mut herdr, anonymous).unwrap();
+        assert!(env.ctx.is_some(), "the captain is found in its pane");
+
+        let out = run_plan_check(&mut store, &env, &mut herdr).unwrap();
+
+        assert!(
+            out.iter().any(|line| line.contains("heat")),
+            "the park ended: {out:?}"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, gear_model::SeatState::Active, "its agent continues");
+        assert_eq!(seat.state_reason.as_deref(), Some("park ended"));
+    }
+
+    /// T-216 (F4): an ordinary apply ends an expired park whose lane's agent
+    /// is still running — the apply reads the session's agents, not only for a
+    /// release.
+    #[test]
+    fn an_ordinary_apply_ends_an_expired_park_with_a_live_agent() {
+        let (mut store, mut herdr) = world();
+        park_heat_until_the_past(&mut store);
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p3", "opencode", T0)
+            })
+            .unwrap();
+        // An ordinary apply: the captain holds another lane.
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold wire reason=wait\n");
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "r-plan",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+
+        assert!(out.contains("plan version 1"), "{out}");
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(
+            seat.state,
+            gear_model::SeatState::Active,
+            "the expired park ended: its agent continues"
+        );
+        assert_eq!(seat.state_reason.as_deref(), Some("park ended"));
+    }
+
     /// T-58: after a successful apply the captain hears about a lane that
     /// would stand idle — its only queued task waits for a dependency that is
     /// not done.
@@ -2683,6 +3149,242 @@ path="api"
             estimate_min: None,
              issue: None,updated: T0,
         }
+    }
+
+    /// T-163: `gear queue` is the captain's plain view of the work (design
+    /// §8.3): every lane, what it does now, why an idle lane is idle, and
+    /// what it has left — read from the store.
+    #[test]
+    fn queue_prints_the_lanes_and_the_reviewers() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                // Two lanes beside the ones the world seeds.
+                testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p5", "opencode", T0)?;
+                testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p6", "opencode", T0)?;
+                // The hull lane works on T-1 and has two tasks left.
+                let mut working = lane_task("T-1", "hull", gear_model::TaskState::Running, &[]);
+                working.estimate_min = Some(60);
+                working.rank = 1;
+                tx.insert_task(&working)?;
+                let mut queued = lane_task("T-2", "hull", gear_model::TaskState::Ready, &[]);
+                queued.estimate_min = Some(35);
+                queued.rank = 2;
+                tx.insert_task(&queued)?;
+                let mut waiting = lane_task("T-3", "hull", gear_model::TaskState::Ready, &["T-9"]);
+                waiting.estimate_min = Some(30);
+                waiting.rank = 3;
+                tx.insert_task(&waiting)?;
+                let mut queued = lane_task("T-4", "hull", gear_model::TaskState::Ready, &[]);
+                queued.estimate_min = Some(60);
+                queued.rank = 4;
+                tx.insert_task(&queued)?;
+                // The keel lane waits for a task of another lane: its next
+                // task is queued, but the dependency is not done.
+                let mut waiting = lane_task("T-9", "keel", gear_model::TaskState::Ready, &["T-1"]);
+                waiting.estimate_min = Some(40);
+                waiting.rank = 9;
+                tx.insert_task(&waiting)?;
+                // A reviewer works on T-2; another one stands by.
+                testing::seed_temp_seat(tx, "p", "r-1", "T-2", TEMP_PANE, "opencode", T0)?;
+                Ok(())
+            })
+            .unwrap();
+        // The hull lane's attempt: 38 minutes of work.
+        store
+            .write(|tx| {
+                // The task is ready when the attempt starts, then runs.
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = gear_model::TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:hull", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                // Only the start is recorded: the round is still running, so
+                // the elapsed minutes run to the clock (T-163 rework F1).
+                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Started, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 38 * 60).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        // The working lane: the task, its actual and estimated minutes, and
+        // what it has left.
+        let hull = lines.iter().find(|line| line.starts_with("hull")).unwrap();
+        assert!(hull.contains("working T-1 38/60m"), "{hull}");
+        assert!(hull.contains("· left 3 (125m):"), "{hull}");
+        assert!(hull.contains("T-2 35m"), "{hull}");
+        assert!(hull.contains("T-3 30m needs T-9"), "{hull}");
+        assert!(
+            hull.contains("T-2 35m, T-3 30m needs T-9, T-4 60m"),
+            "the queue is in the order of the plan: {hull}"
+        );
+        assert!(hull.contains("T-4 60m"), "{hull}");
+        // The idle lane: why it is idle, through the board's own function.
+        let keel = lines.iter().find(|line| line.starts_with("keel")).unwrap();
+        assert!(keel.contains("idle: next T-9 waits for T-1 (hull, in progress)"), "{keel}");
+        assert!(keel.contains("· left 1 (40m)"), "{keel}");
+        // The reviewers are on the last line.
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("r-1 reviewing T-2"), "{last}");
+
+        // --json has the same facts.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 38 * 60).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let lanes = parsed["lanes"].as_array().unwrap();
+        assert_eq!(lanes.len(), 3, "{json}");
+        // The lane with nothing planned says so.
+        let heat = lanes.iter().find(|lane| lane["lane"] == "heat").unwrap();
+        assert_eq!(heat["idle"], "nothing left planned");
+        assert_eq!(heat["left"].as_array().unwrap().len(), 0);
+        let hull = lanes.iter().find(|lane| lane["lane"] == "hull").unwrap();
+        assert_eq!(hull["working"]["id"], "T-1");
+        assert_eq!(hull["working"]["actual_min"], 38, "the elapsed minutes of a running task");
+        assert_eq!(hull["left"].as_array().unwrap().len(), 3);
+        assert_eq!(hull["left_min"], 125);
+        assert_eq!(parsed["reviewers"][0]["reviewing"], "T-2");
+    }
+
+    /// T-163: `gear plan show T-n` prints one task's block in plan-file
+    /// form, and the block parses back to the same task.
+    /// T-163 rework F2: a lane that is idle for a reason (held, quota
+    /// parked, waiting for a task) is not working, and its unfinished task
+    /// stays in its left list. The text and the JSON say the same.
+    #[test]
+    fn queue_shows_a_held_lane_as_idle_with_its_reason() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut working = lane_task("T-1", "heat", gear_model::TaskState::Ready, &[]);
+                working.estimate_min = Some(60);
+                tx.insert_task(&working)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+                tx.set_attempt_time("p", "T-1", 1, gear_store::AttemptStep::Started, T0)?;
+                // The captain holds the lane: it is idle for a reason.
+                tx.set_seat_state(
+                    "p:heat",
+                    gear_model::SeatState::Held,
+                    Some("hold: the captain paused it"),
+                    T0 + 60,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 38 * 60).unwrap();
+        let heat = out.lines().find(|line| line.starts_with("heat")).unwrap();
+        assert!(heat.contains("idle: held: the captain paused it"), "{heat}");
+        assert!(!heat.contains("working"), "{heat}");
+        assert!(heat.contains("left 1 (60m)"), "the unfinished task is left: {heat}");
+
+        // The JSON says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 38 * 60).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let heat = parsed["lanes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lane| lane["lane"] == "heat")
+            .unwrap();
+        assert!(heat["working"].is_null(), "{heat}");
+        assert_eq!(heat["idle"], "held: the captain paused it");
+        assert_eq!(heat["left"].as_array().unwrap().len(), 1);
+    }
+
+    /// T-163 rework F3: a released or retired reviewer is not in the queue;
+    /// a standby one says how long it has been standing by.
+    #[test]
+    fn queue_shows_only_the_available_reviewers() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                // A reviewer with a job.
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", TEMP_PANE, "opencode", T0)?;
+                // A standby reviewer.
+                testing::seed_temp_seat(tx, "p", "r-2", "T-2", "w1:p4", "opencode", T0)?;
+                tx.set_seat_state("p:r-2", gear_model::SeatState::Standby, None, T0)?;
+                // A released reviewer: its agent and its pane are gone (§3.6).
+                testing::seed_temp_seat(tx, "p", "r-3", "T-3", "w1:p5", "opencode", T0)?;
+                tx.set_seat_state("p:r-3", gear_model::SeatState::Released, None, T0)?;
+                // A retired one.
+                testing::seed_temp_seat(tx, "p", "r-4", "T-4", "w1:p6", "opencode", T0)?;
+                tx.set_seat_state("p:r-4", gear_model::SeatState::Retired, None, T0)?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_queue(&mut store, &env("captain", CAP_PANE), false, T0 + 180).unwrap();
+        let last = out.lines().last().unwrap();
+        assert!(last.contains("r-1 reviewing T-1"), "{last}");
+        assert!(last.contains("r-2 standby 3m"), "{last}");
+        assert!(!last.contains("r-3"), "a released reviewer is not available: {last}");
+        assert!(!last.contains("r-4"), "a retired reviewer is not available: {last}");
+
+        // The JSON says the same.
+        let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 180).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let names: Vec<&str> = parsed["reviewers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reviewer| reviewer["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["r-1", "r-2"]);
+    }
+
+    #[test]
+    fn plan_show_prints_a_block_that_parses_back() {
+        let (mut store, _herdr) = world();
+        store
+            .write(|tx| {
+                let mut task = lane_task("T-7", "heat", gear_model::TaskState::Ready, &["T-8"]);
+                task.priority = "must".into();
+                task.milestone = Some("M2".into());
+                task.required = true;
+                task.estimate_min = Some(60);
+                task.followup_of = Some("T-6".into());
+                tx.insert_task(&task)?;
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    version: 1,
+                    goal: "the goal of T-7".into(),
+                    accept: "the acceptance of T-7".into(),
+                    evidence_files: vec!["ops/reports/T-7.md".into()],
+                    evidence_due_min: Some(90),
+                    body: String::new(),
+                    created: T0,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = store
+            .read(|tx| gear_app::plan::show(tx, "p", "T-7"))
+            .unwrap();
+        assert!(out.starts_with("## T-7 [must] lane=heat milestone=M2 required"), "{out}");
+        assert!(out.contains("goal: the goal of T-7"), "{out}");
+        assert!(out.contains("accept: the acceptance of T-7"), "{out}");
+        assert!(out.contains("evidence-files: ops/reports/T-7.md"), "{out}");
+        assert!(out.contains("evidence-due: 90"), "{out}");
+        assert!(out.contains("estimate: 60"), "{out}");
+        assert!(out.contains("deps: T-8"), "{out}");
+        assert!(out.contains("followup-of: T-6"), "{out}");
+
+        // The block parses back to the same task.
+        let text = format!("<!-- gear-plan project=p base=0 -->\n# Queue\n{out}\n");
+        let draft = gear_app::draft::parse(&text).unwrap();
+        let item = &draft.queue[0];
+        assert_eq!(item.id.as_deref(), Some("T-7"));
+        assert_eq!(item.lane.as_deref(), Some("heat"));
+        assert_eq!(item.milestone.as_deref(), Some("M2"));
+        assert!(item.required);
+        assert_eq!(item.goal.as_deref(), Some("the goal of T-7"));
+        assert_eq!(item.accept.as_deref(), Some("the acceptance of T-7"));
+        assert_eq!(item.estimate, Some(60));
+        assert_eq!(item.deps, vec!["T-8".to_string()]);
+        assert_eq!(item.followup_of.as_deref(), Some("T-6"));
     }
 
     #[test]
@@ -2910,6 +3612,7 @@ path="api"
             &mut herdr,
             &gear_app::time::Filter::default(),
             false,
+            T0,
         )
         .unwrap();
         assert!(out.contains("Time report · project p"), "{out}");
@@ -2926,9 +3629,641 @@ path="api"
             &mut herdr,
             &gear_app::time::Filter::default(),
             false,
+            T0,
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+    }
+
+    /// T-171: `gear report voyage` is the captain's landing report (design
+    /// §7.5): the voyage's lines, its `done:` sentence clause by clause, its
+    /// time and tokens, the ★ decisions in full (the rest counted per kind),
+    /// the friction reports with their outcomes and the tasks that took more
+    /// than one round.
+    #[test]
+    fn report_voyage_prints_the_six_parts() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                // The voyage: its own sentence, its bar and its eta.
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) v0.4.1: the board reads well; (2) v0.4.2: the user can review it".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(2),
+                    departure_estimate_min: Some(120),
+                    updated: T0,
+                })?;
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: "T-7".into(),
+                    rank: 1,
+                    state: gear_model::TaskState::Done,
+                    priority: "must".into(),
+                    lane: Some("heat".into()),
+                    milestone: Some("M2".into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(60),
+                     issue: None,updated: T0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some("abc".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::Started, T0)?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::HandedIn, T0 + 10 * 60)?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::Settled, T0 + 20 * 60)?;
+                // A second round: the task took more than one round.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: gear_model::AttemptState::Accepted,
+                    candidate: Some("def".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 30 * 60,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::Started, T0 + 30 * 60)?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::HandedIn, T0 + 40 * 60)?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::Settled, T0 + 45 * 60)?;
+                // The round of the lane, with its tokens and its cost.
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "opencode".into(),
+                    model: Some("gpt".into()),
+                    start_at: T0,
+                })?;
+                tx.set_round_active(&key, 30 * 60)?;
+                tx.set_round_tokens(
+                    &key,
+                    &gear_store::RoundTokens {
+                        input: Some(1000),
+                        output: Some(500),
+                        cache_read: Some(10),
+                        cache_write: Some(20),
+                        reasoning: Some(5),
+                        cost_usd: Some(0.25),
+                        cost_source: "prices".into(),
+                    },
+                    T0 + 20 * 60,
+                )?;
+                // The lane waited for the quota (design §5.4): a pause.
+                tx.open_pause("p", "p:heat", "quota", "minimax-cn 5h", T0)?;
+                tx.close_pause("p", "p:heat", "quota", T0 + 2 * 3600)?;
+                // The decisions: one ★ and two of other kinds.
+                tx.insert_decision_if_new(&gear_store::NewDecision {
+                    project: "p".into(),
+                    key: "k1".into(),
+                    voyage: "M2".into(),
+                    at: "2026-10-26 10:00".into(),
+                    kind: "scope".into(),
+                    what: "the board reads well".into(),
+                    why: Some("the user asked".into()),
+                    alt: None,
+                    changes: None,
+                    star: true,
+                    source: "plan".into(),
+                    line: None,
+                    plan_version: None,
+                })?;
+                tx.insert_decision_if_new(&gear_store::NewDecision {
+                    project: "p".into(),
+                    key: "k2".into(),
+                    voyage: "M2".into(),
+                    at: "2026-10-26 11:00".into(),
+                    kind: "estimate".into(),
+                    what: "the estimate holds".into(),
+                    why: Some("measured".into()),
+                    alt: None,
+                    changes: None,
+                    star: false,
+                    source: "plan".into(),
+                    line: None,
+                    plan_version: None,
+                })?;
+                tx.insert_decision_if_new(&gear_store::NewDecision {
+                    project: "p".into(),
+                    key: "k3".into(),
+                    voyage: "M2".into(),
+                    at: "2026-10-26 12:00".into(),
+                    kind: "estimate".into(),
+                    what: "the estimate moved".into(),
+                    why: Some("measured".into()),
+                    alt: None,
+                    changes: None,
+                    star: false,
+                    source: "plan".into(),
+                    line: None,
+                    plan_version: None,
+                })?;
+                // A friction report, open.
+                tx.insert_friction(&gear_store::NewFriction {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                    seat: "p:heat".into(),
+                    body: "the build took too long".into(),
+                    required: true,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 2 * 3600,
+        )
+        .unwrap();
+
+        // 1. The voyage's own lines.
+        assert!(out.contains("Voyage M2"), "{out}");
+        // 2. The done: sentence, clause by clause.
+        assert!(out.contains("(1) v0.4.1: the board reads well"), "{out}");
+        assert!(out.contains("(2) v0.4.2: the user can review it"), "{out}");
+        // 3. Time and tokens, the work and waiting time (§5.4).
+        assert!(out.contains("tokens 1000 in / 500 out"), "{out}");
+        assert!(out.contains("cost $0.2500"), "{out}");
+        assert!(out.contains("lane heat · work 0h30m"), "{out}");
+        assert!(out.contains("quota wait 2h00m"), "{out}");
+        assert!(out.contains("fleet stopped by quota"), "{out}");
+        // 4. The ★ decision in full; the others counted per kind.
+        assert!(out.contains("★ scope · the board reads well"), "{out}");
+        assert!(out.contains("why: the user asked"), "{out}");
+        assert!(out.contains("others: estimate 2"), "{out}");
+        // 5. The friction report, open.
+        assert!(out.contains("the build took too long"), "{out}");
+        assert!(out.contains("open"), "{out}");
+        // 6. The task that took more than one round.
+        assert!(out.contains("Rework"), "{out}");
+
+        // --all prints every decision, not only the ★ ones.
+        let all = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            true,
+            false,
+            T0 + 2 * 3600,
+        )
+        .unwrap();
+        assert!(all.contains("the estimate holds"), "{all}");
+        assert!(all.contains("the estimate moved"), "{all}");
+
+        // A lane may not read the report.
+        let err = run_report_voyage(
+            &mut store,
+            &env("heat", LANE_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 2 * 3600,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+    }
+
+    /// T-171 rework F1: the landing's default command names no voyage: the
+    /// report must show the voyage that departed last, so a finished voyage
+    /// never hands the captain an older one.
+    #[test]
+    fn report_voyage_without_a_name_shows_the_last_departed_voyage() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                for (milestone, departure) in [("M1", T0 - 10 * 86400), ("M4", T0)] {
+                    tx.upsert_voyage(&gear_store::VoyageRow {
+                        project: "p".into(),
+                        milestone: milestone.into(),
+                        title: format!("the {milestone} station"),
+                        done: Some(format!("(1) the {milestone} clause")),
+                        bar: Some("STABLE".into()),
+                        eta: Some("12h".into()),
+                        departure: Some(departure),
+                        departure_tasks: Some(1),
+                        departure_estimate_min: Some(30),
+                        updated: T0,
+                    })
+                    .unwrap();
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            None,
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(out.contains("Done (M4)"), "the voyage that departed last: {out}");
+        assert!(!out.contains("Done (M1)"), "{out}");
+    }
+
+    /// T-171 rework F6: the text report prints each round's own tokens and
+    /// cost, not only the task's total.
+    #[test]
+    fn report_time_prints_a_round_own_tokens() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&lane_task("T-7", "heat", gear_model::TaskState::Ready, &[]))
+                    .unwrap();
+                tx.insert_contract(&gear_store::ContractRow {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    version: 1,
+                    goal: "g".into(),
+                    accept: "a".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0,
+                })
+                .unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0).unwrap();
+                for (role, seat, input, cost) in [
+                    ("dev", "p:heat", 100i64, 0.10f64),
+                    ("review", "p:r-1", 200, 0.20),
+                ] {
+                    let key = gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-7".into(),
+                        attempt: 1,
+                        role: role.into(),
+                    };
+                    tx.insert_round(&gear_store::NewRound {
+                        key: key.clone(),
+                        seat: seat.into(),
+                        generation: 1,
+                        cli: "opencode".into(),
+                        model: None,
+                        start_at: T0,
+                    })
+                    .unwrap();
+                    tx.set_round_tokens(
+                        &key,
+                        &gear_store::RoundTokens {
+                            input: Some(input),
+                            output: Some(10),
+                            cache_read: Some(0),
+                            cache_write: Some(0),
+                            reasoning: Some(0),
+                            cost_usd: Some(cost),
+                            cost_source: "prices".into(),
+                        },
+                        T0 + 60,
+                    )
+                    .unwrap();
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0,
+        )
+        .unwrap();
+        assert!(out.contains("T-7 attempt 1 dev · tokens 100 in / 10 out"), "{out}");
+        assert!(out.contains("T-7 attempt 1 review · tokens 200 in / 10 out"), "{out}");
+    }
+
+    /// A task of a voyage: a lane works on it and the plan knows its time.
+    fn voyage_task(id: &str, lane: &str, milestone: &str) -> TaskRow {
+        let mut task = lane_task(id, lane, gear_model::TaskState::Ready, &[]);
+        task.milestone = Some(milestone.to_string());
+        task.estimate_min = Some(60);
+        task
+    }
+
+    /// A pi session log with one assistant record: the usage a report counts
+    /// (T-207).
+    fn pi_log(name: &str, at: i64) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "gear-t207-{name}-{}.jsonl",
+            std::process::id()
+        ));
+        let record = serde_json::json!({
+            "type": "message",
+            "timestamp": at,
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input": 1200,
+                    "output": 300,
+                    "cacheRead": 0,
+                    "cacheWrite": 0,
+                    "reasoning": 0,
+                    "cost": {"total": 0.42}
+                }
+            }
+        });
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        path
+    }
+
+    /// The contract of a task the lane starts.
+    fn contract_of(task: &str) -> gear_store::ContractRow {
+        gear_store::ContractRow {
+            project: "p".into(),
+            task: task.into(),
+            version: 1,
+            goal: "g".into(),
+            accept: "a".into(),
+            evidence_files: vec![],
+            evidence_due_min: None,
+            body: String::new(),
+            created: T0,
+        }
+    }
+
+    /// T-207: the reports count the open rounds — the round that is still
+    /// running — and never show an unknown usage as zero.
+    ///
+    /// The store counts a round when it ends, so an open round has no numbers
+    /// yet: the report counts it as it reads (design §4.3) and shows what it
+    /// counted, in the round's own line and in the task's and the lane's sums.
+    #[test]
+    fn the_reports_count_the_open_round() {
+        let (mut store, mut herdr) = world();
+        let log = pi_log("open", T0 + 10);
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-7", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-7")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-7".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                // The session the lane runs in: pi's log, which the report reads.
+                tx.add_round_session(&key, log.to_str().unwrap()).unwrap();
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) the voyage sails".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(60),
+                    updated: T0,
+                })
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        // The round's own count: the open round is counted as the report reads.
+        assert!(out.contains("T-7 attempt 1 dev · tokens 1200 in / 300 out"), "{out}");
+        assert!(out.contains("cost $0.4200"), "{out}");
+        // The task's sum and the voyage's sum carry the same numbers.
+        assert!(out.contains("T-7 · estimate 60m"), "{out}");
+        assert!(out.contains("Voyage M2 · 1 task"), "{out}");
+
+        let voyage = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(voyage.contains("Time and tokens · tokens 1200 in / 300 out"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens 1200 in / 300 out"), "{voyage}");
+
+        // The store is not written: the open round keeps its empty columns.
+        let stored = store.read(|tx| tx.rounds_of_project("p")).unwrap();
+        let open = stored.iter().find(|row| row.task == "T-7").unwrap();
+        assert_eq!(open.input, None, "the report writes no tokens");
+        assert_eq!(open.counted_at, None, "the report counts nothing into the store");
+        std::fs::remove_file(&log).ok();
+    }
+
+    /// T-207: an open round whose log cannot be read stays unknown: the
+    /// report shows a question mark, never a zero.
+    #[test]
+    fn an_unreadable_open_round_is_unknown_not_zero() {
+        let (mut store, mut herdr) = world();
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-8", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-8")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-8", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-8".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                // The session file is gone: the log cannot be read.
+                tx.add_round_session(&key, "/nonexistent/gear-t207-gone.jsonl")
+                    .unwrap();
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: "M2".into(),
+                    title: "the second station".into(),
+                    done: Some("(1) the voyage sails".into()),
+                    bar: Some("STABLE".into()),
+                    eta: Some("12h".into()),
+                    departure: Some(T0),
+                    departure_tasks: Some(1),
+                    departure_estimate_min: Some(60),
+                    updated: T0,
+                })
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(out.contains("T-8 attempt 1 dev · tokens ? / cost ?"), "{out}");
+        assert!(!out.contains("tokens 0 in / 0 out"), "{out}");
+
+        let voyage = run_report_voyage(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some("M2"),
+            false,
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        assert!(voyage.contains("Time and tokens · tokens ? / cost ?"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens ? / cost ?"), "{voyage}");
+        assert!(!voyage.contains("tokens 0 in / 0 out"), "{voyage}");
+    }
+
+    /// T-207: a closed round keeps the numbers the store counted: the report
+    /// does not count it again.
+    #[test]
+    fn a_closed_round_keeps_its_counted_numbers() {
+        let (mut store, mut herdr) = world();
+        let log = pi_log("closed", T0 + 10);
+        store
+            .write(|tx| {
+                tx.insert_task(&voyage_task("T-9", "heat", "M2")).unwrap();
+                tx.insert_contract(&contract_of("T-9")).unwrap();
+                gear_app::tasks::start_attempt(tx, "p", "T-9", "p:heat", 1, T0).unwrap();
+                let key = gear_store::RoundKey {
+                    project: "p".into(),
+                    task: "T-9".into(),
+                    attempt: 1,
+                    role: "dev".into(),
+                };
+                tx.insert_round(&gear_store::NewRound {
+                    key: key.clone(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })
+                .unwrap();
+                tx.add_round_session(&key, log.to_str().unwrap()).unwrap();
+                // The round ended: the engine counted it and stored the count.
+                tx.close_round(&key, T0 + 30).unwrap();
+                tx.set_round_tokens(
+                    &key,
+                    &gear_store::RoundTokens {
+                        input: Some(7),
+                        output: Some(8),
+                        cache_read: Some(0),
+                        cache_write: Some(0),
+                        reasoning: Some(0),
+                        cost_usd: Some(0.01),
+                        cost_source: "prices".into(),
+                    },
+                    T0 + 30,
+                )
+                .unwrap();
+                Ok(())
+            })
+            .unwrap();
+
+        let out = run_report_time(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &gear_app::time::Filter::default(),
+            false,
+            T0 + 60,
+        )
+        .unwrap();
+        // The stored count, not a fresh one: the round is over.
+        assert!(out.contains("T-9 attempt 1 dev · tokens 7 in / 8 out"), "{out}");
+        assert!(out.contains("cost $0.0100"), "{out}");
+        let stored = store.read(|tx| tx.rounds_of_task("p", "T-9")).unwrap();
+        assert_eq!(stored[0].input, Some(7), "the stored count is untouched");
+        assert_eq!(stored[0].counted_at, Some(T0 + 30));
+        std::fs::remove_file(&log).ok();
     }
 
     #[test]
@@ -3034,6 +4369,74 @@ path="api"
         c.attempt = Some(1);
         c.verdict = Some(verdict.into());
         c
+    }
+
+    #[test]
+    fn direction_result_is_bound_to_the_reviewer_and_does_not_submit() {
+        let cli=Cli::try_parse_from(["gear","send","--kind","result","--task","T-7","--attempt","1","--direction","ok"]).unwrap();
+        assert!(matches!(cli.cmd,Some(Cmd::Send(ref c)) if c.direction.as_deref()==Some("ok")));
+        let (mut store, mut herdr) = review_world();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"abc123"
+        }).to_string())).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        let mut c=send_cmd("result");
+        c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        let out=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap();
+        assert!(!out.contains("Handed in"), "{out}");
+        let history=store.read(|tx|tx.thread_messages("p","T-7:1")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(history[0].kind, gear_model::MsgKind::Result);
+        assert_eq!(history[0].body,"ok");
+        let meta:serde_json::Value=serde_json::from_str(history[0].meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta,serde_json::json!({"direction":true,"sha":"abc123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Started);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
+        let replay=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+2,false).unwrap();
+        assert!(replay.contains("replayed"));
+    }
+
+    #[test]
+    fn direction_result_rejects_lane_and_other_reviewer() {
+        let (mut store,mut herdr)=review_world();
+        store.write(|tx| {
+            testing::seed_temp_seat(tx,"p","r-2","T-7","w1:p4","opencode",T0)?;
+            tx.set_meta("engine.direction.p.T-7.1",&serde_json::json!({"seat":"p:r-1","generation":1,"state":"running","sha":"abc123"}).to_string())
+        }).unwrap();
+        herdr.add_agent("w1:p4","opencode",AgentStatus::Idle);
+        let mut c=send_cmd("result"); c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        for (name,pane) in [("heat",LANE_PANE),("r-2","w1:p4")] {
+            let err=run_send(&mut store,&env(name,pane),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+            assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
+        }
+        c.direction=None; c.contract=Some(1); c.candidate=Some("abc123".into());
+        let err=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+        assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
+    }
+
+    #[test]
+    fn direction_result_after_lane_submission_preserves_submitted_state() {
+        let (mut store, mut herdr) = review_world();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"checked123"
+        }).to_string())).unwrap();
+        let mut lane = send_cmd("result");
+        lane.task=Some("T-7".into()); lane.attempt=Some(1); lane.contract=Some(1);
+        lane.candidate=Some("candidate123".into()); lane.request_id=Some("lane-result".into());
+        run_send(&mut store,&env("heat",LANE_PANE),&mut herdr,&lane,"done".into(),None,T0+1,false).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(task_before,gear_model::TaskState::Verifying);
+        let mut direction=send_cmd("result");
+        direction.task=Some("T-7".into()); direction.attempt=Some(1); direction.direction=Some("ok".into());
+        run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&direction,"ok".into(),None,T0+2,false).unwrap();
+        let history=store.read(|tx|tx.thread_messages("p","T-7:2")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(history[0].meta.as_deref().unwrap()).unwrap(),serde_json::json!({"direction":true,"sha":"checked123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
     }
 
     #[test]
@@ -3846,13 +5249,15 @@ path="api"
             .is_empty());
     }
 
-    /// §5.1: a review is charged from the reviewer's own start — its delivery
-    /// confirmation — and never from the writer's check-in.
+    /// §5.1 (T-193): a review is charged from the reviewer's own clock — the
+    /// review round's start — and never from the writer's check-in. The
+    /// writer's attempt carries the writer's times only.
     #[test]
-    fn a_review_is_charged_from_the_reviewers_own_start() {
+    fn a_review_is_charged_from_the_reviewers_own_clock() {
         let (mut store, mut herdr) = world_with_task();
         herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
-        // The lane hands the candidate in.
+        // The lane hands the candidate in: the writer checked in at T0 and its
+        // packet went out at T0+10.
         store
             .write(|tx| {
                 gear_app::tasks::submit_result(
@@ -3867,9 +5272,8 @@ path="api"
                 )
             })
             .unwrap();
-        // The reviewer gets the packet an hour later.
         store
-            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 3600))
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 10))
             .unwrap();
         // A reviewer seat, bound to the task.
         store
@@ -3878,9 +5282,29 @@ path="api"
                 tx.set_seat_task("p:review-1", "T-1")
             })
             .unwrap();
+        // The review round starts an hour later: the reviewer worked from
+        // there, and the writer's hour is not the reviewer's.
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 3600,
+                })
+            })
+            .unwrap();
 
-        // The verdict five minutes after the delivery: well inside the review's
-        // own budget, even though the writer checked in an hour before.
+        // The verdict five minutes after the review started: inside the
+        // review's own budget, even though the writer checked in an hour
+        // before.
         let mut c = send_cmd("review");
         c.task = Some("T-1".into());
         c.attempt = Some(1);
@@ -3904,6 +5328,99 @@ path="api"
                 .is_empty(),
             "the reviewer was inside its own budget"
         );
+        // The writer's attempt still carries the writer's times only.
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.sent_at, Some(T0 + 10), "{attempt:?}");
+        assert_eq!(attempt.started, T0, "{attempt:?}");
+    }
+
+    /// §5.1, §6.2 (T-193): a review over its own budget needs a friction
+    /// report — the reviewer's own clock says so, not the writer's.
+    #[test]
+    fn a_review_over_its_own_budget_needs_a_friction_report() {
+        let (mut store, mut herdr) = world_with_task();
+        herdr.add_agent("w1:p9", "codex", AgentStatus::Idle);
+        store
+            .write(|tx| {
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-1",
+                    1,
+                    1,
+                    "abc1234",
+                    "ops/reports/T-1.md",
+                    T0,
+                )
+            })
+            .unwrap();
+        store
+            .write(|tx| tx.set_attempt_sent("p", "T-1", 1, T0 + 10))
+            .unwrap();
+        store
+            .write(|tx| {
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
+                tx.set_seat_task("p:review-1", "T-1")
+            })
+            .unwrap();
+        store
+            .write(|tx| {
+                tx.insert_round(&gear_store::NewRound {
+                    key: gear_store::RoundKey {
+                        project: "p".into(),
+                        task: "T-1".into(),
+                        attempt: 1,
+                        role: "review".into(),
+                    },
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 3600,
+                })
+            })
+            .unwrap();
+
+        // The verdict half an hour after the review started: over the review's
+        // budget (30 min by default).
+        let mut c = send_cmd("review");
+        c.task = Some("T-1".into());
+        c.attempt = Some(1);
+        c.verdict = Some("pass".into());
+        let error = run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 1801,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            error.detail.contains("FRICTION_REQUIRED") || error.detail.contains("--friction"),
+            "{}",
+            error.detail
+        );
+
+        // With a report: it is stored, and it is required.
+        c.friction = Some("the reviewer's checkout was slow".into());
+        run_send(
+            &mut store,
+            &env("review-1", "w1:p9"),
+            &mut herdr,
+            &c,
+            "all good".into(),
+            None,
+            T0 + 3600 + 1801,
+            false,
+        )
+        .unwrap();
+        let reports = store.read(|tx| tx.frictions_of_project("p")).unwrap();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].role, "review");
+        assert!(reports[0].required, "the report was required: {reports:?}");
     }
 
     /// §6.3, §6.4: the captain reads the reports and closes one.

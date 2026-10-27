@@ -29,6 +29,7 @@ mod dispatch_tick_contract;
 mod doorbell_contract;
 mod doorbell_isolation;
 mod doorbell_while_working;
+mod doorbell_working_budget_contract;
 mod eng_confirm;
 mod eng_execute;
 mod eng_intend_recover;
@@ -37,6 +38,7 @@ mod feed_contract;
 mod friction_ring_contract;
 mod lane_view_contract;
 mod onboard_contract;
+mod park_end_contract;
 mod onboard_run_contract;
 mod reviewer_nudge_contract;
 mod settle_review_tick;
@@ -65,6 +67,8 @@ mod delivery_grace_contract;
 mod targeting_contract;
 mod all_tail_contract;
 mod dead_temp_slot_contract;
+mod lane_nudge_contract;
+mod lane_restart_generation_contract;
 
 /// A scratch home with the GEAR skill installed for every kind (T-83): `init`
 /// refuses a kind whose skill is missing, and these fixtures are not about

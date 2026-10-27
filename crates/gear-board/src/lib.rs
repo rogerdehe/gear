@@ -140,6 +140,25 @@ pub struct ProjectBoard {
     pub decisions: Vec<DecisionBoard>,
     /// The friction reports the agents left (§6.1), open and closed.
     pub frictions: Vec<FrictionBoard>,
+    /// The tasks that overlap the integration branch of their repo (T-188):
+    /// information lines, never items that wait for the captain.
+    pub overlaps: Vec<Overlap>,
+}
+
+/// One task that overlaps the integration branch of its repo (T-188).
+///
+/// The overlap is an information line: the lane merges the integration branch
+/// in and the merge gate catches a conflict. It never waits for the captain.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Overlap {
+    /// The task that overlaps the integration branch.
+    pub task: String,
+    /// The repo the task is in; empty for the project root.
+    pub repo: String,
+    /// The integration branch the task overlaps.
+    pub integration: String,
+    /// The files the task and the integration branch share.
+    pub files: Vec<String>,
 }
 
 /// One decision of the captain's log, as the board shows it (§7.1).
@@ -617,10 +636,135 @@ pub fn project_with_agents(
         quota: quota_readings(tx)?,
         decisions,
         frictions: frictions_of(tx, project)?,
+        // The overlaps with the integration branch (T-188): information
+        // lines, never items that wait for the captain.
+        overlaps: integration_overlaps_of(tx, project)?,
         waiting,
         temps,
         unconfirmed_deliveries,
     })
+}
+
+/// The overlaps of the project with the integration branches (T-188).
+///
+/// The engine's scan writes the meta keys
+/// `parallel:<project>[:<repo>]:integration:<task>`; the value holds the files
+/// the task and the integration branch share. A cleared key (an empty value)
+/// shows nothing.
+pub fn integration_overlaps(store: &mut Store, project: &str) -> GearResult<Vec<Overlap>> {
+    store.read(|tx| integration_overlaps_of(tx, project))
+}
+
+/// The overlaps of the project, read inside an open transaction.
+pub fn integration_overlaps_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Overlap>> {
+    let prefix = format!("parallel:{project}:");
+    let mut overlaps = Vec::new();
+    for key in tx.meta_keys_with_prefix(&prefix)? {
+        let Some(rest) = key.strip_prefix(&prefix) else { continue };
+        let Some((repo, task)) = split_overlap_key(rest) else { continue };
+        let Some(raw) = tx.get_meta(&key)? else { continue };
+        // A cleared key shows nothing: the scan clears it when the overlap
+        // is gone.
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let (files, integration) = overlap_value(&raw);
+        if files.is_empty() {
+            continue;
+        }
+        overlaps.push(Overlap {
+            task,
+            repo,
+            integration: integration.unwrap_or_default(),
+            files,
+        });
+    }
+    overlaps.sort_by(|left, right| {
+        (&left.task, &left.repo).cmp(&(&right.task, &right.repo))
+    });
+    Ok(overlaps)
+}
+
+/// The repo and the task of one overlap key: `integration:<task>` for the
+/// project root, `<repo>:integration:<task>` for a child repo.
+///
+/// Only that exact shape is an overlap (F1): the bookkeeping keys of the
+/// scan — `pair:<pair>:files`, `pair:<pair>:item` — are not overlaps, and
+/// the task is a task id, not the rest of the key.
+fn split_overlap_key(rest: &str) -> Option<(String, String)> {
+    // A repo named `integration` is the one case where the key has two
+    // `integration` segments.
+    if let Some(task) = rest.strip_prefix("integration:integration:") {
+        return task_id(task).map(|task| ("integration".to_string(), task));
+    }
+    let (repo, tail) = match rest.split_once(':') {
+        Some((repo, tail)) if repo != "integration" => (repo.to_string(), tail),
+        _ => (String::new(), rest),
+    };
+    let task = tail.strip_prefix("integration:")?;
+    // `pair` is the namespace of the scan's bookkeeping, not a repo.
+    if repo == "pair" {
+        return None;
+    }
+    task_id(task).map(|task| (repo, task))
+}
+
+/// A task id: one segment, not empty. The suffixes of the bookkeeping keys
+/// (`:files`, `:item`, `:notified`) are not part of a task id.
+fn task_id(task: &str) -> Option<String> {
+    if task.is_empty() || task.contains(':') {
+        return None;
+    }
+    Some(task.to_string())
+}
+
+/// The files and the integration branch of one overlap value.
+///
+/// The scan writes the files and the branch as a JSON object; a value that
+/// only holds the files is read as the files it names.
+fn overlap_value(raw: &str) -> (Vec<String>, Option<String>) {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(_)) => {
+            let value: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+            let files = value
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let integration = value
+                .get("integration")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            (files, integration)
+        }
+        Ok(serde_json::Value::Array(files)) => (
+            files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect(),
+            None,
+        ),
+        Ok(serde_json::Value::String(file)) => (vec![file], None),
+        // A plain value: the shared files, separated by commas.
+        _ => (
+            raw.split(',').map(|file| file.trim().to_string()).filter(|file| !file.is_empty()).collect(),
+            None,
+        ),
+    }
+}
+
+/// The information line of one overlap: the task, the files it shares and
+/// the integration branch it shares them with.
+pub fn overlap_line(overlap: &Overlap) -> String {
+    let integration = if !overlap.integration.is_empty() {
+        overlap.integration.clone()
+    } else if !overlap.repo.is_empty() {
+        overlap.repo.clone()
+    } else {
+        "integration".to_string()
+    };
+    format!(
+        "overlap: {} shares {} with {integration}",
+        overlap.task,
+        overlap.files.join(", ")
+    )
 }
 
 /// The seat's own account of why it is not running (T-82): None while it runs
@@ -785,6 +929,14 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
             lines.extend(graph::lines(&project.graph, &project.graph_lanes, None));
         }
     }
+    // The overlaps with the integration branch (T-188): information lines.
+    // They are not items that wait for the captain.
+    if !project.overlaps.is_empty() {
+        lines.push(String::new());
+        for overlap in &project.overlaps {
+            lines.push(overlap_line(overlap));
+        }
+    }
     lines.push(String::new());
     lines.push(waiting_line(&project.waiting));
     lines.push(format!(
@@ -839,41 +991,46 @@ fn actual_min_of(
 /// The finished voyages are not in `voyages` (the home page and the station
 /// watch the active ones only), but their measurements are still true: a
 /// landed voyage keeps its burn-up and its lanes.
-/// The tokens of a task's rounds (§4.3): None when no round counted them.
+/// The tokens of a task's rounds (§4.3): None when a round counted none of
+/// them, so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0;
-    let mut counted = false;
     for round in &rounds {
         // The fields' presence says what was counted: a round that counted
-        // nothing is a measured zero, not an unknown (F5).
-        if round.input.is_some()
-            || round.output.is_some()
-            || round.cache_read.is_some()
-            || round.cache_write.is_some()
+        // nothing is a measured zero, not an unknown (F5). A round that has
+        // none of the four counted fields counted nothing at all: the sum
+        // hides it, so the sum is unknown (F5 of the T-166 review). The
+        // fields that are absent on a measured round stay absent.
+        if round.input.is_none()
+            && round.output.is_none()
+            && round.cache_read.is_none()
+            && round.cache_write.is_none()
         {
-            counted = true;
+            return Ok(None);
         }
         total += round.input.unwrap_or(0)
             + round.output.unwrap_or(0)
             + round.cache_read.unwrap_or(0)
             + round.cache_write.unwrap_or(0);
     }
-    Ok(counted.then_some(total))
+    Ok((!rounds.is_empty()).then_some(total))
 }
 
-/// The cost of a task's rounds (§4.4): None when no round priced them.
+/// The cost of a task's rounds (§4.4): None when a round priced none of them,
+/// so a sum is never a total that hides an unknown part (F5).
 fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0.0;
-    let mut priced = false;
     for round in &rounds {
-        if let Some(cost) = round.cost_usd {
-            priced = true;
-            total += cost;
-        }
+        // A round that was never priced is unknown, not a price of zero:
+        // the sum that hides it is not a total (F5 of the T-166 review).
+        let Some(cost) = round.cost_usd else {
+            return Ok(None);
+        };
+        total += cost;
     }
-    Ok(priced.then_some(total))
+    Ok((!rounds.is_empty()).then_some(total))
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).
@@ -1072,6 +1229,10 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "task": friction.task, "lane": friction.lane, "body": friction.body,
                     "closed": friction.closed, "outcome": friction.outcome,
                 })).collect::<Vec<_>>(),
+                "overlaps": project.overlaps.iter().map(|overlap| serde_json::json!({
+                    "task": overlap.task, "repo": overlap.repo,
+                    "integration": overlap.integration, "files": overlap.files,
+                })).collect::<Vec<_>>(),
                 "deps": project.deps.iter().map(|node| serde_json::json!({
                     "id": node.id,
                     "state": state_word(node.state),
@@ -1238,13 +1399,23 @@ pub fn run_with(
                             panel = None;
                             break;
                         }
-                    } else if y > frame::FIRST_ROW as u16 {
-                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize;
-                        // A click outside the rows of the view is ignored.
-                        if index < rows {
-                            selected = index;
-                            panel = None;
-                            break;
+                    } else {
+                        // Only the rows the frame draws are rows of the view
+                        // (F8): the click is on the screen row, the spacer
+                        // below the data and the footer's row select nothing.
+                        let row = y.saturating_sub(1) as usize;
+                        let last = keys.size().1.saturating_sub(2);
+                        if row >= frame::FIRST_ROW && row < last {
+                            // The rows above the viewport are scrolled away:
+                            // the clicked row is the one the frame drew.
+                            let scroll = frame::scroll_of(rows, selected, keys.size().1);
+                            let index = (row - frame::FIRST_ROW) + scroll;
+                            // A click outside the rows of the view is ignored.
+                            if index < rows {
+                                selected = index;
+                                panel = None;
+                                break;
+                            }
                         }
                     }
                 }

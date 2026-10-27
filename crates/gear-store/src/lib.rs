@@ -1457,6 +1457,14 @@ impl<'s> Tx<'s> {
         Ok(messages)
     }
 
+    /// Direction results for one task attempt.
+    pub fn direction_results_of_attempt(&self, project: &str, task: &str, attempt: i64) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self.tx.prepare(&message_select(" WHERE project=?1 AND task=?2 AND attempt=?3 AND kind='result' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.direction') = 1 ELSE 0 END ORDER BY created, id"))
+            .map_err(map_sqlite)?;
+        let rows = stmt.query_map(params![project, task, attempt], message_from_row).map_err(map_sqlite)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(map_sqlite)
+    }
+
     /// The captain quota episode, kept in meta so recovery needs no migration.
     pub fn captain_quota(&self, project: &str) -> GearResult<Option<CaptainQuota>> {
         let raw = self.get_meta(&format!("engine.captain_quota.{project}"))?;

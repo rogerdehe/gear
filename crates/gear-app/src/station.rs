@@ -31,8 +31,26 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
         if left > 0 { tx.set_meta(&format!("{key}:watch"), "1")?; }
         let mut crossed = Vec::new();
         let mut markers = Vec::new();
+        // The course station (design §10.7 row B10): besides the 25/50/75%
+        // eta stations, the captain gets a station every 60 min of voyage
+        // time. The hour counter is a meta, so a late engine tick does not
+        // replay the hours it slept through.
+        let mut course: Option<(String, i64)> = None;
         if left > 0 {
             let voyage = tx.get_voyage(project, &report.milestone)?.expect("report has a voyage");
+            if let Some(departure) = voyage.departure {
+                let hours = (now - departure).max(0) / 3600;
+                let course_key = format!("{key}:course");
+                let last = tx.get_meta(&course_key)?.and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                if hours > last {
+                    crossed.push(if hours - last == 1 {
+                        format!("{} min", hours * 60)
+                    } else {
+                        format!("{}–{} min", (last + 1) * 60, hours * 60)
+                    });
+                    course = Some((course_key, hours));
+                }
+            }
             if let (Some(departure), Some(eta)) = (voyage.departure,
                 report.eta.as_deref().and_then(eta_seconds))
             {
@@ -69,7 +87,11 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
                 body: format!(
-                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}). Land it: write the voyage report, freeze the voyage file, ask the user whether to reclaim the lanes; close this with `station <id>: land`.",
+                    "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}).\n\
+1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
+2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
+3. Only then ask about reclaiming the lanes and the release.\n\
+Close this with `station <id>: land`.",
                     report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
                 ),
                 reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
@@ -86,20 +108,45 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
             .as_ref()
             .map(|(lane, min)| format!("{lane} {min}m"))
             .unwrap_or_else(|| "-".into());
+        // The per-lane projection (design §10.7 row B4): every lane's own
+        // pace and what it has left. The slowest lane sets the finish and is
+        // named; a lane without a measured pace says so instead of guessing.
+        let lanes = if report.lanes.is_empty() {
+            "-".to_string()
+        } else {
+            report.lanes.iter().map(|lane| {
+                let projection = lane.projected_min.map(|m| format!("{m}m")).unwrap_or_else(|| "-".into());
+                format!("{} {projection}", lane.lane)
+            }).collect::<Vec<_>>().join(", ")
+        };
+        // The time left until the eta: the clock the captain watches.
+        let time_left = match (report.eta.as_deref().and_then(eta_seconds), report.elapsed_min) {
+            (Some(eta), Some(elapsed)) => format!("{}m", (((eta + 59) / 60) - elapsed).max(0)),
+            _ => "-".into(),
+        };
         let body = format!(
-            "Station {} [{}] · elapsed {} / eta {} · pace {pace} · projected finish {} from departure · tasks left {left} ({}) · slowest lane {slowest}",
+            "Station {} [{}] · elapsed {} / eta {} · time left {time_left} · pace {pace} · projected finish {} from departure · tasks left {left} ({}) · lanes {lanes} · slowest lane {slowest}",
             report.milestone, crossed.join(", "), minutes(report.elapsed_min),
             report.eta.as_deref().unwrap_or("-"), minutes(report.projected_min),
             minutes(report.remaining_estimate_min),
         );
+        // Urgent when the projected finish is past the eta (row B10): the
+        // captain must answer before the voyage is late.
+        let past_eta = match (report.eta.as_deref().and_then(eta_seconds), report.projected_min) {
+            (Some(eta), Some(projected)) => projected.saturating_mul(60) > eta,
+            _ => false,
+        };
         let message = tx.insert_message(&NewMessage {
             meta: None,
             project: project.into(), thread: format!("station:{}", report.milestone),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
-            recipient: captain.id.clone(), kind: MsgKind::System, urgent: false,
+            recipient: captain.id.clone(), kind: MsgKind::System, urgent: past_eta,
             body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
         })?;
         for marker in markers { tx.set_meta(&marker, &message.id)?; }
+        if let Some((course_key, hours)) = course {
+            tx.set_meta(&course_key, &hours.to_string())?;
+        }
         if groups > previous { tx.set_meta(&completed_key, &groups.to_string())?; }
         opened.push(message.id);
     }

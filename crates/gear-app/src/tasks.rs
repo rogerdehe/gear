@@ -6,8 +6,8 @@
 
 use gear_model::state::require_transition;
 use gear_model::{
-    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, SeatState,
-    TaskState, Ts,
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, OpKind, OpState,
+    SeatState, TaskState, Ts,
 };
 use gear_store::{AttemptRow, AttemptStep, NewMessage, NewOp, Tx, VerdictRow};
 
@@ -99,6 +99,42 @@ pub fn start_attempt(tx: &Tx<'_>, project: &str, task: &str, seat_id: &str, gene
     // reached the lane, and no later step may move it.
     tx.set_attempt_time(project, task, n, AttemptStep::Delivered, now)?;
     Ok(row)
+}
+
+/// The seat's generation advances (a restart, a retry, a session step): the
+/// attempt the seat is working on — `Delivered` or `Started` — moves to the
+/// new generation with the seat, so the lane can still hand it in (T-217).
+///
+/// A lane that is restarted while its attempt waits for the lane moves on
+/// with the attempt; without this the hand-in of the new generation is
+/// refused ("not owned by this seat and generation") and the attempt is stuck
+/// until a human moves it by hand.
+///
+/// Only the seat's own attempts move, and only the ones that are open in the
+/// older generation: an attempt of another seat, or one that is already
+/// settled, is untouched.
+pub fn carry_attempt_generation(
+    tx: &Tx<'_>,
+    seat_id: &str,
+    from_generation: i64,
+    to_generation: i64,
+    now: Ts,
+) -> GearResult<()> {
+    if from_generation == to_generation {
+        return Ok(());
+    }
+    for mut attempt in tx.in_progress_attempts_of_seat(seat_id)? {
+        if attempt.generation != from_generation {
+            continue;
+        }
+        if !matches!(attempt.state, AttemptState::Delivered | AttemptState::Started) {
+            continue;
+        }
+        attempt.generation = to_generation;
+        attempt.updated = now;
+        tx.update_attempt(&attempt)?;
+    }
+    Ok(())
 }
 
 /// Delivery confirmed: attempt Delivered → Started, task Ready → Running.
@@ -453,22 +489,61 @@ pub fn merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<Ts
 /// The time the work of `task` was merged, or a refusal naming why not
 /// (design §10.7, row B03-01): a pass that names the task whose merge landed
 /// this work is only settled when that task is merged.
+///
+/// The named task must be **Done** and its **merge op confirmed**: a task
+/// that is not done has not landed anything, and a merge time without a
+/// confirmed merge op is a leftover of an earlier merge (T-205, the review of
+/// T-165).
 pub fn require_merged_at(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Ts> {
-    if tx.get_task(project, task)?.is_none() {
+    let Some(row) = tx.get_task(project, task)? else {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!("no task {task} in project {project}"),
         ));
+    };
+    if row.state != TaskState::Done {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} is not done yet (it is {}): a pass may name it as the merge that landed this work only when its own merge landed it",
+                row.state.as_str()
+            ),
+        ));
     }
-    match merged_at(tx, project, task)? {
-        Some(at) => Ok(at),
-        None => Err(GearError::new(
+    // The attempt that landed the work, and the time it landed.
+    let mut merged: Option<(i64, Ts)> = None;
+    for (n, times) in tx.attempt_times_of_task(project, task)? {
+        if let Some(at) = times.merged {
+            merged = Some((n, at));
+        }
+    }
+    let Some((attempt, at)) = merged else {
+        return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
                 "{task} is not merged yet: a pass may name it as the merge that landed this work only when it is merged"
             ),
-        )),
+        ));
+    };
+    // The merge op of that attempt must be confirmed: the merge is what
+    // landed the work, and a merge time without it is not a merge.
+    let confirmed = tx
+        .ops_in_state(project, OpState::Confirmed)?
+        .into_iter()
+        .any(|op| {
+            op.kind == OpKind::Merge
+                && op.task.as_deref() == Some(task)
+                && op.attempt == Some(attempt)
+        });
+    if !confirmed {
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!(
+                "{task} has no confirmed merge for attempt {attempt}: a pass may name it as the merge that landed this work only when its own merge landed it"
+            ),
+        ));
     }
+    Ok(at)
 }
 
 /// The work is merged by the named task's merge (design §10.7, row B03-01):

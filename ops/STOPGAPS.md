@@ -6,6 +6,7 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 |---|---|---|---|
 | `~/.local/bin/gear` symlink to `target/release/gear` | lanes started by `gear run` need `gear` on PATH | GEAR has an install step (design/14 plugin) | captain |
 | The captain's lane watch (`scratchpad/watch.sh`, every 5 min: no commit for 20 min on a task, a working lane whose session is 10 min old, an idle lane with a Started attempt, `find /` orphans, load; wakes the captain, re-armed after each wake) | the engine does not yet ask a lane that has not pushed, nor watch the machine | T-194, T-206 and T-209 run in the engine; the machine watch in M5 | captain |
+| An attempt Delivered under an older seat generation is moved to the seat's current generation in the store by hand (M4 06:30, T-175) | a lane restart does not carry its Delivered attempt to the new generation, so the hand-in is refused | T-217 runs in the engine | captain |
 | Plan park ended by hand: `- hold <lane>`, apply, `- release <lane>`, apply | a plan park has no exit (`until=` never expires, `release` refuses Parked) | T-190 merged | captain |
 
 ## Removed

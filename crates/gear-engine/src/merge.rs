@@ -1405,11 +1405,11 @@ fn repo_of_op(
     op: &OpRow,
     config: &ProjectConfig,
 ) -> GearResult<Repo> {
-    let mut lane = None;
-    if let Some(task) = op.task.as_deref() {
-        lane = store.read(|tx| Ok(tx.get_task(project, task)?.and_then(|row| row.lane.clone())))?;
-    }
-    Ok(config.repo_of_lane(lane.as_deref().unwrap_or_default()))
+    let task = match op.task.as_deref() {
+        Some(task) => store.read(|tx| tx.get_task(project, task))?,
+        None => None,
+    };
+    Ok(task.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.root_repo()))
 }
 
 /// The key of a merge worker: one worker per repo (T-53), so a merge in one
@@ -1671,13 +1671,21 @@ fn merge_one_locked(
         let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
         combined.push_str(&String::from_utf8_lossy(&output.stderr));
         let tail = tail(&combined, 12);
+        // T-219: the tail is often slow-test timings, and the captain cannot
+        // see what failed in it. The lines that name a failure come first.
+        let failures = failure_lines(&combined, 20);
         let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
         // not the work. That can clear, so it is retried; every other exit
         // status is the project's own gate saying no.
         let status = output.status.code().unwrap_or(0);
-        let reason = format!("gate failed ({gate}):\n{tail}");
+        let mut reason = format!("gate failed ({gate}):\n");
+        if !failures.is_empty() {
+            reason.push_str(&failures.join("\n"));
+            reason.push('\n');
+        }
+        reason.push_str(&tail);
         return Step::Failed(if status == 126 || status == 127 {
             Failed::clear(reason)
         } else {
@@ -2095,6 +2103,28 @@ fn tail(text: &str, lines: usize) -> String {
     all[start..].join("\n")
 }
 
+/// The lines of a gate's output that name a failure (T-219). A line counts
+/// when it starts (after spaces) with `FAIL`, `TIMEOUT` or `SIGSEGV`, or when
+/// it holds `panicked at`, `error[` or `error:`. The lines keep their order,
+/// and at most `max` of them come back: a gate that fails on everything names
+/// nothing in particular.
+fn failure_lines(text: &str, max: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let starts = trimmed.starts_with("FAIL")
+            || trimmed.starts_with("TIMEOUT")
+            || trimmed.starts_with("SIGSEGV");
+        let holds = line.contains("panicked at")
+            || line.contains("error[")
+            || line.contains("error:");
+        if (starts || holds) && out.len() < max {
+            out.push(line.to_string());
+        }
+    }
+    out
+}
+
 /// Why a Herdr step did not succeed.
 fn step_failure<T>(step: &str, outcome: &Outcome<T>) -> String {
     match outcome {
@@ -2147,6 +2177,13 @@ fn tell_captain(
 /// tick.
 fn wait_thread(task: &str) -> String {
     format!("merge-wait:{task}")
+}
+
+/// The key that remembers that the captain was told that the merge of a
+/// task's attempt waits. The notice is told once per attempt (T-220): a
+/// resolved item does not bring the same news back.
+fn merge_wait_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.merge_wait_told.{project}.{task}.{attempt}")
 }
 
 /// Tell the captain that a merge waits for another task (T-62): one open item
@@ -2211,6 +2248,13 @@ fn tell_captain_waiting(
         if unpassed.is_empty() {
             return Ok(());
         }
+        // And once per attempt: the captain was told about this wait already
+        // (T-220). A resolved item does not bring the same news back on the
+        // next tick.
+        let told_key = merge_wait_told_key(project, &task, op.attempt.unwrap_or(0));
+        if tx.get_meta(&told_key)?.is_some() {
+            return Ok(());
+        }
         tx.insert_message(&NewMessage {
             meta: None,
             project: project.to_string(),
@@ -2228,6 +2272,9 @@ fn tell_captain_waiting(
             state: MsgState::Open,
             created: now,
         })?;
+        // The notice is told once per attempt: remember it, so a later tick
+        // does not add it again after the captain resolved the item.
+        tx.set_meta(&told_key, &now.to_string())?;
         Ok(())
     })
 }
@@ -2851,6 +2898,53 @@ mod tests {
         // The captain's item about the wait is closed.
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 60)).unwrap();
         assert!(inbox.is_empty(), "the wait is over: {inbox:?}");
+    }
+
+    /// T-220: the "the merge waits" notice is told once per attempt. A
+    /// resolved item does not bring the same news back on the next tick, and
+    /// the next attempt of the same task is told once again.
+    ///
+    /// The tick calls `tell_captain_waiting` once per waiting merge; this
+    /// test calls it as the tick does.
+    #[test]
+    fn the_merge_waits_notice_is_told_once_per_attempt() {
+        let mut store = world(TaskState::Verifying);
+        let waiting = op("abc1234"); // T-5, attempt 1
+        // T-1 has not passed: the merge of T-5 waits for it.
+        let blocked = vec![("T-1".to_string(), false)];
+
+        // The first tick: the captain is told once.
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 10).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 11)).unwrap();
+        assert_eq!(inbox.len(), 1, "the captain is told: {inbox:?}");
+        assert!(inbox[0].body.contains("T-1"), "{}", inbox[0].body);
+        assert!(inbox[0].body.contains("T-5"), "{}", inbox[0].body);
+
+        // The captain resolves the item.
+        let id = inbox[0].id.clone();
+        store
+            .write(|tx| {
+                tx.update_message_state("p", &id, MsgState::Resolved, Some("ok"), None, None, 12)
+            })
+            .unwrap();
+
+        // The later ticks add no item: the notice was already told for this
+        // attempt.
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 20).unwrap();
+        tell_captain_waiting(&mut store, "p", &waiting, &blocked, 30).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 31)).unwrap();
+        assert!(inbox.is_empty(), "the notice comes back: {inbox:?}");
+        let items = store.read(|tx| tx.thread_messages("p", "merge-wait:T-5")).unwrap();
+        assert_eq!(items.len(), 1, "a second item was added: {items:?}");
+
+        // The next attempt of the same task is told once again.
+        let mut next = waiting.clone();
+        next.attempt = Some(2);
+        tell_captain_waiting(&mut store, "p", &next, &blocked, 40).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 41)).unwrap();
+        assert_eq!(inbox.len(), 1, "the next attempt is told again: {inbox:?}");
+        let items = store.read(|tx| tx.thread_messages("p", "merge-wait:T-5")).unwrap();
+        assert_eq!(items.len(), 2, "the next attempt has no item: {items:?}");
     }
 
     /// T-62: a task that is not built on another task's branch is not held.
@@ -4480,6 +4574,38 @@ gate = "{project_gate}"
         assert_eq!(scratch.dev_log(), "dev", "the root repo was not merged into");
     }
 
+    #[test]
+    fn a_task_from_before_a_lane_rebind_merges_on_its_original_repo_and_gate() {
+        let scratch = Scratch::new("rebound-child");
+        let child = Child::new(&scratch.root, "web", "web-dev");
+        let worktree = child.merge_worktree("web-dev");
+        let candidate = child.head_of("heat/t5");
+        let child_gate = scratch.root.join("old-gate");
+        let new_gate = scratch.root.join("new-gate");
+        let config_toml = child_config(&scratch.root, &format!("touch '{}'", child_gate.display()), &format!("touch '{}'", new_gate.display()));
+        let mut store = child_world(&config_toml, &candidate);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-5")?.unwrap();
+            task.repo = Some(scratch.root.join("web").to_string_lossy().into_owned());
+            task.base = Some("web-dev".into());
+            task.gate = Some(format!("touch '{}'", child_gate.display()));
+            tx.update_task(&task)?;
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = project.config_toml.replace("repo = \"web\"", "");
+            tx.update_project(&project)
+        }).unwrap();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("home/merge", &worktree.path, &worktree.pane_id);
+        let mut cfg = test_cfg();
+        for kind in ["opencode", "claude"] { cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap()); }
+        assert_eq!(wait_merge(&mut store, &mut herdr, &cfg).len(), 1);
+        assert!(herdr.calls.iter().any(|call| matches!(call, gear_herdr::fake::Call::WorktreeOpen {repo,branch,..} if repo == &scratch.root.join("web").to_string_lossy() && branch == "home/merge")));
+        assert!(child_gate.exists());
+        assert!(!new_gate.exists());
+        assert!(child.log_of("web-dev").contains("task"));
+        assert_eq!(scratch.dev_log(), "dev");
+    }
+
     /// T-53: the merge worktree of a repo is created in that repo, cut from
     /// that repo's integration branch.
     #[test]
@@ -5061,6 +5187,75 @@ gate = "{project_gate}"
         // for the next run).
         let head = sh(Path::new(&worktree.path), "git log --format=%s -1");
         assert_eq!(head, "dev", "{head}");
+    }
+
+    /// T-219: a gate that failed names the failing tests. The tail of a long
+    /// test run is slow-test timings, and the captain could not see what
+    /// failed in it.
+    #[test]
+    fn a_failing_gate_names_the_failing_tests_before_the_tail() {
+        let scratch = Scratch::new("gate-failures");
+        // The FAIL line is far above 40 slow-test lines: the tail alone
+        // would say nothing about what failed.
+        let gate = "printf 'FAIL [t] the_broken_test\\n'; \
+                   i=0; while [ $i -lt 40 ]; do printf 'test slow_%s ... ok (4.2s)\\n' $i; \
+                   i=$((i+1)); done; \
+                   printf 'error: the build failed\\n' >&2; exit 1";
+        let (mut store, mut herdr, cfg) = queued_merge(&scratch, gate);
+        accept(&mut store, "T-5", 0);
+
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+        assert!(merged.is_empty(), "{merged:?}");
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let reason = op.result.clone().unwrap_or_default();
+        assert!(reason.contains("FAIL [t] the_broken_test"), "{reason}");
+        // The tail is still there, after the failure lines.
+        assert!(reason.contains("test slow_39 ... ok (4.2s)"), "{reason}");
+        let failure = reason.find("FAIL [t] the_broken_test").unwrap();
+        let tail_line = reason.find("test slow_39 ... ok (4.2s)").unwrap();
+        assert!(failure < tail_line, "the failing line comes before the tail: {reason}");
+
+        // The captain's item carries the same reason.
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", 30)).unwrap();
+        assert_eq!(inbox.len(), 1, "{inbox:?}");
+        assert!(
+            inbox[0].body.contains("FAIL [t] the_broken_test"),
+            "{}",
+            inbox[0].body
+        );
+    }
+
+    /// T-219: the failure lines are the ones that name a failure: a line that
+    /// starts (after spaces) with FAIL, TIMEOUT or SIGSEGV, or one that holds
+    /// `panicked at`, `error[` or `error:`.
+    #[test]
+    fn the_failure_lines_are_the_lines_that_name_a_failure() {
+        let text = "running 3 tests\n  FAIL [t] one_test\n\
+                   test ok ... ok (4.2s)\n\
+                   TIMEOUT [t] other_test\n\
+                   SIGSEGV [t] third_test\n\
+                   thread panicked at src/lib.rs:12:5\n\
+                   error[E0308]: mismatched types\n\
+                   error: could not compile\n\
+                   not a failure line\n";
+        let failures = failure_lines(text, 20);
+        assert_eq!(
+            failures,
+            vec![
+                "  FAIL [t] one_test",
+                "TIMEOUT [t] other_test",
+                "SIGSEGV [t] third_test",
+                "thread panicked at src/lib.rs:12:5",
+                "error[E0308]: mismatched types",
+                "error: could not compile",
+            ]
+        );
+        // At most `max` of them come back.
+        let many: String = (0..30)
+            .map(|n| format!("FAIL [t] test_{n}\n"))
+            .collect();
+        assert_eq!(failure_lines(&many, 20).len(), 20);
     }
 
     /// T-41: the gate is the project's build and test command. It must not

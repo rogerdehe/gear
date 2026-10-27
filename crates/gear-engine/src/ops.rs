@@ -626,7 +626,7 @@ pub fn confirm_pending(
     budget: i64,
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
-    confirm_pending_with(store, project, budget, DEFAULT_DELIVERY_GRACE_S, now)
+    confirm_pending_with(store, project, budget, DEFAULT_DELIVERY_GRACE_S, &[], now)
 }
 
 /// Settle Submitted/Unknown doorbell ops using ViewRecords: an op is Confirmed
@@ -642,12 +642,19 @@ pub fn confirm_pending(
 /// op.attempt`; on confirmation an attempt still in Delivered goes through
 /// `gear_app::tasks::on_delivery_confirmed` in the same transaction. Budget and
 /// flagging as for doorbells.
+/// `working` names the seats whose agent Herdr reports **working** this tick
+/// (T-213): a doorbell that reached a working agent is queued behind its turn,
+/// which is not a stall — such a doorbell spends no check budget, so the
+/// budget counts only the checks made while the agent is idle or done. A
+/// delivery keeps its wall-clock window: a working seat is not spared the
+/// confirmation window.
 /// Returns (confirmed op ids, flagged seat ids).
 pub fn confirm_pending_with(
     store: &mut Store,
     project: &str,
     budget: i64,
     grace_s: i64,
+    working: &[String],
     now: Ts,
 ) -> GearResult<(Vec<String>, Vec<String>)> {
     // The seats whose screen shows a provider limit right now (T-15): their
@@ -745,6 +752,14 @@ pub fn confirm_pending_with(
                 if on_quota.contains(&op.seat) {
                     continue;
                 }
+                // A doorbell that reached a working agent (T-213) is not a
+                // stall: the agent is in the middle of a build or a suite and
+                // the text waits in the pane behind its turn. Its check
+                // budget is not spent, so the budget counts only the checks
+                // made while the agent is idle or done.
+                if op.kind == OpKind::Doorbell && working.contains(&op.seat) {
+                    continue;
+                }
                 // No evidence yet: the op waits for the next round.
                 if op.kind == OpKind::Deliver {
                     // Design §10.3: the confirmation window is wall clock
@@ -787,7 +802,45 @@ pub fn confirm_pending_with(
                             retry_now: false,
                         },
                     )?;
-                    if !flagged.contains(&op.seat) {
+                    // T-206 (F3), T-218: the first failure of a delivery may
+                    // still be retried by the lane's own path: the marker
+                    // says so, and the tick holds the captain's ring back
+                    // until the retry has had its chance. Only a lane whose
+                    // attempt waits for its check-in gets that retry; every
+                    // other seat (a reviewer, the captain) has none, so its
+                    // unconfirmed delivery reaches the captain at once.
+                    let task = op.task.clone().unwrap_or_default();
+                    let attempt = op.attempt.unwrap_or_default();
+                    let marker = crate::lane_nudge::retry_marker(&op.seat, &task, attempt);
+                    let eligible = crate::lane_nudge::retry_eligible(
+                        tx,
+                        project,
+                        &op.seat,
+                        &task,
+                        attempt,
+                    )?;
+                    match tx.get_meta(&marker)?.as_deref() {
+                        None => {
+                            // The first failure: the lane's own path may
+                            // still deliver the packet again (T-206, F3).
+                            if eligible {
+                                tx.set_meta(&marker, "allowed")?;
+                            }
+                        }
+                        Some("pending") => {
+                            // The retry failed too: the fact stands, the
+                            // captain hears about it.
+                            tx.set_meta(&marker, "")?;
+                        }
+                        _ => {}
+                    }
+                    // The one automatic retry is still ahead: the captain is
+                    // not rung yet. The stall item opens when the retried
+                    // delivery fails or its own window ends unconfirmed
+                    // (T-218).
+                    let retry_pending =
+                        crate::lane_nudge::retry_pending(tx, &op.seat, &task, attempt)?;
+                    if !retry_pending && !flagged.contains(&op.seat) {
                         flagged.push(op.seat.clone());
                     }
                     continue;

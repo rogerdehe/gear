@@ -40,6 +40,8 @@ pub enum Role {
     Rework,
     /// A reviewer's round.
     Review,
+    /// An early direction check on a lane's attempt.
+    Direction,
 }
 
 impl Role {
@@ -49,6 +51,7 @@ impl Role {
             Role::Dev => "dev",
             Role::Rework => "rework",
             Role::Review => "review",
+            Role::Direction => "direction",
         }
     }
 }
@@ -161,7 +164,7 @@ pub fn choose(facts: &Facts) -> Action {
         return action;
     }
     let action = match facts.role {
-        Role::Review => review_action(facts),
+        Role::Review | Role::Direction => review_action(facts),
         Role::Dev | Role::Rework => lane_action(facts),
     };
     // L1: a seat without a live agent has its agent started plainly, and the
@@ -293,6 +296,7 @@ pub fn prepare_lane(
         None => None,
     };
 
+    let rebind_fresh = round.is_none() && store.read(|tx| tx.get_meta(&crate::rebind::fresh_key(&seat.id)))?.as_deref() == Some(&seat.generation.to_string());
     let mut action = match &round {
         // A new round: the rules of §3.3 decide.
         None => choose(&facts),
@@ -303,6 +307,7 @@ pub fn prepare_lane(
             None => recorded_action(store, &project, task, attempt)?.unwrap_or(Action::Keep),
         },
     };
+    if rebind_fresh { action = Action::Fresh; }
     if round.is_none() && facts.followup_of.is_some() && attempt == 1 && matches!(action, Action::Keep)
         && context_large(store, cfg, seat, facts.current_session.as_deref())? {
         action = Action::Compact;
@@ -315,6 +320,7 @@ pub fn prepare_lane(
         // Resuming an existing round also uses this generation's fresh
         // process; it must not be reused for a later unrelated round.
         if fresh_generation { tx.set_meta(&fresh_key, "")?; }
+        if rebind_fresh { tx.set_meta(&crate::rebind::fresh_key(&seat.id), "")?; }
         if round.is_none() {
             tx.set_attempt_action(&project, task, attempt, action.as_str())?;
         }
@@ -356,10 +362,18 @@ pub fn prepare_review(
     attempt: i64,
     now: Ts,
 ) -> GearResult<Prep> {
+    prepare_review_role(store, herdr, cfg, seat, task, attempt, Role::Review, now)
+}
+
+pub(crate) fn prepare_review_role(
+    store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, seat: &SeatRow,
+    task: &str, attempt: i64, role: Role, now: Ts,
+) -> GearResult<Prep> {
     let project = seat.project.clone();
-    let key = round_key(&project, task, attempt, Role::Review);
+    let key = round_key(&project, task, attempt, role);
 
     let mut facts = review_facts(store, herdr, &project, seat, task, attempt)?;
+    facts.role = role;
     let round = round_of(store, &key)?;
     facts.open_round_session = round.as_ref().and_then(|round| round.sessions.last().cloned());
 
@@ -379,7 +393,7 @@ pub fn prepare_review(
         Ok(())
     })?;
 
-    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, Role::Review, &action, false, now)
+    crate::session_runner::run(store, herdr, cfg, seat, task, attempt, role, &action, false, now)
 }
 
 fn context_large(store: &mut Store, cfg: &EngineCfg, seat: &SeatRow, session: Option<&str>) -> GearResult<bool> {

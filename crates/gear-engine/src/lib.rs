@@ -34,8 +34,10 @@ mod opencode;
 pub mod ops;
 pub mod overrun;
 pub mod parallel;
+pub mod lane_nudge;
 pub mod quota;
 pub mod quiet;
+pub mod rebind;
 pub mod release;
 pub mod restart;
 pub mod rounds;
@@ -128,6 +130,10 @@ pub struct TickReport {
     pub onboarded: Vec<String>,
     /// Quota switches and parks this tick, one line each (design/01 `on_quota`).
     pub quota: Vec<String>,
+    /// The lanes that were told to go on after they stopped (T-206).
+    pub lane_nudged: Vec<String>,
+    /// The lanes whose plan park ended this tick (T-190), one line each.
+    pub park_ended: Vec<String>,
     /// `project:task/attempt` of the review verdicts that settled a task this
     /// tick (T-13).
     pub settled: Vec<String>,
@@ -187,6 +193,8 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     for project in store.read(|tx| tx.project_ids())? {
         gear_app::plan::reconcile_rebinds(store, &project)?;
     }
+
+    rebind::tick(store, herdr, cfg, now)?;
 
     // 0. onboard: every queued lane gets its worktree, pane and agent. A seat
     //    that fails a step is parked in NeedsCheck, never retried blindly.
@@ -284,6 +292,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // (T-97): the binding follows what the pane reports, so a delivery that
         // was never confirmed can be sent again without a store edit.
         observe::record_sessions(store, &observed)?;
+        // A park whose time has come ends (T-190): the lane the captain
+        // parked until a time that has passed works again.
+        let ended = store.write(|tx| {
+            gear_app::plan::end_parked_lanes(tx, &project, Some(&agents), now)
+        })?;
+        report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
@@ -304,6 +318,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.backoff.extend(waiting);
 
         captain_quota::update(store, herdr, &profiles, &project, &observed, now)?;
+
+        // T-209: when an active attempt's agent exited but its bound pane is
+        // still a shell, restart it once in place before treating the absence
+        // as a stall. Pending starts continue through the same durable restart
+        // machine on later ticks.
+        let restarted = restart_missing_jobs(store, herdr, cfg, &profiles, &project, &observed, now)?;
+        missing_seats.retain(|seat| !restarted.contains(seat));
+        report.flagged.retain(|seat| !restarted.contains(seat));
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
@@ -337,8 +359,25 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let delivery_grace = gear_app::config::latest(store, &project)
             .map(|config| i64::from(config.timing.delivery_grace_s))
             .unwrap_or(cfg.delivery_grace_s);
-        let (confirmed, flagged) =
-            ops::confirm_pending_with(store, &project, cfg.doorbell_check_budget, delivery_grace, now)?;
+        // T-213: the seats whose agent Herdr reports working this tick. A
+        // doorbell that reached one of them waits behind the agent's turn:
+        // that is not a stall, so its check budget is not spent.
+        let working: Vec<String> = observed
+            .iter()
+            .filter(|obs| {
+                obs.presence == observe::Presence::Present
+                    && obs.status == Some(gear_herdr::AgentStatus::Working)
+            })
+            .map(|obs| obs.seat.id.clone())
+            .collect();
+        let (confirmed, flagged) = ops::confirm_pending_with(
+            store,
+            &project,
+            cfg.doorbell_check_budget,
+            delivery_grace,
+            &working,
+            now,
+        )?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
 
@@ -360,6 +399,7 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         for (seat, action) in &planned {
             // An escalated seat needs a human; nothing is sent to it.
             if matches!(action, dispatch::Action::Escalate { .. })
+                && !restarted.contains(&seat.id)
                 && !report.flagged.contains(&seat.id)
             {
                 report.flagged.push(seat.id.clone());
@@ -413,6 +453,14 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
             review::nudge_stopped_reviewers(store, &project, &observed, cfg.cooldown_s, now)?;
         for seat in stuck {
             reviewer_nudge_flags.push((project.clone(), seat));
+        }
+
+        // 7c. a lane that stopped on a server error goes on by itself
+        //     (T-206): its agent is idle with an attempt in flight.
+        let (nudged_lanes, stuck_lanes) = lane_nudge::nudge_stopped_lanes(store, &project, &observed, now)?;
+        report.lane_nudged.extend(nudged_lanes);
+        for seat in stuck_lanes {
+            report.flagged.push(seat);
         }
 
         // 8. release: a reviewer whose task left review frees its slot (T-17).
@@ -502,6 +550,29 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
                 if !other_cause { stall::resolve(tx, project, seat, now, None)?; }
                 return Ok(false);
             }
+            // T-218 (F3): while the one automatic retry of this delivery is
+            // still ahead, the first failure's flag stays suppressed: the
+            // sweep must not restore it. An independent cause (a missing
+            // agent, an escalation) keeps its own flag.
+            if crate::lane_nudge::retry_pending(tx, seat, &failed.task, failed.attempt)? {
+                // T-218 (F1): a retry that failed while it was sent (the
+                // agent of the pane was gone) never reaches the
+                // confirmation window: it spends its marker here, and the
+                // captain hears about it now.
+                if crate::lane_nudge::retry_failed(tx, seat, &failed.task, failed.attempt)? {
+                    if attempt.as_ref().is_some_and(|a| a.state == gear_model::AttemptState::Started) {
+                        delivery::clear(tx, seat)?;
+                        tx.set_meta(&crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt), "")?;
+                        return Ok(false);
+                    }
+                    tx.set_meta(
+                        &crate::lane_nudge::retry_marker(seat, &failed.task, failed.attempt),
+                        "",
+                    )?;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             Ok(*present && tx.get_meta(&format!("stall-active:{seat}"))?.is_some_and(|v| !v.is_empty()))
         })?;
         if outstanding && !report.flagged.contains(seat) {
@@ -536,6 +607,87 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     }
     Ok(report)
+}
+
+fn restart_missing_jobs(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    cfg: &EngineCfg,
+    profiles: &std::collections::BTreeMap<String, gear_herdr::Profile>,
+    project: &str,
+    observed: &[observe::SeatObs],
+    now: Ts,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    use gear_model::{AttemptState, SeatRole, SeatState};
+    let shell_panes = match herdr.panes() { Ok(panes) => panes, Err(_) => return Ok(Default::default()) };
+    let mut handled = std::collections::BTreeSet::new();
+    let seats = store.read(|tx| tx.seats_of_project(project))?;
+    for seat in seats {
+        if !matches!(seat.role, SeatRole::Lane | SeatRole::Temp) { continue }
+        let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+        let pending_restart = restart::pending(store, &seat.id)?;
+        let pane = pending_restart.as_ref().and_then(|_| restart::pane_of(store, &seat).ok().flatten())
+            .or_else(|| binding.as_ref().filter(|b| b.status == gear_store::BindingStatus::Active || b.status == gear_store::BindingStatus::Pending).map(|b| b.pane_id.clone()));
+        let Some(pane) = pane.filter(|p| shell_panes.contains(p)) else { continue };
+        if herdr.agent_get(&pane).ok().flatten().is_some() { continue }
+
+        let jobs = if seat.role == SeatRole::Lane {
+            store.read(|tx| tx.open_attempts_of_seat(&seat.id))?.into_iter()
+                .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Delivered))
+                .map(|a| (a.task, a.n)).collect::<Vec<_>>()
+        } else {
+            let task = store.read(|tx| Ok(tx.get_meta(&format!("engine.review_pending.{}", seat.id))?.filter(|s| !s.is_empty()).or(seat.task_id.clone())))?;
+            match task {
+                Some(task) => store.read(|tx| tx.attempts_of_task(project, &task))?.into_iter()
+                    .filter(|a| a.state == AttemptState::Submitted && store.read(|tx| tx.get_review_verdict(project, &task, a.n).map(|v| v.is_none())).unwrap_or(false))
+                    .map(|a| (a.task, a.n)).collect(),
+                None => Vec::new(),
+            }
+        };
+        for (task, attempt) in jobs {
+            let marker = format!("engine.restart.{}.{}.{}", seat.id, task, attempt);
+            let state = store.read(|tx| tx.get_meta(&marker))?;
+            if matches!(state.as_deref(), Some("started" | "failed")) { break; }
+            let is_missing = observed.iter().any(|o| o.seat.id == seat.id && o.presence == observe::Presence::Missing && o.seat.state == SeatState::Active);
+            let plan = restart::pending(store, &seat.id)?;
+            if !is_missing && !(state.as_deref() == Some("starting") && plan.is_some()) { continue }
+            if state.is_none() {
+                store.write(|tx| tx.set_meta(&marker, "starting"))?;
+            }
+            let entry = if plan.is_some() { None } else {
+                let Some(binding) = binding.as_ref() else { continue };
+                let project_row = store.read(|tx| tx.get_project(project))?;
+                let Some(config) = project_row.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else { continue };
+                let saved = store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?.filter(|s| !s.is_empty());
+                let reviewer = if seat.role == SeatRole::Temp {
+                    store.read(|tx| tx.get_meta(&format!("engine.review_model_entry.{}", seat.id)))?
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                } else { None };
+                let (model, args) = if let Some(meta) = reviewer {
+                    (meta["model"].as_str().map(str::to_owned).or(saved.clone()).unwrap_or_default(), meta["args"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default())
+                } else {
+                    let lane = config.lanes.iter().find(|l| l.name == seat.name);
+                    let selected = lane.map(|l| crate::model::role_chain(&config, &l.name).into_iter().find(|entry| entry.cli().unwrap_or(&l.kind) == binding.kind && saved.as_deref().is_none_or(|m| entry.model() == m)));
+                    match selected.flatten() {
+                        Some(entry) => (entry.model().to_string(), entry.args().to_vec()),
+                        None => (saved.unwrap_or_default(), Vec::new()),
+                    }
+                };
+                Some(gear_app::config::ModelEntry::Entry(gear_app::config::ModelSpec { model, cli: Some(binding.kind.clone()), args, context_window_k: None }))
+            };
+            match restart::advance(store, herdr, cfg, profiles, project, &seat, entry.as_ref(), now) {
+                Ok(Some(_)) => {
+                    store.write(|tx| tx.set_meta(&marker, "started"))?;
+                    handled.insert(seat.id.clone());
+                }
+                Ok(None) if restart::pending(store, &seat.id)?.is_some() => { handled.insert(seat.id.clone()); }
+                Ok(None) => { store.write(|tx| tx.set_meta(&marker, "failed"))?; }
+                Err(_) => { store.write(|tx| tx.set_meta(&marker, "failed"))?; }
+            }
+            break;
+        }
+    }
+    Ok(handled)
 }
 
 /// Settle every review verdict whose attempt is still handed in (T-13), in
@@ -747,4 +899,95 @@ fn doorbell_inputs(
         });
     }
     Ok(inputs)
+}
+
+#[cfg(test)]
+mod t209_tick_tests {
+    use super::*;
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_model::{AttemptState, MsgState, SeatRole, TaskState};
+    use gear_store::{testing, AttemptRow, ContractRow, NewRound, RoundKey, TaskRow};
+
+    const NOW: Ts = 1_900_000_000;
+    const CONFIG: &str = r#"
+[project]
+id="p"
+herdr_session="sess"
+repo="/repo"
+[quota]
+lanes=1
+temps=1
+[captain]
+pane="w1:p9"
+kind="claude"
+profile="claude"
+[[lanes]]
+name="heat"
+duty="everything"
+owns=["src/"]
+kind="codex"
+profile="codex"
+[temps]
+kind="codex"
+profile="codex"
+[models]
+lanes=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high"]}]
+"#;
+
+    fn fixture(role: SeatRole) -> (Store, FakeHerdr, EngineCfg, String) {
+        let mut store=Store::open_in_memory().unwrap();
+        let pane=if role==SeatRole::Lane {"w1:p1"} else {"w1:p2"};
+        let seat_name=if role==SeatRole::Lane {"heat"} else {"review-1"};
+        let task_state=if role==SeatRole::Lane {TaskState::Running} else {TaskState::Verifying};
+        let attempt_state=if role==SeatRole::Lane {AttemptState::Started} else {AttemptState::Submitted};
+        let seat=store.write(|tx| {
+            let mut p=testing::seed_project(tx,"p","sess",NOW)?; p.config_toml=CONFIG.into(); tx.update_project(&p)?;
+            let seat=testing::seed_active_seat(tx,"p",seat_name,role,pane,"codex",NOW)?;
+            testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p9","claude",NOW)?;
+            if role==SeatRole::Temp { tx.set_seat_task(&seat.id,"T-1")?; }
+            tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+            tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some("codex".into()),session_action:None,sent_at:Some(NOW)})?;
+            let round_role=if role==SeatRole::Lane {"dev"} else {"review"};
+            tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:"codex".into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
+            tx.set_meta(&crate::model::model_meta_key(&seat.id),"gpt-6.1-sol")?;
+            if role==SeatRole::Temp {
+                tx.set_meta("engine.review_model_entry.p:review-1",&serde_json::json!({"cli":"codex","model":"gpt-6.1-sol","args":["-c","model_reasoning_effort=high"]}).to_string())?;
+                tx.set_meta("engine.review_pending.p:review-1","T-1")?;
+                tx.set_meta("engine.review_path.p:review-1","/work/review")?;
+                tx.set_meta("engine.review_repo.p:review-1","/repo")?;
+            } else { tx.set_meta(&crate::onboard::worktree_path_key(&seat.id),"/work/heat")?; }
+            Ok(seat)
+        }).unwrap();
+        let _=seat;
+        let mut herdr=FakeHerdr::new(); herdr.add_shell(pane); herdr.add_shell("w1:p9");
+        let mut cfg=EngineCfg::default(); cfg.db_path="/tmp/t209.db".into();
+        for kind in ["codex","claude"] { cfg.profiles.insert(kind.into(),gear_herdr::builtin(kind).unwrap()); }
+        (store,herdr,cfg,pane.into())
+    }
+
+    #[test]
+    fn exited_lane_and_reviewer_restart_once_replay_their_packets_and_stall_after_second_exit() {
+        for role in [SeatRole::Lane,SeatRole::Temp] {
+            let (mut store,mut herdr,cfg,pane)=fixture(role);
+            tick(&mut store,&mut herdr,&cfg,NOW+1).unwrap();
+            let starts: Vec<_>=herdr.calls.iter().filter_map(|call|if let Call::AgentStart {kind,args,pane,..}=call {Some((kind.clone(),args.clone(),pane.clone()))} else {None}).collect();
+            assert_eq!(starts.len(),1,"{role:?}: {starts:?}");
+            assert_eq!(starts[0].0,"codex");
+            assert_eq!(starts[0].2,pane);
+            assert!(starts[0].1.iter().any(|arg|arg.contains("gpt-6.1-sol")),"{:?}",starts[0].1);
+            assert!(starts[0].1.iter().any(|arg|arg.contains("model_reasoning_effort=high")),"{:?}",starts[0].1);
+            let packet=herdr.calls.iter().find_map(|call|if let Call::Prompt{text,..}=call {Some(text.as_str())} else {None}).unwrap_or("");
+            if role==SeatRole::Lane { assert!(packet.contains("Continue T-1"),"{packet}"); }
+            else { assert!(packet.contains("Review T-1 attempt 1"),"{packet}"); }
+            herdr.exit_agent(&pane);
+            tick(&mut store,&mut herdr,&cfg,NOW+2).unwrap();
+            assert_eq!(herdr.calls.iter().filter(|call|matches!(call,Call::AgentStart{..})).count(),1);
+            let stall=store.read(|tx|tx.thread_messages("p","stall:p:review-1")).unwrap();
+            let lane_stall=store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
+            assert_eq!(if role==SeatRole::Lane {lane_stall.len()} else {stall.len()},1);
+            assert_eq!(if role==SeatRole::Lane {lane_stall[0].state} else {stall[0].state},MsgState::Open);
+        }
+    }
 }

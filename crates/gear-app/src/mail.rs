@@ -103,24 +103,38 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
+    send_inner(store, env, fp, args, now, false)
+}
+
+/// Hand in a direction check without submitting the lane's attempt.
+pub fn send_direction(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts) -> GearResult<SendResult> {
+    send_inner(store, env, fp, args, now, true)
+}
+
+fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts, direction: bool) -> GearResult<SendResult> {
     // A request that already committed replays its receipt before the hand-in
     // gate: the hand-in happened, only the receipt was lost, and an outage
     // must not report it as failed (T-19 review F2). The caller is the live
     // seat — identity is checked in the same read transaction as the receipt
     // (review round 2, F6), so a stale generation or another occupant cannot
     // replay it.
-    if let Some(receipt) = stored_receipt(store, env, fp, args)? {
+    if let Some(receipt) = stored_receipt(store, env, fp, args, direction)? {
         return Ok(receipt);
     }
     // The hand-in gate (T-19) runs before the transaction: a candidate that
     // does not contain the current integration branch is refused and nothing —
     // no message, no attempt change — is stored.
-    if args.kind == MsgKind::Result {
+    if args.kind == MsgKind::Result && !direction {
         if let Some(gate) = &args.base {
             let candidate = args.candidate.as_deref().ok_or_else(|| {
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
-            crate::base::require_current_base(&gate.worktree, &gate.integration, candidate)?;
+            crate::base::require_current_base(
+                &gate.worktree,
+                &gate.integration,
+                candidate,
+                gate.window_min,
+            )?;
             // A rework keeps the work the reviewer read (design §10.7, row
             // B03-08): the new candidate carries the previous attempt's
             // candidate. The refusal names that commit. It comes before the
@@ -167,10 +181,8 @@ pub fn send(
         match args.kind {
             MsgKind::Progress | MsgKind::Question | MsgKind::Instruction => {}
             MsgKind::Result => {
-                if args.task.is_none()
-                    || args.attempt.is_none()
-                    || args.contract.is_none()
-                    || args.candidate.is_none()
+                if args.task.is_none() || args.attempt.is_none() || (!direction && (
+                    args.contract.is_none() || args.candidate.is_none()))
                 {
                     return Err(GearError::new(
                         ErrorCode::BadFormat,
@@ -208,6 +220,9 @@ pub fn send(
                     format!("kind {} is not available yet", other.as_str()),
                 ))
             }
+        }
+        if direction && (args.kind != MsgKind::Result || args.body.trim().is_empty() || args.to.is_some() || args.reply_to.is_some() || args.candidate.is_some() || args.contract.is_some() || args.verdict.is_some()) {
+            return Err(GearError::new(ErrorCode::BadFormat, "a direction result needs `--kind result`, `--task`, `--attempt`, and nonempty `--direction` text"));
         }
         if args.verdict.is_some() && args.kind != MsgKind::Review {
             return Err(GearError::new(
@@ -348,7 +363,7 @@ pub fn send(
         // request closure, after the replay check: a repeated request id
         // replays the stored result and never touches the reviewer's file
         // again (T-21, review F2). The key keeps the original argument.
-        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
+        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction);
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
             // The review the verdict belongs to: the findings are resolved
@@ -385,7 +400,21 @@ pub fn send(
 
             // A result submits the attempt before the message is stored; an
             // error here aborts the whole send, so nothing is kept.
-            if args.kind == MsgKind::Result {
+            let mut direction_sha = None;
+            if direction {
+                let task_id = task.as_deref().unwrap_or_default();
+                let attempt_n = args.attempt.unwrap_or_default();
+                let job = tx.get_meta(&format!("engine.direction.{}.{}.{}", ctx.project, task_id, attempt_n))?
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                let valid = seat.role == SeatRole::Temp && seat.task_id.as_deref() == Some(task_id)
+                    && job.as_ref().is_some_and(|j| j["seat"].as_str() == Some(seat.id.as_str())
+                        && j["generation"].as_i64() == Some(ctx.generation) && j["state"].as_str() == Some("running"));
+                if !valid { return Err(GearError::new(ErrorCode::Forbidden, "this seat does not hold the direction job for that attempt")); }
+                let attempt = tx.get_attempt(&ctx.project, task_id, attempt_n)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "direction attempt not found"))?;
+                if !matches!(attempt.state, AttemptState::Started | AttemptState::Submitted) { return Err(GearError::new(ErrorCode::BadTransition, "direction attempt is neither Started nor Submitted")); }
+                direction_sha = job.and_then(|j| j["sha"].as_str().filter(|s| !s.is_empty()).map(str::to_owned));
+                if direction_sha.is_none() { return Err(GearError::new(ErrorCode::BadFormat, "direction job has no checked sha")); }
+            } else if args.kind == MsgKind::Result {
                 let result_task = task.as_deref().ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--task`"))?;
                 let result_attempt = args.attempt.ok_or_else(|| GearError::new(ErrorCode::BadFormat, "a result needs `--attempt`"))?;
                 let owner = tx.get_attempt(&ctx.project, result_task, result_attempt)?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no attempt {result_attempt} of task {result_task}")))?;
@@ -494,7 +523,7 @@ pub fn send(
                 }
             };
             let message = NewMessage {
-                meta: progress_meta(args.left, args.blocker.as_deref())?,
+                meta: if let Some(sha) = direction_sha { Some(serde_json::json!({"direction": true, "sha": sha}).to_string()) } else { progress_meta(args.left, args.blocker.as_deref())? },
                 project: ctx.project.clone(),
                 thread: thread.clone(),
                 task: task.clone(),
@@ -542,6 +571,7 @@ fn stored_receipt(
     env: &Env,
     fp: Option<&Fingerprint>,
     args: &SendArgs,
+    direction: bool,
 ) -> GearResult<Option<SendResult>> {
     if env.ctx.is_none() {
         return Ok(None);
@@ -557,7 +587,7 @@ fn stored_receipt(
             Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
             Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
         )?;
-        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args);
+        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction);
         if stored_hash != gear_store::args_hash(&key) {
             return Ok(None);
         }
@@ -580,8 +610,8 @@ fn stored_receipt(
 /// The args key of a send: the same seat and generation with the same
 /// arguments is the same request (design/13), whether it is checked before the
 /// transaction (to replay a committed receipt) or inside it.
-fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> String {
-    format!(
+fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs, direction: bool) -> String {
+    let key = format!(
         "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}|friction={:?}",
         args.kind.as_str(),
         args.body,
@@ -598,7 +628,8 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs) -> S
         args.blocker,
         args.on,
         args.friction
-    )
+    );
+    if direction { format!("{key}|direction=true") } else { key }
 }
 
 /// The next unused sequence number of a thread with this prefix.
@@ -822,13 +853,12 @@ fn check_friction(
     let model = round.and_then(|round| round.model.as_deref());
     let budget = tx.round_budget_min(project, task, attempt, role, model)?;
     // The round's own clock (design §5.1). A review is charged from the
-    // reviewer's own start — its delivery confirmation, else the round's
-    // start — and never from the writer's check-in: the reviewer did not
-    // spend the writer's time.
+    // reviewer's own start — the review round's start — and never from the
+    // writer's check-in: the reviewer did not spend the writer's time. The
+    // writer's attempt carries the writer's times, so reading them here would
+    // charge the reviewer for the writer's hour (T-193).
     let started = if role == "review" {
-        tx.get_attempt(project, task, attempt)?
-            .and_then(|attempt| attempt.sent_at)
-            .or_else(|| round.map(|round| round.start_at))
+        round.map(|round| round.start_at)
     } else {
         tx.attempt_times(project, task, attempt)
             .ok()

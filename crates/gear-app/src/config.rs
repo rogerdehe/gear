@@ -84,6 +84,28 @@ impl ProjectConfig {
         }
     }
 
+    /// A task keeps the repository, base and gate fixed at creation, even if
+    /// its lane later moves. Legacy tasks without a snapshot use the lane.
+    pub fn repo_of_task(&self, task: &gear_store::TaskRow) -> Repo {
+        let Some(path) = task.repo.as_deref() else {
+            return self.repo_of_lane(task.lane.as_deref().unwrap_or_default());
+        };
+        let mut repo = self.repos().into_iter().find(|r| r.path == path).unwrap_or_else(|| {
+            // A removed repo is still a valid historical target. Do not use a
+            // different repo's GitHub settings or worker key for it.
+            let mut hash = 0xcbf29ce484222325u64;
+            for b in path.bytes() { hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3); }
+            let mut fallback = self.root_repo();
+            fallback.name = format!("snapshot-{hash:x}");
+            fallback.path = path.to_string();
+            fallback.github = None;
+            fallback
+        });
+        if let Some(base) = &task.base { repo.integration = base.clone(); }
+        if let Some(gate) = &task.gate { repo.gate = gate.clone(); }
+        repo
+    }
+
     /// Every repo of the project (T-52): the project root first, then the
     /// `[[repos]]` entries in config order. The root's name is `""`.
     pub fn repos(&self) -> Vec<Repo> {
@@ -603,6 +625,11 @@ pub struct Timing {
     /// Working with no attempt in development while ready work waits.
     pub lane_busy_idle_min: u32,
     pub delivery_grace_s: u32,
+    /// How many minutes a hand-in may be behind the integration branch and
+    /// still be accepted (T-221): a base that moved while the lane merged and
+    /// ran its suite is not a stale base. `0` = a hand-in must contain the
+    /// current tip (the strict rule).
+    pub handin_base_window_min: u32,
 }
 
 impl Default for Timing {
@@ -615,6 +642,7 @@ impl Default for Timing {
             captain_item_stale_min: 15,
             lane_busy_idle_min: 10,
             delivery_grace_s: 180,
+            handin_base_window_min: 30,
         }
     }
 }

@@ -45,6 +45,10 @@ pub fn begin_onboard(tx: &Tx<'_>, seat_id: &str, pane_id: &str, kind: &str, now:
 
     let generation = seat.generation + 1;
     tx.set_seat_generation(seat_id, generation)?;
+    // T-217: the attempt the seat is working on moves to the new generation
+    // with it, so a lane that is restarted (or retried) can still hand the
+    // attempt in.
+    crate::tasks::carry_attempt_generation(tx, seat_id, seat.generation, generation, now)?;
     tx.set_seat_state(seat_id, SeatState::Starting, Some("onboarding"), now)?;
     tx.insert_binding(&BindingRow {
         seat: seat_id.to_string(),
