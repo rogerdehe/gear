@@ -12,7 +12,8 @@ pub(crate) fn compact_key(seat: &str) -> String { format!("engine.quiet.compact.
 
 fn eligible(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
     if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Retiring)
-        || tx.seats_in_backoff(&seat.project)?.iter().any(|s| s == &seat.id) {
+        || tx.seats_in_backoff(&seat.project)?.iter().any(|s| s == &seat.id)
+        || crate::waits::waiting_seat(tx, &seat.id)? {
         return Ok(None);
     }
     Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.state == AttemptState::Started && a.generation == seat.generation))
@@ -22,7 +23,8 @@ fn eligible(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
 // being processed, before a Started check-in has been recorded.
 fn loop_attempt(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
     if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Retiring)
-        || tx.seats_in_backoff(&seat.project)?.iter().any(|s| s == &seat.id) { return Ok(None) }
+        || tx.seats_in_backoff(&seat.project)?.iter().any(|s| s == &seat.id)
+        || crate::waits::waiting_seat(tx, &seat.id)? { return Ok(None) }
     Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.generation == seat.generation))
 }
 
@@ -118,7 +120,10 @@ pub fn prepare_pending_deliveries(store: &mut Store, herdr: &mut dyn HerdrAct, c
         for op in tx.ops_in_state(project, gear_model::OpState::Intended)? {
             if op.kind != gear_model::OpKind::Deliver || !tx.get_meta(&compact_key(&op.seat))?.is_some_and(|s| !s.is_empty()) { continue; }
             let (Some(seat), Some(task), Some(attempt)) = (tx.get_seat(&op.seat)?, op.task, op.attempt) else { continue };
-            if seat.generation == op.generation && seat.role == SeatRole::Lane { work.push((seat, task, attempt)); }
+            let active = tx.get_attempt(project, &task, attempt)?.is_some_and(|a| !a.state.is_terminal())
+                && tx.get_task(project, &task)?.is_some_and(|t| !t.state.is_terminal());
+            if active && seat.generation == op.generation && seat.role == SeatRole::Lane
+                && !crate::waits::waiting_seat(tx, &seat.id)? { work.push((seat, task, attempt)); }
         }
         Ok(work)
     })?;
@@ -207,6 +212,12 @@ mod tests {
             tick(tx, "p", T+1300)
         }).unwrap();
         assert!(messages(&mut s, "quiet-lane:p:heat").is_empty());
+        let mut s = world("/missing");
+        s.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.wait_on = Some("T-2".into()); tx.update_task(&task)?;
+            tick(tx, "p", T+1300)
+        }).unwrap();
+        assert!(messages(&mut s, "quiet-lane:p:heat").is_empty(), "declared task waits are not stalled work");
     }
 
     fn observation(s: &mut Store) -> SeatObs {

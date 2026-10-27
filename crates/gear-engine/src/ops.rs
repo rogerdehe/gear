@@ -246,9 +246,6 @@ pub fn execute_intended(
         let ops = tx.ops_in_state(project, OpState::Intended)?;
         let mut prepared = Vec::new();
         for op in ops {
-            if op.kind == OpKind::Deliver && tx.get_meta(&crate::quiet::compact_key(&op.seat))?.is_some_and(|s| !s.is_empty()) {
-                continue; // never deliver ahead of the loop guard's compaction
-            }
             if tx.captain_quota_paused(project)? {
                 let seat = tx.get_seat(&op.seat)?;
                 if seat.as_ref().is_some_and(|seat| seat.role == gear_model::SeatRole::Captain)
@@ -273,7 +270,8 @@ pub fn execute_intended(
             // blocked-seat alert carries the reason to the captain (T-57).
             let item = match item {
                 Prepared::Run { id, .. }
-                    if op.kind == OpKind::Deliver && crate::blocked::holding(tx, &op.seat)? =>
+                    if op.kind == OpKind::Deliver && (crate::blocked::holding(tx, &op.seat)?
+                        || tx.get_meta(&crate::quiet::compact_key(&op.seat))?.is_some_and(|s| !s.is_empty())) =>
                 {
                     Prepared::Wait { id }
                 }
