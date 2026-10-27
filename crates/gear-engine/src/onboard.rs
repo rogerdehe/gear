@@ -257,7 +257,13 @@ pub fn onboard_queued(
             let resuming = seat.state == SeatState::Starting
                 && (crate::switch::pending(store, &seat.id)?.is_some()
                     || crate::start::pending(store, &seat.id)?.is_some());
-            if seat.state != SeatState::Queued && !resuming {
+            let rebound = seat.state == SeatState::Missing
+                && store.read(|tx| crate::rebind::ready_to_onboard(tx, &seat.id))?;
+            if seat.state == SeatState::Queued && store.read(|tx| {
+                Ok(tx.get_meta(&format!("lane-rebind-applied:{}", seat.id))?.is_some_and(|s| !s.is_empty())
+                    && !crate::rebind::ready_to_onboard(tx, &seat.id)?)
+            })? { continue; }
+            if seat.state != SeatState::Queued && !resuming && !rebound {
                 continue;
             }
             // A lane the snapshot's config does not name is not parked: the
@@ -375,7 +381,8 @@ fn onboard_seat(
     //    b. by its home branch (a lane whose checkout is still there);
     //    c. only a lane that has neither gets a new worktree.
     let recorded = store
-        .read(|tx| tx.get_meta(&worktree_path_key(&seat.id)))
+        .read(|tx| Ok(tx.get_meta(&worktree_repo_path_key(&seat.id, &worktree.repo))?
+            .filter(|path| !path.is_empty()).or(tx.get_meta(&worktree_path_key(&seat.id))?)))
         .map_err(|e| format!("worktree path: {}", e.detail))?
         .filter(|path| !path.is_empty());
     let by_path = match recorded.as_deref() {
@@ -409,7 +416,10 @@ fn onboard_seat(
     // The worktree's path is kept: a fallback to another CLI may have to trust
     // it (grok asks before its first start in a directory, T-32).
     store
-        .write(|tx| tx.set_meta(&worktree_path_key(&seat.id), &created.path))
+        .write(|tx| {
+            tx.set_meta(&worktree_path_key(&seat.id), &created.path)?;
+            tx.set_meta(&worktree_repo_path_key(&seat.id, &worktree.repo), &created.path)
+        })
         .map_err(|e| format!("worktree path: {}", e.detail))?;
 
     // 3b. the pane must be a shell. A seat retried while its agent still runs
@@ -733,6 +743,10 @@ fn resume_start(
 /// no field for it).
 pub(crate) fn worktree_path_key(seat: &str) -> String {
     format!("engine.worktree_path.{seat}")
+}
+
+pub(crate) fn worktree_repo_path_key(seat: &str, repo: &str) -> String {
+    format!("engine.worktree_path_repo.{seat}:{repo}")
 }
 
 /// Park a seat in NeedsCheck with the reason. It is never retried
