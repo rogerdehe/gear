@@ -7,11 +7,36 @@ use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
+/// What the terminal sends the board: a key or a click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Event {
+    /// A key press.
+    Key(char),
+    /// The arrow up.
+    Up,
+    /// The arrow down.
+    Down,
+    /// The arrow left.
+    Left,
+    /// The arrow right.
+    Right,
+    /// The shift-tab (the tab before).
+    BackTab,
+    /// A click (the SGR mouse): the button (0 = the left one) and the
+    /// position, counted from 1.
+    Mouse { button: u8, x: u16, y: u16 },
+}
+
 /// Where the board's key presses come from. The real one is the terminal; a
 /// test feeds its own.
 pub trait Keys {
-    /// The next key press, waiting up to `timeout`; `None` on timeout.
-    fn next_key(&mut self, timeout: Duration) -> Option<char>;
+    /// The next event, waiting up to `timeout`; `None` on timeout.
+    fn next_event(&mut self, timeout: Duration) -> Option<Event>;
+
+    /// The size of the screen the board draws on: the columns and the rows.
+    ///
+    /// The terminal knows it; a test says how big its screen is.
+    fn size(&self) -> (usize, usize);
 }
 
 /// Is the board running on a terminal? Without one the board is printed once
@@ -44,10 +69,8 @@ impl Terminal {
 }
 
 impl Keys for Terminal {
-    fn next_key(&mut self, timeout: Duration) -> Option<char> {
-        if self.saved.is_none() {
-            return None;
-        }
+    fn next_event(&mut self, timeout: Duration) -> Option<Event> {
+        self.saved?;
         let mut fds = libc::pollfd { fd: self.stdin, events: libc::POLLIN, revents: 0 };
         let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
         // SAFETY: `fds` is one pollfd we own; the call only waits.
@@ -61,9 +84,87 @@ impl Keys for Terminal {
         if read != 1 {
             return None;
         }
-        // One byte is one key for everything the board listens for.
-        Some(byte[0] as char)
+        if byte[0] != 0x1b {
+            // One byte is one key for everything the board listens for.
+            return Some(Event::Key(byte[0] as char));
+        }
+        // An escape: the arrows, the shift-tab and the mouse.
+        let rest = self.read_sequence()?;
+        match rest.as_bytes().first() {
+            Some(b'[') => match rest.as_bytes().get(1) {
+                Some(b'A') => Some(Event::Up),
+                Some(b'B') => Some(Event::Down),
+                Some(b'C') => Some(Event::Right),
+                Some(b'D') => Some(Event::Left),
+                Some(b'Z') => Some(Event::BackTab),
+                Some(b'<') => mouse_event(&rest),
+                _ => Some(Event::Key('\u{1b}')),
+            },
+            _ => Some(Event::Key('\u{1b}')),
+        }
     }
+
+    fn size(&self) -> (usize, usize) {
+        terminal_size(self.stdin)
+    }
+}
+
+/// The size of a terminal: the columns and the rows.
+///
+/// The default (120 columns, 40 rows) is used when the terminal does not say:
+/// a pipe has no size, and the board still has to draw.
+pub fn terminal_size(fd: RawFd) -> (usize, usize) {
+    let mut window: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `window` is a winsize to fill in; the ioctl only writes it.
+    let ok = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut window) };
+    if ok != 0 || window.ws_col == 0 || window.ws_row == 0 {
+        return (DEFAULT_WIDTH, DEFAULT_ROWS);
+    }
+    (window.ws_col as usize, window.ws_row as usize)
+}
+
+/// The size the board falls back to when the terminal does not say.
+pub const DEFAULT_WIDTH: usize = 120;
+/// The size the board falls back to when the terminal does not say.
+pub const DEFAULT_ROWS: usize = 40;
+
+impl Terminal {
+    /// Read the rest of an escape sequence: what follows the escape byte.
+    fn read_sequence(&mut self) -> Option<String> {
+        let mut out = String::new();
+        // A sequence arrives at once; a few bytes are enough for the arrows
+        // and for the mouse.
+        for _ in 0..32 {
+            let mut byte = [0u8; 1];
+            // SAFETY: the buffer is one byte long and the fd is in raw mode.
+            let read = unsafe { libc::read(self.stdin, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+            if read != 1 {
+                break;
+            }
+            out.push(byte[0] as char);
+            // The mouse sequence ends with M or m.
+            if byte[0] == b'M' || byte[0] == b'm' {
+                break;
+            }
+            // The arrows and the shift-tab end after their last letter.
+            if matches!(out.as_bytes(), [b'[', b'A'] | [b'[', b'B'] | [b'[', b'C'] | [b'[', b'D'] | [b'[', b'Z']) {
+                break;
+            }
+        }
+        Some(out)
+    }
+}
+
+/// The click of an SGR mouse sequence: `[<{button};{x};{y}M` (the escape
+/// byte is read before).
+fn mouse_event(sequence: &str) -> Option<Event> {
+    let rest = sequence.strip_prefix("[<")?;
+    let rest = rest.strip_suffix('M').or_else(|| rest.strip_suffix('m'))?;
+    let mut parts = rest.split(';');
+    let button: u8 = parts.next()?.parse().ok()?;
+    let x: u16 = parts.next()?.parse().ok()?;
+    let y: u16 = parts.next()?.parse().ok()?;
+    Some(Event::Mouse { button, x, y })
 }
 
 impl Drop for Terminal {
@@ -76,21 +177,24 @@ impl Drop for Terminal {
 }
 
 /// Take over the screen: the alternate buffer keeps the board out of the
-/// terminal's scrollback, and the cursor stays out of the way.
+/// terminal's scrollback, the cursor stays out of the way, and the mouse
+/// reports its clicks (the SGR mode, which carries the position).
 pub fn enter(out: &mut dyn Write) -> std::io::Result<()> {
-    write!(out, "\x1b[?1049h\x1b[?25l")?;
+    write!(out, "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")?;
     out.flush()
 }
 
 /// Give the terminal back.
 pub fn leave(out: &mut dyn Write) -> std::io::Result<()> {
-    write!(out, "\x1b[?25h\x1b[?1049l")?;
+    // The mouse reporting is switched off again: a terminal that keeps it on
+    // sends its clicks into the user's shell.
+    write!(out, "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l")?;
     out.flush()
 }
 
 /// Clear the screen and draw `text` at the top.
 pub fn draw(out: &mut dyn Write, text: &str) -> std::io::Result<()> {
-    write!(out, "\x1b[H\x1b[2J{text}\n")?;
+    writeln!(out, "\x1b[H\x1b[2J{text}")?;
     out.flush()
 }
 
