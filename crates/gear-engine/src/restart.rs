@@ -532,6 +532,8 @@ fn start(
         args.extend(model_args);
     }}
     if let Some(session) = &plan.resume {
+        // The model gate must address the resumed session even before finish.
+        store.write(|tx| tx.set_binding_session_ref(&seat.id, plan.generation, session))?;
         let Some(resume_args) = profile.resume_args.as_ref() else {
             flag(store, seat, &format!("the profile {profile_name:?} cannot resume its open session"), now)?;
             clear_pending(store, &seat.id)?;
@@ -550,7 +552,7 @@ fn start(
             return Ok(false);
         }
     }
-    if plan.cli == "opencode" && !plan.model.is_empty() {
+    if plan.cli == "opencode" && !plan.model.is_empty() && plan.resume.is_none() {
         if let Some(path) = worktree_path(store, seat)? {
             let project = store.read(|tx| tx.get_project(&seat.project))?.expect("project exists");
             let config = gear_app::config::parse(&project.config_toml)?;
@@ -709,7 +711,8 @@ fn finish(
                 }).to_string())?;
                 if round.role != "review" { tx.set_attempt_action(project, &round.task, round.attempt, "fresh")?; }
                 if let Some(session) = session {
-                    tx.add_round_session(&gear_store::RoundKey {project:round.project,task:round.task,attempt:round.attempt,role:round.role}, session)?;
+                    let key = gear_store::RoundKey {project:round.project,task:round.task,attempt:round.attempt,role:round.role};
+                    crate::rounds::add_session(tx, &key, session, &plan.cli)?;
                 }
             } else {
                 tx.set_meta(&format!("engine.session_fresh.{}", seat.id), &plan.generation.to_string())?;
@@ -1200,4 +1203,75 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert_eq!(crate::session::prepare_lane(&mut store,&mut herdr,&cfg,&seat,"T-1",1,T+3).unwrap(),crate::session::Prep::Ready);
         assert!(!herdr.calls[before..].iter().any(|c|matches!(c,Call::Prompt {..}|Call::SendKeys {..}|Call::AgentStart {..}|Call::PaneType {..})), "the completed resume is not repeated");
     }
+    #[test]
+    fn opencode_resume_reuses_session_and_switches_its_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), true);
+        change(&mut store, "opencode", "provider/new");
+        store.write(|tx| {
+            let mut p = tx.get_project("p")?.unwrap();
+            p.config_toml.push_str("\n[models.switch.\"provider/new\"]\npicker='New Provider'\nbar='New Provider'\n");
+            tx.update_project(&p)
+        }).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let mut plan = Plan { model:"provider/new".into(), cli:"opencode".into(), args:vec![], generation:0,
+            phase:Phase::Start, waited:0, old_cli:"opencode".into(), resume:Some("old-session".into()),
+            resume_required:true, profile_name:Some("opencode".into()) };
+        herdr.exit_agent(PANE);
+        assert!(start(&mut store, &mut herdr, &cfg, &cfg.profiles, &seat, &mut plan, T+1).unwrap());
+        let args = herdr.calls.iter().find_map(|c| if let Call::AgentStart { args, .. } = c { Some(args) } else { None }).unwrap();
+        assert_eq!(args.iter().filter(|s| s.as_str() == "old-session").count(), 1, "{args:?}");
+        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::OpenCodeApi { args } if args[0] == "session.create")));
+        assert_eq!(store.read(|tx| tx.get_binding("p:heat", plan.generation)).unwrap().unwrap().session_ref.as_deref(), Some("old-session"));
+        let catalog = serde_json::json!({"data":[{"providerID":"provider","id":"new"}]});
+        herdr.api_replies.extend([Ok(catalog.clone()), Ok(serde_json::json!({"data":{"model":{"providerID":"provider","id":"old"}}})), Ok(serde_json::json!({}))]);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert!(finish(&mut store, &mut herdr, &cfg.profiles, "p", &seat, &plan, T+2).unwrap().is_none());
+        assert!(herdr.calls.iter().any(|c| matches!(c, Call::OpenCodeApi { args } if args[0] == "session.switchModel" && args[2] == "sessionID=old-session")));
+        herdr.api_replies.extend([Ok(catalog), Ok(serde_json::json!({"data":{"model":{"providerID":"provider","id":"new"}}}))]);
+        herdr.set_screen(PANE, "Build auto · New Provider");
+        assert!(finish(&mut store, &mut herdr, &cfg.profiles, "p", &seat, &plan, T+3).unwrap().is_some());
+        let before = herdr.calls.len();
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert_eq!(crate::session::prepare_lane(&mut store,&mut herdr,&cfg,&seat,"T-1",1,T+4).unwrap(), crate::session::Prep::Ready);
+        assert!(!herdr.calls[before..].iter().any(|c| matches!(c, Call::AgentStart { .. } | Call::Prompt { .. })));
+    }
+
+    #[test]
+    fn cross_cli_round_counts_each_sessions_own_log_and_missing_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let pi = dir.path().join("pi.jsonl");
+        let codex = dir.path().join("codex.jsonl");
+        let pi_record = serde_json::json!({"type":"message","timestamp":T+1,"message":{"role":"assistant","usage":{"input":10,"cost":{"total":0.25}}}});
+        let codex_record = serde_json::json!({"type":"event_msg","timestamp":T+2,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":0,"output_tokens":0}}}});
+        std::fs::write(&pi, format!("{pi_record}\n")).unwrap();
+        let context = serde_json::json!({"type":"turn_context","timestamp":T+1,"payload":{"model":"new-model"}});
+        std::fs::write(&codex, format!("{context}\n{codex_record}\n")).unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        let key = RoundKey { project:"p".into(), task:"T-1".into(), attempt:1, role:"dev".into() };
+        store.write(|tx| {
+            tx.set_binding_session_ref("p:heat", 1, pi.to_str().unwrap())?;
+            tx.add_round_session(&key, pi.to_str().unwrap())?;
+            let mut p = tx.get_project("p")?.unwrap();
+            p.config_toml.push_str("\n[prices.\"new-model\"]\ninput=2\noutput=0\ncache_read=0\ncache_write=0\n");
+            tx.update_project(&p)
+        }).unwrap();
+        herdr.exit_agent(PANE);
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let mut plan = Plan { model:"new-model".into(), cli:"codex".into(), args:vec![], generation:0,
+            phase:Phase::Start, waited:0, old_cli:"pi".into(), resume:None, resume_required:false, profile_name:Some("codex".into()) };
+        assert!(start(&mut store, &mut herdr, &cfg, &cfg.profiles, &seat, &mut plan, T+3).unwrap());
+        herdr.set_agent_session(PANE, codex.to_str().unwrap());
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        assert!(finish(&mut store, &mut herdr, &cfg.profiles, "p", &seat, &plan, T+4).unwrap().is_some());
+        store.write(|tx| tx.close_round(&key, T+10)).unwrap();
+        let round = store.read(|tx| tx.rounds_of_project("p")).unwrap().remove(0);
+        let tokens = crate::rounds::count_round(&mut store, &cfg, &round, T+20).unwrap();
+        assert_eq!(tokens.input, Some(30));
+        assert!((tokens.cost_usd.unwrap() - 0.25004).abs() < 1e-10);
+        assert_eq!(tokens.cost_source, "prices");
+        std::fs::remove_file(codex).unwrap();
+        assert_eq!(crate::rounds::count_round(&mut store, &cfg, &round, T+20).unwrap().input, None);
+    }
+
 }
