@@ -20,6 +20,7 @@ pub mod identity;
 pub mod kickoff;
 pub mod mail;
 pub mod plan;
+pub mod queue;
 pub mod review;
 pub mod seats;
 pub mod standard;
@@ -27,6 +28,7 @@ pub mod skill;
 pub mod station;
 pub mod tasks;
 pub mod time;
+pub mod voyage;
 
 use gear_model::GearCtx;
 
