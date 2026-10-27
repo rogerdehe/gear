@@ -814,6 +814,67 @@ profile = "codex"
             .unwrap();
     }
 
+    /// The reviewer works on attempt 2 of `T-1`, and the verdict of attempt 1
+    /// is already in: the seat judged the first attempt, the lane reworked,
+    /// and the seat reviews the second attempt now.
+    fn reviewer_of_the_second_attempt(store: &mut Store, seat: &SeatRow) {
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("def5678".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 10,
+                    updated: T0 + 10,
+                })?;
+                // The packet of the seat names the attempt it judges now.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(2),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "the packet of attempt 2" }),
+                    created: T0 + 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The verdict of attempt 2 of `T-1`, handed in by `seat`.
+    fn judge_attempt_two(store: &mut Store, seat: &str) {
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 2,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: seat.into(),
+                    created: T0 + 20,
+                })
+            })
+            .unwrap();
+    }
+
     /// A project with the lane `heat` on `pane`, the seat in `state`, and one
     /// task `T-1` the lane may work on.
     fn lane_world(pane: &str, state: SeatState) -> (Store, SeatRow) {
@@ -1375,6 +1436,94 @@ profile = "codex"
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
         let binding = store.read(|tx| tx.get_binding(&seat.id, 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Active, "its agent is still there");
+    }
+
+    /// F1 of the T-143 review: the verdict of an earlier attempt does not
+    /// end the review that runs now. A reviewer that works on attempt 2 of a
+    /// task whose attempt 1 was judged stays bound, Active and its pane open
+    /// until the verdict of attempt 2 is in.
+    #[test]
+    fn an_earlier_verdict_does_not_end_the_review_that_runs_now() {
+        let (mut store, seat) = world_with_a_working_lane();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        // The first attempt was judged (it failed), the lane reworked, and the
+        // seat reviews the second attempt now.
+        judge(&mut store, &seat.id);
+        reviewer_of_the_second_attempt(&mut store, &seat);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
+
+        let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(row.state, SeatState::Active, "the review of attempt 2 goes on");
+        assert_eq!(row.task_id.as_deref(), Some("T-1"), "the seat keeps its job");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+
+        // The verdict of attempt 2 ends the job: the reviewer waits for the
+        // next one.
+        judge_attempt_two(&mut store, &seat.id);
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(row.state, SeatState::Standby, "the reviewer waits for the next review");
+        assert_eq!(row.task_id, None, "its job binding ended");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
+    }
+
+    /// F1 of the T-143 review: a reviewer that judged attempt 1 and whose
+    /// lane has already started attempt 2 is done — the verdict of attempt 1
+    /// is the verdict of its job, even though a newer attempt exists.
+    #[test]
+    fn the_verdict_of_the_job_ends_it_even_when_a_newer_attempt_exists() {
+        let (mut store, seat) = world_with_a_working_lane();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        // The seat judged attempt 1 (its packet names attempt 1) and the
+        // writer has already started attempt 2.
+        judge(&mut store, &seat.id);
+        store
+            .write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "the packet of attempt 1" }),
+                    created: T0,
+                })?;
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 10,
+                    updated: T0 + 10,
+                })
+            })
+            .unwrap();
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
+
+        let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
+        assert_eq!(row.state, SeatState::Standby, "its job is done");
+        assert_eq!(row.task_id, None, "its job binding ended");
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
 
     /// T-143 (design §3.6): with one lane working (W = 1) and two Standby

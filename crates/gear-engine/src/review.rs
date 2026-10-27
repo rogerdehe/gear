@@ -208,22 +208,37 @@ pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearR
     Ok(standby)
 }
 
-/// Whether this reviewer handed in a verdict for the task it works on: a
-/// verdict of that task that this seat wrote.
+/// Whether this reviewer handed in the verdict of the job it works on.
 ///
-/// The verdict of the **attempt** it judged counts, not the verdict of a
-/// later attempt: a rework (a fail verdict) is the reviewer's own job, done.
+/// The job is the attempt its own review packet named — the seat's last
+/// `Deliver` op — and the verdict must be that attempt's: an earlier verdict
+/// of the same task does not end the review that runs now. A rework is a new
+/// attempt of the same task, and it is judged by its own verdict (F1 of the
+/// T-143 review).
+///
+/// A seat with no packet (a legacy seat, a seat of an older engine) has no
+/// job to name: the latest attempt of the task is its job then.
 fn handed_a_verdict(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
     store.read(|tx| {
-        for attempt in tx.attempts_of_task(project, task)? {
-            if tx
-                .get_review_verdict(project, task, attempt.n)?
-                .is_some_and(|verdict| verdict.by_seat == seat.id)
-            {
-                return Ok(true);
+        let attempt = match tx.last_op(&seat.id, OpKind::Deliver)? {
+            // The packet of the job: it must be about this seat's task.
+            Some(op) => {
+                if op.task.as_deref() != Some(task) {
+                    return Ok(false);
+                }
+                op.attempt
             }
-        }
-        Ok(false)
+            // A seat with no packet: the latest attempt of the task is its job.
+            None => tx
+                .attempts_of_task(project, task)?
+                .into_iter()
+                .last()
+                .map(|attempt| attempt.n),
+        };
+        let Some(attempt) = attempt else { return Ok(false) };
+        Ok(tx
+            .get_review_verdict(project, task, attempt)?
+            .is_some_and(|verdict| verdict.by_seat == seat.id))
     })
 }
 
