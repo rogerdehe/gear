@@ -16,7 +16,7 @@ fn eligible(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
         || crate::waits::waiting_seat(tx, &seat.id)? {
         return Ok(None);
     }
-    Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.state == AttemptState::Started && a.generation == seat.generation))
+    Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.state == AttemptState::Started))
 }
 
 // A loop can also occur while an assigned delivery or a stopped attempt is
@@ -25,7 +25,7 @@ fn loop_attempt(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
     if seat.role != SeatRole::Lane || !matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Retiring)
         || tx.seats_in_backoff(&seat.project)?.iter().any(|s| s == &seat.id)
         || crate::waits::waiting_seat(tx, &seat.id)? { return Ok(None) }
-    Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().find(|a| a.generation == seat.generation))
+    Ok(tx.in_progress_attempts_of_seat(&seat.id)?.into_iter().next())
 }
 
 fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(String, Ts)> {
@@ -226,6 +226,44 @@ mod tests {
     }
     fn set_mtime(path: &std::path::Path, ts: i64) {
         std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(ts as u64))).unwrap();
+    }
+
+    #[test]
+    fn resumed_attempt_is_monitored_after_seat_generation_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(&path, "session").unwrap();
+        set_mtime(&path, T+100);
+        let path = path.to_str().unwrap();
+        let restarted = || {
+            let mut s = world(dir.path().to_str().unwrap());
+            s.write(|tx| {
+                let mut binding = tx.get_binding("p:heat", 1)?.unwrap();
+                binding.generation = 2;
+                binding.session_ref = Some(path.into());
+                tx.set_seat_generation("p:heat", 2)?;
+                tx.insert_binding(&binding)?;
+                assert_eq!(tx.get_attempt("p", "T-1", 1)?.unwrap().generation, 1);
+                Ok(())
+            }).unwrap();
+            s
+        };
+        let mut s = restarted();
+        s.write(|tx| tick(tx, "p", T+1260)).unwrap();
+        s.write(|tx| tick(tx, "p", T+1261)).unwrap();
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
+
+        let mut s = restarted();
+        let mut h = FakeHerdr::new();
+        h.add_agent_named(PANE, "pi", AgentStatus::Working, "p-heat");
+        h.set_agent_session(PANE, path);
+        let obs = observation(&mut s);
+        loops(&mut s, &mut h, "p", &[obs.clone()], T+760).unwrap();
+        loops(&mut s, &mut h, "p", &[obs], T+761).unwrap();
+        assert_eq!(h.calls.iter().filter(|c| matches!(c, Call::SendKeys {pane, keys} if pane == PANE && keys == &["esc"])).count(), 1);
+        assert_eq!(messages(&mut s, "quiet-lane:p:heat").len(), 1);
+        assert_eq!(messages(&mut s, "quiet:p:heat").len(), 1);
     }
 
     #[test]
