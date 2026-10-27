@@ -311,9 +311,11 @@ fn a_stuck_checkout_is_not_restarted_by_a_recovered_seat() {
     let mut store = handed_in_world(2);
     let mut herdr = FakeHerdr::new();
 
-    // A failed direct Git operation parks the seat and records the failure.
+    // Three failed Git operations exhaust the attempt's retry budget.
     crate::REVIEW_GIT_FAIL.with(|fail| fail.set(true));
     start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 11).unwrap();
+    start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
     crate::REVIEW_GIT_FAIL.with(|fail| fail.set(false));
     let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
     assert_eq!(seat.state, SeatState::Unknown, "{:?}", seat.state_reason);

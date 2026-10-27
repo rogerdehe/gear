@@ -474,7 +474,26 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
     let key = format!("engine.review_tree.{}", seat.id);
     let job = format!("{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo);
     if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(job.as_str()) { return Ok(true) }
-    if !prepare_review_tree(git, store, herdr, &seat.project, repo, path, branch, task, now)? { return Ok(false) }
+    match prepare_review_tree(git, store, herdr, &seat.project, repo, path, branch, task, now) {
+        Ok(true) => {},
+        Ok(false) => return Ok(false),
+        Err(error) => {
+            let count_key = format!("engine.review_checkout_fails.{}.{}.{}", seat.project, task.task, task.attempt);
+            let used = store.write(|tx| {
+                let used = tx.get_meta(&count_key)?.and_then(|n| n.parse::<u32>().ok()).unwrap_or(0) + 1;
+                tx.set_meta(&count_key, &used.to_string())?;
+                Ok(used)
+            })?;
+            if used >= 3 {
+                let reason = format!("review checkout failed {used} times: {}", error.detail);
+                park(store, &seat.id, &reason, now)?;
+                mark_checkout_stuck(store, &seat.project, &task.task, task.attempt, &reason)?;
+                store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
+                tell_captain(store, &seat.project, task, &reason, now)?;
+            }
+            return Ok(false);
+        }
+    }
     store.write(|tx| {
         tx.set_meta(&branch_key(&seat.id, repo), branch)?;
         tx.set_meta(&key, &job)
@@ -819,18 +838,7 @@ fn start_reviewer(
         park(store, &seat.id, "the seat's worktree path is unknown", now)?;
         return Ok(Started::NotYet);
     };
-    match prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now) {
-        Ok(true) => {},
-        Ok(false) => return Ok(Started::NotYet),
-        Err(error) => {
-            let reason = format!("review checkout: {}", error.detail);
-            park(store, &seat.id, &reason, now)?;
-            mark_checkout_stuck(store, &config.project.id, &task.task, task.attempt, &reason)?;
-            store.write(|tx| tx.set_meta(&pending_review_key(&seat.id), ""))?;
-            tell_captain(store, &config.project.id, task, &reason, now)?;
-            return Ok(Started::NotYet);
-        }
-    }
+    if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
 
     let current_seat = store.read(|tx| tx.get_seat(&seat.id))?.ok_or_else(|| GearError::new(ErrorCode::NoTarget, "review seat disappeared"))?;
     if crate::session::prepare_review(store, herdr, cfg, &current_seat, &task.task, task.attempt, now)? != crate::session::Prep::Ready {
@@ -2419,7 +2427,10 @@ review = [
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
         assert!(report.started.is_empty());
         assert!(starts(&herdr).is_empty());
-        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Unknown);
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Starting);
+        REVIEW_GIT_FAIL.with(|fail| fail.set(false));
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(report.started, vec!["p:review-1"]);
     }
 
     #[test]
