@@ -133,8 +133,33 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
             for (pair, conflict) in &conflicts.pairs {
                 let key = format!("{prefix}:pair:{pair}");
                 let files = serde_json::json!(conflict.files).to_string();
-                if tx.get_meta(&format!("{key}:files"))?.as_deref() == Some(&files) { continue; }
-                close(tx, project, &key, "the shared file set changed", now)?;
+                // A pair rings once (T-188): the marker stays, even when the
+                // overlap clears, so a pair that shares one more file later
+                // does not ring the captain again. The file set is kept
+                // current: it is what the captain's item and the board show.
+                let notified = tx.get_meta(&format!("{key}:notified"))?.is_some_and(|value| !value.is_empty())
+                    // An older engine kept the item's id instead of a marker:
+                    // a pair that already has an item is notified too.
+                    || tx.get_meta(&format!("{key}:item"))?.is_some_and(|value| !value.is_empty());
+                tx.set_meta(&format!("{key}:files"), &files)?;
+                if notified {
+                    // The item is the pair's one notification; its text
+                    // follows the files the pair shares now.
+                    let text = format!(
+                        "parallel changes{where_}: {} and {} share files: {files}",
+                        conflict.left, conflict.right
+                    );
+                    if let Some(id) = tx.get_meta(&format!("{key}:item"))? {
+                        if let Some(item) = tx.get_message(project, &id)? {
+                            if item.body != text
+                                && matches!(item.state, MsgState::Open | MsgState::Waiting)
+                            {
+                                tx.update_message_body(project, &id, &text)?;
+                            }
+                        }
+                    }
+                    continue;
+                }
                 let message = tx.insert_message(&NewMessage {
                     meta: None,
                     project: project.into(), thread: format!("parallel:{pair}"), task: None, attempt: None,
@@ -145,6 +170,7 @@ pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
                 })?;
                 tx.set_meta(&format!("{key}:files"), &files)?;
                 tx.set_meta(&format!("{key}:item"), &message.id)?;
+                tx.set_meta(&format!("{key}:notified"), "1")?;
                 opened.push(message.id);
             }
             // An overlap with the integration branch is an information line

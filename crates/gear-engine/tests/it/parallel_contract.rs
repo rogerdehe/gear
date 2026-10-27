@@ -141,6 +141,9 @@ fn hand_in(store: &mut Store, task: &str, seat: &str, n: i64, candidate: &str) {
     })).unwrap();
 }
 
+/// T-188: a pair of tasks rings once — for its lifetime. Another shared file
+/// does not ring the captain again, and an overlap that clears and comes back
+/// does not either: the captain answered "known" once.
 #[test]
 fn overlapping_branches_name_both_tasks_and_the_shared_file_once() {
     let repo = Repo::new();
@@ -158,16 +161,41 @@ fn overlapping_branches_name_both_tasks_and_the_shared_file_once() {
         Some("ordered the work"), None, None, T0+1)).unwrap();
     assert!(scan(&mut store, 600).opened.is_empty());
     assert_eq!(pair_items(&mut store).len(), 1, "acknowledgment cannot repeat the same set");
+
+    // Another shared file: the pair does not ring again (T-188).
     repo.change("heat/t1", "other.rs", "heat");
     repo.change("steady/t2", "other.rs", "steady");
-    assert_eq!(scan(&mut store, 1200).opened.len(), 1);
+    assert!(scan(&mut store, 1200).opened.is_empty(), "a pair rings once");
     let items = pair_items(&mut store);
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 1, "one item for the pair's lifetime: {items:?}");
     assert_eq!(items[0].state, MsgState::Resolved);
-    assert_eq!(items[1].state, MsgState::Open);
-    assert!(items[1].body.contains("other.rs"));
-    assert!(items[1].body.contains(SHARED));
+
+    // The overlap clears and comes back: still no second item.
+    let steady = git(&repo.path, &["rev-parse", "steady/t2"]);
+    git(&repo.path, &["update-ref", "refs/heads/steady/t2", &repo.base]);
     assert!(scan(&mut store, 1800).opened.is_empty());
+    git(&repo.path, &["update-ref", "refs/heads/steady/t2", &steady]);
+    assert!(scan(&mut store, 2400).opened.is_empty(), "the marker stays when the overlap clears");
+    assert_eq!(pair_items(&mut store).len(), 1, "one item for the pair's lifetime");
+
+    // Another pair rings once of its own.
+    repo.branch("steady/t3", SHARED);
+    store.write(|tx| {
+        tx.insert_task(&TaskRow {
+            repo: None, base: None, gate: None, rework_estimate_min: None,
+            project: "p".into(), id: "T-3".into(), rank: 3, state: TaskState::Running,
+            priority: "must".into(), lane: Some("steady".into()), milestone: None, required: false,
+            contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
+            wait_cond: None, rework_note: None, estimate_min: Some(30), issue: None, updated: T0,
+        })
+    }).unwrap();
+    let checked = scan(&mut store, 3000);
+    assert_eq!(checked.opened.len(), 1, "another pair rings once: {checked:?}");
+    let items = store
+        .read(|tx| tx.thread_messages("p", "parallel:tasks:T-1:T-3"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
 }
 
 #[test]
@@ -255,7 +283,7 @@ fn integration_changes_since_the_branch_base_count_too() {
 }
 
 #[test]
-fn cleared_overlaps_resolve_and_can_report_a_later_recurrence() {
+fn cleared_overlaps_resolve_and_the_pair_does_not_ring_again() {
     let repo = Repo::new();
     repo.branch("heat/t1", SHARED);
     repo.branch("steady/t2", SHARED);
@@ -265,9 +293,10 @@ fn cleared_overlaps_resolve_and_can_report_a_later_recurrence() {
     git(&repo.path, &["update-ref", "refs/heads/steady/t2", &repo.base]);
     assert!(scan(&mut store, 600).opened.is_empty());
     assert_eq!(pair_items(&mut store)[0].state, MsgState::Resolved);
+    // The overlap comes back: the pair has already rung (T-188).
     git(&repo.path, &["update-ref", "refs/heads/steady/t2", &steady]);
-    assert_eq!(scan(&mut store, 1200).opened.len(), 1, "empty-to-shared is a set change");
-    assert_eq!(pair_items(&mut store).len(), 2);
+    assert!(scan(&mut store, 1200).opened.is_empty(), "a pair rings once for its lifetime");
+    assert_eq!(pair_items(&mut store).len(), 1);
 }
 
 #[test]
@@ -306,7 +335,7 @@ fn remote_tracking_task_refs_work_and_pair_state_survives_reopening() {
 }
 
 #[test]
-fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
+fn a_pair_rings_once_through_the_engine() {
     let repo = Repo::new();
     repo.branch("heat/t1", SHARED);
     repo.branch("steady/t2", SHARED);
@@ -328,13 +357,14 @@ fn fresh_file_sets_get_fresh_ids_and_ring_through_the_engine() {
     assert!(tick(&mut store, &mut herdr, &cfg, T0+900).unwrap().parallel.is_empty());
     assert!(tick(&mut store, &mut herdr, &cfg, T0+1200).unwrap().parallel.is_empty());
     assert_eq!(herdr.prompts_to("w1:p1").len(), 1, "unchanged overlap must not get a stale-item reminder");
+    // Another shared file: the pair does not ring again (T-188).
     repo.change("heat/t1", "third.rs", "heat third");
     repo.change("steady/t2", "third.rs", "steady third");
-    assert_eq!(tick(&mut store, &mut herdr, &cfg, T0+1800).unwrap().parallel.len(), 1);
-    assert_eq!(herdr.prompts_to("w1:p1").len(), 2, "a changed set rings despite a view of the previous item");
+    assert!(tick(&mut store, &mut herdr, &cfg, T0+1800).unwrap().parallel.is_empty());
+    assert_eq!(herdr.prompts_to("w1:p1").len(), 1, "a pair rings once for its lifetime");
     let items = pair_items(&mut store);
-    assert_eq!(items[0].state, MsgState::Resolved);
-    assert_eq!(items[1].state, MsgState::Open);
+    assert_eq!(items.len(), 1, "one item for the pair: {items:?}");
+    assert_eq!(items[0].state, MsgState::Open);
 }
 
 /// A project with a child repo (T-53): the lane "heat" works in the root,
@@ -533,10 +563,10 @@ fn a_task_that_overlaps_the_integration_branch_makes_no_captain_item() {
     assert!(integration_info(&mut store, "T-1").unwrap_or_default().is_empty());
 }
 
-/// T-188: two tasks that share only test files do not conflict: a test that
+/// T-188: two tasks that share only a test file do not conflict: a test that
 /// is written twice is not a merge conflict.
 #[test]
-fn two_tasks_that_share_only_test_files_make_no_item() {
+fn two_tasks_that_share_only_a_test_file_make_no_item() {
     let repo = Repo::new();
     repo.branch("heat/t1", TEST_FILE);
     repo.branch("steady/t2", TEST_FILE);
@@ -545,13 +575,19 @@ fn two_tasks_that_share_only_test_files_make_no_item() {
     assert!(result.problems.is_empty());
     assert!(result.opened.is_empty(), "no item for a shared test file: {result:?}");
     assert!(pair_items(&mut store).is_empty());
+}
 
-    // A contract file is a test file by another name.
+/// T-188: a contract file is a test file by another name: it does not count
+/// either.
+#[test]
+fn two_tasks_that_share_only_a_contract_file_make_no_item() {
     let repo = Repo::new();
     repo.branch("heat/t1", CONTRACT_FILE);
     repo.branch("steady/t2", CONTRACT_FILE);
     let mut store = repo.store();
-    assert!(scan(&mut store, 0).opened.is_empty(), "a contract file does not count");
+    let result = scan(&mut store, 0);
+    assert!(result.problems.is_empty());
+    assert!(result.opened.is_empty(), "a contract file does not count: {result:?}");
     assert!(pair_items(&mut store).is_empty());
 }
 
