@@ -127,6 +127,10 @@ impl Keys for Presses {
         }
         Some(Event::Key(self.0.remove(0)))
     }
+
+    fn size(&self) -> (usize, usize) {
+        (120, 40)
+    }
 }
 
 #[test]

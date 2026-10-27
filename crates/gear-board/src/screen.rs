@@ -32,6 +32,11 @@ pub enum Event {
 pub trait Keys {
     /// The next event, waiting up to `timeout`; `None` on timeout.
     fn next_event(&mut self, timeout: Duration) -> Option<Event>;
+
+    /// The size of the screen the board draws on: the columns and the rows.
+    ///
+    /// The terminal knows it; a test says how big its screen is.
+    fn size(&self) -> (usize, usize);
 }
 
 /// Is the board running on a terminal? Without one the board is printed once
@@ -98,7 +103,30 @@ impl Keys for Terminal {
             _ => Some(Event::Key('\u{1b}')),
         }
     }
+
+    fn size(&self) -> (usize, usize) {
+        terminal_size(self.stdin)
+    }
 }
+
+/// The size of a terminal: the columns and the rows.
+///
+/// The default (120 columns, 40 rows) is used when the terminal does not say:
+/// a pipe has no size, and the board still has to draw.
+pub fn terminal_size(fd: RawFd) -> (usize, usize) {
+    let mut window: libc::winsize = unsafe { std::mem::zeroed() };
+    // SAFETY: `window` is a winsize to fill in; the ioctl only writes it.
+    let ok = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut window) };
+    if ok != 0 || window.ws_col == 0 || window.ws_row == 0 {
+        return (DEFAULT_WIDTH, DEFAULT_ROWS);
+    }
+    (window.ws_col as usize, window.ws_row as usize)
+}
+
+/// The size the board falls back to when the terminal does not say.
+pub const DEFAULT_WIDTH: usize = 120;
+/// The size the board falls back to when the terminal does not say.
+pub const DEFAULT_ROWS: usize = 40;
 
 impl Terminal {
     /// Read the rest of an escape sequence: what follows the escape byte.
@@ -158,7 +186,9 @@ pub fn enter(out: &mut dyn Write) -> std::io::Result<()> {
 
 /// Give the terminal back.
 pub fn leave(out: &mut dyn Write) -> std::io::Result<()> {
-    write!(out, "\x1b[?1006l\x1b[?1000h\x1b[?25h\x1b[?1049l")?;
+    // The mouse reporting is switched off again: a terminal that keeps it on
+    // sends its clicks into the user's shell.
+    write!(out, "\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l")?;
     out.flush()
 }
 

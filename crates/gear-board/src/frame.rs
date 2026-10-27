@@ -3,6 +3,10 @@
 //!
 //! The prototype of `ops/plan/m4-board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
+//!
+//! The frame is drawn on a **canvas** of the size of the terminal: every row
+//! is cut at the right edge, the footer keeps the last row, and the panel is
+//! drawn over the view (as the prototype draws its window over the board).
 
 use crate::graph;
 use crate::idle::IdleReason;
@@ -24,10 +28,6 @@ pub enum Tab {
 }
 
 impl Tab {
-    /// The label of the tab on the tab row.
-    pub fn label(self) -> String {
-        tab_label(self)
-    }
     /// The number of the tab (the keys 1 to 5).
     pub fn number(self) -> u8 {
         match self {
@@ -48,6 +48,11 @@ impl Tab {
             Tab::Decisions => "Decisions",
             Tab::Tokens => "Time & tokens",
         }
+    }
+
+    /// The label of the tab on the tab row: ` 1 Now `.
+    pub fn label(self) -> String {
+        format!(" {} {} ", self.number(), self.title())
     }
 
     /// The tab of a number (the keys 1 to 5).
@@ -90,31 +95,160 @@ impl Tab {
     }
 }
 
-/// The row of the tab row: a click on it picks a tab.
+/// The row of the tab row (counted from zero).
 pub const TAB_ROW: usize = 3;
-/// The first row of a view: a click on it picks a row.
+/// The row of the view's heading (counted from zero). The first row the user
+/// can pick is the one after it.
 pub const VIEW_ROW: usize = 5;
-/// The width the frame is drawn for.
-pub const WIDTH: usize = 120;
+/// The first row the user can pick (counted from zero).
+pub const FIRST_ROW: usize = VIEW_ROW + 1;
 
-/// The whole screen: the frame, the view and the panel (when one is open).
-pub fn frame(board: &Board, tab: Tab, selected: usize, panel: Option<&[String]>) -> String {
-    let mut lines = header(board);
-    lines.push(String::new());
-    lines.extend(view(board, tab, selected));
-    lines.push(String::new());
-    lines.push(FOOTER.to_string());
-    if let Some(panel) = panel {
-        draw_panel(&mut lines, panel);
-    }
-    lines.join("\n")
+/// The footer of the board: the keys.
+///
+/// Short enough for an 80 column terminal: a row that is cut at the edge
+/// hides the end of it, and the end says how to leave.
+pub const FOOTER: &str = "←→ / Tab / 1-5 / click: views · ↑↓ select · Enter: details · q quit";
+
+/// A screen of characters: the frame, the view and the panel are drawn on it.
+pub struct Canvas {
+    width: usize,
+    height: usize,
+    cells: Vec<char>,
+    /// The parts of the screen the terminal shows in reverse video (the tab
+    /// that is open).
+    reversed: Vec<(usize, usize, usize)>,
 }
 
-/// The header of the board: the title, the time bar, the tasks bar and the
-/// tabs.
-fn header(board: &Board) -> Vec<String> {
+impl Canvas {
+    /// A canvas of the size of the terminal.
+    pub fn new(width: usize, height: usize) -> Canvas {
+        let width = width.max(20);
+        let height = height.max(8);
+        Canvas {
+            width,
+            height,
+            cells: vec![' '; width * height],
+            reversed: Vec::new(),
+        }
+    }
+
+    /// Write a text at a column and a row; the text is cut at the edge.
+    pub fn put(&mut self, x: usize, y: usize, text: &str) {
+        if y >= self.height {
+            return;
+        }
+        for (offset, character) in text.chars().enumerate() {
+            let column = x + offset;
+            if column >= self.width {
+                break;
+            }
+            self.cells[y * self.width + column] = character;
+        }
+    }
+
+    /// Show a part of the screen in reverse video (the tab that is open).
+    pub fn reverse(&mut self, y: usize, x: usize, len: usize) {
+        if y < self.height && x < self.width {
+            self.reversed.push((y, x, len.min(self.width - x)));
+        }
+    }
+
+    /// The screen as text: the rows, each cut at the edge.
+    ///
+    /// The parts in reverse video (the tab that is open) are wrapped in the
+    /// terminal's reverse video, as the prototype shows them.
+    pub fn text(&self) -> String {
+        let mut rows: Vec<String> = Vec::with_capacity(self.height);
+        for row in 0..self.height {
+            rows.push(self.row_text(row));
+        }
+        rows.join("\n")
+    }
+
+    /// One row of the screen.
+    fn row_text(&self, row: usize) -> String {
+        let cells = &self.cells[row * self.width..(row + 1) * self.width];
+        let reversed = |column: usize| {
+            self.reversed
+                .iter()
+                .any(|(r, x, len)| *r == row && column >= *x && column < *x + *len)
+        };
+        let mut out = String::new();
+        let mut column = 0usize;
+        while column < self.width {
+            let start = column;
+            let is_reversed = reversed(column);
+            while column < self.width && reversed(column) == is_reversed {
+                column += 1;
+            }
+            let text: String = cells[start..column].iter().collect();
+            if is_reversed {
+                out.push_str("\u{1b}[7m");
+                out.push_str(&text);
+                out.push_str("\u{1b}[0m");
+            } else {
+                out.push_str(&text);
+            }
+        }
+        out.trim_end().to_string()
+    }
+}
+
+/// The whole screen: the frame, the view and the panel.
+pub fn frame(
+    board: &Board,
+    tab: Tab,
+    selected: usize,
+    panel: Option<&[String]>,
+    size: (usize, usize),
+) -> String {
+    let (width, height) = size;
+    let mut canvas = Canvas::new(width, height);
+    header(&mut canvas, board, tab);
+
+    let view = view(board, tab, selected);
+    // The view's heading sits on its own row; the rows the user can pick come
+    // after it, and the footer keeps the last row of the screen.
+    canvas.put(0, VIEW_ROW, &view.heading);
+    let first = FIRST_ROW;
+    let last = height.saturating_sub(2);
+    let visible = last.saturating_sub(first);
+    // The selected row stays on the screen.
+    let scroll = selected.saturating_sub(visible.saturating_sub(1));
+    for (index, line) in view.rows.iter().enumerate() {
+        let row = first + index;
+        if row >= last {
+            break;
+        }
+        let row = row.saturating_sub(scroll);
+        if row < first {
+            continue;
+        }
+        canvas.put(0, row, line);
+    }
+    for (index, line) in view.rest.iter().enumerate() {
+        let row = first + view.rows.len() + index;
+        if row >= last {
+            break;
+        }
+        canvas.put(0, row, line);
+    }
+    canvas.put(0, height - 1, FOOTER);
+    if let Some(panel) = panel {
+        draw_panel(&mut canvas, panel);
+    }
+    canvas.text()
+}
+
+/// The head of the board: the title, the time and tasks bars and the tabs.
+///
+/// The rows are the prototype's: the title, the time, the tasks, the tabs. A
+/// warning (the engine is down) never moves the tab row.
+fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
     let project = board.projects.first();
     let voyage = project.and_then(|project| project.voyages.first());
+
+    // Row 0: the title and the clock.
     let title = match (project, voyage) {
         (Some(project), Some(voyage)) => format!(
             "GEAR · {} · {}: {}",
@@ -123,62 +257,79 @@ fn header(board: &Board) -> Vec<String> {
         (Some(project), None) => format!("GEAR · {}", project.project),
         _ => "GEAR".to_string(),
     };
-    let mut lines = vec![pad(&title, 0)];
+    canvas.put(0, 0, &title);
     if board.engine == crate::EngineState::Down {
-        // The engine is down: the next `gear` call starts it (the old frame
-        // says so, and the user has to know).
-        lines.push(crate::ENGINE_DOWN.to_string());
+        // The engine is down: the next `gear` call starts it. It says so on
+        // the title's row, so that the tab row stays where it is.
+        canvas.put(0, 0, &format!("{title}  ! engine down — the next gear call starts it"));
     }
-    // The time bar: how much of the voyage is gone, and how much is left.
+    let clock = clock_now();
+    canvas.put(canvas.width.saturating_sub(clock.chars().count()), 0, &clock);
+
+    // Row 1: the time bar and the projection.
     let elapsed = voyage.and_then(|voyage| voyage.elapsed_min);
-    let eta = voyage.and_then(|voyage| voyage.eta.as_deref());
-    let measured = voyage.map(|voyage| voyage.measured_actual_min).unwrap_or(0);
-    let estimate = voyage.map(|voyage| voyage.measured_estimate_min).unwrap_or(0);
-    let time = match elapsed {
-        Some(elapsed) => format!(
+    let eta_minutes = voyage
+        .and_then(|voyage| voyage.eta.as_deref())
+        .and_then(duration_minutes);
+    let time = match (elapsed, eta_minutes) {
+        (Some(elapsed), Some(eta)) => format!(
             "time   {} {} of {}",
-            bar(measured, estimate, 24),
+            bar(elapsed, eta, 24),
             hours(elapsed),
-            eta.unwrap_or("-")
+            hours(eta)
         ),
-        None => format!("time   {} measured, no estimate", hours(measured)),
+        _ => "time   the voyage's time is unknown".to_string(),
     };
-    lines.push(pad(&time, 0));
+    canvas.put(0, 1, &time);
     if let Some(voyage) = voyage {
         let projected = match voyage.projected_min {
-            Some(minutes) => format!("projected finish {} (slowest lane: {})", hours(minutes), voyage.slowest.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| "-".into())),
+            Some(minutes) => format!(
+                "projected finish {} (slowest lane: {})",
+                hours(minutes),
+                voyage
+                    .slowest
+                    .as_ref()
+                    .map(|(id, _)| id.clone())
+                    .unwrap_or_else(|| "-".into())
+            ),
             None => "projected finish unknown".to_string(),
         };
-        lines.push(pad(&projected, 48));
+        canvas.put(48, 1, &projected);
     }
-    // The tasks bar: what is done and what is left.
+
+    // Row 2: the tasks bar and the done sentence.
     if let Some(project) = project {
         let totals = &project.totals;
-        let left = project.voyages.first().and_then(|voyage| voyage.remaining_estimate_min).unwrap_or(0);
-        let tasks = format!(
-            "tasks  {} {}/{} done, {} of estimates left",
-            bar(totals.done as i64, totals.tasks as i64, 24),
-            totals.done,
-            totals.tasks,
-            hours(left)
+        let left = project
+            .voyages
+            .first()
+            .and_then(|voyage| voyage.remaining_estimate_min)
+            .unwrap_or(0);
+        canvas.put(
+            0,
+            2,
+            &format!(
+                "tasks  {} {}/{} done, {} of estimates left",
+                bar(totals.done as i64, totals.tasks as i64, 24),
+                totals.done,
+                totals.tasks,
+                hours(left)
+            ),
         );
-        lines.push(pad(&tasks, 0));
+        let clauses = done_clauses(project).len();
+        canvas.put(72, 2, &format!("done sentence {clauses} clauses"));
     }
-    // The tabs: the number and the title of each, as the prototype draws them.
-    let mut row = String::new();
-    for (index, tab) in Tab::all().iter().enumerate() {
-        if index > 0 {
-            row.push(' ');
-        }
-        row.push_str(&tab.label());
-    }
-    lines.push(row);
-    lines
-}
 
-/// The label of a tab on the tab row: ` 1 Now `.
-pub fn tab_label(tab: Tab) -> String {
-    format!(" {} {} ", tab.number(), tab.title())
+    // Row 3: the five tabs; the open one is in reverse video.
+    let mut x = 1;
+    for tab_in_row in Tab::all() {
+        let label = tab_in_row.label();
+        canvas.put(x, TAB_ROW, &label);
+        if tab_in_row == tab {
+            canvas.reverse(TAB_ROW, x, label.chars().count());
+        }
+        x += label.chars().count() + 1;
+    }
 }
 
 /// The columns of every tab on the tab row: its first and its last column.
@@ -186,7 +337,7 @@ pub fn tab_ranges() -> Vec<(u16, u16, Tab)> {
     let mut ranges = Vec::new();
     let mut x = 1u16;
     for tab in Tab::all() {
-        let width = tab_label(tab).chars().count() as u16;
+        let width = tab.label().chars().count() as u16;
         ranges.push((x, x + width - 1, tab));
         x += width + 1;
     }
@@ -201,29 +352,47 @@ pub fn tab_at(x: u16) -> Option<Tab> {
         .map(|(_, _, tab)| tab)
 }
 
-/// The footer of the board: the keys.
-pub const FOOTER: &str =
-    "←→ / Tab / 1-5 / click: views · ↑↓ select · Enter: a lane's work / a task's rounds · q quit";
+/// A view of the board: its heading, the rows the user can pick and the rest.
+pub struct ViewRows {
+    pub heading: String,
+    pub rows: Vec<String>,
+    pub rest: Vec<String>,
+}
 
 /// The view of the board.
-pub fn view(board: &Board, tab: Tab, selected: usize) -> Vec<String> {
+pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
     let Some(project) = board.projects.first() else {
-        return vec!["no project in the store".to_string()];
+        return ViewRows {
+            heading: "no project in the store".to_string(),
+            rows: Vec::new(),
+            rest: Vec::new(),
+        };
     };
     match tab {
         Tab::Now => view_now(project, selected),
-        Tab::Graph => graph::lines(&project.graph, &project.graph_lanes, Some(selected)),
-        Tab::Workload | Tab::Decisions | Tab::Tokens => vec![format!(
-            "{}: the next task",
-            tab.title()
-        )],
+        Tab::Graph => {
+            let lines = graph::lines(&project.graph, &project.graph_lanes, Some(selected));
+            let count = project.graph.len();
+            let heading = lines.first().cloned().unwrap_or_default();
+            let rows = lines
+                .get(1..=count)
+                .map(|rows| rows.to_vec())
+                .unwrap_or_default();
+            let rest = lines.get(count + 1..).map(|rest| rest.to_vec()).unwrap_or_default();
+            ViewRows { heading, rows, rest }
+        }
+        Tab::Workload | Tab::Decisions | Tab::Tokens => ViewRows {
+            heading: format!("{}: the next task", tab.title()),
+            rows: Vec::new(),
+            rest: Vec::new(),
+        },
     }
 }
 
 /// The first view: the lanes, what needs a look, the quota and the done
 /// sentence.
-fn view_now(project: &ProjectBoard, selected: usize) -> Vec<String> {
-    let mut lines = vec!["LANES  (Enter: what this lane did and has left)".to_string()];
+fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
+    let mut rows = Vec::new();
     for (index, lane) in project.lanes.iter().enumerate() {
         let mark = if index == selected { "›" } else { " " };
         let current = current_task(lane);
@@ -239,13 +408,13 @@ fn view_now(project: &ProjectBoard, selected: usize) -> Vec<String> {
         let measures = match current {
             Some(task) => match (task.actual_min, task.est_min) {
                 (Some(actual), Some(estimate)) if estimate > 0 => {
-                    format!("{}/{estimate}m", actual)
+                    format!("{actual}/{estimate}m")
                 }
                 _ => String::new(),
             },
             None => String::new(),
         };
-        lines.push(format!(
+        rows.push(format!(
             "{mark} {:<5} {:<44} {:>9}  done {} · left {} ({}m)",
             lane.lane,
             middle,
@@ -255,22 +424,22 @@ fn view_now(project: &ProjectBoard, selected: usize) -> Vec<String> {
             lane.left_min
         ));
     }
-    lines.push(String::new());
+    let mut rest = Vec::new();
     let looks = needs_a_look(project);
-    lines.push(format!("NEEDS A LOOK ({})", looks.len()));
+    rest.push(format!("NEEDS A LOOK ({})", looks.len()));
     for (task, lane, kind, why) in &looks {
-        lines.push(format!("  {task} {lane:<5} {kind:<14} {why}"));
+        rest.push(format!("  {task} {lane:<5} {kind:<14} {why}"));
     }
-    lines.push(String::new());
-    lines.push("QUOTA".to_string());
+    rest.push(String::new());
+    rest.push("QUOTA".to_string());
     for reading in &project.quota {
         for window in &reading.windows {
             let reset = window
                 .resets_at
                 .map(crate::idle::clock)
                 .unwrap_or_else(|| "-".into());
-            lines.push(format!(
-                "  {:<8}{:<6}{} {:>3}% used  resets {reset}",
+            rest.push(format!(
+                "  {:<12}{:<6}{} {:>3}% used  resets {reset}",
                 reading.provider,
                 window.name,
                 bar(window.used_percent as i64, 100, 14),
@@ -278,12 +447,16 @@ fn view_now(project: &ProjectBoard, selected: usize) -> Vec<String> {
             ));
         }
     }
-    lines.push(String::new());
-    lines.push("DONE SENTENCE".to_string());
+    rest.push(String::new());
+    rest.push("DONE SENTENCE".to_string());
     for clause in done_clauses(project) {
-        lines.push(format!("  · {clause}"));
+        rest.push(format!("  · {clause}"));
     }
-    lines
+    ViewRows {
+        heading: "LANES  (Enter: what this lane did and has left)".to_string(),
+        rows,
+        rest,
+    }
 }
 
 /// The task the lane works on now.
@@ -292,12 +465,16 @@ fn current_task(lane: &LaneBoard) -> Option<&TaskBoard> {
         .iter()
         .find(|task| task.state == gear_model::TaskState::Running)
         .or_else(|| lane.tasks.iter().find(|task| task.state == gear_model::TaskState::Waiting))
-        .or_else(|| lane.tasks.iter().find(|task| task.state == gear_model::TaskState::Verifying))
+        .or_else(|| {
+            lane.tasks
+                .iter()
+                .find(|task| task.state == gear_model::TaskState::Verifying)
+        })
 }
 
 /// The things the captain should look at: a task over its estimate, a task
-/// that was reworked, and a lane that has more work than the others while
-/// they are idle.
+/// that was reworked, and a lane that has much more work left than the idle
+/// ones beside it.
 fn needs_a_look(project: &ProjectBoard) -> Vec<(String, String, String, String)> {
     let mut looks = Vec::new();
     for lane in &project.lanes {
@@ -323,7 +500,11 @@ fn needs_a_look(project: &ProjectBoard) -> Vec<(String, String, String, String)>
         }
     }
     // A lane with much more work left than the idle ones beside it.
-    let idle: Vec<&LaneBoard> = project.lanes.iter().filter(|lane| lane.idle.is_some()).collect();
+    let idle: Vec<&LaneBoard> = project
+        .lanes
+        .iter()
+        .filter(|lane| lane.idle.is_some())
+        .collect();
     if let Some(busy) = project.lanes.iter().max_by_key(|lane| lane.left_min) {
         if busy.left_min > 0 && !idle.iter().any(|lane| lane.lane == busy.lane) {
             let others: Vec<String> = idle
@@ -366,78 +547,35 @@ fn done_clauses(project: &ProjectBoard) -> Vec<String> {
 }
 
 /// Draw the panel over the frame: a box at the right of the screen, as the
-/// prototype draws it.
-fn draw_panel(lines: &mut Vec<String>, panel: &[String]) {
+/// prototype draws its window over the board.
+fn draw_panel(canvas: &mut Canvas, panel: &[String]) {
     let width = panel
         .iter()
         .map(|line| line.chars().count())
         .max()
         .unwrap_or(20)
         .max(20)
-        + 4;
-    let top = VIEW_ROW.min(lines.len());
-    let bottom = (top + panel.len() + 1).min(lines.len());
-    let left = WIDTH.saturating_sub(width + 1);
-    let mut index = top;
-    // The box.
-    if index < lines.len() {
-        let line = pad_to(&lines[index], left);
-        lines[index] = format!("{line}┌{}┐", "─".repeat(width));
+        .min(canvas.width.saturating_sub(4));
+    if width < 8 {
+        return;
     }
-    index += 1;
-    for row in panel {
-        if index >= bottom {
+    let left = canvas.width.saturating_sub(width + 1);
+    let top = VIEW_ROW;
+    // The box: a top border, the rows, a bottom border.
+    canvas.put(left, top, &format!("┌{}┐", "─".repeat(width)));
+    for (index, row) in panel.iter().enumerate() {
+        let line = top + 1 + index;
+        if line + 1 >= canvas.height {
             break;
         }
-        let line = pad_to(&lines[index], left);
-        lines[index] = format!(
-            "{line}│ {:<width$} │",
-            row.chars().take(width - 2).collect::<String>()
+        canvas.put(
+            left,
+            line,
+            &format!("│ {:<width$} │", row.chars().take(width - 2).collect::<String>()),
         );
-        index += 1;
     }
-    if index < lines.len() {
-        let line = pad_to(&lines[index], left);
-        lines[index] = format!("{line}└{}┘", "─".repeat(width));
-    }
-}
-
-/// A line of at least `width` characters.
-fn pad_to(line: &str, width: usize) -> String {
-    let mut out = line.to_string();
-    while out.chars().count() < width {
-        out.push(' ');
-    }
-    out
-}
-
-/// A line with something at a column (the prototype puts the time and the
-/// projection side by side).
-fn pad(line: &str, column: usize) -> String {
-    let mut out = line.to_string();
-    while out.chars().count() < column {
-        out.push(' ');
-    }
-    out
-}
-
-/// A bar of `width` cells: how much of `total` is `part`.
-pub fn bar(part: i64, total: i64, width: usize) -> String {
-    if total <= 0 {
-        return "░".repeat(width);
-    }
-    let filled = ((part as f64 / total as f64) * width as f64).round().max(0.0) as usize;
-    let filled = filled.min(width);
-    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
-}
-
-/// Minutes as the board reads them: 45m, 3h05m.
-pub fn hours(minutes: i64) -> String {
-    if minutes < 60 {
-        format!("{minutes}m")
-    } else {
-        format!("{}h{:02}m", minutes / 60, (minutes % 60))
-    }
+    let bottom = (top + panel.len() + 1).min(canvas.height - 1);
+    canvas.put(left, bottom, &format!("└{}┘", "─".repeat(width)));
 }
 
 /// The lane's panel: what it did, what it does now and what it has left.
@@ -463,7 +601,11 @@ pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
         ) {
             rows.push(format!(
                 "  {} {} {:<30} {}",
-                if task.state == gear_model::TaskState::Running { "◉" } else { "◎" },
+                if task.state == gear_model::TaskState::Running {
+                    "◉"
+                } else {
+                    "◎"
+                },
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
                 task.state.as_str()
@@ -489,6 +631,49 @@ pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
     }
     rows.push(format!("left: {left} tasks, {minutes}m of estimates"));
     rows
+}
+
+/// A duration of the plan (`12h`, `30m`) in minutes.
+fn duration_minutes(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let number: String = text.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let value: i64 = number.parse().ok()?;
+    let unit = text[number.len()..].trim().to_ascii_lowercase();
+    match unit.as_str() {
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(value * 60),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(value),
+        _ => None,
+    }
+}
+
+/// A bar of `width` cells: how much of `total` is `part`.
+pub fn bar(part: i64, total: i64, width: usize) -> String {
+    if total <= 0 {
+        return "░".repeat(width);
+    }
+    let filled = ((part as f64 / total as f64) * width as f64)
+        .round()
+        .max(0.0) as usize;
+    let filled = filled.min(width);
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+/// Minutes as the board reads them: 45m, 3h05m.
+pub fn hours(minutes: i64) -> String {
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else {
+        format!("{}h{:02}m", minutes / 60, (minutes % 60))
+    }
+}
+
+/// The clock of the board, as the user's clock sees it.
+fn clock_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0);
+    crate::idle::clock(now)
 }
 
 /// The idle reason of a lane, in words (the board's own).

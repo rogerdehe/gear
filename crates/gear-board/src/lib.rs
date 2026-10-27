@@ -991,7 +991,11 @@ pub fn run_with(
                 continue;
             }
         };
-        let text = frame::frame(&board, tab, selected, panel.as_deref());
+        // The selection never leaves the rows of the view (F4): a view that
+        // shrank, or a key pressed at its end, does not lose the selection.
+        let rows = frame::view(&board, tab, selected).rows.len();
+        selected = selected.min(rows.saturating_sub(1));
+        let text = frame::frame(&board, tab, selected, panel.as_deref(), keys.size());
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -1001,6 +1005,12 @@ pub fn run_with(
                 break;
             }
             let Some(event) = keys.next_event(deadline - now) else { continue };
+            if panel.is_some() {
+                // Any key closes the panel (the prototype): the board's own
+                // keys come after it.
+                panel = None;
+                break;
+            }
             match event {
                 Event::Key('q') | Event::Key('Q') | Event::Key('\u{3}') => return Ok(()),
                 Event::Right => {
@@ -1041,7 +1051,7 @@ pub fn run_with(
                     break;
                 }
                 Event::Down | Event::Key('j') => {
-                    selected += 1;
+                    selected = (selected + 1).min(rows.saturating_sub(1));
                     panel = None;
                     break;
                 }
@@ -1050,8 +1060,10 @@ pub fn run_with(
                     break;
                 }
                 Event::Mouse { button: 0, x, y } => {
-                    // A click on the tab row picks a view; a click on a row
-                    // picks that row.
+                    // A click on the tab row picks a view; a click on a row of
+                    // the view picks that row. The rows are the ones the
+                    // frame draws: the tabs on their own row, the data below
+                    // the heading.
                     if y == frame::TAB_ROW as u16 + 1 {
                         if let Some(picked) = frame::tab_at(x) {
                             tab = picked;
@@ -1059,10 +1071,14 @@ pub fn run_with(
                             panel = None;
                             break;
                         }
-                    } else if y > frame::VIEW_ROW as u16 {
-                        selected = (y - frame::VIEW_ROW as u16 - 1) as usize;
-                        panel = None;
-                        break;
+                    } else if y > frame::FIRST_ROW as u16 {
+                        let index = (y - frame::FIRST_ROW as u16 - 1) as usize;
+                        // A click outside the rows of the view is ignored.
+                        if index < rows {
+                            selected = index;
+                            panel = None;
+                            break;
+                        }
                     }
                 }
                 Event::Key(_) | Event::Mouse { .. } => {}
@@ -1105,7 +1121,8 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
     if opts.json {
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
-        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None)).map_err(write_error)?;
+        let size = (screen::DEFAULT_WIDTH, screen::DEFAULT_ROWS);
+        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }
