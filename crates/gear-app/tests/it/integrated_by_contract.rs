@@ -253,3 +253,61 @@ fn a_pass_naming_a_merge_whose_work_is_not_merged_is_refused() {
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.merged, None);
 }
+
+/// T-165 (review F1): the attribution may arrive **after** the attempt was
+/// accepted — the normal path after an auto-settled review or a failed merge.
+/// The second plan carries the same pass plus `integrated-by=T-2`: the
+/// attempt must then carry T-2's merge time and the attribution, without a
+/// second verdict and without a second state change. Replaying the same plan
+/// changes nothing.
+#[test]
+fn an_attribution_added_after_the_pass_marks_the_merged_time() {
+    let repos = Repos::new();
+    let mut s = world(&repos, &repos.candidate);
+    // The first plan: an ordinary pass. The attempt is accepted, but nothing
+    // says which merge landed the work.
+    let plain = format!(
+        "<!-- gear-plan project=p base=0 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={} pass evidence=ops/reports/T-1.md\n",
+        repos.candidate
+    );
+    run(&mut s, &plain, "r1").unwrap();
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, None, "no merge named the work yet");
+    assert!(
+        s.read(|tx| tx.get_meta("integrated-by:p:T-1")).unwrap().is_none(),
+        "no attribution yet"
+    );
+
+    // The second plan: the same pass, now naming the merge that landed it.
+    let named = format!(
+        "<!-- gear-plan project=p base=1 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate={} pass evidence=ops/reports/T-1.md integrated-by=T-2\n",
+        repos.candidate
+    );
+    run(&mut s, &named, "r2").unwrap();
+
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "marked merged by T-2's merge");
+    let by = s
+        .read(|tx| tx.get_meta("integrated-by:p:T-1"))
+        .unwrap()
+        .expect("the merge that landed the work is recorded");
+    assert_eq!(by, "T-2");
+    // The attempt was already accepted: no second verdict, no second change.
+    let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+    assert_eq!(attempt.state, gear_model::AttemptState::Accepted);
+    let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
+    assert_eq!(verdicts.len(), 1, "one verdict, not two: {verdicts:?}");
+
+    // The same plan applied again changes nothing.
+    let again = named.replace("base=1", "base=2");
+    run(&mut s, &again, "r3").unwrap();
+    let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
+    assert_eq!(times.merged, Some(NOW + 10), "the replay changes nothing");
+    let by = s
+        .read(|tx| tx.get_meta("integrated-by:p:T-1"))
+        .unwrap()
+        .expect("the attribution is kept");
+    assert_eq!(by, "T-2");
+    let verdicts = s.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap();
+    assert_eq!(verdicts.len(), 1, "the replay writes no second verdict");
+}
