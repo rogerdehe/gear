@@ -3,11 +3,14 @@ use crate::observe::{Presence, SeatObs};
 use gear_herdr::{AgentStatus, HerdrAct, Outcome};
 use gear_model::{AttemptState, GearResult, MsgKind, MsgState, SeatRole, SeatState, Ts};
 use gear_store::{AttemptRow, NewMessage, SeatRow, Store, Tx};
+use std::hash::{Hash, Hasher};
 
 const PUSH_INTERVAL: i64 = 20 * 60;
 const LOOP_INTERVAL: i64 = 10 * 60;
+const THINK_INTERVAL: i64 = 15 * 60;
 fn ask_key(seat: &str) -> String { format!("engine.quiet.{seat}") }
 fn loop_key(seat: &str) -> String { format!("engine.quiet.loop.{seat}") }
+fn think_key(seat: &str) -> String { format!("engine.quiet.think.{seat}") }
 pub(crate) fn compact_key(seat: &str) -> String { format!("engine.quiet.compact.{seat}") }
 
 fn eligible(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
@@ -57,6 +60,66 @@ fn notify(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow, branch: &str, minut
         tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("quiet:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: captain.id, kind: MsgKind::System, urgent: false, body: format!("lane {}: task {} has not pushed to {branch} for {minutes} min", seat.name, attempt.task), reply_to: None, needs_ack: false, state: MsgState::Info, created: now, meta: None })?;
     }
     tx.set_meta(&ask_key(&seat.id), &now.to_string())
+}
+
+/// The worktree's fingerprint: its HEAD, its dirty set and its diff. A git
+/// that fails says nothing about the lane, so the seat is skipped this tick.
+fn think_fp(path: &str) -> Option<u64> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for args in [["rev-parse", "HEAD"], ["status", "--porcelain"], ["diff", "HEAD"]] {
+        let output = std::process::Command::new("git").args(["-C", path]).args(args).output().ok()
+            .filter(|o| o.status.success())?;
+        output.stdout.hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// The lane's session file is still growing, as fn loops reads it.
+fn session_growing(tx: &Tx<'_>, seat: &SeatRow, now: Ts) -> GearResult<bool> {
+    let Some(path) = tx.get_binding(&seat.id, seat.generation)?.and_then(|b| b.session_ref).filter(|s| !s.is_empty()) else { return Ok(false) };
+    Ok(std::fs::metadata(&path).ok().filter(|m| m.is_file()).and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as Ts)
+        .is_some_and(|t| now.saturating_sub(t) < LOOP_INTERVAL))
+}
+
+fn think_notify(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow, minutes: i64, now: Ts) -> GearResult<()> {
+    let body = format!("Your worktree has not changed for {minutes} min while you work on {}. If a design question holds you, send gear send --kind question now with your default and go on with that default; otherwise write the code and push.", attempt.task);
+    tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("think-lane:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: seat.id.clone(), kind: MsgKind::Instruction, urgent: true, body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now, meta: None })?;
+    if let Some(captain) = tx.captain_of(&seat.project)? {
+        tx.insert_message(&NewMessage { project: seat.project.clone(), thread: format!("think:{}", seat.id), task: Some(attempt.task.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient: captain.id, kind: MsgKind::System, urgent: false, body: format!("lane {}: {}: working for {minutes} min with no change in its worktree", seat.name, attempt.task), reply_to: None, needs_ack: false, state: MsgState::Info, created: now, meta: None })?;
+    }
+    Ok(())
+}
+
+/// A 15-minute think clock (M4.1): a working lane whose session file grows
+/// while its worktree does not change is asked to stop thinking. The
+/// fingerprint and its clock are persisted per seat across engine restarts.
+pub fn thinks(store: &mut Store, project: &str, observed: &[SeatObs], now: Ts) -> GearResult<()> {
+    for obs in observed.iter().filter(|o| o.presence == Presence::Present && o.status == Some(AgentStatus::Working)) {
+        let candidate = store.read(|tx| {
+            let Some(seat) = tx.get_seat(&obs.seat.id)? else { return Ok(None) };
+            if seat.project != project || seat.generation != obs.seat.generation { return Ok(None) }
+            let Some(attempt) = eligible(tx, &seat)? else { return Ok(None) };
+            let Some(path) = tx.get_meta(&crate::onboard::worktree_path_key(&seat.id))?.filter(|p| !p.is_empty()) else { return Ok(None) };
+            Ok(Some((seat, attempt, path)))
+        })?;
+        let Some((seat, attempt, path)) = candidate else { continue };
+        let Some(fp) = think_fp(&path) else { continue };
+        store.write(|tx| {
+            let meta = tx.get_meta(&think_key(&seat.id))?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            let live = meta.as_ref().filter(|m| m["task"].as_str() == Some(attempt.task.as_str())
+                && m["n"].as_i64() == Some(attempt.n) && m["fp"].as_u64() == Some(fp));
+            let since = live.and_then(|m| m["since"].as_i64()).unwrap_or(now);
+            let mut asked = live.and_then(|m| m["asked"].as_i64());
+            if now.saturating_sub(since) >= THINK_INTERVAL && asked.is_none_or(|a| now.saturating_sub(a) >= THINK_INTERVAL)
+                && session_growing(tx, &seat, now)? {
+                think_notify(tx, &seat, &attempt, now.saturating_sub(since) / 60, now)?;
+                asked = Some(now);
+            }
+            tx.set_meta(&think_key(&seat.id), &serde_json::json!({"task":attempt.task,"n":attempt.n,"fp":fp,"since":since,"asked":asked}).to_string())
+        })?;
+    }
+    Ok(())
 }
 
 /// A 20-minute push clock, persisted per seat across engine restarts.
@@ -115,7 +178,7 @@ pub fn loops(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, observe
         }
         store.write(|tx| notify(tx, &seat, &attempt, &branch, minutes, now))?;
     }
-    Ok(())
+    thinks(store, project, observed, now)
 }
 
 /// A delivery can have been intended before the loop was detected. Drive its
@@ -292,8 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_or_unreadable_session_does_not_interrupt() {
-        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("session.jsonl");
+    fn fresh_or_unreadable_session_does_not_interrupt() {        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("session.jsonl");
         std::fs::write(&path, "session").unwrap(); set_mtime(&path, T+700);
         let mut s = world(dir.path().to_str().unwrap()); let path = path.to_str().unwrap();
         s.write(|tx| tx.set_binding_session_ref("p:heat", 1, path)).unwrap();
@@ -302,5 +364,76 @@ mod tests {
         loops(&mut s, &mut h, "p", &[obs], T+760).unwrap();
         assert!(!h.calls.iter().any(|c| matches!(c, Call::SendKeys {..})));
         assert!(messages(&mut s, "quiet:p:heat").is_empty());
+    }
+
+    struct Think { s: Store, session: std::path::PathBuf, _dir: tempfile::TempDir }
+
+    fn thinking(mtime: i64) -> Think {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"], None);
+        git(dir.path(), &["config", "user.email", "test@example.invalid"], None);
+        git(dir.path(), &["config", "user.name", "test"], None);
+        std::fs::write(dir.path().join("file"), "x").unwrap();
+        git(dir.path(), &["add", "file"], None);
+        git(dir.path(), &["commit", "-qm", "one"], Some("@1800001200 +0000"));
+        let session = dir.path().join("session.jsonl");
+        std::fs::write(&session, "session").unwrap();
+        set_mtime(&session, mtime);
+        let worktree = dir.path().to_str().unwrap().to_string();
+        let path = session.to_str().unwrap().to_string();
+        let mut s = world(&worktree);
+        s.write(|tx| {
+            tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), &worktree)?;
+            tx.set_binding_session_ref("p:heat", 1, &path)
+        }).unwrap();
+        Think { s, session, _dir: dir }
+    }
+
+    fn think(t: &mut Think, now: Ts) {
+        let obs = observation(&mut t.s);
+        thinks(&mut t.s, "p", &[obs], now).unwrap();
+    }
+
+    #[test]
+    fn thinking_lane_is_asked_once_per_interval() {
+        let mut t = thinking(T + 900);
+        think(&mut t, T);
+        think(&mut t, T + 960);
+        let lane = messages(&mut t.s, "think-lane:p:heat");
+        let captain = messages(&mut t.s, "think:p:heat");
+        assert_eq!(lane.len(), 1); assert!(lane[0].urgent); assert_eq!(lane[0].kind, MsgKind::Instruction);
+        assert_eq!(lane[0].body, "Your worktree has not changed for 16 min while you work on T-1. If a design question holds you, send gear send --kind question now with your default and go on with that default; otherwise write the code and push.");
+        assert_eq!(captain.len(), 1); assert_eq!(captain[0].state, MsgState::Info);
+        assert_eq!(captain[0].body, "lane heat: T-1: working for 16 min with no change in its worktree");
+
+        set_mtime(&t.session, T + 1500);
+        think(&mut t, T + 1500);
+        assert_eq!(messages(&mut t.s, "think-lane:p:heat").len(), 1, "a second ask only 9 min later is too soon");
+        set_mtime(&t.session, T + 1860);
+        think(&mut t, T + 1860);
+        assert_eq!(messages(&mut t.s, "think-lane:p:heat").len(), 2, "15 min after the first ask");
+        assert_eq!(messages(&mut t.s, "think:p:heat").len(), 2);
+    }
+
+    #[test]
+    fn worktree_edit_resets_the_think_clock() {
+        let mut t = thinking(T);
+        think(&mut t, T);
+        set_mtime(&t.session, T + 600);
+        std::fs::write(t._dir.path().join("file"), "edited").unwrap();
+        think(&mut t, T + 600);
+        set_mtime(&t.session, T + 960);
+        think(&mut t, T + 960);
+        assert!(messages(&mut t.s, "think-lane:p:heat").is_empty());
+        assert!(messages(&mut t.s, "think:p:heat").is_empty());
+    }
+
+    #[test]
+    fn a_session_that_stopped_growing_is_left_to_the_loop_guard() {
+        let mut t = thinking(T + 300);
+        think(&mut t, T);
+        think(&mut t, T + 960);
+        assert!(messages(&mut t.s, "think-lane:p:heat").is_empty());
+        assert!(messages(&mut t.s, "think:p:heat").is_empty());
     }
 }
