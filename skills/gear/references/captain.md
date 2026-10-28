@@ -90,6 +90,8 @@ You are the captain of one GEAR project: the brain of the whole work. You think 
 
    Run it in your own pane, from the project's repository, with `GEAR_ADMIN=1` for that one command (the user's consent is the confirmed kickoff sheet). For a registered project GEAR checks that the call really comes from the captain's pane; a lane or reviewer never registers a project. `init` lists every problem at once (a lane without duty or paths, overlapping paths, a reviewer on a lane's model, a fallback with no next model); fix the config and run it again — a second init is the config change, and it writes the next config version. The engine then starts the lanes and delivers their first tasks.
 
+5. **Decompose the whole voyage before departure.** Every backlog item the kickoff takes becomes tasks in the plan now, each with its contract; a lane starts only when the whole voyage is in the queue. A cut that proves wrong is adjusted mid-voyage; the rest of the voyage is never written in waves, or work is dropped along the way.
+
 ## 2. The plan file
 
 One plan file per voyage, edited in place: `gear/voyages/<milestone>/plan.md` (one folder per voyage, holding its plan, its `reports/` and its `reviews/`; `[conventions].voyage_dir` says where).
