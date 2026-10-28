@@ -818,10 +818,11 @@ fn branch_templates_default_to_the_names_gear_uses() {
     assert_eq!(validate(&cfg), vec![], "the defaults are valid");
 
     // T-255 gave the fixture its own `[conventions]` section: the templates
-    // join it rather than a second one.
+    // join it rather than a second one. T-372: the seat branch keeps its own
+    // folder, so it is no ref above the task branches.
     let text = MINIMAL.replace(
         GATE_LINE,
-        "gate = \"make test\"\ntask_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"",
+        "gate = \"make test\"\ntask_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"",
     );
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.conventions.task_branch, "{project}/{lane}/t{n}");
@@ -904,6 +905,60 @@ fn a_seat_branch_names_the_project_and_the_seat() {
     );
     // A seat branch is free to be any name git takes.
     assert_eq!(validate(&with("{project}-{seat}")), vec![]);
+}
+
+// T-372: git cannot hold a ref and a folder of the same name, so a seat
+// branch that is a task or review branch (or a folder of one) is refused at
+// init: a lane would have to delete its own seat branch to cut a task branch.
+
+#[test]
+fn a_seat_branch_that_holds_a_task_or_review_branch_is_refused() {
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.project.id = "p".into();
+    cfg.lanes.truncate(1); // the lane "heat"
+    cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
+    let issues = validate(&cfg);
+    assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
+    assert!(
+        issues[0]
+            .problem
+            .contains("the seat branch p/heat and the task branch p/heat/t1"),
+        "{}",
+        issues[0].problem
+    );
+    assert!(
+        issues[0].problem.contains("e.g. seat_branch = \"{project}/home/{seat}\""),
+        "{}",
+        issues[0].problem
+    );
+
+    // A seat branch in its own folder collides with nothing.
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.project.id = "p".into();
+    cfg.conventions.task_branch = "{project}/{lane}/t{n}".into();
+    cfg.conventions.seat_branch = "{project}/home/{seat}".into();
+    assert_eq!(validate(&cfg), vec![]);
+
+    // The defaults keep the three apart.
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.project.id = "p".into();
+    assert_eq!(validate(&cfg), vec![]);
+
+    // A review branch under a reviewer's own seat branch collides too, and the
+    // finding names it as one.
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.project.id = "p".into();
+    cfg.lanes.truncate(1);
+    cfg.conventions.review_branch = "{project}/review-1/t{n}".into();
+    let issues = validate(&cfg);
+    assert_eq!(fields(&issues), vec!["conventions.seat_branch"]);
+    assert!(
+        issues[0]
+            .problem
+            .contains("the seat branch p/review-1 and the review branch p/review-1/t1"),
+        "{}",
+        issues[0].problem
+    );
 }
 
 // T-257: the remote and the voyage folder are configuration too. The defaults

@@ -815,6 +815,10 @@ pub fn profile_table(
 ///   if non-empty differs from both;
 /// - `conventions.remote` non-empty and without whitespace, and
 ///   `conventions.voyage_dir` names `{milestone}` (T-257);
+/// - a seat branch that git cannot hold together with a task or review branch
+///   (T-372): a ref and a directory of one name cannot both exist, so the
+///   seat branch of a lane, of the merge seat and of a reviewer must not be a
+///   task or review branch, nor a folder of one;
 /// - `timing.cooldown_s > timing.tick_s`;
 /// - `models.lanes`, `models.review`, `models.captain` and each lane's `models`
 ///   hold no blank and no repeated entry (compared trimmed; an entry is the
@@ -1291,6 +1295,42 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
+    // ---- a seat branch is a ref, and a lane's task or review branch lives
+    // below it when one is a folder of the other (T-372): git cannot hold the
+    // ref `prometheus/money` and the branch `prometheus/money/t54` together, so
+    // the lane would have to delete its own seat branch to cut a task branch.
+    // Checked on a sample per lane, for the lane's own seat and for the two
+    // seats every project has: the merge seat and a reviewer's.
+    let project = &cfg.project.id;
+    for lane in &cfg.lanes {
+        let task = gear_model::branch::expand(
+            &conventions.task_branch,
+            project,
+            &lane.name,
+            SAMPLE_TASK,
+        );
+        let review = gear_model::branch::expand(
+            &conventions.review_branch,
+            project,
+            &lane.name,
+            SAMPLE_TASK,
+        );
+        for seat in [lane.name.as_str(), MERGE_SEAT, REVIEW_SEAT] {
+            let seat_branch =
+                gear_model::branch::expand_seat(&conventions.seat_branch, project, seat);
+            for (kind, branch) in [("task", &task), ("review", &review)] {
+                if one_branch_holds_the_other(&seat_branch, branch) {
+                    issues.push(issue(
+                        "conventions.seat_branch",
+                        format!(
+                            "the seat branch {seat_branch} and the {kind} branch {branch} cannot both exist in git (a ref and a directory of the same name): give the seat branches their own folder, e.g. seat_branch = \"{{project}}/home/{{seat}}\""
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     // ---- timing
     if cfg.timing.cooldown_s <= cfg.timing.tick_s {
         issues.push(issue(
@@ -1553,6 +1593,20 @@ fn branch_template_issues(
         return false;
     }
     true
+}
+
+/// The seat names every project has (T-372): the merge worktree and a
+/// reviewer's.
+const MERGE_SEAT: &str = "merge";
+const REVIEW_SEAT: &str = "review-1";
+
+/// Two branch names git cannot hold side by side (T-372): the same name, or one
+/// as a folder of the other (`p/heat` and `p/heat/t1`), because a ref and a
+/// directory of one name cannot both exist.
+fn one_branch_holds_the_other(a: &str, b: &str) -> bool {
+    a == b
+        || b.strip_prefix(a).is_some_and(|rest| rest.starts_with('/'))
+        || a.strip_prefix(b).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// What is wrong with `name` as a branch name, or `None` when git takes it
