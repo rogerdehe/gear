@@ -1020,9 +1020,8 @@ fn check_models_warns_about_a_model_its_cli_does_not_list() {
     let o = run(&["admin", "init", "--check", "--models", config]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(
-        stderr(&o).contains(
-            "warning: lane heat: model tok/deep-2 is not among the models pi lists"
-        ),
+        stderr(&o)
+            .contains("warning: lane heat: model tok/deep-2 is not among the models pi lists"),
         "{}",
         stderr(&o)
     );
