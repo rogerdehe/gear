@@ -41,6 +41,9 @@ pub struct QueueItem {
     pub reopen: Option<String>,
     /// The GitHub issue a task came from (T-79): `issue: #12`.
     pub issue: Option<u64>,
+    /// The reason the task is mechanical (T-272): `mechanical: delete three
+    /// dead fns`. The gate alone proves the change, so the review is skipped.
+    pub mechanical: Option<String>,
 }
 
 /// One `# Staff` line.
@@ -514,6 +517,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         followup_of: None,
         reopen: None,
         issue: None,
+        mechanical: None,
     })
 }
 
@@ -540,6 +544,7 @@ fn parse_queue_field(
         "followup-of" => "followup-of",
         "reopen" => "reopen",
         "issue" => "issue",
+        "mechanical" => "mechanical",
         other => return Err(bad(line, format!("unknown queue field {other:?}"))),
     };
     if seen.contains(&field) {
@@ -583,6 +588,15 @@ fn parse_queue_field(
             item.issue = Some(parse_issue(value).ok_or_else(|| {
                 bad(line, format!("`issue` is a GitHub issue number as `#<n>`, got {value:?}"))
             })?)
+        }
+        "mechanical" => {
+            if value.is_empty() {
+                return Err(bad(
+                    line,
+                    "`mechanical` needs the reason the gate alone proves this change",
+                ));
+            }
+            item.mechanical = Some(value.to_string());
         }
         _ => unreachable!("the field was matched above"),
     }

@@ -22,7 +22,7 @@ fn world(attempt: bool) -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
-            accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0 })?;
+            accept: "repro passes".into(), evidence_files: vec!["notes/T-7.md".into()], evidence_due_min: Some(60), body: String::new(), created: T0, mechanical: None, })?;
         if attempt { start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?; }
         Ok(())
     }).unwrap();
@@ -88,7 +88,7 @@ fn pending_update_and_missing_task() {
     let mut s = world(true);
     s.write(|tx| {
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 2, goal: "Fix it better".into(),
-            accept: "a2".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 + 1 })?;
+            accept: "a2".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 + 1, mechanical: None, })?;
         let mut t = tx.get_task("p", "T-7")?.unwrap();
         t.contract_version = 2;
         tx.update_task(&t)

@@ -79,6 +79,7 @@ fn world_with(passed: bool, findings: &str, blocking: &str) -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         // T-1 is handed in: Delivered → Started → Submitted, task Verifying.
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -304,6 +305,7 @@ fn a_pass_on_an_older_contract_is_a_rework() {
             evidence_due_min: None,
             body: String::new(),
             created: T0 + 3,
+            mechanical: None,
         })?;
         let mut row = tx.get_task("p", "T-1")?.unwrap();
         row.contract_version = 2;
@@ -438,6 +440,7 @@ fn a_fail_on_an_older_contract_is_never_a_pass() {
             evidence_due_min: None,
             body: String::new(),
             created: T0 + 3,
+            mechanical: None,
         })?;
         let mut row = tx.get_task("p", "T-1")?.unwrap();
         row.contract_version = 2;

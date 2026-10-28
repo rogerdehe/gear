@@ -4775,6 +4775,7 @@ gate = "{project_gate}"
                     evidence_due_min: None,
                     body: String::new(),
                     created: 0,
+                    mechanical: None,
                 })?;
                 tx.insert_message(&NewMessage {
                     meta: None,

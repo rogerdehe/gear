@@ -437,6 +437,7 @@ fn apply_queue(
                     evidence_due_min: item.evidence_due.map(i64::from),
                     body: contract_body(item),
                     created: now,
+                    mechanical: item.mechanical.clone(),
                 };
                 tx.insert_contract(&contract)?;
                 created.push(id);
@@ -527,7 +528,8 @@ fn apply_queue(
                         .unwrap_or(false);
                     let files_changed = item.evidence_files != contract.evidence_files;
                     let due_changed = item.evidence_due.map(i64::from) != contract.evidence_due_min;
-                    if goal_changed || accept_changed || files_changed || due_changed {
+                    let mechanical_changed = item.mechanical != contract.mechanical;
+                    if goal_changed || accept_changed || files_changed || due_changed || mechanical_changed {
                         let version = task.contract_version + 1;
                         let next = ContractRow {
                             project: project.to_string(),
@@ -539,6 +541,7 @@ fn apply_queue(
                             evidence_due_min: item.evidence_due.map(i64::from),
                             body: contract_body(item),
                             created: now,
+                            mechanical: item.mechanical.clone(),
                         };
                         tx.insert_contract(&next)?;
                         task.contract_version = version;
@@ -1744,6 +1747,9 @@ fn contract_body(item: &QueueItem) -> String {
     if let Some(minutes) = item.evidence_due {
         body.push_str(&format!("evidence-due: {minutes}\n"));
     }
+    if let Some(reason) = &item.mechanical {
+        body.push_str(&format!("mechanical: {reason}\n"));
+    }
     body
 }
 
@@ -1753,9 +1759,9 @@ fn contract_body(item: &QueueItem) -> String {
 ///
 /// The block is the one the draft parser reads back: the header
 /// (`## T-<n> [priority] lane=… milestone=…`), then the fields the task
-/// carries — `goal`, `accept`, `evidence-files`, `evidence-due`, `estimate`,
-/// `deps`, `followup-of` and `issue`. A block that parses back is the same
-/// task, so the captain can copy it into the plan file as it is.
+/// carries — `goal`, `accept`, `evidence-files`, `evidence-due`, `mechanical`,
+/// `estimate`, `deps`, `followup-of` and `issue`. A block that parses back is
+/// the same task, so the captain can copy it into the plan file as it is.
 ///
 /// Read-only: nothing is written.
 pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
@@ -1793,6 +1799,9 @@ pub fn show(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<String> {
         }
         if let Some(minutes) = contract.evidence_due_min {
             text.push_str(&format!("evidence-due: {minutes}\n"));
+        }
+        if let Some(reason) = &contract.mechanical {
+            text.push_str(&format!("mechanical: {reason}\n"));
         }
     }
     if let Some(minutes) = row.estimate_min {
@@ -2975,6 +2984,14 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     }
     if let Some(minutes) = contract.evidence_due_min {
         text.push_str(&format!("Due: {minutes} minutes\n"));
+    }
+    // A mechanical task (T-272): the gate alone proves the change, so no
+    // reviewer looks at it — the lane knows what its hand-in rests on.
+    if let Some(reason) = &contract.mechanical {
+        text.push_str(&format!(
+            "Review: none — mechanical ({reason}): the merge gate is the only check, \
+             so run its command before you hand in.\n"
+        ));
     }
     text.push_str("\n## Report\n");
     text.push_str("gear send --kind progress \"…\"\n");

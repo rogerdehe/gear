@@ -62,6 +62,7 @@ fn world(status: AgentStatus) -> World {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             Ok(())
         })

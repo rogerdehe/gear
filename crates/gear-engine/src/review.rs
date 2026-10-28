@@ -2153,6 +2153,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 // The lane hands the result in.
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -2331,6 +2332,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -2349,6 +2351,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0 + 5,
+                    mechanical: None,
                 })?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.contract_version = 2;
@@ -3720,6 +3723,7 @@ review = [
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
@@ -4237,6 +4241,7 @@ profile = "opencode"
                 project: "p".into(), task: task.id.clone(), version: 1,
                 goal: "next job".into(), accept: "review it".into(),
                 evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0,
+                mechanical: None,
             })?;
             gear_app::tasks::start_attempt(tx, "p", &task.id, "p:heat", 1, T0)?;
             gear_app::tasks::on_delivery_confirmed(tx, "p", &task.id, 1, T0)?;

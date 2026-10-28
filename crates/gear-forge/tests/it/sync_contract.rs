@@ -174,6 +174,7 @@ fn world() -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             tx.insert_task(&TaskRow {
                 repo: None,
@@ -512,6 +513,7 @@ fn a_backlog_is_worked_off_a_bounded_number_of_calls_at_a_time() {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 Ok(())
             })

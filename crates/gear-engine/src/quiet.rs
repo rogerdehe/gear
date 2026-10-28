@@ -153,7 +153,7 @@ mod tests {
             testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", T)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "pi", T)?;
             tx.insert_task(&TaskRow { project:"p".into(), id:"T-1".into(), rank:1, state:TaskState::Ready, priority:"must".into(), lane:Some("heat".into()), milestone:None, required:false, contract_version:1, deps:vec![], followup_of:None, wait_on:None, wait_cond:None, rework_note:None, estimate_min:None, issue:None, updated:T, repo:Some(repo.into()), base:None, gate:None, rework_estimate_min:None })?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"g".into(),accept:"a".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"g".into(),accept:"a".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
             gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T)?;
             gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T)?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T)?;

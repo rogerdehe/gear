@@ -25,7 +25,7 @@ fn world(with_attempt: bool) -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "Fix the login crash".into(),
-            accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         if with_attempt { start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?; }
         Ok(())
     }).unwrap();

@@ -126,6 +126,7 @@ fn hand_in(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResu
         evidence_due_min: None,
         body: String::new(),
         created: T0,
+        mechanical: None,
     })?;
     tasks::start_attempt(tx, "p", id, "p:heat", 1, T0)?;
     tasks::on_delivery_confirmed(tx, "p", id, 1, T0)?;
