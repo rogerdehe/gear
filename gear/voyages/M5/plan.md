@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=625 -->
+<!-- gear-plan project=gear base=626 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -723,3 +723,8 @@ goal: [v0.5.0 S1] A hand-in that waits 20 minutes without its review packet reac
 accept: review.rs tests: a hand-in 21 min old with no confirmed reviewer delivery gives one urgent captain item naming the seats; a second tick gives none; a hand-in whose packet was confirmed gives none; one 19 min old gives none. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 deps: T-375
 estimate: 20
+
+## T-377 [must] lane=hull milestone=M5 required
+goal: [v0.5.0 S1] A review round's budget is not built from rounds that were never measured (M5: every review round got 10 min and overran — F-122, F-123, F-126, F-128, F-129, F-131, F-132 — while their reports read "active 0 min · tokens 0"). crates/gear-store/src/lib.rs fn review_budget_min takes the median of the last 10 ended review rounds' `active_s` times 1.5, at least 10; a Codex reviewer's rounds carry `active_s` 0 when its usage was not read, so the median is 0 and every budget is the floor. Change fn review_budget_min only, no other design: the query keeps only rows with `active_s > 0` (a round with no measured activity says nothing about how long a review takes); fewer than three such rows give `DEFAULT_REVIEW_BUDGET_MIN` (30) as today. Why Codex review rounds read 0 is not this task. The code change is in crates/gear-store/src/lib.rs only; tests go where the crate keeps them.
+accept: Store tests: ten ended review rounds with `active_s` 0 give 30; three rounds of 600 s and seven of 0 give 15 (median 10 min × 1.5); the existing budget tests pass. Run only `make check CRATE=gear-store`; the merge gate runs `make gate`.
+estimate: 15
