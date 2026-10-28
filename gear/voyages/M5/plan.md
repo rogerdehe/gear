@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=609 -->
+<!-- gear-plan project=gear base=610 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -44,6 +44,8 @@ eta: 16h
 - station M-4586: keep course 184 min in, 30 done; forecast 1500 min; the eta waits for the user
 - 2026-10-29 03:05 override: T-322 passes over its review fail: the one finding is SQLite's -wal and -shm files appearing beside a store the command reads; they are SQLite's own bookkeeping, made by every reader of a WAL store (the engine and every gear call make them too), hold no data and change nothing a user sees; "no new file under the scratch HOME" was the captain's wording for "no new store and no directory", which the command meets | why: the work is right, the accept line was too literal | else: a rework that reads live stores as immutable, which the review itself warns against
 
+- station M-4602: keep course 193 min in, 33 done; forecast 1413 min; the eta waits for the user
+- 2026-10-29 03:15 config: the engine is rebuilt from dev again so T-277 runs: mast's T-323 delivery O-3643 failed as "not confirmed" while mast worked on T-323 (it asked M-4593 about it), and the old engine would deliver it again in a new session, losing mast's context; a restart is operational | why: no hand fix for a fault already fixed on dev | else: mast loses its session mid-task
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
