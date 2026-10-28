@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=605 -->
+<!-- gear-plan project=gear base=606 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -40,6 +40,7 @@ eta: 16h
 
 - 2026-10-29 02:45 hand-fix: mast's delivery O-3634 ("Continue T-317: run `gear` first") sat typed in pi's input box with its Enter lost, the agent idle; the captain sent one Enter (herdr agent send-keys gear-mast enter) and mast went on; the root fix is T-371 | why: mast idle on an unsent packet (M-4569) | else: mast idle until a restart
 - station M-4570: keep course 180 min in, 29 done; forecast 1440 min; the eta waits for the user
+- 2026-10-29 02:50 hand-fix: the same lost Enter on hull: O-3638 "Continue T-273: run `gear` first" sat in pi's input box, hull idle (M-4576); one Enter sent; T-371 goes to the head of hull's queue ([now]): twice in ten minutes, both a Continue to a pi lane | why: hull idle | else: the next Continue stalls a lane again
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
@@ -675,7 +676,7 @@ accept: review.rs tests: a hand-in while both temp seats are busy writes one Sys
 deps: T-283
 estimate: 15
 
-## T-371 [must] lane=hull milestone=M5 required
+## T-371 [now] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] A delivery whose text sits unsent in the agent's input box gets its Enter (M5 hand fix, M-4569: mast's O-3634 "Continue T-317: run `gear` first" stayed typed in pi's input box with the Enter lost, the agent idle, until the captain pressed Enter; M4.2's review nudges exist for the same loss on reviewers, L-76). Today a lane Deliver op stays Submitted until a view or a hand-in confirms it, and nothing looks at the pane in between. Change crates/gear-engine/src/ops.rs (and the call in crates/gear-engine/src/lib.rs next to `ops::confirm_pending_with`), after T-277 (same file), no other design: a new `pub fn resubmit_unsent(store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, now: Ts) -> GearResult<Vec<String>>`: for every lane Deliver op of the project in `OpState::Submitted` at least 30 s old whose seat is Active at the op's generation, whose agent (`herdr.agent_get(&binding.pane_id)`) is Idle or Done, and whose meta `engine.resubmit.<op id>` is not set: read `herdr.read_tail(&pane, 12)`; when the text's first line, cut to its first 40 characters, appears in one of the last 6 non-empty lines of the tail, send `herdr.send_keys(&pane, &["enter".into()])` once, set that meta to `now`, and return the op id; a failed read or a refused key changes nothing. A seat whose packet was read (the op confirmed) is never touched. The code change is in crates/gear-engine/src/ops.rs and lib.rs only; tests go where the crate keeps them.
 accept: ops tests with the fake Herdr: a Submitted lane delivery 40 s old on an idle pi lane whose tail ends with "Continue T-1: run `gear` first" gets one `enter` and the meta, and a second pass sends none; the same 20 s old gets none; a tail without the text gets none; a working agent gets none; a confirmed op gets none. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 deps: T-277
