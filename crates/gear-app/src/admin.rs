@@ -19,6 +19,12 @@ pub struct InitResult {
     /// The seats of the project after this call (captain first, then the lanes
     /// in config order).
     pub seats: Vec<String>,
+    /// T-373: one display line per seat whose worktree the **old**
+    /// `conventions.seat_branch` made and the new config no longer uses —
+    /// empty when the `seat_branch` did not change. Nothing is removed: the
+    /// line names the path and the command that takes it away.
+    #[serde(default)]
+    pub stale_worktrees: Vec<String>,
 }
 
 /// The seat that may register a project: the user's own shell (no ctx), or
@@ -599,6 +605,8 @@ fn register(
         project: project_id,
         config_version: 1,
         seats,
+        // A first registration changes no `seat_branch`: there is no old one.
+        stale_worktrees: Vec::new(),
     })
 }
 
@@ -622,10 +630,59 @@ fn register(
 ///   only its profile follows the config;
 /// - a **retired** lane stays retired, even when it is in the new config
 ///   (T-247): a re-apply starts no agent; a Ready task that names the lane is
-///   what brings it back, in `plan::apply_queue`.
+///   what brings it back, in `plan::apply_queue`;
+/// - a changed `conventions.seat_branch` says which seat worktrees GEAR no
+///   longer uses (T-373): the result carries one line per seat that has a
+///   worktree path in meta, naming the seat, the path and both branch
+///   expansions. Nothing is removed.
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
 /// a plan change.
+///
+/// The meta key of a seat's worktree path: `engine.worktree_path.<seat id>`.
+/// `gear_engine::onboard::worktree_path_key` builds the same key — the engine
+/// sits above this crate, so the shape is named here as well; the two must
+/// stay the same string.
+const WORKTREE_PATH_KEY: &str = "engine.worktree_path.";
+
+/// The seat worktrees the stored `conventions.seat_branch` made that the new
+/// config no longer uses (T-373): one line per seat of the project that has a
+/// worktree path in meta, empty when the `seat_branch` did not change.
+///
+/// The line is what the CLI prints; it takes nothing away — the seat keeps its
+/// worktree until its own agent runs in the new one, and the user removes the
+/// old tree then.
+fn stale_seat_worktrees(
+    tx: &Tx<'_>,
+    project: &ProjectRow,
+    config: &config::ProjectConfig,
+) -> GearResult<Vec<String>> {
+    // A stored config that does not parse says nothing about the old branch.
+    let Ok(stored) = config::parse(&project.config_toml) else {
+        return Ok(Vec::new());
+    };
+    let old_template = &stored.conventions.seat_branch;
+    let new_template = &config.conventions.seat_branch;
+    if old_template == new_template {
+        return Ok(Vec::new());
+    }
+    let mut lines = Vec::new();
+    for seat in tx.seats_of_project(&project.id)? {
+        let Some(path) = tx.get_meta(&format!("{WORKTREE_PATH_KEY}{}", seat.id))? else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let old_branch = gear_model::branch::expand_seat(old_template, &project.id, &seat.name);
+        let new_branch = gear_model::branch::expand_seat(new_template, &project.id, &seat.name);
+        lines.push(format!(
+            "seat {}: its worktree {path} was made for branch {old_branch}; new agents of this seat get a worktree on {new_branch}; remove the old one with `herdr worktree remove` once the seat runs in the new one",
+            seat.name
+        ));
+    }
+    Ok(lines)
+}
 fn re_register(
     tx: &Tx<'_>,
     project: &ProjectRow,
@@ -789,6 +846,7 @@ fn re_register(
         project: project_id,
         config_version: version,
         seats,
+        stale_worktrees: stale_seat_worktrees(tx, project, config)?,
     })
 }
 

@@ -655,3 +655,45 @@ fn shared_issue_labels_are_named_together() {
         "project alpha also takes issues labelled z, a from GitHub o/r: give each project labels of its own"
     );
 }
+
+/// `CONFIG` with `[conventions] seat_branch` set to `template`.
+fn with_seat_branch(template: &str) -> String {
+    CONFIG.replace(
+        "gate = \"make test\"",
+        &format!("gate = \"make test\"\nseat_branch = \"{template}\""),
+    )
+}
+
+/// T-373: a re-applied config whose `conventions.seat_branch` changed names
+/// the worktree of every seat that has one in meta — the branch it was made
+/// for, the branch new agents of the seat get, and the command that takes the
+/// old tree away. Nothing is removed.
+#[test]
+fn a_changed_seat_branch_names_the_worktree_it_leaves_behind() {
+    let mut s = Store::open_in_memory().unwrap();
+    init_with_home(&mut s, &admin(), &with_seat_branch("{project}/seat/{seat}"), Some(crate::skill_home()), T0).unwrap();
+    // Only one lane has a worktree so far: the other one and the captain say
+    // nothing.
+    s.write(|tx| tx.set_meta("engine.worktree_path.harbor:heat", "/work/harbor-heat")).unwrap();
+
+    let r = init_with_home(&mut s, &admin(), &with_seat_branch("{project}/home/{seat}"), Some(crate::skill_home()), T0 + 1).unwrap();
+    assert_eq!(r.config_version, 2);
+    assert_eq!(
+        r.stale_worktrees,
+        vec![
+            "seat heat: its worktree /work/harbor-heat was made for branch harbor/seat/heat; \
+             new agents of this seat get a worktree on harbor/home/heat; \
+             remove the old one with `herdr worktree remove` once the seat runs in the new one"
+                .to_string()
+        ]
+    );
+    // Nothing is removed: the seat keeps its worktree until it runs in the new
+    // one.
+    let path = s.read(|tx| tx.get_meta("engine.worktree_path.harbor:heat")).unwrap();
+    assert_eq!(path.as_deref(), Some("/work/harbor-heat"));
+
+    // An unchanged `seat_branch` leaves nothing to say.
+    let r = init_with_home(&mut s, &admin(), &with_seat_branch("{project}/home/{seat}"), Some(crate::skill_home()), T0 + 2).unwrap();
+    assert_eq!(r.config_version, 3);
+    assert!(r.stale_worktrees.is_empty());
+}
