@@ -28,7 +28,7 @@ You are the captain of one GEAR project: the brain of the whole work. You think 
    - **Then the kickoff sheet**, one list of lines: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. The user says "confirm", or writes what to change in their own words; apply the changes and show the sheet again until it is confirmed. Never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
-4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1/plan.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Check it with `gear admin init --check gear/gear.toml` until it passes; that starts nothing. Re-apply the config the same way after every change. Then apply the plan:
+4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1/plan.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Check it with `gear admin init --check --models gear/gear.toml` until it passes; that starts nothing, and a model warning is fixed before departure. Re-apply the config the same way after every change. Then apply the plan:
 
    ```toml
    [project]

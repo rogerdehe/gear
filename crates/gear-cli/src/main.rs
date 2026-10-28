@@ -273,6 +273,11 @@ enum AdminOp {
         /// engine (T-228).
         #[arg(long)]
         check: bool,
+        /// With `--check`: ask each CLI for its models and warn about a
+        /// configured model id its CLI does not list (T-315). Asking runs the
+        /// CLIs, so it never happens unless asked for.
+        #[arg(long, requires = "check")]
+        models: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -385,8 +390,8 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config, check } }) => {
-            cmd_admin_init(&config, check, cli.json)
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models } }) => {
+            cmd_admin_init(&config, check, models, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -505,7 +510,17 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// Both forms go on to name the seats the config starts and the model each
 /// one runs (T-261), so a captain sees a wrong model here rather than once the
 /// fleet runs.
-fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+///
+/// With `--models` (T-315) it also asks each seat's CLI for the models it
+/// lists and warns, on stderr, about a configured model id that is not among
+/// them — a warning, not a refusal, and never without `--models`, since asking
+/// runs the CLIs.
+fn cmd_admin_init(
+    config: &std::path::Path,
+    check_only: bool,
+    with_models: bool,
+    json: bool,
+) -> GearResult<()> {
     // T-261: the lane list — `(name, kind, model)` — with the model being the
     // lane's first `models` entry, else the role chain's first, else "-".
     let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
@@ -617,6 +632,14 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
+        // T-315: only when asked for — this runs the CLIs.
+        let model_warnings: Vec<String> = if with_models {
+            gear_app::kickoff::model_warnings(&parsed, &mut |cli: &str| {
+                gear_app::kickoff::models_of(cli)
+            })
+        } else {
+            Vec::new()
+        };
         if json {
             let lane_list = lane_list(&parsed);
             println!(
@@ -628,6 +651,7 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                     "reviewers": reviewers,
                     "lane_list": lane_json(&lane_list),
                     "review_model": review_model(&parsed),
+                    "model_warnings": model_warnings,
                 })
             );
         } else {
@@ -637,6 +661,9 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
             );
             for line in seat_lines(&parsed) {
                 println!("{line}");
+            }
+            for line in &model_warnings {
+                eprintln!("warning: {line}");
             }
         }
         return Ok(());
