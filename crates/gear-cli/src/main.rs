@@ -1022,14 +1022,16 @@ fn open_store() -> GearResult<gear_store::Store> {
 /// [`open_store`] over an injected variable lookup (testable).
 /// The caller's identity (T-104): the library proves the whole claim — the
 /// pane the caller really runs in is the claimed one, and the seat is bound to
-/// it — and reports a refusal once to the captain.
+/// it — and reports a refusal once to the captain. A caller whose tools run in
+/// a daemon (T-328) also proves it is the seat's own session.
 fn observe_identity(
     store: &mut gear_store::Store,
     env: &gear_app::Env,
     herdr: &mut dyn gear_herdr::HerdrRead,
 ) -> GearResult<Option<gear_app::identity::Fingerprint>> {
     let ancestors = gear_app::identity::process_ancestors();
-    gear_app::identity::prove_seat(store, env, herdr, &ancestors, now_ts())
+    let daemon = gear_app::identity::DaemonSessions::from_vars(|name| std::env::var(name).ok());
+    gear_app::identity::prove_seat(store, env, herdr, &ancestors, &daemon, now_ts())
 }
 
 /// The caller's identity (T-126): `GEAR_CTX` when the seat's shell exports it,
