@@ -157,9 +157,9 @@ pub fn build_with_agents(
                     // can be: by a `# Verdicts` line, not by a reply (T-90).
                     Some(message) => match crate::tasks::verdict_hint(tx, &ctx.project, &message)? {
                         Some(hint) => format!("next: {}", verdict_command(&hint)),
-                        None => format!("next: gear reply {first} --resolve"),
+                        None => format!("next: gear reply {first} --resolve -m \"<what was done>\""),
                     },
-                    None => format!("next: gear reply {first} --resolve"),
+                    None => format!("next: gear reply {first} --resolve -m \"<what was done>\""),
                 },
                 None => "next: gear".to_string(),
             },
