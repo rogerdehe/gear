@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=635 -->
+<!-- gear-plan project=gear base=636 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -743,7 +743,7 @@ goal: [v0.5.0 S1] A lane's packet shows the text of a pending contract update, n
 accept: A gear-app packet test: a task at contract v2 whose attempt adopted v1 shows "## Pending update: v2", v2's goal and acceptance text and the adopt line; a task whose attempt adopted its current version shows no pending section. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
 estimate: 15
 
-## NEW [must] lane=hull milestone=M5 required
+## T-379 [must] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] A `gear` call waits for the store instead of failing with LOCKED, and a write that holds the store long is named (M5: a reviewer's `gear --show` got LOCKED, F-129, and the captain's `gear plan apply` got "ERROR LOCKED: database is locked" at station M-4797; both passed on a retry; M4.2's O-3206 was stuck after the same error). Today crates/gear-store/src/lib.rs waits `BUSY_TIMEOUT_MS` = 5 000 ms on a lock and then fails, and nothing says which transaction held it. Change crates/gear-store/src/lib.rs only, no other design: (1) `BUSY_TIMEOUT_MS` becomes 30 000; (2) fn write measures the time from its `BEGIN IMMEDIATE` to the commit or rollback with `std::time::Instant`, and when it is over 1 000 ms writes one line to stderr, `gear-store: a write held the store for <ms> ms (<the caller's location>)`, the location taken with `#[track_caller]` on fn write and `std::panic::Location::caller()`; the engine's stderr is its log, so the slow writer shows there. Nothing else changes. The code change is in crates/gear-store/src/lib.rs only; tests go where the crate keeps them.
 accept: Store tests: `BUSY_TIMEOUT_MS` is 30 000; a second connection whose write starts while the first holds a write for 200 ms succeeds after it (no Locked); a helper that formats the slow-write line names the caller's file and line. No test sleeps beyond that 200 ms hold. Run only `make check CRATE=gear-store`; the merge gate runs `make gate`.
 estimate: 20
