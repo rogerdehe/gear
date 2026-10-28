@@ -404,12 +404,14 @@ fn a_forged_captain_claim_cannot_re_init() {
     assert_eq!(done.config_version, 2);
 }
 
-/// The contract's config with another project id and repository (T-256).
-fn project_on(id: &str, repo: &std::path::Path) -> String {
+/// The contract's config with another project id and repository (T-256), plus
+/// `branches` lines in its `[conventions]` section.
+fn project_on(id: &str, repo: &std::path::Path, branches: &str) -> String {
     let path = serde_json::json!(repo.to_string_lossy()).to_string();
     CONFIG
         .replace("id = \"harbor\"", &format!("id = {id:?}"))
         .replace("repo = \"/repo\"", &format!("repo = {path}"))
+        .replace("[conventions]\n", &format!("[conventions]\n{branches}"))
 }
 
 /// T-256: two projects on one repository cannot cut the same branch names. A
@@ -427,12 +429,12 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let shown = |path: &std::path::Path| {
         std::fs::canonicalize(path).unwrap().to_string_lossy().into_owned()
     };
-    let alpha = project_on("alpha", &repo);
+    let alpha = project_on("alpha", &repo, "");
     init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
 
     // beta on alpha's repository with the default templates is refused,
     // naming alpha and the repository.
-    let beta = project_on("beta", &repo);
+    let beta = project_on("beta", &repo, "");
     let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert_eq!(
@@ -445,20 +447,22 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
 
     // With `{project}` in all three templates it registers.
-    let templated = format!(
-        "{beta}\n[conventions]\ntask_branch = \"{{project}}/{{lane}}/t{{n}}\"\nreview_branch = \"{{project}}/review/t{{n}}\"\nseat_branch = \"{{project}}/{{seat}}\"\n"
+    let templated = project_on(
+        "beta",
+        &repo,
+        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\n",
     );
     let r = init_with_home(&mut s, &admin(), &templated, Some(home.path()), T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
 
     // A third project on another repository keeps the defaults.
-    let gamma = project_on("gamma", &elsewhere);
+    let gamma = project_on("gamma", &elsewhere, "");
     let r = init_with_home(&mut s, &admin(), &gamma, Some(home.path()), T0 + 3).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("gamma", 1));
 
     // A re-registration is checked too: gamma moving onto alpha's repository
     // with the default templates is refused and changes nothing.
-    let moved = project_on("gamma", &repo);
+    let moved = project_on("gamma", &repo, "");
     let e = init_with_home(&mut s, &admin(), &moved, Some(home.path()), T0 + 4).unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert!(e.detail.contains("project alpha also works in"), "{}", e.detail);

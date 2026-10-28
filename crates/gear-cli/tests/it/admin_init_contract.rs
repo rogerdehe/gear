@@ -503,7 +503,8 @@ fn config_for(dir: &Path, id: &str, repo: &Path) -> PathBuf {
         format!(
             "[project]\nid = {id}\nherdr_session = \"sess\"\nrepo = {repo}\n\
              \n[quota]\nlanes = 0\ntemps = 0\n\
-             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n",
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[conventions]\ngate = \"make gate\"\n",
             id = serde_json::json!(id).to_string(),
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
@@ -523,6 +524,12 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     let elsewhere = dir.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("the other repo");
     let db = dir.join("gear.db");
+    // With no store yet there is nothing to collide with, and the check says
+    // what it skipped.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "p", &repo), None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stderr(&o).trim(), "cross-project check skipped: no store");
+    assert!(!db.exists(), "a check creates no store");
     // The user registers `p` on the repository.
     let o = init(&dir, &db, &config_for(&dir, "p", &repo), None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));

@@ -77,7 +77,7 @@ pub fn init_with_home(
     //    the GEAR skills (`check`, T-228). The other projects of the branch
     //    check (T-256) are this store's, so `register`/`re_register` read them
     //    inside the transaction, before any write.
-    let config = check(config_text, home, &[])?;
+    let config = check(config_text, home)?;
 
     let project_id = config.project.id.clone();
 
@@ -124,17 +124,13 @@ pub fn init_with_home(
 /// The checks `init` makes before it touches the store (T-228): the config's
 /// shape and every issue at once, each seat's profile, and the GEAR skill of
 /// every kind the project can start. A caller that only wants to validate its
-/// `gear.toml` runs this: it opens no store (the other projects it compares the
-/// branches with are the caller's, T-256), reaches no Herdr and starts
+/// `gear.toml` runs this: it opens no store, reaches no Herdr and starts
 /// nothing. The caller-context checks (`init`'s step 2b) need the store and
-/// stay there.
-/// `others` are the **other** projects of the caller's store — `(id,
-/// config_toml)` — for the branch check of T-256; a caller with no store (a
-/// machine without one yet) passes an empty slice.
+/// stay there, and the cross-project branch check (T-256) is [`branch_clash`],
+/// which the caller feeds its own projects.
 pub fn check(
     config_text: &str,
     home: Option<&std::path::Path>,
-    others: &[(String, String)],
 ) -> GearResult<config::ProjectConfig> {
     // Parse and validate the config; every issue is reported at once.
     let config = config::parse(config_text)?;
@@ -251,19 +247,6 @@ pub fn check(
         }
     }
 
-    // Two projects on one repository must not cut the same branch names
-    // (T-256): the store's other projects are the caller's, and one that does
-    // not parse is skipped — it is not the config being checked.
-    for (other_id, other_text) in others {
-        if *other_id == config.project.id {
-            continue;
-        }
-        let Ok(other) = config::parse(other_text) else {
-            continue;
-        };
-        branch_clash(&config, other_id, &other)?;
-    }
-
     Ok(config)
 }
 
@@ -337,55 +320,67 @@ fn prove_captain(
 }
 
 /// The branch check of a registration (T-256), against every other project of
-/// the store: a project's `config_toml` that does not parse is skipped, since
-/// it says nothing about the branches it cuts.
+/// the store.
 fn check_other_projects(tx: &Tx<'_>, config: &config::ProjectConfig) -> GearResult<()> {
-    for other_id in tx.project_ids()? {
-        if other_id == config.project.id {
-            continue;
-        }
-        let Some(other) = tx.get_project(&other_id)? else {
-            continue;
-        };
-        let Ok(other_config) = config::parse(&other.config_toml) else {
-            continue;
-        };
-        branch_clash(config, &other_id, &other_config)?;
+    match branch_clash(config, &other_projects(tx)?) {
+        Some(problem) => Err(GearError::new(ErrorCode::BadFormat, problem)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Refuse a config that would cut the same branch names as `other` (T-256): two
-/// fleets in one Herdr session may work on one repository, and their task,
-/// review and seat branch templates then need `{project}` so `hull/t12` and
-/// `review/t12` belong to one project only.
+/// Every project of the store as `(id, config_toml)` (T-256).
+fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
+    let mut others = Vec::new();
+    for id in tx.project_ids()? {
+        if let Some(row) = tx.get_project(&id)? {
+            others.push((row.id, row.config_toml));
+        }
+    }
+    Ok(others)
+}
+
+/// The problem of two projects cutting the same branch names on one repository
+/// (T-256), or `None` when they cannot collide.
+///
+/// `others` are the store's projects as `(id, config_toml)`; one that does not
+/// parse is skipped, since it says nothing about the branches it cuts. A
+/// project of `others` that works in one of this config's repositories
+/// (canonicalized, the text when it does not exist) meets this config's
+/// branches, so this config's task, review and seat branch templates must name
+/// `{project}`: two fleets in one Herdr session then keep `hull/t12` and
+/// `review/t12` to themselves.
 pub fn branch_clash(
     config: &config::ProjectConfig,
-    other_id: &str,
-    other: &config::ProjectConfig,
-) -> GearResult<()> {
+    others: &[(String, String)],
+) -> Option<String> {
     let ours = repo_paths(config);
-    let theirs = repo_paths(other);
-    let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
-        return Ok(());
-    };
-    let conventions = &config.conventions;
-    let templated = [
-        &conventions.task_branch,
-        &conventions.review_branch,
-        &conventions.seat_branch,
-    ]
-    .iter()
-    .all(|template| template.contains("{project}"));
-    if templated {
-        return Ok(());
-    }
-    Err(GearError::new(
-        ErrorCode::BadFormat,
-        format!(
+    for (other_id, other_text) in others {
+        if *other_id == config.project.id {
+            continue;
+        }
+        let Ok(other) = config::parse(other_text) else {
+            continue;
+        };
+        let theirs = repo_paths(&other);
+        let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
+            continue;
+        };
+        let conventions = &config.conventions;
+        let templated = [
+            &conventions.task_branch,
+            &conventions.review_branch,
+            &conventions.seat_branch,
+        ]
+        .iter()
+        .all(|template| template.contains("{project}"));
+        if templated {
+            continue;
+        }
+        return Some(format!(
             "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
-        ),
-    ))
+        ));
+    }
+    None
 }
 
 /// A config's repo paths, each canonicalized to compare two configs that name
