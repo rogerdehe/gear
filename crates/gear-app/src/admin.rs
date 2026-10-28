@@ -404,6 +404,8 @@ fn register(
 ///   naming the field;
 /// - the project row takes the new config text, the next config version and
 ///   the new quotas;
+/// - a lower `[quota] temps` retires the temp seats it no longer allows, the
+///   newest ones and every Active or Starting seat staying (T-237);
 /// - a lane that is not registered yet becomes a Queued seat (generation 0) —
 ///   the engine onboards it;
 /// - a registered lane keeps its seat: its generation, state and bindings stay,
@@ -486,6 +488,11 @@ fn re_register(
     row.quota_includes_captain = config.quota.includes_captain;
     tx.update_project(&row)?;
 
+    // A lower `[quota] temps` retires the reviewer seats it no longer allows
+    // (T-237): the extra temp seats of an older, larger quota each hold their
+    // own worktree, and the engine rotates through all of them.
+    retire_excess_temps(tx, &project_id, config.quota.temps, now)?;
+
     // The decision log (design §7.4): a config change is GEAR's own entry.
     {
         let voyage = crate::plan::current_voyage(tx, &project_id)?;
@@ -567,6 +574,55 @@ fn re_register(
         config_version: version,
         seats,
     })
+}
+
+/// Retire the temp seats a lower `[quota] temps` no longer allows (T-237).
+///
+/// The quota is the number of reviewer seats the project keeps. A seat that is
+/// Active or Starting holds a working reviewer: it is never retired and it
+/// takes a slot. The idle seats — Released or Standby — fill the slots that are
+/// left, newest `state_since` first (their worktrees are the warm ones), and
+/// every idle seat past them goes: a Released one (no agent left) becomes
+/// Retired, a Standby one (its agent and pane are still there) becomes
+/// Releasing, so the engine's own release path closes the pane and the next
+/// config apply retires it.
+fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearResult<()> {
+    let seats: Vec<SeatRow> = tx
+        .seats_of_project(project)?
+        .into_iter()
+        .filter(|seat| seat.role == SeatRole::Temp && seat.state != SeatState::Retired)
+        .collect();
+    if seats.len() as i64 <= i64::from(quota) {
+        return Ok(());
+    }
+
+    // The working reviewers hold their slots; the idle ones take the rest.
+    let working = seats
+        .iter()
+        .filter(|seat| matches!(seat.state, SeatState::Active | SeatState::Starting))
+        .count();
+    let slots = usize::try_from(quota).unwrap_or(usize::MAX);
+    let room = slots.saturating_sub(working);
+    let mut idle: Vec<&SeatRow> = seats
+        .iter()
+        .filter(|seat| matches!(seat.state, SeatState::Released | SeatState::Standby))
+        .collect();
+    // The newest seats fill the slots; the id breaks a tie so the choice is
+    // the same on every run.
+    idle.sort_by(|a, b| b.state_since.cmp(&a.state_since).then_with(|| a.id.cmp(&b.id)));
+
+    let reason = format!("temps quota lowered to {quota}");
+    for seat in idle.into_iter().skip(room) {
+        // A Standby reviewer still has its agent: Releasing is the transition
+        // that lets the engine close its pane (Temp has no Standby -> Retired).
+        let state = if seat.state == SeatState::Standby {
+            SeatState::Releasing
+        } else {
+            SeatState::Retired
+        };
+        tx.set_seat_state(&seat.id, state, Some(&reason), now)?;
+    }
+    Ok(())
 }
 
 /// Note that `who` may start the CLI `kind` (T-83): once per kind, the first
