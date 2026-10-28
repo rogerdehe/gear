@@ -84,6 +84,14 @@ fn the_report_path_is_the_voyages_reports_folder() {
 }
 
 #[test]
+fn a_task_that_adopted_its_current_version_has_no_pending_section() {
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(!text.contains("## Pending update"), "{text}");
+    assert!(!text.contains("Run `gear` (no arguments) to adopt it"), "{text}");
+}
+
+#[test]
 fn pending_update_and_missing_task() {
     let mut s = world(true);
     s.write(|tx| {
@@ -96,6 +104,13 @@ fn pending_update_and_missing_task() {
     let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
     assert!(text.contains("# T-7 — Fix the login crash"), "rendered from the adopted v1:\n{text}");
     assert!(text.contains("## Pending update: v2"), "{text}");
+    // T-378: the pending version's own wording, not only its number.
+    assert!(text.contains("Goal (v2):\nFix it better\n"), "{text}");
+    assert!(text.contains("Acceptance (v2):\na2\n"), "{text}");
+    assert!(
+        text.contains("Run `gear` (no arguments) to adopt it, then work and hand in to v2.\n"),
+        "{text}"
+    );
     assert_eq!(s.read(|tx| render_task_packet(tx, "p", "T-9")).unwrap_err().code, ErrorCode::NoTarget);
     let mut s = world(false);
     assert!(s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap().contains("--attempt <n>"));
