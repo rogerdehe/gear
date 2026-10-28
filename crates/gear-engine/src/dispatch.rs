@@ -534,9 +534,7 @@ pub fn prepare_dispatch(
                 .map(Some).ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
         })?;
         let Some(attempt) = attempt else { continue };
-        let prep = crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)?;
-        if prep == crate::session::Prep::Ready
-            || rework_mid_turn_ready(store, herdr, seat, task, attempt.n, prep)? {
+        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
             let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
                 Action::Assign { task: task.clone() }
             } else { action.clone() };
@@ -544,46 +542,6 @@ pub fn prepare_dispatch(
         }
     }
     Ok(ready)
-}
-
-/// T-290: a rework packet reaches a lane that queues input while it still
-/// works. The session step is the last gate before a packet: for a rework that
-/// keeps the current conversation (`keep`/`fresh`) it has nothing to run
-/// against the agent, so the idle wait of `session_runner` does not apply —
-/// the packet waits in the agent's input queue instead. Every other session
-/// action (new, compact, resume) types into the pane and still waits.
-fn rework_mid_turn_ready(
-    store: &mut Store,
-    herdr: &mut dyn gear_herdr::HerdrAct,
-    seat: &SeatRow,
-    task: &str,
-    attempt: i64,
-    prep: crate::session::Prep,
-) -> GearResult<bool> {
-    if prep != crate::session::Prep::Wait || attempt < 2 {
-        return Ok(false);
-    }
-    let (row, binding) = store.read(|tx| {
-        Ok((
-            tx.get_attempt(&seat.project, task, attempt)?,
-            tx.get_binding(&seat.id, seat.generation)?,
-        ))
-    })?;
-    let (Some(row), Some(binding)) = (row, binding) else { return Ok(false) };
-    if row.state != AttemptState::Delivered || row.sent_at.is_some() {
-        return Ok(false);
-    }
-    if !matches!(row.session_action.as_deref(), Some("keep") | Some("fresh")) {
-        return Ok(false);
-    }
-    if !gear_herdr::queues_input(&binding.kind) {
-        return Ok(false);
-    }
-    Ok(matches!(
-        herdr.agent_get(&binding.pane_id),
-        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str())
-            && info.agent_status == gear_herdr::AgentStatus::Working
-    ))
 }
 
 /// Resume an open lane round after its agent disappears or is restarted.
