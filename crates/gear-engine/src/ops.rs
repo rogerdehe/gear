@@ -1415,6 +1415,22 @@ mod tests {
     }
 
     #[test]
+    fn a_review_delivery_with_no_view_and_no_verdict_stays_submitted() {
+        // Neither proof is in: the delivery waits, spends no budget and flags
+        // nothing — the reviewer may still be starting (T-267).
+        let mut store = reviewer_world();
+        store.write(|tx| { review_delivery(tx, "T-1", T0); Ok(()) }).unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 600).unwrap();
+
+        assert!(confirmed.is_empty());
+        assert!(flagged.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
+        assert_eq!(op.check_budget, 0);
+    }
+
+    #[test]
     fn a_newer_review_delivery_supersedes_the_older_one() {
         // Two deliveries of one attempt (T-267): the newer is the packet the
         // reviewer got, so confirming it voids the older, which would hold the
