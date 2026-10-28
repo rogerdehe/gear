@@ -14,6 +14,7 @@ use gear_model::{GearResult, TaskState, Ts};
 use gear_store::{AttemptRow, AttemptTimes, Tx};
 
 use crate::state_word;
+use crate::style::{lane_color, lane_width, Color, Line, Style};
 
 /// The attempts of a task and the times of each of them.
 struct History {
@@ -219,66 +220,130 @@ fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
     (actual, merged)
 }
 
-/// The lines of the graph.
+/// The lines of the graph, as plain text.
 ///
 /// `selected` is the row the user has on: its dependencies and the tasks that
 /// wait for it are marked.
 pub fn lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> Vec<String> {
-    let text_x = 14 + 6 * lanes.len() + 1;
-    let width = text_x + 120;
+    styled_lines(tasks, lanes, selected).into_iter().map(|line| line.text).collect()
+}
+
+/// The colour of a stage (the prototype's STAGE_COL).
+pub fn stage_color(stage: GraphStage) -> Color {
+    match stage {
+        GraphStage::Done => Color::Ok,
+        GraphStage::Merging | GraphStage::Review => Color::Acc,
+        GraphStage::Working => Color::Warn,
+        GraphStage::Queued => Color::Dim,
+    }
+}
+
+/// The columns of the graph: where the lanes and the text stand.
+///
+/// The prototype's columns (a lane every six, the id, the lane and the goal
+/// after the lanes) grow with the longest lane name and the longest id, so a
+/// long name never runs into the next column.
+struct Columns {
+    /// The distance between two lane columns.
+    step: usize,
+    /// The id of the task.
+    id_x: usize,
+    /// The lane of the task and the width of its field.
+    lane_x: usize,
+    lane_w: usize,
+    /// What happened to the task.
+    info_x: usize,
+    /// The dependency marks.
+    mark_x: usize,
+}
+
+impl Columns {
+    fn of(tasks: &[GraphTask], lanes: &[String]) -> Columns {
+        let names = lanes
+            .iter()
+            .map(String::as_str)
+            .chain(tasks.iter().map(|task| task.lane.as_str()));
+        let step = lane_width(lanes.iter().map(String::as_str), 6, 1);
+        let lane_w = lane_width(names, 5, 1);
+        let id_w = lane_width(tasks.iter().map(|task| task.id.as_str()), 6, 1);
+        let id_x = 14 + step * lanes.len() + 1;
+        let lane_x = id_x + id_w;
+        // The goal: 35 columns, then a space before the info.
+        let info_x = lane_x + lane_w + 36;
+        Columns { step, id_x, lane_x, lane_w, info_x, mark_x: info_x + 33 }
+    }
+
+    /// The column of a lane: the first lane at 14, every next one a step
+    /// further.
+    fn lane(&self, index: usize) -> usize {
+        14 + self.step * index
+    }
+}
+
+/// The lines of the graph, in the prototype's colours.
+pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> Vec<Line> {
+    let columns = Columns::of(tasks, lanes);
+    let width = columns.mark_x + 60;
+    let lane_style = |lane: &str| Style::fg(lane_color(lanes, lane));
     let mut out = Vec::new();
 
     // The head of the columns: dev, the review column, one column per lane.
     let mut head = Row::new(width);
-    head.put(2, "dev");
-    head.put(8, "rev");
+    head.put(2, "dev", Style::fg(Color::Ok).and_bold());
+    head.put(8, "rev", Style::fg(Color::Acc).and_bold());
     for (index, lane) in lanes.iter().enumerate() {
-        head.put(column_x(index), lane);
+        head.put(columns.lane(index), lane, lane_style(lane).and_bold());
     }
     out.push(head.finish());
 
     let selected_task = selected.and_then(|index| tasks.get(index));
     for (index, task) in tasks.iter().enumerate() {
+        let picked = selected == Some(index);
         let mut row = Row::new(width);
         // The line of dev runs down the whole graph.
-        row.put(3, "│");
-        let x = column_x(lane_index(lanes, &task.lane)) + 1;
+        row.put(3, "│", Style::fg(Color::Ok));
+        let x = columns.lane(lane_index(lanes, &task.lane)) + 1;
         if matches!(task.stage, GraphStage::Review | GraphStage::Merging) {
             // The task is in review: the line from the review column to it.
-            row.put(9, "◎");
-            row.put(10, &"─".repeat(x.saturating_sub(10)));
+            row.put(9, "◎", Style::fg(Color::Acc).and_bold());
+            row.put(10, &"─".repeat(x.saturating_sub(10)), Style::fg(Color::Acc));
         }
         // A lane's line runs while the lane still has tasks below this row.
         for (lane_index, lane) in lanes.iter().enumerate() {
             if tasks[index + 1..].iter().any(|other| &other.lane == lane) {
-                row.put(column_x(lane_index) + 1, "│");
+                row.put(columns.lane(lane_index) + 1, "│", lane_style(lane));
             }
         }
-        row.put(x, task.stage.symbol());
+        row.put(x, task.stage.symbol(), Style::fg(stage_color(task.stage)).and_bold());
         if task.stage == GraphStage::Done {
             // The task was merged into dev: the line of the merge.
-            row.put(3, "●");
-            row.put(4, &"─".repeat(x.saturating_sub(4)));
+            row.put(3, "●", Style::fg(Color::Ok).and_bold());
+            row.put(4, &"─".repeat(x.saturating_sub(4)), Style::fg(Color::Ok));
             // The lanes the merge crosses.
             for (lane_index, lane) in lanes.iter().enumerate() {
-                let crossing = column_x(lane_index) + 1;
+                let crossing = columns.lane(lane_index) + 1;
                 if crossing < x && tasks[index + 1..].iter().any(|other| &other.lane == lane) {
-                    row.put(crossing, "┼");
+                    row.put(crossing, "┼", lane_style(lane));
                 }
             }
         }
-        row.put(text_x, &task.id);
+        row.put(columns.id_x, &task.id, lane_style(&task.lane).reversed_if(picked));
         row.put(
-            text_x + 6,
-            &format!("{:<5}{:<35}", task.lane, cut(&task.title, 34)),
+            columns.lane_x,
+            &format!("{:<w$}{:<35}", task.lane, cut(&task.title, 34), w = columns.lane_w),
+            Style::PLAIN.reversed_if(picked),
         );
-        row.put(text_x + 47, &info(task));
+        let info_style = match task.stage {
+            GraphStage::Done => Style::fg(Color::Dim),
+            stage => Style::fg(stage_color(stage)),
+        };
+        row.put(columns.info_x, &info(task), info_style);
         if task.stage == GraphStage::Done {
-            row.put(9, "✓");
+            row.put(9, "✓", Style::fg(Color::Ok).and_bold());
         }
         if task.rounds > 1 {
             // The task was reworked.
-            row.put(8, "↺");
+            row.put(8, "↺", Style::fg(Color::Warn).and_bold());
         }
         // What the selection means for this row: the dependencies of the
         // selected task, and the tasks that wait for it.
@@ -292,25 +357,22 @@ pub fn lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> 
             _ => None,
         };
         match mark {
-            Some(mark) => row.put(text_x + 80, &mark),
-            None if !task.deps.is_empty() => {
-                row.put(text_x + 80, &format!("needs {}", task.deps.join(",")))
-            }
+            Some(mark) => row.put(columns.mark_x, &mark, Style::fg(Color::Warn).and_bold()),
+            None if !task.deps.is_empty() => row.put(
+                columns.mark_x,
+                &format!("needs {}", task.deps.join(",")),
+                Style::fg(Color::Dim),
+            ),
             None => {}
         }
         out.push(row.finish());
     }
-    out.push(String::new());
-    out.push(
-        "○ queued  ◉ working  ◎ in review (rev column)  ↺ reworked  ✓● reviewed and merged into dev   select a row: its deps light up"
-            .to_string(),
-    );
+    out.push(Line::new());
+    out.push(Line::styled(
+        "○ queued  ◉ working  ◎ in review (rev column)  ↺ reworked  ✓● reviewed and merged into dev   select a row: its deps light up",
+        Style::fg(Color::Dim),
+    ));
     out
-}
-
-/// The column of a lane: the first lane at 14, every next one six further.
-fn column_x(index: usize) -> usize {
-    14 + 6 * index
 }
 
 /// The index of a lane in the columns; a lane that is not a column (a task of
@@ -345,11 +407,27 @@ fn info(task: &GraphTask) -> String {
 /// The task panel: the rounds of the task, what it depends on, what needs
 /// it.
 pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<String>> {
+    Ok(styled_panel(tx, project, task, now)?.into_iter().map(|line| line.text).collect())
+}
+
+/// The colour of a task's state in a panel: the stage colours of the graph.
+fn state_color(state: TaskState) -> Color {
+    match state {
+        TaskState::Done => Color::Ok,
+        TaskState::Running => Color::Warn,
+        TaskState::Verifying => Color::Acc,
+        _ => Color::Dim,
+    }
+}
+
+/// The task panel, in the prototype's colours.
+pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<Line>> {
     let Some(row) = tx.get_task(project, task)? else {
-        return Ok(vec![format!("{task} is not a task of {project}")]);
+        return Ok(vec![Line::plain(format!("{task} is not a task of {project}"))]);
     };
     let history = History::of(tx, project, task)?;
-    let mut lines = Vec::new();
+    let order = lanes(tx, project)?;
+    let mut lines: Vec<Line> = Vec::new();
     let lane = row.lane.clone().unwrap_or_else(|| "-".to_string());
     let stage = match row.state {
         TaskState::Done => "done",
@@ -361,20 +439,27 @@ pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<
         TaskState::Cancelled => "cancelled",
         TaskState::Draft => "draft",
     };
-    lines.push(format!("{task} · lane {lane} · {stage}"));
+    lines.push(Line::styled(
+        format!("{task} · lane {lane} · {stage}"),
+        Style::fg(lane_color(&order, &lane)).and_bold(),
+    ));
     let title = tx
         .get_contract(project, task, row.contract_version)?
         .map(|contract| contract.goal)
         .unwrap_or_default();
     if !title.is_empty() {
-        lines.push(title);
+        lines.push(Line::plain(title));
     }
-    lines.push(String::new());
+    lines.push(Line::new());
     let estimate = row.estimate_min.unwrap_or(0);
     let actual = actual_of(&history, now).0.unwrap_or(0);
-    lines.push(format!("estimate {estimate}m · actual {actual}m"));
-    lines.push(String::new());
-    lines.push("ROUNDS".to_string());
+    let over = estimate > 0 && actual > estimate;
+    lines.push(Line::styled(
+        format!("estimate {estimate}m · actual {actual}m"),
+        if over { Style::fg(Color::Warn) } else { Style::PLAIN },
+    ));
+    lines.push(Line::new());
+    lines.push(Line::styled("ROUNDS", Style::bold()));
     let rounds = tx.rounds_of_task(project, task)?;
     if !rounds.is_empty() {
         // The rounds of the store (§4): the time on the clock, the tokens and
@@ -385,27 +470,27 @@ pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<
                 + round.output.unwrap_or(0)
                 + round.cache_read.unwrap_or(0)
                 + round.cache_write.unwrap_or(0);
-            let mut line = format!(
+            let mut line = Line::plain(format!(
                 "  {:<5} {:<7} {:<6} {:>3}m   {}k tokens",
                 round.role,
                 format!("attempt {}", round.attempt),
                 round.cli,
                 minutes,
                 tokens / 1000
-            );
+            ));
             if round.role == "review" {
                 // How the review ended: it is still running when there is no
                 // verdict yet.
-                line.push_str(match tx.get_review_verdict(project, task, round.attempt)? {
-                    Some(verdict) if verdict.passed => "  → pass",
-                    Some(_) => "  → fail: rework",
-                    None => "  (running)",
-                });
+                line = match tx.get_review_verdict(project, task, round.attempt)? {
+                    Some(verdict) if verdict.passed => line.push("  → pass", Style::fg(Color::Ok)),
+                    Some(_) => line.push("  → fail: rework", Style::fg(Color::Warn)),
+                    None => line.push("  (running)", Style::fg(Color::Acc)),
+                };
             }
             lines.push(line);
         }
     } else if history.attempts.is_empty() {
-        lines.push("  not started".to_string());
+        lines.push(Line::styled("  not started", Style::fg(Color::Dim)));
     } else {
         // No rounds yet: the attempts of the task say what happened.
         for attempt in &history.attempts {
@@ -418,47 +503,54 @@ pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<
                 }
                 _ => 0,
             };
-            lines.push(format!(
+            lines.push(Line::plain(format!(
                 "  {role} {:<7} {cli:<6} {minutes:>3}m",
                 format!("{}", attempt.n)
-            ));
+            )));
             if let Some(verdict) = tx.get_review_verdict(project, task, attempt.n)? {
-                let outcome = if verdict.passed { "pass" } else { "fail: rework" };
-                lines.push(format!(
-                    "  review {:<7} {:<6}          → {outcome}",
-                    format!("{}", attempt.n),
-                    cli_of(tx, &verdict.by_seat)
-                ));
+                let (outcome, color) =
+                    if verdict.passed { ("pass", Color::Ok) } else { ("fail: rework", Color::Warn) };
+                lines.push(
+                    Line::plain(format!(
+                        "  review {:<7} {:<6}          ",
+                        format!("{}", attempt.n),
+                        cli_of(tx, &verdict.by_seat)
+                    ))
+                    .push(format!("→ {outcome}"), Style::fg(color)),
+                );
             }
         }
     }
-    lines.push(String::new());
-    lines.push("DEPENDS ON".to_string());
+    lines.push(Line::new());
+    lines.push(Line::styled("DEPENDS ON", Style::bold()));
     let mut depends = Vec::new();
     for dep in &row.deps {
         depends.push(dependency_line(tx, project, dep)?);
     }
     if depends.is_empty() {
-        lines.push("  nothing".to_string());
+        lines.push(Line::styled("  nothing", Style::fg(Color::Dim)));
     } else {
         lines.extend(depends);
     }
-    lines.push(String::new());
-    lines.push("NEEDED BY".to_string());
+    lines.push(Line::new());
+    lines.push(Line::styled("NEEDED BY", Style::bold()));
     let mut needed = Vec::new();
     for other in tx.tasks_of_project(project)? {
         if other.deps.iter().any(|dep| dep == task) {
-            needed.push(format!(
-                "  {} {:<5} {:<30}  ({})",
-                other.id,
-                other.lane.clone().unwrap_or_else(|| "-".to_string()),
-                cut(&goal_of(tx, project, &other)?, 30),
-                state_word(other.state)
+            needed.push(Line::styled(
+                format!(
+                    "  {} {:<5} {:<30}  ({})",
+                    other.id,
+                    other.lane.clone().unwrap_or_else(|| "-".to_string()),
+                    cut(&goal_of(tx, project, &other)?, 30),
+                    state_word(other.state)
+                ),
+                Style::fg(state_color(other.state)),
             ));
         }
     }
     if needed.is_empty() {
-        lines.push("  nothing".to_string());
+        lines.push(Line::styled("  nothing", Style::fg(Color::Dim)));
     } else {
         lines.extend(needed);
     }
@@ -466,16 +558,19 @@ pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<
 }
 
 /// One line of the "depends on" list.
-fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<String> {
+fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<Line> {
     let Some(row) = tx.get_task(project, dep)? else {
-        return Ok(format!("  {dep} (unknown)"));
+        return Ok(Line::styled(format!("  {dep} (unknown)"), Style::fg(Color::Dim)));
     };
-    Ok(format!(
-        "  {} {:<5} {:<30}  ({})",
-        row.id,
-        row.lane.clone().unwrap_or_else(|| "-".to_string()),
-        cut(&goal_of(tx, project, &row)?, 30),
-        state_word(row.state)
+    Ok(Line::styled(
+        format!(
+            "  {} {:<5} {:<30}  ({})",
+            row.id,
+            row.lane.clone().unwrap_or_else(|| "-".to_string()),
+            cut(&goal_of(tx, project, &row)?, 30),
+            state_word(row.state)
+        ),
+        Style::fg(state_color(row.state)),
     ))
 }
 
@@ -513,27 +608,34 @@ fn cut(text: &str, max: usize) -> String {
     text.chars().take(max).collect()
 }
 
-/// One line of the graph: characters at fixed columns.
+/// One line of the graph: characters at fixed columns, each in its style.
 struct Row {
-    cells: Vec<char>,
+    cells: Vec<(char, Style)>,
 }
 
 impl Row {
     fn new(width: usize) -> Row {
-        Row { cells: vec![' '; width] }
+        Row { cells: vec![(' ', Style::PLAIN); width] }
     }
 
-    /// Write a text at a column.
-    fn put(&mut self, x: usize, text: &str) {
+    /// Write a text at a column, in a style.
+    fn put(&mut self, x: usize, text: &str, style: Style) {
         for (offset, character) in text.chars().enumerate() {
             if x + offset < self.cells.len() {
-                self.cells[x + offset] = character;
+                self.cells[x + offset] = (character, style);
             }
         }
     }
 
-    /// The line, without the spaces at its end.
-    fn finish(self) -> String {
-        self.cells.into_iter().collect::<String>().trim_end().to_string()
+    /// The line, without the plain spaces at its end.
+    fn finish(mut self) -> Line {
+        while matches!(self.cells.last(), Some((' ', style)) if !style.shows_on_space()) {
+            self.cells.pop();
+        }
+        let mut line = Line::new();
+        for (character, style) in self.cells {
+            line = line.push(character.to_string(), style);
+        }
+        line
     }
 }

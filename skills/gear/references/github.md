@@ -19,7 +19,8 @@ inherits the root's section: it names another repository):
 ```toml
 [github]
 repo = "owner/name"
-merge = "push"                 # the landing of this release; "pr" lands in M4
+merge = "pr"                   # "push" (default): merge locally and push; "pr": land through the pull request
+merge_method = "squash"        # with "pr": "squash" (default) or "merge"
 
 [github.issues]
 labels = ["gear"]              # which issues become tasks; empty = every open one
@@ -37,9 +38,12 @@ already knows — no agent writes on GitHub:
 | a verdict | a comment: the verdict and the findings |
 | a merge | a comment naming the merge commit, then the issue is closed |
 
-Landing a task through its pull request (`merge = "pr"`) is not in this
-release: the engine's merge lands locally and consumes the branch, so the
-config refuses the mode. M4 brings it, with `merge_method`.
+With `merge = "pr"` the gate still runs locally first; the review commits go to
+the task's pull request head, and the engine asks GitHub to merge it
+(`--match-head-commit`), confirms the merge from the pull request's state, and
+only then closes the branches. A refused land tells the captain GitHub's
+reason; `- remerge T-n` tries again. The engine calls GitHub through `gh`, with
+the account `gh auth status` shows.
 
 Every call is one op, kept until the forge confirms it: once per event, retried
 on the next tick while the forge fails (one tick's calls are bounded, so a
