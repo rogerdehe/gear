@@ -231,6 +231,25 @@ class Board:
         y += 1
         self.put(y, 15, "█ used   ◆ expected finish   │ planned end", curses.A_DIM)
         y += 1
+        # tasks of this voyage only: merged, in progress, not started (moved ones are named apart)
+        tasks = [t for t in T[v["id"]] if t[2] != "moved"]
+        merged = sum(1 for t in tasks if t[2] == "merged")
+        waiting = sum(1 for t in tasks if t[2] in ("queued", "deps"))
+        going = len(tasks) - merged - waiting
+        moved = [t[0] for t in T[v["id"]] if t[2] == "moved"]
+        self.put(y, 1, "Tasks", label)
+        n = max(1, len(tasks))
+        a, b = merged * bw // n, going * bw // n
+        self.put(y, 15, "█" * a, curses.color_pair(11))
+        self.put(y, 15 + a, "▓" * b, curses.color_pair(3))
+        self.put(y, 15 + a + b, "░" * (bw - a - b), curses.A_DIM)
+        txt = f"{merged} of {len(tasks)} merged · {going} in progress · {waiting} not started"
+        if moved:
+            txt += f" · moved out: {', '.join(moved)}"
+        self.put(y, 17 + bw, txt, curses.A_BOLD)
+        y += 1
+        self.put(y, 15, "█ merged   ▓ in progress   ░ not started", curses.A_DIM)
+        y += 1
         bars = {"FASTEST": "only what breaks the chain or loses data blocks a task",
                 "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
                 "STRICT": "severe issues block a task; medium ones are the captain's call"}
@@ -269,8 +288,11 @@ class Board:
                 txt = "idle: " + ("next task waits for " + ", ".join(left[0][9]) if left and left[0][9] else "nothing planned")
             self.put(y, 9, txt[: left_w - 10], a)
             y += 1
-            self.put(y, 9, f"done {len(done)} ({hm(sum(t[5] for t in done))}) · left {len(left)} "
-                           f"({hm(sum(t[4] for t in left))})", curses.A_DIM)
+            n = max(1, len(mine))
+            bar = "█" * (len(done) * 12 // n) + "░" * (12 - len(done) * 12 // n)
+            self.put(y, 9, bar, self.lane_attr(lane))
+            self.put(y, 22, f"{len(done)} of {len(mine)} tasks done ({hm(sum(t[5] for t in done))}) · "
+                            f"{len(left)} not started ({hm(sum(t[4] for t in left))} estimated)", curses.A_DIM)
             y += 2
         rx, ry = (1, y + 1) if w < 140 else (left_w + 3, top)
         self.put(ry, rx, "NEEDS A LOOK (open tasks only)", curses.A_BOLD)
