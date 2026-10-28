@@ -60,6 +60,29 @@ fn the_packet_says_the_budget_and_the_friction_flag() {
     assert!(text.contains("a permission you lacked"), "{text}");
 }
 
+/// T-257: the report goes to the voyage's reports folder, one folder per
+/// voyage; a task without a milestone keeps the free `<path>`.
+#[test]
+fn the_report_path_is_the_voyages_reports_folder() {
+    let mut s = world(true);
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-7")?.unwrap();
+        task.milestone = Some("M3".into());
+        tx.update_task(&task)
+    })
+    .unwrap();
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(
+        text.contains("--candidate <commit> \"Report: gear/voyages/M3/reports/T-<n>.md\""),
+        "{text}"
+    );
+
+    // Without a milestone the lane may report where it likes.
+    let mut s = world(true);
+    let text = s.read(|tx| render_task_packet(tx, "p", "T-7")).unwrap();
+    assert!(text.contains("--candidate <commit> \"Report: <path>\""), "{text}");
+}
+
 #[test]
 fn pending_update_and_missing_task() {
     let mut s = world(true);

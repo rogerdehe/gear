@@ -388,6 +388,14 @@ pub struct Conventions {
     /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
     /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
     pub seat_branch: String,
+    /// The git remote a hand-in is checked against (T-257): the branch is
+    /// fetched from it and `<remote>/<branch>` is the ref the check reads.
+    /// Default `origin`.
+    pub remote: String,
+    /// The folder a voyage keeps its plan, reports and reviews in (T-257), a
+    /// template with `{project}` and `{milestone}` filled in. Default
+    /// `gear/voyages/{milestone}` (one folder per voyage).
+    pub voyage_dir: String,
 }
 
 impl Default for Conventions {
@@ -401,6 +409,8 @@ impl Default for Conventions {
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
             seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
+            remote: gear_model::layout::REMOTE.to_string(),
+            voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
         }
     }
 }
@@ -777,6 +787,8 @@ pub fn profile_table(
 /// - a lane's `repo` names one of the `[[repos]]` entries;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
+/// - `conventions.remote` non-empty and without whitespace, and
+///   `conventions.voyage_dir` names `{milestone}` (T-257);
 /// - `timing.cooldown_s > timing.tick_s`;
 /// - `models.lanes`, `models.review`, `models.captain` and each lane's `models`
 ///   hold no blank and no repeated entry (compared trimmed; an entry is the
@@ -1148,7 +1160,26 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
-    // ---- the branch templates (T-252): the branch names GEAR cuts and
+    // ---- the remote and the voyage folder (T-257): a remote with a blank
+    // or a space in it is no remote git can fetch from, and a voyage folder
+    // without `{milestone}` keeps every voyage in one place.
+    let remote = conventions.remote.trim();
+    if remote.is_empty() || remote.chars().any(char::is_whitespace) {
+        issues.push(issue(
+            "conventions.remote",
+            "the remote must be one git remote name, without spaces (e.g. origin, upstream)"
+                .to_string(),
+        ));
+    }
+    if !conventions.voyage_dir.contains("{milestone}") {
+        issues.push(issue(
+            "conventions.voyage_dir",
+            "the voyage folder must name {milestone} (one folder per voyage, e.g. gear/voyages/{milestone})"
+                .to_string(),
+        ));
+    }
+
+    // The branch templates (T-252): the branch names GEAR cuts and
     // checks. A template is expanded with its placeholders; anything else stays
     // a literal brace and git refuses the branch, so each is checked here — on
     // a sample — rather than when a lane cannot push.

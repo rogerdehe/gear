@@ -151,7 +151,16 @@ pub fn build_with_agents(
                 Some(first) => match tx.get_message(&ctx.project, first)? {
                     Some(message) if crate::station::is_station(&message) => {
                         let milestone = message.thread.trim_start_matches("station:");
-                        format!("next: gear plan apply gear/voyages/{milestone}.md (# Decisions: station {first}: keep course|time-box|cut|move)")
+                        // The voyage's plan file, where the project keeps it
+                        // (T-257): `gear/voyages/<M>/plan.md` by default.
+                        let voyage_dir =
+                            crate::tasks::conventions_of(tx, &ctx.project).voyage_dir;
+                        let plan = gear_model::layout::plan_file(
+                            &voyage_dir,
+                            &ctx.project,
+                            milestone,
+                        );
+                        format!("next: gear plan apply {plan} (# Decisions: station {first}: keep course|time-box|cut|move)")
                     }
                     // A review fail (or a failed merge) is settled where it
                     // can be: by a `# Verdicts` line, not by a reply (T-90).
@@ -203,16 +212,15 @@ pub fn record_view(store: &mut Store, view: &ViewRecord) -> GearResult<()> {
 }
 
 /// The command that settles an item with a `# Verdicts` line (T-90): the
-/// voyage file of the task's milestone, then the line with the real values.
+/// voyage's plan file (`hint.plan`, the project's own folder, T-257), then the
+/// line with the real values.
 ///
 /// A failed merge is settled by a `# Staff` line instead (B5): `- remerge
 /// T-<n>` retries the merge, which is what a merge that failed needs — a
 /// rework is the other way round.
 pub fn verdict_command(hint: &crate::tasks::VerdictHint) -> String {
-    let path = match &hint.milestone {
-        Some(milestone) => format!("gear/voyages/{milestone}.md"),
-        None => "gear/voyages/<M>.md".to_string(),
-    };
+    // The voyage's plan file, where the project keeps it (T-257).
+    let path = &hint.plan;
     match &hint.remerge {
         Some(task) => format!("gear plan apply {path} (# Staff: - remerge {task})"),
         None => format!("gear plan apply {path} (# Verdicts: {})", hint.line),

@@ -28,7 +28,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    - **Then the kickoff sheet**, one list of lines: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. The user says "confirm", or writes what to change in their own words; apply the changes and show the sheet again until it is confirmed. Never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
-4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Check it with `gear admin init --check gear/gear.toml` until it passes; that starts nothing. Re-apply the config the same way after every change. Then apply the plan:
+4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1/plan.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Check it with `gear admin init --check gear/gear.toml` until it passes; that starts nothing. Re-apply the config the same way after every change. Then apply the plan:
 
    ```toml
    [project]
@@ -92,10 +92,10 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
 
 ## 2. The plan file
 
-One plan file per voyage, edited in place: `gear/voyages/<milestone>.md`.
+One plan file per voyage, edited in place: `gear/voyages/<milestone>/plan.md` (one folder per voyage, holding its plan, its `reports/` and its `reviews/`; `[conventions].voyage_dir` says where).
 
 ```bash
-gear plan apply gear/voyages/M1.md
+gear plan apply gear/voyages/M1/plan.md
 ```
 
 **The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): a Herdr tab running `gear board` in the project's repository, restarted if one from an earlier voyage is still open, and check it shows this project and this voyage.

@@ -129,8 +129,15 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
             let candidate = args.candidate.as_deref().ok_or_else(|| {
                 GearError::new(ErrorCode::BadFormat, "a result needs `--candidate`")
             })?;
+            // The remote the hand-in is checked against is the project's
+            // `[conventions].remote` (T-257): `origin` unless it names its own.
+            let conventions = match env.ctx.as_ref() {
+                Some(ctx) => crate::config::conventions_or_default(store, &ctx.project)?,
+                None => crate::config::Conventions::default(),
+            };
             crate::base::require_current_base(
                 &gate.worktree,
+                &conventions.remote,
                 &gate.integration,
                 candidate,
                 gate.window_min,
@@ -149,9 +156,10 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     crate::tasks::require_rework_contains(&gate.worktree, &previous, candidate)?;
                 }
             }
-            // And it must be on the task's branch on origin (T-83): a hand-in
-            // nobody can fetch is not a hand-in (M2.1: T-60). The branch is the
-            // project's template (T-252), expanded like the lane's.
+            // And it must be on the task's branch on the remote (T-83): a
+            // hand-in nobody can fetch is not a hand-in (M2.1: T-60). The
+            // branch is the project's template (T-252), expanded like the
+            // lane's, and the remote is the project's (T-257).
             if let Some(task) = args.task.as_deref() {
                 if let Some(ctx) = env.ctx.as_ref() {
                     if let Some(lane) = store
@@ -160,11 +168,14 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                         .flatten()
                         .and_then(|row| row.lane)
                     {
-                        let conventions =
-                            crate::config::conventions_or_default(store, &ctx.project)?;
                         let branch =
                             crate::base::task_branch(&conventions, &ctx.project, &lane, task);
-                        crate::base::require_pushed(&gate.worktree, &branch, candidate)?;
+                        crate::base::require_pushed(
+                            &gate.worktree,
+                            &conventions.remote,
+                            &branch,
+                            candidate,
+                        )?;
                     }
                 }
             }
