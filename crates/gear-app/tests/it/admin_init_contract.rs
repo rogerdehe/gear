@@ -464,7 +464,7 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let templated = project_on(
         "beta",
         &repo,
-        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
+        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
     );
     let r = init_with_home(&mut s, &admin(), &templated, Some(home.path()), T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
@@ -546,8 +546,9 @@ fn a_retired_lane_takes_no_quota_slot_on_re_apply() {
         .any(|seat| seat.name == "sail" && seat.state == SeatState::Queued));
 }
 
-/// The templates that let two projects share a repository (T-256).
-const TEMPLATED: &str = "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\n";
+/// The templates that let two projects share a repository (T-256). T-372: the
+/// seat branch keeps its own folder, so it is no ref above the task branches.
+const TEMPLATED: &str = "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/home/{seat}\"\n";
 
 /// T-302: two projects on one repository keep their voyages apart. With
 /// `{project}` in all three branch templates but the default voyage folder
