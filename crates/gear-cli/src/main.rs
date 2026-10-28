@@ -263,7 +263,13 @@ enum FrictionOp {
 #[derive(Subcommand, Debug)]
 enum AdminOp {
     /// Register a project, or apply a changed config to a registered one.
-    Init { config: std::path::PathBuf },
+    Init {
+        config: std::path::PathBuf,
+        /// Validate the config and change nothing: no store, no Herdr, no
+        /// engine (T-228).
+        #[arg(long)]
+        check: bool,
+    },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
     /// Write the GEAR skill where an agent CLI loads its skills.
@@ -281,7 +287,11 @@ fn main() {
     // without touching the user's home (design/13: a read-only command writes
     // nothing).
     let cli = Cli::parse();
-    default_store_path();
+    // T-228 (review F1): `admin init --check` validates a config and changes
+    // nothing, and that includes the directories of the default store.
+    if !checks_a_config(&cli.cmd) {
+        default_store_path();
+    }
     let code = match run(cli) {
         Ok(()) => 0,
         Err(e) => {
@@ -290,6 +300,11 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// True for the read-only validation `gear admin init --check`.
+fn checks_a_config(cmd: &Option<Cmd>) -> bool {
+    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
@@ -366,7 +381,9 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
+        Some(Cmd::Admin { op: AdminOp::Init { config, check } }) => {
+            cmd_admin_init(&config, check, cli.json)
+        }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
             cmd_admin_install_skill(&agent, cli.json)
@@ -392,20 +409,24 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   the store, and a kickoff runs before the project exists (the review of
 ///   T-10). `--skill` and `--help` never get here.
 /// - `captain handover` moves a seat's binding: it must not start an engine
-///   (T-104).
+///   (T-104);
+/// - `admin init --check` only validates a config: it opens no store, so there
+///   is nothing to keep moving (T-228).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
-    !matches!(
-        cmd,
+    match cmd {
+        None => true,
+        Some(Cmd::Admin { op: AdminOp::Init { check, .. } }) => !check,
         Some(Cmd::Run)
-            | Some(Cmd::Admin { op: AdminOp::Stop })
-            | Some(Cmd::Admin { op: AdminOp::Kickoff })
-            | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
-            | Some(Cmd::Board { .. })
-            | Some(Cmd::Report { .. })
-            | Some(Cmd::Whoami)
-            | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
-            | Some(Cmd::Captain { .. })
-    )
+        | Some(Cmd::Admin { op: AdminOp::Stop })
+        | Some(Cmd::Admin { op: AdminOp::Kickoff })
+        | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
+        | Some(Cmd::Board { .. })
+        | Some(Cmd::Report { .. })
+        | Some(Cmd::Whoami)
+        | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
+        | Some(Cmd::Captain { .. }) => false,
+        Some(_) => true,
+    }
 }
 
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
@@ -469,7 +490,36 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// is checked before anything is read; which seat may act on it is decided by
 /// `gear_app::admin::init`, against the project the config names. The store is
 /// `GEAR_DB`.
-fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
+///
+/// With `--check` (T-228) it only validates the config: `GEAR_ADMIN` is not
+/// needed, no store is opened, nothing starts, and the command says what it
+/// read (`config ok: project <id>, <n> lanes, <m> reviewers`).
+fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+    // T-228: `--check` validates the config and changes nothing — no
+    // GEAR_ADMIN, no store, no Herdr, no engine.
+    if check_only {
+        let text = read_config(config)?;
+        let parsed = gear_app::admin::check(&text, None)?;
+        let lanes = parsed.lanes.len();
+        let reviewers = parsed.quota.temps;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "project": parsed.project.id,
+                    "lanes": lanes,
+                    "reviewers": reviewers,
+                })
+            );
+        } else {
+            println!(
+                "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
+                parsed.project.id
+            );
+        }
+        return Ok(());
+    }
     let env = env_from_process()?;
     if !env.admin {
         return Err(GearError::new(
@@ -477,9 +527,7 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
             "`gear admin init` needs GEAR_ADMIN=1: the user's own shell, or the captain's pane",
         ));
     }
-    let text = std::fs::read_to_string(config).map_err(|e| {
-        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
-    })?;
+    let text = read_config(config)?;
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
     // another project's seat (T-100); a seat may re-apply its own project's
@@ -534,6 +582,16 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         }
     }
     Ok(())
+}
+
+/// Read the config a command was given, as `BadFormat` when it cannot be read.
+fn read_config(config: &std::path::Path) -> GearResult<String> {
+    std::fs::read_to_string(config).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read {}: {e}", config.display()),
+        )
+    })
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).

@@ -73,20 +73,9 @@ pub fn init_with_home(
         ));
     }
 
-    // 2. parse and validate the config; every issue is reported at once.
-    let config = config::parse(config_text)?;
-    let issues = config::validate(&config);
-    if !issues.is_empty() {
-        let detail = issues
-            .iter()
-            .map(|issue| format!("{}: {}", issue.field, issue.problem))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(GearError::new(
-            ErrorCode::BadFormat,
-            format!("the config has {} issue(s): {detail}", issues.len()),
-        ));
-    }
+    // 2. everything that needs no store: the config itself, the profiles and
+    //    the GEAR skills (`check`, T-228).
+    let config = check(config_text, home)?;
 
     let project_id = config.project.id.clone();
 
@@ -118,6 +107,41 @@ pub fn init_with_home(
                 ));
             }
         }
+    }
+
+    store.write(|tx| {
+        match tx.get_project(&project_id)? {
+            // The project is registered: the config changes.
+            Some(project) => re_register(tx, &project, &config, config_text, now),
+            // The project is new: it is registered.
+            None => register(tx, &config, config_text, now),
+        }
+    })
+}
+
+/// The checks `init` makes before it touches the store (T-228): the config's
+/// shape and every issue at once, each seat's profile, and the GEAR skill of
+/// every kind the project can start. A caller that only wants to validate its
+/// `gear.toml` runs this: it opens no store, reaches no Herdr and starts
+/// nothing. The caller-context checks (`init`'s step 2b) need the store and
+/// stay there.
+pub fn check(
+    config_text: &str,
+    home: Option<&std::path::Path>,
+) -> GearResult<config::ProjectConfig> {
+    // Parse and validate the config; every issue is reported at once.
+    let config = config::parse(config_text)?;
+    let issues = config::validate(&config);
+    if !issues.is_empty() {
+        let detail = issues
+            .iter()
+            .map(|issue| format!("{}: {}", issue.field, issue.problem))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("the config has {} issue(s): {detail}", issues.len()),
+        ));
     }
 
     // Every seat's profile must resolve against the table (built-ins + the
@@ -220,14 +244,7 @@ pub fn init_with_home(
         }
     }
 
-    store.write(|tx| {
-        match tx.get_project(&project_id)? {
-            // The project is registered: the config changes.
-            Some(project) => re_register(tx, &project, &config, config_text, now),
-            // The project is new: it is registered.
-            None => register(tx, &config, config_text, now),
-        }
-    })
+    Ok(config)
 }
 
 /// `gear admin init` behind the seat proof (T-104).
