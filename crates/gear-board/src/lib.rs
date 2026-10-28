@@ -1417,10 +1417,14 @@ pub fn run_with(
     let mut tab = tab_of(opts.view);
     let mut selected = 0usize;
     let mut panel: Option<Vec<style::Line>> = None;
+    // The project the board shows when it was opened without one (T-317):
+    // the store is the session's, so its projects are the session's, and `p`
+    // walks through them.
+    let mut shown = 0usize;
     let mut first = true;
     loop {
         let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
-        let board = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+        let mut board = match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
             Ok(board) => board,
             Err(e) => {
                 // The first frame decides whether the board can start at all.
@@ -1439,6 +1443,12 @@ pub fn run_with(
                 continue;
             }
         };
+        // The frame draws the shown project: the project the board was opened
+        // with is the only one then, and every other project is one `p` away.
+        if opts.project.is_none() && board.projects.len() > 1 {
+            shown %= board.projects.len();
+            board.projects.rotate_left(shown);
+        }
         // The selection never leaves the rows of the view (F4): a view that
         // shrank, or a key pressed at its end, does not lose the selection.
         let rows = frame::view(&board, tab, selected).rows.len();
@@ -1492,6 +1502,14 @@ pub fn run_with(
                         panel = None;
                         break;
                     }
+                }
+                Event::Key('p') | Event::Key('P') => {
+                    // The next project of the session (T-317): the selection
+                    // and the panel belong to the project that was shown.
+                    shown += 1;
+                    selected = 0;
+                    panel = None;
+                    break;
                 }
                 Event::Up | Event::Key('k') => {
                     selected = selected.saturating_sub(1);
@@ -1587,12 +1605,21 @@ fn open_panel(
 }
 
 /// Print the board once: the JSON or the text, depending on the options.
+///
+/// The text is one static frame: nothing can be pressed after it, so it is the
+/// frame of one project even when the store holds several — the project
+/// switch of the interactive board (`p`, T-317) is not mentioned, exactly as
+/// before the board could switch at all (review of T-317, F1).
 fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<()> {
     if opts.json {
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
         let size = (screen::DEFAULT_WIDTH, screen::DEFAULT_ROWS);
-        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
+        // Every view of the frame reads the first project, so a board of one
+        // project draws what it always drew.
+        let mut one = board.clone();
+        one.projects.truncate(1);
+        writeln!(out, "{}", frame::frame(&one, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }
