@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=568 -->
+<!-- gear-plan project=gear base=569 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -48,3 +48,8 @@ goal: [v0.5.0 S1] The engine uses the project's remote and voyage folder, and a 
 accept: Engine tests: a push touching only gear/voyages/M5/reports/T-1.md (task milestone M5) starts no direction check; a push touching that report and one source file starts one; the existing ops-only test (`direction_checks_follow_pushes_and_report_results`) uses the new folder; a merge test on a fixture whose remote is `upstream` (config remote = "upstream") fetches, merges and pushes through it. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 deps: T-257
 estimate: 35
+
+## T-263 [must] lane=mast milestone=M5 required
+goal: [v0.5.0 S1] The board's friction reports are the measured voyage's only (user, 2026-10-28, a minute after M5 departed: the Decisions tab listed M4's friction reports T-145 … T-203 under M5's seven decisions — "又串到其他航线去了"). Today crates/gear-board/src/lib.rs fn frictions_of reads `tx.frictions_of_project(project)`, every friction of every voyage, while the decisions beside it are already the measured voyage's (fn decisions_of). Change crates/gear-board/src/lib.rs only, no other design: fn frictions_of takes the same `voyage: Option<&str>` as fn decisions_of (the measured voyage's milestone) and keeps only the frictions whose task (`friction.task`, read with `tx.get_task(project, …)`) has that milestone; with no measured voyage it returns none, as decisions_of does. The call at the ProjectBoard build passes the same voyage as decisions_of.
+accept: A board test: a project with a friction on a task of M4 and one on a task of M5, M5 measured: the board's frictions hold only the M5 one; with M4 measured, only the M4 one. Existing board tests pass. Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
+estimate: 15
