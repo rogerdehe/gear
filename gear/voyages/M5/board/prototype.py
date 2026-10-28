@@ -206,12 +206,30 @@ class Board:
                 txt, a = f"· {sid} {what} — planned by {hm(at)}", curses.A_DIM
             self.put(y, 15, txt, a)
             y += 1
-        if v["state"] == "sailing":
-            when = f"{hm(v['used'])} used of {hm(v['eta'])} planned · expected to finish at {hm(v['projected'])}"
-        else:
-            when = f"took {hm(v['used'])} of {hm(v['eta'])} planned"
+        # time as a bar: █ used, ◆ expected finish, │ planned end; then the same in words
         self.put(y, 1, "Time", label)
-        self.put(y, 15, when)
+        span = max(v["eta"], v["projected"], v["used"])
+        bw = max(20, min(50, w - 90))
+        pos = lambda m: min(bw - 1, m * bw // span)
+        cells = ["░"] * bw
+        for i in range(pos(v["used"])):
+            cells[i] = "█"
+        end = pos(v["eta"])
+        cells[end] = "│"
+        if v["state"] == "sailing":
+            cells[pos(v["projected"])] = "◆"
+        early = v["eta"] - (v["projected"] if v["state"] == "sailing" else v["used"])
+        ok = early >= 0
+        self.put(y, 15, "".join(cells), curses.color_pair(11) if ok else curses.color_pair(10))
+        if v["state"] == "sailing":
+            when = (f"used {hm(v['used'])} · planned {hm(v['eta'])} · expected {hm(v['projected'])}, "
+                    + (f"{hm(early)} ahead of plan" if ok else f"{hm(-early)} behind plan"))
+        else:
+            when = (f"took {hm(v['used'])} · planned {hm(v['eta'])} · "
+                    + (f"{hm(early)} under plan" if ok else f"{hm(-early)} over plan"))
+        self.put(y, 17 + bw, when, curses.A_BOLD)
+        y += 1
+        self.put(y, 15, "█ used   ◆ expected finish   │ planned end", curses.A_DIM)
         y += 1
         bars = {"FASTEST": "only what breaks the chain or loses data blocks a task",
                 "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
