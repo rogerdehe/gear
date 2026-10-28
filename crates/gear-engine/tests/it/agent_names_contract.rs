@@ -320,6 +320,46 @@ fn a_name_held_by_another_pane_is_reported_once_and_never_stolen() {
 }
 
 #[test]
+fn a_captain_whose_name_another_pane_holds_gets_one_item_and_its_name_back() {
+    let mut w = world();
+    // The captain's agent lost its name, and another pane carries `p-captain`.
+    w.herdr
+        .add_agent_named(OTHER_PANE, "codex", AgentStatus::Idle, "p-captain");
+
+    for now in [T0 + 10, T0 + 20] {
+        let names = names::read(&mut w.herdr).unwrap();
+        let restored = names::restore(&mut w.store, &mut w.herdr, "p", &names, now).unwrap();
+        assert!(restored.taken.contains(&"p:captain".to_string()), "{restored:?}");
+    }
+
+    assert_eq!(w.name(CAP_PANE), None, "the seat's agent is not named");
+    assert_eq!(w.name(OTHER_PANE), Some("p-captain"), "the holder keeps its name");
+    assert!(w.herdr.renames_to("p-captain").is_empty(), "nothing was stolen");
+
+    // One item for the captain, in the captain's own thread — not none.
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:captain"))
+        .unwrap();
+    assert_eq!(items.len(), 1, "one item over two passes, not every tick: {items:?}");
+    assert_eq!(items[0].recipient, "p:captain");
+    assert_eq!(items[0].state, MsgState::Open);
+    assert!(items[0].body.contains("p-captain"), "{}", items[0].body);
+    assert!(items[0].body.contains(OTHER_PANE), "{}", items[0].body);
+
+    // The holder lets the name go: the captain carries it and its item is
+    // resolved.
+    w.herdr.set_agent_name(OTHER_PANE, None);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 30).unwrap();
+    assert_eq!(w.name(CAP_PANE), Some("p-captain"));
+    let items = w
+        .store
+        .read(|tx| tx.thread_messages("p", "name:p:captain"))
+        .unwrap();
+    assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+}
+
+#[test]
 fn a_delivery_to_a_pane_whose_agent_lost_its_name_names_it_and_delivers_in_the_same_tick() {
     let mut w = world();
     let task = w.ready_task();

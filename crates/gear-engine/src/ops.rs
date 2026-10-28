@@ -480,7 +480,21 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
         return void("the op carries no text".to_string());
     };
     let mut urgent = false;
-    let policy = if op.kind == OpKind::Deliver { PromptPolicy::Delivery } else {
+    let policy = if op.kind == OpKind::Deliver {
+        // T-290: a rework packet (attempt n ≥ 2) that is on its way to a lane
+        // whose agent queues input while it works (pi, claude) may go while
+        // the agent is Working — it waits in the input queue and is read
+        // after the current step.
+        let working = match (op.task.as_deref(), op.attempt) {
+            (Some(task), Some(n)) if n >= 2 && gear_herdr::queues_input(&binding.kind) => tx
+                .get_attempt(&op.project, task, n)?
+                .is_some_and(|attempt| {
+                    attempt.state == AttemptState::Delivered && attempt.sent_at.is_none()
+                }),
+            _ => false,
+        };
+        PromptPolicy::Delivery { working }
+    } else {
         let ids = op.payload.get("covers").and_then(|v| v.as_array());
         let mut working = ids.is_some_and(|v| !v.is_empty());
         let mut unknown = working;
@@ -545,7 +559,12 @@ pub enum Aimed {
 /// The sender has no exception: an unnamed agent is named again and the text
 /// goes on the next tick, like everywhere else.
 #[derive(Clone, Copy)]
-enum PromptPolicy { Delivery, Doorbell { working: bool, unknown: bool } }
+enum PromptPolicy {
+    /// A task packet. `working`: a rework packet for an agent that queues
+    /// input while it works may go mid-turn (T-290).
+    Delivery { working: bool },
+    Doorbell { working: bool, unknown: bool },
+}
 
 fn aim(
     herdr: &mut dyn HerdrAct,
@@ -564,14 +583,17 @@ fn aim(
                 Ok(Some(info)) if info.agent.as_deref() == Some(kind) => {
                     let ready = match info.agent_status {
                         gear_herdr::AgentStatus::Idle | gear_herdr::AgentStatus::Done => true,
-                        gear_herdr::AgentStatus::Working => matches!(policy, PromptPolicy::Doorbell { working: true, .. }),
+                        gear_herdr::AgentStatus::Working => {
+                            matches!(policy, PromptPolicy::Doorbell { working: true, .. })
+                                || matches!(policy, PromptPolicy::Delivery { working: true })
+                        }
                         gear_herdr::AgentStatus::Unknown => matches!(policy, PromptPolicy::Doorbell { unknown: true, .. }),
                         gear_herdr::AgentStatus::Blocked => false,
                     };
                     if !ready {
                         let reason = format!("agent in {pane_id} is not ready ({:?})", info.agent_status);
                         return match policy {
-                            PromptPolicy::Delivery => Aimed::Retry(reason),
+                            PromptPolicy::Delivery { .. } => Aimed::Retry(reason),
                             PromptPolicy::Doorbell { .. } => Aimed::Refused(reason),
                         };
                     }

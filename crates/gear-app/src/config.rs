@@ -405,6 +405,18 @@ pub struct Conventions {
     /// template with `{project}` and `{milestone}` filled in. Default
     /// `gear/voyages/{milestone}` (one folder per voyage).
     pub voyage_dir: String,
+    /// The message of a task's merge commit (T-299), a template with
+    /// `{project}`, `{task}` and `{source}` filled in. Default
+    /// `merge({task}): {source}`.
+    pub merge_message: String,
+    /// The message of a reviewer's commit (T-299), a template with `{project}`,
+    /// `{task}`, `{attempt}` and `{what}` filled in. Default
+    /// `review({task}): {what}`.
+    pub review_message: String,
+    /// The message of the captain's plan commit (T-299), a template with
+    /// `{project}`, `{milestone}` and `{what}` filled in. Default
+    /// `{milestone}: {what}`.
+    pub plan_message: String,
 }
 
 impl Default for Conventions {
@@ -421,6 +433,9 @@ impl Default for Conventions {
             seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
             remote: gear_model::layout::REMOTE.to_string(),
             voyage_dir: gear_model::layout::VOYAGE_DIR.to_string(),
+            merge_message: gear_model::commit::MERGE_MESSAGE.to_string(),
+            review_message: gear_model::commit::REVIEW_MESSAGE.to_string(),
+            plan_message: gear_model::commit::PLAN_MESSAGE.to_string(),
         }
     }
 }
@@ -1197,6 +1212,33 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
+    // The commit-message templates (T-299): a team with commit rules (ticket
+    // keys, Conventional Commits) names its own; GEAR's are only the defaults.
+    // Each is checked here — before a merge or a hand-in writes one — the way a
+    // branch template is: the placeholders it may name are the ones the writer
+    // fills in.
+    message_template_issues(
+        "conventions.merge_message",
+        &conventions.merge_message,
+        Some("task"),
+        &["project", "task", "source"],
+        &mut issues,
+    );
+    message_template_issues(
+        "conventions.review_message",
+        &conventions.review_message,
+        Some("task"),
+        &["project", "task", "attempt", "what"],
+        &mut issues,
+    );
+    message_template_issues(
+        "conventions.plan_message",
+        &conventions.plan_message,
+        None,
+        &["project", "milestone", "what"],
+        &mut issues,
+    );
+
     // The branch templates (T-252): the branch names GEAR cuts and
     // checks. A template is expanded with its placeholders; anything else stays
     // a literal brace and git refuses the branch, so each is checked here — on
@@ -1429,6 +1471,53 @@ fn placeholders(template: &str) -> Vec<&str> {
         rest = &after[close + 1..];
     }
     names
+}
+
+/// Check one commit-message template (T-299): it must not be empty, it must
+/// name `required` when the message needs it, and it may name only `allowed`.
+/// Returns whether the template is usable.
+fn message_template_issues(
+    field: &str,
+    template: &str,
+    required: Option<&str>,
+    allowed: &[&str],
+    issues: &mut Vec<ConfigIssue>,
+) -> bool {
+    let filled: Vec<String> = allowed.iter().map(|name| format!("{{{name}}}")).collect();
+    if template.trim().is_empty() {
+        issues.push(issue(
+            field,
+            format!(
+                "the commit message template is empty: name one; GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    let names = placeholders(template);
+    if let Some(unknown) = names.iter().find(|name| !allowed.contains(name)) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    if let Some(required) = required {
+        if !names.contains(&required) {
+            issues.push(issue(
+                field,
+                format!(
+                    "the template {template:?} has no {{{required}}}, so it does not name the task: GEAR fills in {}",
+                    filled.join(", ")
+                ),
+            ));
+            return false;
+        }
+    }
+    true
 }
 
 /// Check one branch template (T-252): it must name `required`, it may name only

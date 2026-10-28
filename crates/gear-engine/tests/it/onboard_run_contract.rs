@@ -384,3 +384,76 @@ fn a_released_lane_whose_agent_is_gone_is_onboarded_and_given_its_task() {
     assert_eq!(prompts.len(), 1, "its next task is delivered: {prompts:?}");
     assert!(prompts[0].starts_with("New task T-1 (contract v1)"), "{}", prompts[0]);
 }
+
+/// T-285 (T-134 review F3): a seat retried while an unnamed leftover agent
+/// still runs in its pane names that agent and asks it to exit in the same
+/// tick. Before, the exit command went out only when the pane already had a
+/// live name, so an unnamed leftover was never asked and the seat parked after
+/// three tries.
+#[test]
+fn an_unnamed_leftover_agent_is_named_and_asked_to_exit_in_the_same_tick() {
+    let mut s = Store::open_in_memory().unwrap();
+    admin::init_with_home(
+        &mut s,
+        &Env { ctx: None, pane_id: None, admin: true },
+        CONFIG,
+        Some(crate::skill_home()),
+        T0,
+    )
+    .unwrap();
+    let mut herdr = FakeHerdr::new();
+    // The leftover is a codex agent (its profile exits by the typed `/quit`).
+    let mut cfg = cfg();
+    cfg.profiles.insert("codex".into(), builtin("codex").unwrap());
+
+    assert_eq!(
+        onboard_queued(&mut s, &mut herdr, &cfg, T0 + 1).unwrap(),
+        vec!["toy:heat".to_string()]
+    );
+    let pane = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap().pane_id;
+
+    // The fixture is re-run: the seat is queued again and a leftover codex
+    // agent is in its pane, its name cleared by a Herdr restart.
+    herdr.add_agent(&pane, "codex", gear_herdr::AgentStatus::Idle);
+    s.write(|tx| tx.set_seat_state("toy:heat", SeatState::Queued, Some("fixture re-run"), T0 + 2))
+        .unwrap();
+
+    assert!(onboard_queued(&mut s, &mut herdr, &cfg, T0 + 3).unwrap().is_empty());
+
+    // Named first, then prompted at that name: a prompt to an unnamed agent is
+    // refused, and the command is never typed into the pane.
+    assert_eq!(herdr.agent_name(&pane), Some("toy-heat"), "the leftover is named");
+    let renamed_at = herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Rename { pane: p, .. } if p == &pane))
+        .unwrap_or_else(|| panic!("no rename: {:?}", herdr.calls));
+    let asked_at = herdr
+        .calls
+        .iter()
+        .position(|call| matches!(call, Call::Prompt { pane: p, .. } if p == &pane))
+        .unwrap_or_else(|| panic!("the leftover was never asked: {:?}", herdr.calls));
+    assert!(renamed_at < asked_at, "named before it is prompted: {:?}", herdr.calls);
+    assert_eq!(herdr.prompts_to(&pane), vec!["/quit"], "{:?}", herdr.calls);
+    assert_eq!(
+        herdr.prompt_targets(),
+        vec!["toy-heat"],
+        "the command goes to the agent's name, never the pane id"
+    );
+    // That was one try: the seat still waits for the shell.
+    assert_eq!(
+        s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap().state,
+        SeatState::Queued
+    );
+
+    // The agent exits: the pane is a shell and the seat starts.
+    herdr.exit_agent(&pane);
+    assert_eq!(
+        onboard_queued(&mut s, &mut herdr, &cfg, T0 + 4).unwrap(),
+        vec!["toy:heat".to_string()]
+    );
+    assert_eq!(
+        s.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap().state,
+        SeatState::Active
+    );
+}

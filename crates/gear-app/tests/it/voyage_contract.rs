@@ -502,3 +502,56 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     );
     assert_eq!(voyage.title, "delivery v0.2.0");
 }
+
+/// T-301: a voyage id is any word without spaces, not only `M<n>`: a plan
+/// with `# Milestone sprint-3: …` and a task `milestone=sprint-3` applies, the
+/// voyage is stored under that id, the snapshot shows it and its report names
+/// its task.
+#[test]
+fn a_voyage_id_need_not_start_with_m() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone sprint-3: the third sprint\ndone: users install v0.1.0 without Rust\nbar: block only loop breaks\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=sprint-3\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, text, "r1", NOW).unwrap();
+
+    let voyage = s.read(|tx| tx.get_voyage("p", "sprint-3")).unwrap().unwrap();
+    assert_eq!((voyage.milestone.as_str(), voyage.title.as_str()), ("sprint-3", "the third sprint"));
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(
+        s.read(|tx| tx.tasks_of_project("p")).unwrap()[0].milestone.as_deref(),
+        Some("sprint-3")
+    );
+
+    let (env, fp) = cap();
+    let page = home::build(&mut s, &env, Some(&fp), NOW + 10).unwrap();
+    assert!(page.text.contains("Voyage sprint-3 the third sprint"), "{}", page.text);
+
+    let report =
+        s.read(|tx| gear_app::voyage::report(tx, "p", "sprint-3", false, NOW + 60)).unwrap();
+    assert_eq!(report.milestone, "sprint-3");
+    let named: Vec<&str> = report.time.tasks.iter().map(|task| task.id.as_str()).collect();
+    assert_eq!(named, ["T-1"], "the report names the task on the voyage");
+}
+
+/// T-301: the snapshot lists the voyages by departure, not by id — `M10`
+/// departed first comes before `M9`, and `M9` departed first comes before
+/// `M10`, though the id alone would put `M10` first both times.
+#[test]
+fn the_snapshot_lists_the_voyages_by_departure_not_by_id() {
+    let block = "<!-- gear-plan project=p base={base} -->\n# Milestone {id}: voyage {id}\ndone: it ships\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone={id}\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let (env, fp) = cap();
+    for (first, second) in [("M10", "M9"), ("M9", "M10")] {
+        let mut s = world();
+        run(&mut s, &block.replace("{base}", "0").replace("{id}", first), "r1", NOW).unwrap();
+        run(&mut s, &block.replace("{base}", "1").replace("{id}", second), "r2", NOW + 3600)
+            .unwrap();
+        let page = home::build(&mut s, &env, Some(&fp), NOW + 4000).unwrap();
+        let snapshot = &page.text[page.text.find("SNAPSHOT").expect("the snapshot")..];
+        let earlier = snapshot
+            .find(&format!("Voyage {first} voyage {first}"))
+            .unwrap_or_else(|| panic!("{first} is in the snapshot: {snapshot}"));
+        let later = snapshot
+            .find(&format!("Voyage {second} voyage {second}"))
+            .unwrap_or_else(|| panic!("{second} is in the snapshot: {snapshot}"));
+        assert!(earlier < later, "{first} departed first, {second} second: {snapshot}");
+    }
+}
