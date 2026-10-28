@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=640 -->
+<!-- gear-plan project=gear base=641 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -67,6 +67,7 @@ eta: 16h
 
 - 2026-10-29 06:45 hand-fix: a fourth lost Enter (mast, "Continue T-342"), one Enter sent; T-371 is merged, so the engine is rebuilt from dev again to run it | why: mast idle (M-4826) | else: the next Continue stalls a lane again
 - station M-4829: keep course 383 min in, 63 done; forecast 1367 min; the eta waits for the user
+- station M-4854: keep course 400 min in, 66 done; forecast 1359 min; the eta waits for the user
 # Queue
 
 ## T-371 [now] lane=hull milestone=M5 required
