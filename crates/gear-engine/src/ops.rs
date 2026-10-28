@@ -1,8 +1,8 @@
 //! Side-effect operations: intend → execute → confirm (design/08).
 
-use gear_herdr::{HerdrAct, Outcome};
+use gear_herdr::{AgentStatus, HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, SeatState, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -965,6 +965,120 @@ pub fn confirm_pending_with(
 /// The longest a doorbell may wait for its answer before it expires and the
 /// seat can be rung again (L-69).
 pub const DOORBELL_EXPIRY_S: i64 = 300;
+
+/// How long a submitted delivery waits before the engine looks at its pane for
+/// text that was typed but never sent (T-371).
+pub const UNSENT_RESUBMIT_AFTER_S: i64 = 30;
+
+/// How many lines of the pane the typed text is looked for in (T-371).
+const UNSENT_READ_LINES: u32 = 12;
+
+/// How many of the tail's last non-empty lines must show the text (T-371).
+const UNSENT_TAIL_LINES: usize = 6;
+
+/// How much of the text's first line identifies it in the pane (T-371).
+const UNSENT_NEEDLE_CHARS: usize = 40;
+
+/// The meta key that marks an op as already given its Enter (T-371).
+fn resubmit_key(op_id: &str) -> String {
+    format!("engine.resubmit.{op_id}")
+}
+
+/// The needle a pane must show for `text`: its first line, cut to its first
+/// [`UNSENT_NEEDLE_CHARS`] characters. `None` = nothing to look for.
+fn unsent_needle(text: &str) -> Option<String> {
+    let needle: String = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(UNSENT_NEEDLE_CHARS)
+        .collect();
+    if needle.trim().is_empty() {
+        return None;
+    }
+    Some(needle)
+}
+
+/// Whether one of the tail's last [`UNSENT_TAIL_LINES`] non-empty lines shows
+/// `needle` (T-371).
+fn tail_shows(tail: &str, needle: &str) -> bool {
+    let lines: Vec<&str> = tail.lines().filter(|line| !line.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(UNSENT_TAIL_LINES);
+    lines[start..].iter().any(|line| line.contains(needle))
+}
+
+/// Give a delivery whose text sits unsent in its lane's input box its Enter
+/// (T-371, M-4569, L-76).
+///
+/// A delivery op stays Submitted until a view or a hand-in confirms it, and
+/// nothing looked at the pane in between: the text was typed, the Enter was
+/// lost, and the lane sat idle with its packet waiting in the input box. For
+/// every lane Deliver op of the project in `Submitted` at least
+/// [`UNSENT_RESUBMIT_AFTER_S`] old, whose seat is Active at the op's
+/// generation, whose agent is Idle or Done and that never had its Enter
+/// (`engine.resubmit.<op id>` not set): the pane's tail is read, and when the
+/// text's first line (its first [`UNSENT_NEEDLE_CHARS`] characters) shows in
+/// one of its last [`UNSENT_TAIL_LINES`] non-empty lines, one `enter` is sent
+/// and the meta key records it — so the op gets that Enter once, never twice.
+/// A failed read or a refused key changes nothing (no meta, no second try at
+/// once). A confirmed op is never touched: the lane read its packet.
+///
+pub fn resubmit_unsent(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    project: &str,
+    now: Ts,
+) -> GearResult<Vec<String>> {
+    // The candidates: one read transaction, the pane calls come after it.
+    let candidates = store.read(|tx| {
+        let mut out = Vec::new();
+        for op in tx.ops_in_state(project, OpState::Submitted)? {
+            if op.kind != OpKind::Deliver || now - op.created < UNSENT_RESUBMIT_AFTER_S {
+                continue;
+            }
+            let Some(seat) = tx.get_seat(&op.seat)? else { continue };
+            if seat.role != SeatRole::Lane
+                || seat.state != SeatState::Active
+                || seat.generation != op.generation
+            {
+                continue;
+            }
+            let Some(binding) = tx.get_binding(&op.seat, op.generation)? else { continue };
+            if binding.status != BindingStatus::Active {
+                continue;
+            }
+            if tx.get_meta(&resubmit_key(&op.id))?.is_some() {
+                continue;
+            }
+            let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Some(needle) = unsent_needle(text) else { continue };
+            out.push((op.id.clone(), binding.pane_id.clone(), needle));
+        }
+        Ok(out)
+    })?;
+    let mut sent = Vec::new();
+    for (op_id, pane, needle) in candidates {
+        // Only an agent that has nothing better to do left the text unsent.
+        let Ok(Some(agent)) = herdr.agent_get(&pane) else { continue };
+        if !matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done) {
+            continue;
+        }
+        let Ok(tail) = herdr.read_tail(&pane, UNSENT_READ_LINES) else { continue };
+        if !tail_shows(&tail, &needle) {
+            continue;
+        }
+        // The Enter itself: a refused key changes nothing, not even the meta.
+        if !matches!(herdr.send_keys(&pane, &["enter".to_string()]), Outcome::Ok(())) {
+            continue;
+        }
+        store.write(|tx| tx.set_meta(&resubmit_key(&op_id), &now.to_string()))?;
+        sent.push(op_id);
+    }
+    Ok(sent)
+}
 
 /// A late check-in confirms a delivery that failed (design §10.3).
 ///
@@ -1962,5 +2076,155 @@ mod tests {
 
         assert_eq!(pane.as_deref(), Some(REVIEW_PANE));
         prompt_or_esc(&herdr, REVIEW_PANE, "a working reviewer is cut before its urgent send");
+    }
+
+    // ---- T-371: a delivery that sits unsent in the input box ---------------
+
+    const UNSENT_TEXT: &str = "Continue T-1: run `gear` first";
+
+    /// A lane Deliver op carrying `text`, Submitted, created `created`.
+    fn unsent_delivery(tx: &Tx<'_>, text: &str, created: Ts) -> GearResult<String> {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": text }),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created)?;
+        Ok(op.id)
+    }
+
+    /// A `pi` agent at [`LANE_PANE`] in `status` whose screen is `tail`.
+    fn unsent_herdr(status: AgentStatus, tail: &str) -> FakeHerdr {
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent(LANE_PANE, "pi", status);
+        herdr.set_screen(LANE_PANE, tail);
+        herdr
+    }
+
+    fn enters(herdr: &FakeHerdr, pane: &str) -> usize {
+        herdr
+            .calls
+            .iter()
+            .filter(|call| {
+                matches!(call, Call::SendKeys { pane: p, keys } if p == pane && keys == &["enter".to_string()])
+            })
+            .count()
+    }
+
+    #[test]
+    fn an_unsent_delivery_gets_one_enter_and_never_a_second() {
+        // M-4569: the packet was typed and the Enter was lost; the lane sat
+        // idle with the text in its input box. After 30 s the engine presses
+        // the key once and records it.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> earlier output\n> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(enters(&herdr, LANE_PANE), 1, "the Enter is pressed once");
+        assert_eq!(
+            store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(),
+            Some((T0 + 40).to_string()),
+            "the press is recorded with its time"
+        );
+
+        let again = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+
+        assert!(again.is_empty(), "the op got its Enter already");
+        assert_eq!(enters(&herdr, LANE_PANE), 1, "a second pass sends no key");
+    }
+
+    #[test]
+    fn a_delivery_only_20s_old_gets_no_enter() {
+        // The Enter may still be on its way, or the lane may be about to press
+        // it itself: nothing is pressed in the first 30 s.
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        assert!(sent.is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_tail_without_the_text_gets_no_enter() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> gear status\n> T-2 in review");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert!(sent.is_empty(), "the text is not in the pane");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+    }
+
+    #[test]
+    fn a_working_agent_gets_no_enter() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Working, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert!(sent.is_empty(), "a working agent is not interrupted");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+    }
+
+    #[test]
+    fn a_confirmed_delivery_is_never_touched() {
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                let id = unsent_delivery(tx, UNSENT_TEXT, T0)?;
+                tx.set_op_state("p", &id, OpState::Confirmed, Some("view p:heat/1"), T0 + 5)
+            })
+            .unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap();
+
+        assert!(sent.is_empty(), "the lane read its packet");
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_read_or_a_refused_key_changes_nothing() {
+        let mut store = lane_world();
+        store.write(|tx| unsent_delivery(tx, UNSENT_TEXT, T0)).unwrap();
+        let mut herdr = unsent_herdr(AgentStatus::Idle, "> Continue T-1: run `gear` first");
+
+        herdr.observe_fails = true;
+        assert!(resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty());
+        assert_eq!(enters(&herdr, LANE_PANE), 0);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+        herdr.observe_fails = false;
+
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "injected".into() });
+        assert!(
+            resubmit_unsent(&mut store, &mut herdr, "p", T0 + 40).unwrap().is_empty(),
+            "a refused key changes nothing"
+        );
+        assert_eq!(store.read(|tx| tx.get_meta("engine.resubmit.O-1")).unwrap(), None);
+
+        // The next pass still finds the text and presses the key (the fake
+        // logged the refused attempt, so the successful one is the second).
+        let before = enters(&herdr, LANE_PANE);
+        let sent = resubmit_unsent(&mut store, &mut herdr, "p", T0 + 50).unwrap();
+        assert_eq!(sent, vec!["O-1".to_string()]);
+        assert_eq!(enters(&herdr, LANE_PANE), before + 1, "the retry presses it again");
     }
 }

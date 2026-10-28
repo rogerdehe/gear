@@ -129,6 +129,9 @@ pub struct TickReport {
     /// Attempts confirmed by a **late** check-in (design §10.3): the delivery
     /// op had already failed, and the view that showed the attempt came after.
     pub late_confirmed: Vec<String>,
+    /// Deliver op ids whose text sat unsent in their lane's input box and got
+    /// its Enter this tick (T-371).
+    pub resubmitted: Vec<String>,
     /// Seats flagged for attention (e.g. doorbell evidence budget exhausted).
     pub flagged: Vec<String>,
     /// Seats onboarded this tick (worktree, pane and agent all up).
@@ -421,6 +424,13 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         )?;
         report.confirmed.extend(confirmed);
         report.flagged.extend(flagged);
+
+        // 2a. a delivery whose text sits unsent in its lane's input box gets
+        //     its Enter back (T-371): the lane is idle, the packet was typed,
+        //     and only the key that submits it was lost.
+        report
+            .resubmitted
+            .extend(ops::resubmit_unsent(store, herdr, &project, now)?);
 
         // 2b. a late check-in (design §10.3): a view that shows the attempt
         //     after its delivery op failed confirms the attempt anyway and
