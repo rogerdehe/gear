@@ -6,8 +6,10 @@
 //! The rows are written straight into the store: the home page only reads,
 //! and the threads of the batch are easier to build that way.
 
+use gear_app::draft::parse;
 use gear_app::home;
 use gear_app::identity::Fingerprint;
+use gear_app::plan::apply;
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState, Ts};
 use gear_store::{testing, NewMessage, Store, TaskRow};
@@ -82,6 +84,23 @@ fn ask(s: &mut Store, body: &str, created: Ts) -> String {
 /// The captain answers a lane.
 fn answer(s: &mut Store, body: &str, created: Ts) -> String {
     insert(s, "heat:1", "p:captain", "p:heat", MsgKind::Reply, MsgState::Info, body, created)
+}
+
+/// Apply a plan whose `# Decisions` carries the one given line.
+fn apply_decision(s: &mut Store, decision: &str, rid: &str) {
+    let base = s.read(|tx| tx.plan_version("p")).unwrap();
+    let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n- {decision}\n");
+    apply(
+        s,
+        &seat_env("captain", CAP_PANE),
+        Some(&fp(CAP_PANE, "codex")),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        NOW,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -426,4 +445,36 @@ fn the_snapshot_omits_retired_lanes() {
     s.write(|tx| tx.set_seat_state("p:heat", gear_model::SeatState::Retired, None, NOW)).unwrap();
     let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
     assert!(!home.text.lines().any(|line| line.trim_start().starts_with("heat ·")), "{}", home.text);
+}
+
+/// The snapshot line of the named lane.
+fn lane_line(text: &str, name: &str) -> String {
+    text.lines()
+        .find(|line| line.trim_start().starts_with(&format!("{name} ·")))
+        .unwrap_or_else(|| panic!("{name} is in the snapshot: {text}"))
+        .to_string()
+}
+
+/// T-260: a lane the captain's `- tail:` silences says so in the snapshot —
+/// a silenced lane must not read as a quiet one.
+#[test]
+fn the_snapshot_marks_a_tailed_lane() {
+    let mut s = world();
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p3", "opencode", NOW)?;
+        testing::seed_active_seat(tx, "p", "mast", SeatRole::Lane, "w1:p4", "opencode", NOW)
+    })
+    .unwrap();
+    apply_decision(&mut s, "tail: hull", "r1");
+
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert!(lane_line(&home.text, "hull").ends_with(" · tail: warnings off"), "{}", home.text);
+    // The lane the tail does not name reads as before.
+    assert_eq!(lane_line(&home.text, "mast"), "  mast · agent unknown · no current task · 0 queued");
+
+    // The tail is cleared: the mark goes.
+    apply_decision(&mut s, "tail: -", "r2");
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert_eq!(lane_line(&home.text, "hull"), "  hull · agent unknown · no current task · 0 queued", "{}", home.text);
+    assert!(!home.text.contains("tail: warnings off"), "{}", home.text);
 }

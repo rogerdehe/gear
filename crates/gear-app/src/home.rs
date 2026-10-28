@@ -253,7 +253,14 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         plan.totals.tasks, plan.totals.done, plan.totals.in_progress, plan.totals.waiting
     )];
     for lane in plan.lanes.iter().take(SNAPSHOT_LANES) {
-        lines.push(format!("  {}", gear_board::lane_line(lane)));
+        // The captain's tail turns off a lane's idle and stall warnings; the
+        // snapshot says so, or a silenced lane reads as a quiet one (T-260).
+        let mark = if crate::plan::lane_in_tail_at(tx, project, &lane.lane, now)? {
+            " · tail: warnings off"
+        } else {
+            ""
+        };
+        lines.push(format!("  {}{mark}", gear_board::lane_line(lane)));
     }
     if plan.lanes.len() > SNAPSHOT_LANES {
         lines.push(format!("+{} more lanes", plan.lanes.len() - SNAPSHOT_LANES));
