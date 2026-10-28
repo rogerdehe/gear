@@ -5,7 +5,7 @@ The one default way of working every GEAR project shares. The captain and every 
 ## 1. A project, a voyage, a lane
 
 - A **project** is one piece of work with a goal: a new product, or one requirement inside an existing repo (then the project gets a short name, e.g. `billing-v2`, and its own integration branch cut from the mainline). Its code may be one git repository or a folder of several (§9).
-- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own folder `gear/voyages/<milestone>/` holding its plan (`plan.md`), its `reports/` and its `reviews/`. The folder is a convention too (`voyage_dir`, §3).
+- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own folder `gear/voyages/<milestone>/` holding its plan (`plan.md`), its `reports/` and its `reviews/`. Its id is any word without spaces (`M1`, `sprint-3`, `2026-q4`); this guide writes `M<n>`. The folder is a convention too (`voyage_dir`, §3).
 - A **lane** is a long-lived agent with a declared **duty** (one sentence) and **owned paths**; lanes never own the same path. A lane whose duty cannot be stated is not opened. A changed duty is a new lane, not a rename.
 - A **temp worker** (today: a reviewer) starts clean for one job and ends with one deliverable. Clean context always comes from a new session, never from clearing an old one.
 
