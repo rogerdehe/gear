@@ -387,11 +387,11 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
             Style::fg(Color::Bad),
         );
     }
-    // The clock ends at the last column the canvas writes (the prototype's
-    // put never writes the last column), so the whole time stays readable.
+    // The clock sits where the prototype puts it, `wd - 8` (T-340 contract v2:
+    // the golden frames are the standard).
     let clock = crate::idle::clock(board.now);
     canvas.put_styled(
-        canvas.width.saturating_sub(clock.chars().count() + 1),
+        canvas.width.saturating_sub(8),
         0,
         &clock,
         Style::fg(Color::Dim),
