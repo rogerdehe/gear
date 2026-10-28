@@ -12,16 +12,22 @@ use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{GearCtx, OpKind, OpState, SeatRole};
-use gear_store::{testing, NewOp, OpRow, Store};
+use gear_model::{GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole};
+use gear_store::{testing, NewMessage, NewOp, OpRow, Store};
 
 const T0: i64 = 1_800_000_000;
 const CAP: &str = "w1:p1";
 
-/// The project's config with the review-branch template it names.
-fn config(review_branch: &str) -> String {
+/// The project's config, naming `repo` as its repository when one is given
+/// (a test that asks git where the candidate is points it at a real one) and
+/// the review-branch template it names.
+fn config_at(repo: Option<&std::path::Path>, review_branch: &str) -> String {
+    let repo = match repo {
+        Some(path) => serde_json::json!(path.to_string_lossy()).to_string(),
+        None => "\"/repo\"".to_string(),
+    };
     format!(
-        "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n\
+        "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\n\
          [quota]\nlanes = 2\ntemps = 0\n\n\
          [captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n\
          [conventions]\nintegration = \"dev\"\ngate = \"make test\"\n\
@@ -32,11 +38,16 @@ fn config(review_branch: &str) -> String {
 /// A project, the captain and the lane `heat`. `None` keeps the store's config
 /// text empty: the defaults are what every path reads then.
 fn world(review_branch: Option<&str>) -> Store {
+    world_at(None, review_branch)
+}
+
+/// The same world with the project's config naming `repo` as its repository.
+fn world_at(repo: Option<&std::path::Path>, review_branch: Option<&str>) -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         let mut project = testing::seed_project(tx, "p", "sess", T0)?;
-        if let Some(template) = review_branch {
-            project.config_toml = config(template);
+        if repo.is_some() || review_branch.is_some() {
+            project.config_toml = config_at(repo, review_branch.unwrap_or("review/t{n}"));
             tx.update_project(&project)?;
         }
         testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP, "codex", T0)?;
@@ -73,6 +84,11 @@ fn run(
 
 /// Task T-1 on lane `heat`, with attempt 1 accepted on candidate `c1`.
 fn accepted_task(s: &mut Store) {
+    accepted_task_on(s, "c1");
+}
+
+/// Task T-1 on lane `heat`, attempt 1 accepted on `candidate`.
+fn accepted_task_on(s: &mut Store, candidate: &str) {
     run(
         s,
         "# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
@@ -83,16 +99,13 @@ fn accepted_task(s: &mut Store) {
     s.write(|tx| {
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 1)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0 + 1)?;
-        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "c1", "report", T0 + 2)
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, candidate, "report", T0 + 2)
     })
     .unwrap();
-    run(
-        s,
-        "# Verdicts\n- T-1 attempt=1 contract=1 candidate=c1 pass evidence=logs/t1.md\n",
-        "v2",
-        T0 + 3,
-    )
-    .unwrap();
+    let verdicts = format!(
+        "# Verdicts\n- T-1 attempt=1 contract=1 candidate={candidate} pass evidence=logs/t1.md\n"
+    );
+    run(s, &verdicts, "v2", T0 + 3).unwrap();
 }
 
 /// A merge op of T-1 that was created at `created` and ended `Failed`.
@@ -269,4 +282,195 @@ fn a_confirmed_four_digit_merge_is_named_in_the_refusal() {
     let error = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap_err();
     assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{error:?}");
     assert!(error.detail.contains("already merged (O-1000)"), "{error:?}");
+}
+
+// ---- T-92 F1: a candidate that is already on the integration branch ---------
+
+use std::path::{Path, PathBuf};
+
+/// An open `merge-failed:T-1` item, as the engine leaves it when a merge fails.
+fn open_failed_item(s: &mut Store) -> String {
+    s.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: "p".into(),
+            thread: "merge-failed:T-1".into(),
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            sender: "engine".into(),
+            sender_gen: 0,
+            recipient: "p:captain".into(),
+            kind: MsgKind::System,
+            urgent: true,
+            body: "the merge was refused".into(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: T0 + 11,
+        })
+        .map(|message| message.id)
+    })
+    .unwrap()
+}
+
+fn merge_failed_items(s: &mut Store) -> Vec<gear_store::MessageRow> {
+    s.read(|tx| tx.thread_messages("p", "merge-failed:T-1")).unwrap()
+}
+
+/// The merge ops of T-1 in any state: a queued remerge adds one.
+fn merge_op_count(s: &mut Store) -> usize {
+    let mut count = 0;
+    for state in [
+        OpState::Intended,
+        OpState::Executing,
+        OpState::Submitted,
+        OpState::Unknown,
+        OpState::Confirmed,
+        OpState::Failed,
+        OpState::Void,
+    ] {
+        count += s
+            .read(|tx| tx.ops_in_state("p", state))
+            .unwrap()
+            .into_iter()
+            .filter(|op| op.kind == OpKind::Merge && op.task.as_deref() == Some("T-1"))
+            .count();
+    }
+    count
+}
+
+fn sh(dir: &Path, command: &str) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn sh_out(dir: &Path, command: &str) -> String {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(dir)
+        .output()
+        .expect("run sh");
+    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The fixture of this file, built **once**: a bare origin and a repo whose
+/// `dev` carries the lane branch — or does not, when `merged` is false. A test
+/// copies it (T-128), so twenty git processes are paid once.
+struct Fixture {
+    origin: PathBuf,
+    work: PathBuf,
+    candidate: String,
+    /// The trees above live here, for as long as the process does.
+    _root: tempfile::TempDir,
+}
+
+fn template(merged: bool) -> &'static Fixture {
+    static UNMERGED: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    static MERGED: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+    let cell = if merged { &MERGED } else { &UNMERGED };
+    cell.get_or_init(|| {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        std::fs::write(work.join("README.md"), "dev\n").unwrap();
+        sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        publish(&origin, &work, "dev");
+        sh(
+            &work,
+            "git switch -qc heat/t1 && echo work >> README.md && git add -A \
+             && git -c user.email=a@b -c user.name=a commit -qm work",
+        );
+        publish(&origin, &work, "heat/t1");
+        let candidate = sh_out(&work, "git rev-parse HEAD");
+        if merged {
+            sh(
+                &work,
+                "git switch -q dev && git -c user.email=a@b -c user.name=a merge -q --no-ff heat/t1 -m merge",
+            );
+            publish(&origin, &work, "dev");
+        }
+        Fixture { origin, work, candidate, _root: root }
+    })
+}
+
+/// A copy of the fixture: its own bare origin and its own clone of it, which
+/// the project's config names as its repository.
+fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
+    let fixture = template(merged);
+    let origin = scratch.join("origin.git");
+    crate::copy_tree(&fixture.origin, &origin);
+    let work = scratch.join("work");
+    crate::copy_tree(&fixture.work, &work);
+    crate::point_at(&work, &origin);
+    (work, fixture.candidate.clone())
+}
+
+/// Publish `branch` of `source` in the bare origin's refs: the origin fetches
+/// the objects and the ref is set — no test pushes (T-108).
+fn publish(origin: &Path, source: &Path, branch: &str) {
+    let sha = sh_out(source, &format!("git rev-parse refs/heads/{branch}"));
+    sh(origin, &format!("git fetch -q {} refs/heads/{branch}", source.display()));
+    sh(origin, &format!("git update-ref refs/heads/{branch} {}", sha.trim()));
+}
+
+/// A candidate that landed by another way (a hand merge) is on `dev` already:
+/// the remerge queues no op, resolves the open failed-merge item with the sha
+/// and the apply says so in its warnings.
+#[test]
+fn a_remerge_of_a_candidate_already_on_the_integration_branch_queues_nothing() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), true);
+    let mut s = world_at(Some(&work), Some("review/t{n}"));
+    accepted_task_on(&mut s, &candidate);
+    failed_merge(&mut s, T0 + 10);
+    open_failed_item(&mut s);
+    assert_eq!(merge_op_count(&mut s), 1, "the failed op is history");
+
+    let result = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    assert_eq!(merge_op_count(&mut s), 1, "no merge op was queued: {result:?}");
+    assert_eq!(
+        result.warnings,
+        vec![format!(
+            "remerge T-1: {candidate} is already on the integration branch: no merge queued, its failed-merge item resolved"
+        )],
+        "{result:?}"
+    );
+    let items = merge_failed_items(&mut s);
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+    assert_eq!(
+        items[0].result.as_deref(),
+        Some(format!("the candidate {candidate} is already on the integration branch").as_str())
+    );
+}
+
+/// The candidate is not on `dev`: the remerge queues the merge op as before,
+/// and the failed-merge item is left open for the engine's retry.
+#[test]
+fn a_remerge_of_a_candidate_not_on_the_integration_branch_queues_the_op() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (work, candidate) = repo(scratch.path(), false);
+    let mut s = world_at(Some(&work), Some("review/t{n}"));
+    accepted_task_on(&mut s, &candidate);
+    failed_merge(&mut s, T0 + 10);
+    open_failed_item(&mut s);
+
+    let result = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap();
+
+    assert_eq!(merge_op_count(&mut s), 2, "the retry is queued: {result:?}");
+    assert_eq!(queued_merge(&mut s).payload["candidate"], candidate);
+    assert!(result.warnings.is_empty(), "{result:?}");
+    let items = merge_failed_items(&mut s);
+    assert_eq!(items[0].state, MsgState::Open, "the engine's retry answers it");
 }
