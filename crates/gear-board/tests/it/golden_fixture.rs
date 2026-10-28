@@ -5,17 +5,19 @@
 //! store through the store's own API, so the real board is drawn from the data
 //! the golden frames were drawn from: one copy of the agreed data, not two.
 //!
-//! The decisions, the frictions, the quota and the reviewer are T-344's; this
-//! helper seeds the project, the voyages and every task.
+//! This helper is T-343's and T-344's: the project, the voyages and every task
+//! are here, and so are the reviewer, the review rounds, the decisions, the
+//! frictions, the quota readings and the goal checks.
 
 use std::collections::HashMap;
 
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{
-    testing, AttemptRow, AttemptStep, ContractRow, NewRound, RoundKey, RoundTokens, Store, TaskRow,
-    VerdictRow, VoyageRow,
+    testing, AttemptRow, AttemptStep, ContractRow, NewDecision, NewFriction, NewRound, RoundKey,
+    RoundTokens, Store, TaskRow, VerdictRow, VoyageRow,
 };
 use serde::Deserialize;
+use serde_json::json;
 
 const FIXTURE: &str =
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../gear/voyages/M5/board/golden/fixture.json");
@@ -32,8 +34,21 @@ type Task = (String, String, String, String, i64, i64, i64, i64, f64, Vec<String
 struct Fixture {
     now: String,
     review_merge_m: i64,
+    /// `(provider, window, used_percent, resets)`.
+    quota: Vec<FixtureQuota>,
     when: HashMap<String, (i64, Option<i64>)>,
     voyages: Vec<FixtureVoyage>,
+}
+
+/// One quota reading of the fixture.
+#[derive(Deserialize)]
+struct FixtureQuota {
+    provider: String,
+    window: String,
+    /// Kept as the fixture writes it: a whole number stays a whole number.
+    used: serde_json::Number,
+    /// `HH:MM` (a time today) or `Mon DD` (a date).
+    resets: String,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +57,15 @@ struct FixtureVoyage {
     lanes: Vec<String>,
     #[serde(rename = "T")]
     tasks: Vec<Task>,
+    /// `(at, kind, what, why, star)`.
+    #[serde(rename = "DECISIONS")]
+    decisions: Vec<(String, String, String, String, bool)>,
+    /// `(met, text)`.
+    #[serde(rename = "DONE")]
+    done: Vec<(bool, String)>,
+    /// `(task, lane, status, body)`.
+    #[serde(rename = "FRICTION")]
+    friction: Vec<(String, String, String, String)>,
     #[serde(rename = "V")]
     v: FixtureVoyageWords,
 }
@@ -101,6 +125,8 @@ pub fn load() -> (Store, i64) {
             let mut rank = 0;
             for (i, voyage) in fixture.voyages.iter().enumerate() {
                 let words = &voyage.v;
+                let decisions = &voyage.decisions;
+                let done = &voyage.done;
                 let used = words.used_m;
                 let departure = if words.state == "sailing" {
                     now - used * 60
@@ -124,11 +150,67 @@ pub fn load() -> (Store, i64) {
                 // A minute of a voyage's clock.
                 let d = |m: i64| departure + m * 60;
 
+                // The decisions the prototype's log draws, in order.
+                for (i, (at, kind, what, why, star)) in decisions.iter().enumerate() {
+                    tx.insert_decision_if_new(&NewDecision {
+                        project: "gear".into(),
+                        key: format!("golden-{}-{i}", words.milestone),
+                        voyage: words.milestone.clone(),
+                        at: format!("2026-10-28 {at}"),
+                        kind: kind.clone(),
+                        what: what.clone(),
+                        why: if why.is_empty() { None } else { Some(why.clone()) },
+                        alt: None,
+                        changes: None,
+                        star: *star,
+                        source: "plan".into(),
+                        line: None,
+                        plan_version: None,
+                    })?;
+                }
+                // The goal check the board shows from T-354.
+                let check: Vec<serde_json::Value> = done
+                    .iter()
+                    .map(|(met, text)| json!({"met": met, "text": text}))
+                    .collect();
+                tx.set_meta(
+                    &format!("goal-check:gear:{}", words.milestone),
+                    &serde_json::to_string(&check).unwrap(),
+                )?;
+
                 for task in &voyage.tasks {
                     rank += 1;
-                    let (id, lane, stage, title, est, actual, rounds, tokens_k, cost, deps, _, _) =
-                        task;
+                    let (
+                        id,
+                        lane,
+                        stage,
+                        title,
+                        est,
+                        actual,
+                        rounds,
+                        tokens_k,
+                        cost,
+                        deps,
+                        _,
+                        marks,
+                    ) = task;
                     if stage == "moved" {
+                        // A task that left the voyage is one line of the log.
+                        tx.insert_decision_if_new(&NewDecision {
+                            project: "gear".into(),
+                            key: format!("golden-move-{id}"),
+                            voyage: words.milestone.clone(),
+                            at: format!("2026-10-28 {}", gear_board::idle::clock(now)),
+                            kind: "move".into(),
+                            what: format!("{id} moved to {marks}"),
+                            why: None,
+                            alt: None,
+                            changes: None,
+                            star: false,
+                            source: "gear".into(),
+                            line: None,
+                            plan_version: None,
+                        })?;
                         continue;
                     }
                     let state = match stage.as_str() {
@@ -316,7 +398,102 @@ pub fn load() -> (Store, i64) {
                             tx.close_round(&key, d(s) + actual * 60)?;
                         }
                     }
+
+                    // The review round: on the reviewer's seat, a quarter of the
+                    // tokens and the cost. T-262 is the round open right now.
+                    if *tokens_k > 0 {
+                        let s = start.expect("a task whose round is seeded has a WHEN start");
+                        let handed_in = tx
+                            .attempt_times_of_task("gear", id)?
+                            .into_iter()
+                            .filter(|(_, times)| times.handed_in.is_some())
+                            .max_by_key(|(n, _)| *n);
+                        let (a, handed) = match handed_in {
+                            Some((n, times)) => (n, times.handed_in.unwrap()),
+                            None => (1, d(s)),
+                        };
+                        let key = RoundKey {
+                            project: "gear".into(),
+                            task: id.clone(),
+                            attempt: a,
+                            role: "review".into(),
+                        };
+                        let open = id == "T-262";
+                        tx.insert_round(&NewRound {
+                            key: key.clone(),
+                            seat: "gear:review-3".into(),
+                            generation: 1,
+                            cli: "codex".into(),
+                            model: None,
+                            start_at: if open { now - 12 * 60 } else { handed },
+                        })?;
+                        tx.set_round_tokens(
+                            &key,
+                            &RoundTokens {
+                                input: Some((*tokens_k - *tokens_k * 3 / 4) * 1000),
+                                output: Some(0),
+                                cache_read: Some(0),
+                                cache_write: Some(0),
+                                reasoning: None,
+                                cost_usd: Some(cost * 0.25),
+                                cost_source: "agent".into(),
+                            },
+                            now,
+                        )?;
+                        if !open {
+                            tx.close_round(&key, handed)?;
+                        }
+                    }
                 }
+
+                // The friction reports; the captain has read the older one.
+                for (task, lane, status, body) in &voyage.friction {
+                    let id = tx.insert_friction(&NewFriction {
+                        project: "gear".into(),
+                        task: task.clone(),
+                        attempt: 1,
+                        role: "dev".into(),
+                        seat: format!("gear:{lane}"),
+                        body: body.clone(),
+                        required: false,
+                    })?;
+                    if status == "read" {
+                        tx.close_friction("gear", &id, "read", now)?;
+                    }
+                }
+            }
+
+            // The reviewer that holds T-262 right now.
+            testing::seed_temp_seat(tx, "gear", "review-3", "T-262", "w1:p9", "codex", now)?;
+
+            // The quota readings the board shows beside the lanes.
+            for reading in &fixture.quota {
+                let resets = if reading.resets.contains(':') {
+                    // A clock time: the first minute after now that shows it.
+                    let mut ts = now + 60;
+                    let limit = now + 2 * 86_400;
+                    while gear_board::idle::clock(ts) != reading.resets {
+                        assert!(ts < limit, "no minute today shows {:?}", reading.resets);
+                        ts += 60;
+                    }
+                    ts
+                } else {
+                    // A date: two days out.
+                    now + 2 * 86_400
+                };
+                tx.set_meta(
+                    &format!("quota.reading.{}", reading.provider),
+                    &json!({
+                        "provider": reading.provider,
+                        "windows": [{
+                            "name": reading.window,
+                            "used_percent": reading.used,
+                            "resets_at": resets,
+                        }],
+                        "read_at": now,
+                    })
+                    .to_string(),
+                )?;
             }
             Ok(())
         })
@@ -438,6 +615,114 @@ fn a_working_task_has_its_open_dev_round() {
 
             // A task moved to another milestone has no row of its own.
             assert!(tx.get_task("gear", "T-182")?.is_none());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_reviewer_holds_t262_and_its_round_is_open() {
+    let (mut store, now) = load();
+    store
+        .read(|tx| {
+            let seat = tx
+                .seats_of_project("gear")?
+                .into_iter()
+                .find(|seat| seat.id == "gear:review-3")
+                .expect("the fixture's reviewer");
+            assert_eq!(seat.task_id.as_deref(), Some("T-262"));
+
+            let rounds = tx.rounds_of_task("gear", "T-262")?;
+            let review = rounds
+                .iter()
+                .find(|round| round.role == "review")
+                .expect("the review round of T-262");
+            assert_eq!(review.seat, "gear:review-3");
+            assert_eq!(review.cli, "codex");
+            assert_eq!(review.attempt, 1);
+            assert_eq!(review.start_at, now - 12 * 60);
+            assert_eq!(review.end_at, None);
+            // A quarter of the task's tokens and cost.
+            assert_eq!(review.input, Some(183_000));
+            assert_eq!(review.cost_usd, Some(0.0775));
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn every_voyage_has_the_fixtures_decisions() {
+    let (mut store, _) = load();
+    store
+        .read(|tx| {
+            let m5 = tx.decisions_of("gear", "M5")?;
+            assert_eq!(m5.len(), 3, "{m5:?}");
+            assert_eq!(m5.iter().filter(|decision| decision.star).count(), 2);
+            assert_eq!(m5[0].at, "2026-10-28 11:05");
+            assert_eq!(m5[0].kind, "scope");
+            assert_eq!(m5[0].source, "plan");
+
+            let m42 = tx.decisions_of("gear", "M4.2")?;
+            let moved = m42
+                .iter()
+                .find(|decision| decision.kind == "move")
+                .expect("the moved task's line");
+            assert_eq!(moved.what, "T-182 moved to M5");
+            assert_eq!(moved.source, "gear");
+            assert_eq!(moved.why, None);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_fixtures_frictions_keep_their_state() {
+    let (mut store, _) = load();
+    store
+        .read(|tx| {
+            let all = tx.frictions_of_project("gear")?;
+            let open = tx.open_frictions("gear")?;
+            assert_eq!(all.len(), 2, "{all:?}");
+            assert_eq!(open.len(), 1, "{open:?}");
+            assert_eq!(open[0].task, "T-260");
+            assert_eq!(open[0].seat, "gear:hull");
+            let read = all
+                .iter()
+                .find(|friction| friction.task == "T-248")
+                .expect("the friction the captain read");
+            assert_eq!(read.outcome.as_deref(), Some("read"));
+            assert!(read.closed_at.is_some());
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn the_quota_and_the_goal_check_are_in_the_meta() {
+    let (mut store, now) = load();
+    store
+        .read(|tx| {
+            let codex: serde_json::Value =
+                serde_json::from_str(&tx.get_meta("quota.reading.codex")?.unwrap()).unwrap();
+            let window = &codex["windows"][0];
+            assert_eq!(window["name"], "week");
+            assert_eq!(window["used_percent"], 63);
+            // A date two days out.
+            assert_eq!(window["resets_at"].as_i64(), Some(now + 2 * 86_400));
+            assert_eq!(codex["read_at"].as_i64(), Some(now));
+
+            let rhythm: serde_json::Value =
+                serde_json::from_str(&tx.get_meta("quota.reading.tokenrhythm")?.unwrap()).unwrap();
+            let resets = rhythm["windows"][0]["resets_at"].as_i64().unwrap();
+            assert!(resets > now);
+            assert_eq!(gear_board::idle::clock(resets), "22:00");
+
+            let check: serde_json::Value =
+                serde_json::from_str(&tx.get_meta("goal-check:gear:M5")?.unwrap()).unwrap();
+            let items = check.as_array().unwrap();
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[1]["met"], true);
+            assert_eq!(items[1]["text"], "the board shows every voyage");
             Ok(())
         })
         .unwrap();
