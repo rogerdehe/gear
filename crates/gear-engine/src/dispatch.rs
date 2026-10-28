@@ -31,6 +31,12 @@ pub struct LaneView {
     /// confirmed (T-97). It is delivered once more in a new agent session — or
     /// at once when a switch swallowed it — never every tick.
     pub failed_delivery: Option<FailedDelivery>,
+    /// T-290: this seat's next packet is a **rework** (the first ready task
+    /// carries a `rework_note` and its last attempt is this seat's, Rejected)
+    /// and its agent queues input typed while it works (pi, claude). The
+    /// packet may go while the agent is Working: it waits in the input queue
+    /// and is read after the current step.
+    pub rework_mid_turn: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +69,9 @@ pub enum Action {
 /// 1. seat state not Active/Standby/Retiring → None;
 /// 2. `obs` None → None;
 /// 3. `pending_op` present → None (never resend while a delivery is unsettled);
-/// 4. agent not idle (`obs.idle` false) → None;
+/// 4. agent not idle (`obs.idle` false) → None, unless the next packet is a
+///    rework for an agent that queues input while it works
+///    (`v.rework_mid_turn` and the agent reports Working, T-290);
 /// 5. screen flag RateLimit/Quota/Auth → None;
 /// 6. `now - last_deliver_at < cooldown_s` → None;
 /// 7. attempt Started/Stopped/Delivered → Continue, or Escalate when
@@ -102,8 +110,16 @@ pub fn decide(v: &LaneView, cfg: &DispatchCfg, now: Ts) -> Action {
     //    or unknown agent is never ready for a delivery — the text waits for
     //    the agent to be idle again (T-68: a seat on a dialog is not
     //    re-delivered every tick).
+    //    T-290: one exception — a rework packet for a lane whose agent queues
+    //    input while it works (pi, claude) goes into the queue and is read
+    //    after the current step. A first packet, a lane with other work in
+    //    flight, and an opencode or codex lane still wait for idle.
     if !obs.idle {
-        return none("the agent is not ready");
+        let mid_turn = v.rework_mid_turn
+            && obs.status == Some(gear_herdr::AgentStatus::Working);
+        if !mid_turn {
+            return none("the agent is not ready");
+        }
     }
     // 5. A rate limit / quota / auth wall is not nudged through.
     if obs.flags.iter().any(|flag| {
@@ -284,7 +300,10 @@ pub fn contract_changed_text(task: &str, version: i64) -> String {
 /// - `ready_tasks`: tasks of the project with `lane == seat.name`, state Ready,
 ///   priority ≠ `wont`, every dep Done — in rank order;
 /// - `nudges_since_progress` 0; `safe_for_next` true when every open attempt
-///   is handed in (Submitted): review runs in the background (never-stop).
+///   is handed in (Submitted): review runs in the background (never-stop);
+/// - `rework_mid_turn`: the seat's agent queues input while it works (pi,
+///   claude), it has no open attempt that is not Submitted, and the first ready
+///   task is a rework this seat's last attempt failed (T-290).
 pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> GearResult<LaneView> {
     let _ = now; // the design/09 cooldown uses last_deliver_at, not this tick's time
 
@@ -299,7 +318,10 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
     // may be assigned.
     let mut open = tx.open_attempts_of_seat(&seat.id)?;
     open.sort_by_key(|a| a.state == AttemptState::Submitted);
-    let safe_for_next = !open.is_empty() && open.iter().all(|a| a.state == AttemptState::Submitted);
+    // The seat has no open attempt that is not Submitted (T-290): an empty
+    // list, or one that is handed in, is fine.
+    let no_open_unsubmitted = open.iter().all(|a| a.state == AttemptState::Submitted);
+    let safe_for_next = !open.is_empty() && no_open_unsubmitted;
     let attempt = match open.into_iter().next() {
         Some(attempt) => {
             let task = tx.get_task(&seat.project, &attempt.task)?;
@@ -324,19 +346,37 @@ pub fn lane_view(tx: &Tx<'_>, seat: &SeatRow, obs: Option<SeatObs>, now: Ts) -> 
         None => None,
     };
 
+    let ready_tasks = ready_tasks_of(tx, seat)?;
+    // T-290: the next packet is a rework this seat worked on before, and the
+    // agent queues input typed while it works: the packet may go at once.
+    let rework_mid_turn = no_open_unsubmitted
+        && tx
+            .get_binding(&seat.id, seat.generation)?
+            .is_some_and(|binding| gear_herdr::queues_input(&binding.kind))
+        && match ready_tasks.first() {
+            Some(task) if task.rework_note.is_some() => tx
+                .attempts_of_task(&seat.project, &task.id)?
+                .last()
+                .is_some_and(|last| {
+                    last.seat == seat.id && last.state == AttemptState::Rejected
+                }),
+            _ => false,
+        };
+
     Ok(LaneView {
         obs,
         attempt,
         pending_op: tx.slot_ops(&seat.id)?.into_iter().next(),
         last_deliver_at: tx.last_op(&seat.id, OpKind::Deliver)?.map(|op| op.created),
         nudges_since_progress: 0,
-        ready_tasks: ready_tasks_of(tx, seat)?,
+        ready_tasks,
         safe_for_next,
         // The plan is durable in meta (T-33): a switch in progress is not
         // forgotten while the quota line is gone.
         switch_pending: tx.get_meta(&format!("engine.switch.{}", seat.id))?.is_some_and(|value| !value.is_empty())
             || tx.get_meta(&crate::restart::pending_meta_key(&seat.id))?.is_some_and(|value| !value.is_empty()),
         failed_delivery: crate::delivery::failed(tx, &seat.id)?,
+        rework_mid_turn,
     })
 }
 
@@ -352,6 +392,7 @@ fn empty_view(obs: Option<SeatObs>) -> LaneView {
         safe_for_next: false,
         switch_pending: false,
         failed_delivery: None,
+        rework_mid_turn: false,
     }
 }
 
@@ -493,7 +534,9 @@ pub fn prepare_dispatch(
                 .map(Some).ok_or_else(|| gear_model::GearError::new(gear_model::ErrorCode::NoTarget, "open attempt disappeared"))
         })?;
         let Some(attempt) = attempt else { continue };
-        if crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)? == crate::session::Prep::Ready {
+        let prep = crate::session::prepare_lane(store, herdr, cfg, seat, task, attempt.n, now)?;
+        if prep == crate::session::Prep::Ready
+            || rework_mid_turn_ready(store, herdr, seat, task, attempt.n, prep)? {
             let action = if attempt.sent_at.is_none() && attempt.state == AttemptState::Delivered {
                 Action::Assign { task: task.clone() }
             } else { action.clone() };
@@ -501,6 +544,46 @@ pub fn prepare_dispatch(
         }
     }
     Ok(ready)
+}
+
+/// T-290: a rework packet reaches a lane that queues input while it still
+/// works. The session step is the last gate before a packet: for a rework that
+/// keeps the current conversation (`keep`/`fresh`) it has nothing to run
+/// against the agent, so the idle wait of `session_runner` does not apply —
+/// the packet waits in the agent's input queue instead. Every other session
+/// action (new, compact, resume) types into the pane and still waits.
+fn rework_mid_turn_ready(
+    store: &mut Store,
+    herdr: &mut dyn gear_herdr::HerdrAct,
+    seat: &SeatRow,
+    task: &str,
+    attempt: i64,
+    prep: crate::session::Prep,
+) -> GearResult<bool> {
+    if prep != crate::session::Prep::Wait || attempt < 2 {
+        return Ok(false);
+    }
+    let (row, binding) = store.read(|tx| {
+        Ok((
+            tx.get_attempt(&seat.project, task, attempt)?,
+            tx.get_binding(&seat.id, seat.generation)?,
+        ))
+    })?;
+    let (Some(row), Some(binding)) = (row, binding) else { return Ok(false) };
+    if row.state != AttemptState::Delivered || row.sent_at.is_some() {
+        return Ok(false);
+    }
+    if !matches!(row.session_action.as_deref(), Some("keep") | Some("fresh")) {
+        return Ok(false);
+    }
+    if !gear_herdr::queues_input(&binding.kind) {
+        return Ok(false);
+    }
+    Ok(matches!(
+        herdr.agent_get(&binding.pane_id),
+        Ok(Some(info)) if info.agent.as_deref() == Some(binding.kind.as_str())
+            && info.agent_status == gear_herdr::AgentStatus::Working
+    ))
 }
 
 /// Resume an open lane round after its agent disappears or is restarted.
@@ -807,6 +890,7 @@ mod tests {
             }],
             safe_for_next: false,
             failed_delivery: None,
+            rework_mid_turn: false,
         }
     }
 
