@@ -109,7 +109,10 @@ Send it with `gear send --kind question`, then continue with other ready work if
 integration = "dev"     # the integration branch
 release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge; no default
+max_task_min = 60       # no task is planned longer than this; a plan that asks for more is refused
 ```
+
+`max_task_min` (default 60) caps a task's `estimate:`: a lane works unattended and is reviewed only at its hand-in, so a task of hours is a stretch nobody checks and one wrong turn costs all of it — bigger work is cut into tasks of at most `max_task_min`, each with its own test cycle (`gear --skill decompose` §1 rule 5). A rework estimate (`estimate=` on a fail verdict) is not capped.
 
 `[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`. `seat_branch` (default `{project}/{seat}`) names the branch of each seat's own worktree, and of the merge worktree as seat `merge`, so Herdr names the worktree `<project>-<seat>`.
 

@@ -264,7 +264,16 @@ fn apply_queue(
     let mut cancelled: Vec<String> = Vec::new();
     let mut resolved: Vec<String> = Vec::new();
 
-    // 5. validation, nothing written on failure.
+    // 5. validation, nothing written on failure. The project's cap on a
+    // task's planned time (T-279) is read once for the whole apply:
+    // `[conventions].max_task_min` from the stored config, the default when
+    // none parses. A rework estimate (`estimate=` on a fail verdict) is not
+    // capped: it is the price of finishing a task that is already open.
+    let max_task_min = tx
+        .get_project(project)?
+        .and_then(|row| crate::config::parse(&row.config_toml).ok())
+        .map(|config| config.conventions.max_task_min)
+        .unwrap_or(crate::config::MAX_TASK_MIN);
     let mut graph: BTreeMap<String, Vec<String>> = existing
         .iter()
         .map(|(id, task)| (id.clone(), task.deps.clone()))
@@ -337,6 +346,21 @@ fn apply_queue(
                 if item.state.is_some() {
                     return Err(bad(item.line, "`state=` is only for existing tasks"));
                 }
+            }
+        }
+        // A task that would take longer than the project's cap is cut into
+        // tasks each with its own test cycle (T-279): a lane works
+        // unattended and is reviewed only at its hand-in, so a long task is a
+        // long stretch nobody checks.
+        if let Some(estimate) = item.estimate {
+            if estimate > max_task_min {
+                let task = item.id.clone().unwrap_or_else(|| "NEW".to_string());
+                return Err(bad(
+                    item.line,
+                    format!(
+                        "{task}: estimate {estimate} min is over the project's cap of {max_task_min} min: cut it into tasks of at most {max_task_min} min, each with its own test cycle ([conventions] max_task_min)"
+                    ),
+                ));
             }
         }
         for dep in &item.deps {

@@ -27,6 +27,22 @@ fn world() -> Store {
     s
 }
 
+/// The project's cap on a task's planned time, raised (T-279): the tests that
+/// plan long tasks do it to exercise the voyage's pace and scope arithmetic.
+fn lift_the_cap(s: &mut Store, max_task_min: u32) {
+    s.write(|tx| {
+        let mut project = tx.get_project("p")?.unwrap();
+        project.config_toml = format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n\
+             [quota]\nlanes = 2\ntemps = 0\n\n\
+             [captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n\
+             [conventions]\ngate = \"make test\"\nmax_task_min = {max_task_min}\n"
+        );
+        tx.update_project(&project)
+    })
+    .unwrap();
+}
+
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
@@ -267,6 +283,7 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     use gear_model::AttemptState;
     use gear_store::{AttemptRow, AttemptStep};
     let mut s = world();
+    lift_the_cap(&mut s, 120);
     let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M2: course\ndone: ship the voyage\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 60\ndeps: -\n";
     run(&mut s, first, "r1", NOW).unwrap();
     let more = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 90\ndeps: -\n";
@@ -411,6 +428,7 @@ fn voyage_report_keeps_unknowns_and_omits_finished_milestones() {
 #[test]
 fn historical_departure_scope_uses_the_original_plan() {
     let mut old = world();
+    lift_the_cap(&mut old, 300);
     run(&mut old, &plan(0, FULL), "r1", NOW).unwrap();
     let (tasks, contracts, mut voyage, mut history) = old.read(|tx| {
         let tasks = tx.tasks_of_project("p")?;
@@ -424,6 +442,7 @@ fn historical_departure_scope_uses_the_original_plan() {
         .replace("goal: A", "goal: A. Estimate: 0.5h")
         .replace("goal: B", "goal: B. Estimate: 30m");
     let mut s = world();
+    lift_the_cap(&mut s, 300);
     s.write(|tx| {
         for task in &tasks { tx.insert_task(task)?; }
         for contract in &contracts { tx.insert_contract(contract)?; }
