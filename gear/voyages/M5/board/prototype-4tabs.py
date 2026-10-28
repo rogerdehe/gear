@@ -279,6 +279,44 @@ def idle_reason(n):
     if wait: return f"next {nxt[0]} waits for {wait[0][0]} ({wait[0][1]}, {words(wait[0])})"
     return f"next {nxt[0]} is ready but not delivered"
 
+REVIEW_MERGE = 15   # measured mean minutes from hand-in to merge in this voyage (fake)
+
+def forecast():
+    """Each lane's queue, played forward (the engine's run-dry forecast, feed.rs, does the same):
+    a lane is free again when it hands a task in; its next task starts when the lane is free AND every task it
+    depends on has merged (hand-in + review and merge); the gap between the two is waiting. Durations are the
+    estimate left times the lane's measured pace. Returns per lane: end (minutes from now) and its waits."""
+    T, LANES = G["T"], G["LANES"]
+    pace = {}
+    for n in LANES:
+        d = [t for t in T if t[1] == n and t[2] == "done"]
+        pace[n] = max(0.5, min(3.0, sum(t[5] for t in d) / max(1, sum(t[4] for t in d)))) if d else 1.0
+    merged = {t[0]: 0 for t in T if t[2] == "done"}          # already on dev
+    handed = {}
+    for t in T:                                              # handed in: merges after review (passed: soon)
+        if t[2] in ("handed", "review", "verdict"): merged[t[0]] = REVIEW_MERGE
+        if t[2] in ("passed", "merging"): merged[t[0]] = 5
+    out = {}
+    for _ in range(4):                                       # deps cross lanes: settle in a few passes
+        for n in LANES:
+            free, waits, last = 0, [], 0
+            for t in [t for t in T if t[1] == n and t[2] in ("working", "asking", "delivered", "rework", "sentback")] + \
+                     [t for t in T if t[1] == n and t[2] in ("queued", "deps")]:
+                start = free
+                deps = [d for d in t[9] if d not in ("",)]
+                if t[2] in ("queued", "deps"):
+                    ready = max([merged.get(d, 10 ** 6) for d in deps] or [0])
+                    if ready > free:
+                        blocker = max(deps, key=lambda d: merged.get(d, 10 ** 6))
+                        waits.append((ready - free, blocker)); start = ready
+                left = max(t[4] - t[5], 10) if t[5] else t[4]
+                free = start + int(left * pace[n])
+                merged[t[0]] = free + REVIEW_MERGE
+                last = merged[t[0]]
+            reviewing = [merged[t[0]] for t in T if t[1] == n and t[0] in merged and t[2] in ("handed", "review", "verdict", "passed", "merging")]
+            out[n] = (max([last] + reviewing), waits, pace[n])
+    return out
+
 def view_now(w, sel):
     """Now: one table row per lane (what it does, its stage, its time, the lane's progress, when it ends), one line on
     balance, then one list of what to handle (needs a look and waiting on someone, each with who acts), quota last."""
@@ -288,13 +326,14 @@ def view_now(w, sel):
     cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 76 + tw)]
     y = TOP[0]
     for name, x in cols: put(w, y, x, name, C["b"])
-    put(w, y, 86 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
+    put(w, y, 108 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
     ends = {}
+    fc = forecast() if G["V"]["state"] == "sailing" else {}
     for i, n in enumerate(LANES):
         t = lane_now(n)
         mine = [t_ for t_ in T if t_[1] == n and t_[2] != "moved"]
         nd = sum(1 for t_ in mine if t_[2] == "done"); l = sum(t_[4] for t_ in mine if t_[2] != "done")
-        ends[n] = G["V"]["used_m"] + l
+        ends[n] = G["V"]["used_m"] + fc[n][0] if fc else 0
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
         put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"])
         if t:
@@ -305,14 +344,30 @@ def view_now(w, sel):
             put(w, y, 9, idle_reason(n)[:tw + 30], C["dim"] if G["V"]["state"] == "landed" else C["bad"])
         k = nd * 10 // max(1, len(mine))
         put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)} · {l}m left")
-        if G["V"]["state"] == "sailing": put(w, y, 76 + tw, f"~{hm(ends[n])}")
+        if fc:
+            put(w, y, 76 + tw, f"~{hm(ends[n])}")
+            if fc[n][1]:
+                gap, dep = max(fc[n][1])
+                put(w, y, 85 + tw, f"waits {hm(gap)} for {dep}", C["bad"] | C["b"])
         if sel == i: hl(w, y)
         y += 1
     if G["V"]["state"] == "sailing":
         first, last = min(ends, key=ends.get), max(ends, key=ends.get); gap = ends[last] - ends[first]
-        put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}" if gap <= 30 else
-            f"✗ not balanced: {last} ends {hm(gap)} after {first} — move {last}'s next wave to {first}",
-            C["ok"] if gap <= 30 else C["bad"])
+        idle = [(n, max(fc[n][1])) for n in LANES if fc[n][1]]
+        if gap <= 30 and not idle:
+            put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}, none waits", C["ok"])
+        else:
+            msg = f"✗ not balanced: {last} ends {hm(gap)} after {first}"
+            if idle:
+                n, (g, dep) = max(idle, key=lambda x: x[1][0])
+                owner = next(t[1] for t in G["T"] if t[0] == dep)
+                msg += f"; {n} waits {hm(g)} for {dep} ({owner}) — give {n} work it can start now, or move {dep} to {n}"
+            else:
+                msg += f" — move {last}'s next startable wave to {first}"
+            put(w, y, 3, msg, C["bad"])
+        y += 1
+        put(w, y, 3, "ENDS = each lane's queue played forward: estimate left × the lane's pace, a task starts when its "
+                     f"dependencies have merged (hand-in + ~{REVIEW_MERGE}m review and merge); the gap is the wait", C["dim"])
     y += 2
     items = [("⚠", f"{tid} {lane} {why}" if tid != "-" else f"{lane} {kind}: {why}", C["warn"]) for lane, tid, kind, why in G["EXC"]]
     items += [("⏳", s_, 0) for s_ in G["WAITING"]]
