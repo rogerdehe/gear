@@ -23,7 +23,7 @@ fn config(dir: &Path, repo: &Path) -> PathBuf {
         format!(
             "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
              \n[quota]\nlanes = 1\ntemps = 0\n\
-             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n",
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\ngate = \"make test\"\n",
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
     )
@@ -138,7 +138,7 @@ fn a_pull_request_merge_mode_is_registered() {
             "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
              \n[quota]\nlanes = 1\ntemps = 0\n\
              \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
-             \n[github]\nrepo = \"owner/name\"\nmerge = \"pr\"\n",
+             \n[github]\nrepo = \"owner/name\"\nmerge = \"pr\"\n\n[conventions]\ngate = \"make test\"\n",
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
     )
@@ -273,7 +273,7 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
              \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
              \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
              kind = \"codex\"\nprofile = \"codex\"\n\
-             \n[models]\nlanes = [\n  {{ model = \"test-model\", cli = \"opencode\" }},\n  {{ model = \"fallback\", cli = \"codex\" }},\n]\n",
+             \n[models]\nlanes = [\n  {{ model = \"test-model\", cli = \"opencode\" }},\n  {{ model = \"fallback\", cli = \"codex\" }},\n]\n\n[conventions]\ngate = \"make test\"\n",
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
     )
@@ -395,7 +395,7 @@ fn check_validates_a_config_and_opens_no_store() {
              \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
              \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
              kind = \"codex\"\nprofile = \"codex\"\n\
-             \n[temps]\nkind = \"codex\"\nprofile = \"codex\"\n",
+             \n[temps]\nkind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\ngate = \"make test\"\n",
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
     )
@@ -474,7 +474,7 @@ fn check_reports_the_issues_init_reports() {
              \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
              kind = \"codex\"\nprofile = \"codex\"\n\
              \n[[lanes]]\nname = \"keel\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
-             kind = \"codex\"\nprofile = \"codex\"\n",
+             kind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\ngate = \"make test\"\n",
             repo = serde_json::json!(repo.to_string_lossy()).to_string()
         ),
     )

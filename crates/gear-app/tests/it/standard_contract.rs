@@ -37,6 +37,10 @@ duty = "everything"
 owns = ["src/"]
 kind = "opencode"
 profile = "opencode"
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
 
 /// A registered project whose root is a temp dir, with one task on lane heat.

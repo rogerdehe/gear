@@ -39,6 +39,10 @@ kind = "grok"
 unattended_args = ["--yolo"]
 exit_keys = ["ctrl+c", "ctrl+d"]
 resume_args = ["-s", "{session}"]
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
