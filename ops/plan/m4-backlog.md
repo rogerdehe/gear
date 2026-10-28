@@ -130,6 +130,8 @@ Problems found after M4's landing and in other projects' first voyages are colle
 
 - A direction check that is still running when the lane hands in is never closed (M4.2 T-245, 2026-10-28 03:34-03:43): review-11 got the direction packet but its Codex session sat at 0% context; the lane handed in, review-10 started the full review, and review-11 stayed Active on T-245, holding a temp slot (T-249's review queued behind it) and the agent name `gear-review-t245`, so the engine could not name review-10 (M-4166). The engine then nudged review-11 with the review nudge text ("your verdict on T-245 is not in") around the direction packet. A `- release review-11` staff line applied with no error and no effect. Fix: a hand-in ends the attempt's open direction check (job closed, seat to Standby, no result forwarded); a superseded direction seat is never nudged; a staff line that does nothing says why.
 
+- A temp seat whose session resume times out stays NeedsCheck with its pane gone (M4.2 review-10, M-4186, 2026-10-28 03:53): the item asks the captain to check an agent that no longer exists. When the seat's pane is gone and it holds no task, the engine releases it instead of asking.
+
 ## Later fixes (not urgent; collected 2026-10-28)
 
 - A stuck or IDLE alert says what it is about (trial project feedback B04-01, v0.3.4): the operation and its age, the task or instruction it belongs to, the lane's last check-in or hand-in, and what it waits for. IDLE says it means "no next task to dispatch", not "the agent does nothing". Re-check against v0.4.x first: T-213 (a doorbell behind a working turn is not a stall), Herdr's agent state for busy/ready (v0.4.0) and the session-write check (v0.4.1) removed most of these false alerts.
