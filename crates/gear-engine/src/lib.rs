@@ -116,6 +116,10 @@ impl Default for EngineCfg {
 pub struct TickReport {
     /// Projects whose observation failed this tick (nothing decided for them).
     pub observe_failed: Vec<String>,
+    /// Projects one of whose per-project steps failed this tick, one line each
+    /// (`<project>: <code>: <detail>`; T-243). The tick goes on with the other
+    /// projects: one project's bad row or config never stops the rest.
+    pub project_failed: Vec<String>,
     /// Op ids that went Intended this tick.
     pub intended: Vec<String>,
     /// (op id, resulting state) for ops executed this tick.
@@ -186,13 +190,23 @@ pub struct TickReport {
     pub rounds: crate::rounds::RoundReport,
 }
 
+/// One line of [`TickReport::project_failed`]: `<project>: <code>: <detail>`
+/// (T-243).
+fn project_error(project: &str, error: &gear_model::GearError) -> String {
+    format!("{project}: {}: {}", error.code, error.detail)
+}
+
 /// Run one engine tick over every project in the store.
 pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: Ts) -> GearResult<TickReport> {
     let mut report = TickReport::default();
 
     // Settle recorded lane rebinds before onboarding or dispatch sees config.
+    // T-243: a project whose step fails is reported and the other projects go
+    // on; one bad project never stops the tick.
     for project in store.read(|tx| tx.project_ids())? {
-        gear_app::plan::reconcile_rebinds(store, &project)?;
+        if let Err(error) = gear_app::plan::reconcile_rebinds(store, &project) {
+            report.project_failed.push(project_error(&project, &error));
+        }
     }
 
     rebind::tick(store, herdr, cfg, now)?;
@@ -216,20 +230,28 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     waits::tick(store, herdr, cfg, now)?;
     let projects = store.read(|tx| tx.project_ids())?;
     for project in &projects {
-        let checked = parallel::check(store, project, now)?;
-        report.parallel.extend(checked.opened.into_iter().map(|id| format!("{project}:{id}")));
-        report.parallel_failed.extend(checked.problems.into_iter().map(|error| format!("{project}: {error}")));
+        match parallel::check(store, project, now) {
+            Ok(checked) => {
+                report.parallel.extend(checked.opened.into_iter().map(|id| format!("{project}:{id}")));
+                report.parallel_failed.extend(checked.problems.into_iter().map(|error| format!("{project}: {error}")));
+            }
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
     }
     // The GitHub side of a project in GitHub mode (T-91): every call is an op,
     // so an outage queues them and never stops the tick.
     for project in &projects {
-        gear_forge::sync(store, project, now)?;
+        if let Err(error) = gear_forge::sync(store, project, now) {
+            report.project_failed.push(project_error(project, &error));
+        }
     }
     // Station facts need no Herdr observation. Enqueue them before deciding
     // doorbells, including when a previous outage delayed a checkpoint.
     for project in &projects {
-        let ids = store.write(|tx| gear_app::station::checkpoints(tx, project, now))?;
-        report.stations.extend(ids.into_iter().map(|id| format!("{project}:{id}")));
+        match store.write(|tx| gear_app::station::checkpoints(tx, project, now)) {
+            Ok(ids) => report.stations.extend(ids.into_iter().map(|id| format!("{project}:{id}"))),
+            Err(error) => report.project_failed.push(project_error(project, &error)),
+        }
     }
 
     // 1. observe: one agents() call for the whole session. If it fails, every
@@ -260,7 +282,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
     let mut missing_seats = std::collections::BTreeSet::new();
     let mut present_seats = Vec::new();
     let mut observed_seats = Vec::new();
-    for project in projects {
+    // T-243: the steps of one project run in `one_project`, once per project.
+    // A project whose step fails is reported in `report.project_failed` and the
+    // other projects run all the same: several projects share one engine, so
+    // one project's bad row or config never stops the other projects' tick.
+    let mut one_project = |store: &mut Store, report: &mut TickReport, id: &str| -> GearResult<()> {
+        let project = id.to_string();
         // 0d. every seat with an active binding carries its name (`<project>-
         //     <seat>`, 17 §2/§3). A name another pane holds is reported to the
         //     captain once, never stolen.
@@ -275,7 +302,9 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         // The profile table of this project: the built-ins with the project's
         // own `[profiles.<name>]` on top (T-31). A config that does not parse
         // leaves the built-ins in place (the lanes are parked by the onboard
-        // step instead).
+        // step instead); a profile block the engine cannot read is this
+        // project's failure this tick (T-243), reported in
+        // `report.project_failed`, never the tick's.
         let profiles = match gear_app::config::latest(store, &project) {
             Ok(config) => gear_app::config::profile_table(&cfg.profiles, &config)?,
             Err(_) => cfg.profiles.clone(),
@@ -521,6 +550,12 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //     one. Git and the gate run beside the tick (T-36).
         for merged in merge::merge_passed(store, herdr, cfg, &project, now)? {
             report.merged.push(format!("{} @ {}", merged.task, merged.branch));
+        }
+        Ok(())
+    };
+    for project in projects {
+        if let Err(error) = one_project(store, &mut report, &project) {
+            report.project_failed.push(project_error(&project, &error));
         }
     }
     // 13. the rounds bookkeeping of every project (design §4.1): the session of
