@@ -249,7 +249,9 @@ pub trait HerdrAct: HerdrRead {
 /// it: an agent's TUI has to draw and accept the keystrokes (L-71).
 pub const TYPE_SETTLE_MS: u64 = 300;
 
-/// Real Herdr over its unix socket. Holds one blocking client connection.
+/// Real Herdr over its unix socket. Each call opens its own connection to the
+/// socket path (board-herdr `HerdrClient::call_inner`), so a Herdr server
+/// restarted on the same path is reached on the next call; nothing reconnects.
 pub struct SocketHerdr {
     client: board_herdr::HerdrClient,
     /// The path `connect` was given (T-314): an error names the Herdr it asked.
