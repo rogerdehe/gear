@@ -5215,10 +5215,19 @@ pub fn nudge_stopped_reviewers(
             // the cooldown on an idle reviewer does not block: it is exactly
             // the case the nudge is for (the packet or its Enter was lost,
             // L-76). Anything not yet submitted still waits.
-            let blocking = tx
-                .slot_ops(&seat.id)?
-                .into_iter()
-                .any(|op| !(op.state == gear_model::OpState::Submitted && now - op.created >= cooldown_s));
+            //
+            // T-284: an op in `Unknown` (an uncertain send, or an `Executing`
+            // op recovered on engine start) never settles either — a reviewer
+            // delivery is settled only by its verdict — so it must not hold the
+            // nudge for good once it is older than the cooldown. Nor does an op
+            // of an older generation: that agent is gone.
+            let blocking = tx.slot_ops(&seat.id)?.into_iter().any(|op| {
+                op.generation == seat.generation
+                    && !(matches!(
+                        op.state,
+                        gear_model::OpState::Submitted | gear_model::OpState::Unknown
+                    ) && now - op.created >= cooldown_s)
+            });
             if blocking {
                 return Ok(None);
             }
