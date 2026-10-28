@@ -19,6 +19,7 @@ pub mod graph;
 pub mod idle;
 pub mod style;
 mod screen;
+pub mod stations;
 pub mod voyage;
 
 use std::io::Write;
@@ -151,6 +152,9 @@ pub struct ProjectBoard {
     /// The tasks that overlap the integration branch of their repo (T-188):
     /// information lines, never items that wait for the captain.
     pub overlaps: Vec<Overlap>,
+    /// The stations of the measured voyage, in plan order, with their
+    /// progress (T-334); empty without a measured voyage.
+    pub stations: Vec<stations::StationProgress>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -705,6 +709,11 @@ pub fn project_with_agents(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The stations of the measured voyage (T-334): reached, now, next.
+    let stations = match &workload {
+        Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
+        None => Vec::new(),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -728,6 +737,7 @@ pub fn project_with_agents(
         temps,
         unconfirmed_deliveries,
         unconfirmed,
+        stations,
     })
 }
 

@@ -7,6 +7,7 @@ mod graph_contract;
 mod idle_contract;
 mod measures_contract;
 mod overlaps_contract;
+mod stations_contract;
 mod workload_contract;
 mod colour_contract;
 mod voyage_scope_contract;
