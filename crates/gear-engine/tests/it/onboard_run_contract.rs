@@ -31,6 +31,10 @@ duty = "everything"
 owns = ["src/"]
 kind = "opencode"
 profile = "opencode"
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
 
 fn cfg() -> EngineCfg {
@@ -247,6 +251,10 @@ profile = "claude"
 [models]
 lanes = ["grok-4.7"]
 on_quota = { lanes = "wait", review = "wait" }
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
     // The grok trust store lives under HOME: give it a scratch one.
     let home = std::env::temp_dir().join(format!(
