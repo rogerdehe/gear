@@ -49,6 +49,91 @@ pub(crate) fn forget_gear_hooks(worktree: &std::path::Path) -> Result<(), String
     Ok(())
 }
 
+/// The git common dir of `dir`, absolute: the repository a checkout belongs
+/// to. A path git cannot read (not a repository, gone) is `None`.
+fn common_dir(dir: &str) -> Option<String> {
+    let dir = std::path::Path::new(dir);
+    let out = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?;
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+/// The other repository the worktree at `path` belongs to, when it is not the
+/// one at `repo` (T-253). Herdr places a worktree by the repo folder's name and
+/// the branch, so two repos with the same folder name and the same seat branch
+/// shared one directory (`.herdr-worktrees/api/home-merge` belonged to one
+/// `api` repo while another project's `api` repo needed the same path). The git
+/// common dir is the repository's identity: the worktree's must be the repo's
+/// own. A path git cannot read (a fake Herdr, a path that is gone) is not
+/// evidence of another repository, so it is let through.
+pub(crate) fn foreign_worktree(repo: &str, path: &str) -> Option<String> {
+    let own = common_dir(repo)?;
+    let theirs = common_dir(path)?;
+    (own != theirs).then_some(theirs)
+}
+
+/// Check the worktree `path` Herdr returned for `seat` against the repository
+/// it must belong to (T-253). A worktree of another repository is never used:
+/// the captain gets one item on thread `worktree:<seat>` and the caller is
+/// told not to proceed.
+pub(crate) fn check_worktree(
+    store: &mut Store,
+    project: &str,
+    seat: &str,
+    repo: &str,
+    path: &str,
+    now: Ts,
+) -> Result<(), String> {
+    let Some(other) = foreign_worktree(repo, path) else { return Ok(()) };
+    let reason = format!(
+        "the worktree {path} Herdr gave {seat} belongs to another repository ({other}); rename one repo folder or set conventions.seat_branch with {{project}}"
+    );
+    open_worktree_item(store, project, seat, &reason, now)?;
+    Err(reason)
+}
+
+/// One captain item per seat on thread `worktree:<seat>`: the same body is
+/// never repeated, an open item already says it (T-253).
+fn open_worktree_item(
+    store: &mut Store,
+    project: &str,
+    seat: &str,
+    body: &str,
+    now: Ts,
+) -> Result<(), String> {
+    let thread = format!("worktree:{seat}");
+    store
+        .write(|tx| {
+            let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+            let already = tx.thread_messages(project, &thread)?.into_iter().any(|message| {
+                matches!(message.state, gear_model::MsgState::Open | gear_model::MsgState::Waiting)
+                    && message.body == body
+            });
+            if already {
+                return Ok(());
+            }
+            tx.insert_message(&gear_store::NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread,
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id,
+                kind: gear_model::MsgKind::System,
+                urgent: false,
+                body: body.to_string(),
+                reply_to: None,
+                needs_ack: false,
+                state: gear_model::MsgState::Open,
+                created: now,
+            })?;
+            Ok(())
+        })
+        .map_err(|e| e.detail)
+}
+
 /// Run `git <args>` in `dir`; the trimmed stdout, or the stderr as the error.
 fn git(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("git")
@@ -81,7 +166,8 @@ fn git_config(dir: &std::path::Path, args: &[&str]) -> Result<String, String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeStep {
     pub repo: String,
-    /// `home/<lane>`
+    /// The project's `[conventions].seat_branch` with `{project}` and `{seat}`
+    /// filled in (T-253): `<project>/<lane>` by default.
     pub branch: String,
     /// the project's integration branch
     pub base: String,
@@ -104,8 +190,10 @@ pub struct OnboardPlan {
 }
 
 /// Plan onboarding of `seat` as generation `generation` (the next one):
-/// - Lane seats get a `WorktreeStep` (branch `home/<name>`, base
-///   `integration`, label `<project>-<name>`); other roles `None`;
+/// - Lane seats get a `WorktreeStep` (branch
+///   `seat_branch` = the project's `[conventions].seat_branch` template,
+///   `<project>/<name>` by default, base `integration`, label
+///   `<project>-<name>`); other roles `None`;
 /// - `env_command` exactly `export GEAR_CTX=<project>:<name>:<generation>; export GEAR_DB=<db_path>`;
 /// - `args` = `profile.unattended_args` (+ resume args when `resume` is Some and
 ///   the profile has them; a resume request for a profile without resume
@@ -118,6 +206,7 @@ pub fn plan_onboard(
     generation: i64,
     repo: &str,
     integration: &str,
+    seat_branch: &str,
     db_path: &str,
     resume: Option<&str>,
 ) -> Result<OnboardPlan, String> {
@@ -148,7 +237,7 @@ pub fn plan_onboard(
     let worktree = match seat.role {
         SeatRole::Lane => Some(WorktreeStep {
             repo: repo.to_string(),
-            branch: format!("home/{}", seat.name),
+            branch: gear_model::branch::expand_seat(seat_branch, &seat.project, &seat.name),
             base: integration.to_string(),
             label: agent_name.clone(),
         }),
@@ -350,6 +439,7 @@ fn onboard_seat(
         seat.generation + 1,
         &repo.path,
         &repo.integration,
+        &config.conventions.seat_branch,
         &cfg.db_path,
         None,
     )?;
@@ -409,6 +499,13 @@ fn onboard_seat(
         },
         other => return Err(step_failure("worktree_open", &other)),
     };
+    // T-253: the worktree must belong to the lane's repo. Herdr places
+    // worktrees by the repo folder's name and the branch, so a same-named repo
+    // came back with another repository's checkout. It is not used, and the
+    // captain hears about it.
+    if let Err(reason) = check_worktree(store, &seat.project, &seat.name, &worktree.repo, &created.path, now) {
+        return Err(reason);
+    }
     let pane = created.pane_id;
     // T-107: an older engine left its pre-push hook here; the worktree loses
     // it now that GEAR has no allow-list.
@@ -1111,7 +1208,7 @@ repo = "web"
     fn a_retried_lane_whose_agent_still_runs_is_exited_before_the_start() {
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
-        herdr.add_worktree("home/heat", "/wt/heat", "w5:p1");
+        herdr.add_worktree("toy/heat", "/wt/heat", "w5:p1");
         herdr.add_agent("w5:p1", "opencode", gear_herdr::AgentStatus::Idle);
 
         assert!(onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap().is_empty());
@@ -1128,7 +1225,7 @@ repo = "web"
 
     /// T-125: a lane registered again reuses its home worktree. Its checkout
     /// is on the task branch it last worked, so `worktree open --branch
-    /// home/heat` finds nothing and a create would collide with the path that
+    /// toy/heat` finds nothing and a create would collide with the path that
     /// already exists; the recorded path is opened instead.
     #[test]
     fn a_lane_registered_again_reuses_its_home_worktree() {
@@ -1637,7 +1734,7 @@ repo = "web"
             })
             .expect("the engine created the lane's worktree");
         assert_eq!(repo, "/repo/web", "the worktree is in the lane's repo");
-        assert_eq!(branch, "home/heat");
+        assert_eq!(branch, "toy/heat");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "toy-heat");
     }
@@ -1677,7 +1774,7 @@ repo = "web"
         let work = root.join("work");
         std::fs::write(work.join("README.md"), "dev\n").unwrap();
         sh(&work, "git add -A && git -c user.email=a@b -c user.name=a commit -qm dev");
-        sh(&work, "git worktree add -q -b home/heat ../heat dev");
+        sh(&work, "git worktree add -q -b toy/heat ../heat dev");
         let worktree = root.join("heat");
         // The hook an older engine installed: its own path, worktree-only.
         sh(&worktree, "git config extensions.worktreeConfig true");
@@ -1693,7 +1790,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("home/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
 
         let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
 
@@ -1718,7 +1815,7 @@ repo = "web"
         let mut store = world(CONFIG);
         let mut herdr = FakeHerdr::new();
         herdr.add_shell("w1:p2");
-        herdr.add_worktree("home/heat", &worktree.to_string_lossy(), "w1:p2");
+        herdr.add_worktree("toy/heat", &worktree.to_string_lossy(), "w1:p2");
         onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
         assert_eq!(sh(&worktree, "git config --worktree core.hooksPath"), own, "not ours");
         assert!(std::path::Path::new(&own).join("pre-push").exists(), "its hooks stay");

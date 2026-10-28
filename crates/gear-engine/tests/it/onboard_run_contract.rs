@@ -54,7 +54,7 @@ fn queued_lane_gets_worktree_env_and_agent() {
     assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
     let b = s.read(|tx| tx.get_binding("toy:heat", 1)).unwrap().unwrap();
     assert_eq!(b.status, BindingStatus::Active);
-    assert!(herdr.worktree_branches().contains(&"home/heat"));
+    assert!(herdr.worktree_branches().contains(&"toy/heat"));
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::PaneRun { command, .. }
         if command == &format!("export GEAR_CTX=toy:heat:1; export GEAR_DB={}", cfg().db_path))), "{:?}", herdr.calls);
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::AgentStart { name, kind, args, .. }
@@ -158,7 +158,7 @@ fn a_lane_added_by_a_config_change_is_onboarded_with_the_latest_config() {
     let active = onboard_queued(&mut s, &mut herdr, &cfg(), T0 + 3).unwrap();
     assert_eq!(active, vec!["toy:pricing".to_string()]);
     assert!(herdr.calls.iter().any(|c| matches!(c, Call::WorktreeCreate { repo, branch, .. }
-        if repo == "/repo2" && branch == "home/pricing")), "{:?}", herdr.calls);
+        if repo == "/repo2" && branch == "toy/pricing")), "{:?}", herdr.calls);
     let seat = s.read(|tx| tx.get_seat("toy:pricing")).unwrap().unwrap();
     assert_eq!((seat.state, seat.generation), (SeatState::Active, 1));
 }
@@ -291,7 +291,7 @@ gate = "make test"
     );
     // Its worktree was trusted before the start: one entry, written once.
     let trust = std::fs::read_to_string(home.join(".grok/trusted_folders.toml")).unwrap();
-    assert!(trust.contains("[folders.\"/fake-worktrees/home-grok1\"]"), "{trust}");
+    assert!(trust.contains("[folders.\"/fake-worktrees/toy-grok1\"]"), "{trust}");
     assert!(trust.contains("trusted = true"), "{trust}");
     assert_eq!(trust.matches("[folders.").count(), 1, "one entry: {trust}");
 

@@ -29,7 +29,10 @@ fn loop_attempt(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Option<AttemptRow>> {
 }
 
 fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(String, Ts)> {
-    let branch = crate::dispatch::task_branch(&seat.name, &attempt.task);
+    // The branch is the project's own (T-253): the template it names the task
+    // branch with, `{lane}/t{n}` when it says nothing.
+    let conventions = crate::dispatch::conventions(tx, &seat.project);
+    let branch = crate::dispatch::task_branch(&conventions.task_branch, &seat.project, &seat.name, &attempt.task);
     let start = tx.attempt_times(&seat.project, &attempt.task, attempt.n)?.started.unwrap_or(attempt.started);
     let task = tx.get_task(&seat.project, &attempt.task)?;
     let project = tx.get_project(&seat.project)?;

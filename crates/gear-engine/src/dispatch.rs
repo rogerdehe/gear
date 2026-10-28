@@ -380,9 +380,23 @@ pub fn packet_ref(task: &str) -> String {
     format!("`gear --show {task}`")
 }
 
-/// The task branch a lane works on (17 §3): `<lane>/t<n>` (no slug in slice 2).
-pub fn task_branch(lane: &str, task: &str) -> String {
-    format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+/// The task branch a lane works on (T-253): the project's
+/// `[conventions].task_branch` template with `{project}`, `{lane}` and `{n}`
+/// filled in — `<lane>/t<n>` by default (17 §3).
+pub fn task_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
+    gear_model::branch::expand(template, project, lane, task)
+}
+
+/// The project's `[conventions]`, parsed from its latest config text. A project
+/// that is gone or a config that does not parse is the default conventions: a
+/// branch is always named, never guessed from nothing (T-253).
+pub(crate) fn conventions(tx: &Tx<'_>, project: &str) -> gear_app::config::Conventions {
+    tx.get_project(project)
+        .ok()
+        .flatten()
+        .and_then(|row| gear_app::config::parse(&row.config_toml).ok())
+        .map(|config| config.conventions)
+        .unwrap_or_default()
 }
 
 /// The integration branch a lane's branch starts from (T-222): the lane's own
@@ -543,7 +557,7 @@ pub fn recover_open_rounds(
 
 /// Turn decisions into Deliver ops in the caller's transaction:
 /// - Assign → `gear_app::tasks::start_attempt(tx, project, task, seat.id, seat.generation, now)`
-///   then a delivery with `assign_text(task, contract_version, task_branch(seat.name, task), packet_ref(task))`;
+///   then a delivery with `assign_text(task, contract_version, task_branch(template, project, seat.name, task), packet_ref(task))`;
 /// - Continue → a delivery for the seat's open attempt with `continue_text(task, adopted_version, packet_ref(task))`;
 /// - None / Escalate → nothing.
 /// Returns the Intended ops (via `ops::intend_deliveries`).
@@ -551,6 +565,8 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
     let mut deliveries: Vec<DeliverAction> = Vec::new();
     // T-84: the project standard travels with the assignment and the continue.
     let standard = gear_app::standard::line_for(tx, project)?;
+    // The branch templates are the project's own (T-253): read them once.
+    let conventions = conventions(tx, project);
     for (seat, action) in actions {
         let guarded = rebind_action(tx, &seat.id, action.clone())?;
         match &guarded {
@@ -565,7 +581,7 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                 // T-222 (F-75): the first attempt says how to start the branch;
                 // a rework (attempt n ≥ 2) keeps the old wording — the branch
                 // and the worktree are already there.
-                let branch = task_branch(&seat.name, task);
+                let branch = task_branch(&conventions.task_branch, project, &seat.name, task);
                 let mut text = if attempt.n == 1 {
                     first_attempt_text(
                         task,
