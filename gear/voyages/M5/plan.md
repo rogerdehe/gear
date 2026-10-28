@@ -59,6 +59,10 @@ eta: 16h
 - station M-4739: keep course 308 min in, 51 done; forecast 1500 min; the eta waits for the user
 - station M-4754: keep course 320 min in, 54 done; forecast 1422 min; the eta waits for the user
 - station M-4768: keep course 337 min in, 57 done; forecast 1407 min; the eta waits for the user
+
+# Verdicts
+- T-321 attempt=1 contract=2 candidate=fffb4ce734e869c1cd0ec7f91e5d42216f71bf51 fail estimate=15 rework="The merge into dev conflicts in crates/gear-cli/tests/it/admin_init_contract.rs (another task's tests landed there first). Merge origin/dev into your branch, keep both sides' tests, run make check CRATE=gear-cli and make check CRATE=gear-app, and hand in again. No other change."
+
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
