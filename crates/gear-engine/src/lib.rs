@@ -482,6 +482,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         //    lane is not blocked; the reviewer is a seat of its own.
         let reviews = review::start_reviews(store, herdr, cfg, &profiles, &project, now)?;
         report.reviewers.extend(reviews.started);
+        // A mechanical hand-in settles itself (T-273): reported the way a
+        // review's own settlement is, so one failed settlement is visible and
+        // still never stops the tick.
+        report.settled.extend(reviews.settled);
+        report.settle_failed.extend(reviews.settle_failed);
 
         // 7b. a reviewer that stopped before its verdict is told to go on
         //     (L-53); past its nudge budget it is flagged for the captain.
