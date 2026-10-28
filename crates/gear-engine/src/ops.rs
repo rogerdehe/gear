@@ -2,7 +2,7 @@
 
 use gear_herdr::{HerdrAct, Outcome};
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, Ts};
+use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, OpKind, OpState, SeatRole, Ts};
 use gear_store::{BindingStatus, NewOp, OpRow, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -1150,6 +1150,21 @@ fn shown_delivery(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     if row.as_ref().is_some_and(|a| a.seat == op.seat && matches!(a.state, gear_model::AttemptState::Submitted | gear_model::AttemptState::Accepted | gear_model::AttemptState::Rejected)) {
         return Ok(tx.attempt_times(&op.project, task, attempt)?.handed_in);
     }
+    // T-277: the seat's own word about this very attempt is proof as well — a
+    // `gear send` (progress, a question, a result) names the task and attempt
+    // and carries the sender's generation, so a lane that works on the task
+    // without ever running `gear` first has plainly received it. The first
+    // such message's time is the evidence; a message on another task or from
+    // an older generation proves nothing about this delivery.
+    let messages = tx.messages_from_since(&op.project, &op.seat, op.created)?;
+    if let Some(message) = messages.into_iter().find(|message| {
+        message.sender_gen == op.generation
+            && message.task.as_deref() == Some(task)
+            && message.attempt == Some(attempt)
+            && matches!(message.kind, MsgKind::Progress | MsgKind::Question | MsgKind::Result)
+    }) {
+        return Ok(Some(message.created));
+    }
     Ok(None)
 }
 
@@ -1499,6 +1514,114 @@ mod tests {
 
         assert!(confirmed.is_empty(), "a view of the seat alone proves nothing");
         assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Submitted);
+    }
+
+    /// A lane Deliver op for `task` attempt 1, Submitted, created `created`.
+    fn lane_delivery(tx: &Tx<'_>, task: &str, created: Ts) -> GearResult<()> {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some(task.into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({ "text": format!("New task {task}") }),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created)?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created)?;
+        Ok(())
+    }
+
+    /// A message `sender` sent in `sender_gen` naming `task`/`attempt`.
+    fn seat_message(
+        tx: &Tx<'_>,
+        sender: &str,
+        sender_gen: i64,
+        task: &str,
+        attempt: i64,
+        kind: MsgKind,
+        created: Ts,
+    ) -> GearResult<()> {
+        tx.insert_message(&gear_store::NewMessage {
+            project: "p".into(),
+            thread: format!("{task}:{attempt}"),
+            task: Some(task.into()),
+            attempt: Some(attempt),
+            sender: sender.into(),
+            sender_gen,
+            recipient: "p:captain".into(),
+            kind,
+            urgent: false,
+            body: "work update".into(),
+            reply_to: None,
+            needs_ack: false,
+            state: gear_model::MsgState::Info,
+            created,
+            meta: None,
+        })?;
+        Ok(())
+    }
+
+    fn lane_world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_lane_delivery_is_confirmed_by_its_progress_message() {
+        // T-277: a lane that works on the task without ever running `gear`
+        // still received the delivery — its own progress message names the
+        // task and attempt and carries its generation. That message's time is
+        // the evidence, so the engine stops re-delivering the task.
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                lane_delivery(tx, "T-1", T0)?;
+                seat_message(tx, "p:heat", 1, "T-1", 1, MsgKind::Progress, T0 + 10)
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert!(
+            op.result.as_deref().is_some_and(|result| result.contains(&format!("T-1 attempt 1 @ {}", T0 + 10))),
+            "the message's time is the evidence: {:?}",
+            op.result
+        );
+    }
+
+    #[test]
+    fn a_message_for_another_task_or_from_an_older_generation_does_not_confirm() {
+        // T-277: only the seat's word about this very task and attempt, in the
+        // generation the delivery named, proves the delivery arrived.
+        let mut store = lane_world();
+        store
+            .write(|tx| {
+                lane_delivery(tx, "T-1", T0)?;
+                seat_message(tx, "p:heat", 1, "T-2", 1, MsgKind::Progress, T0 + 5)?;
+                seat_message(tx, "p:heat", 1, "T-1", 2, MsgKind::Result, T0 + 6)?;
+                seat_message(tx, "p:heat", 0, "T-1", 1, MsgKind::Question, T0 + 7)?;
+                seat_message(tx, "p:other", 1, "T-1", 1, MsgKind::Progress, T0 + 8)
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert!(confirmed.is_empty(), "none of these messages is the lane's word on T-1 attempt 1");
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Submitted);
     }
 
     #[test]
