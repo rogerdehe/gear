@@ -1085,8 +1085,43 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
         ..Default::default()
     };
     let mut out = std::io::stdout();
-    gear_board::run(&mut store, &opts, &mut out,
-        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead))
+    draw_board(&mut store, &opts, herdr.as_mut(), herdr_tab_id(), &mut out)
+}
+
+/// The Herdr tab this call runs in (`HERDR_TAB_ID`), when Herdr set one. The
+/// user's shell, a terminal outside Herdr, has none.
+fn herdr_tab_id() -> Option<String> {
+    std::env::var("HERDR_TAB_ID").ok().filter(|id| !id.is_empty())
+}
+
+/// The label the board gives its Herdr tab (T-278): `<project> board`, or
+/// `GEAR board` when the board shows every project.
+fn board_tab_label(project: Option<&str>) -> String {
+    match project {
+        Some(project) => format!("{project} board"),
+        None => "GEAR board".into(),
+    }
+}
+
+/// Name the caller's Herdr tab after the board, then draw the board (T-278):
+/// a captain opens the board in a new tab, and an unnamed tab shows a number in
+/// the tab bar. A refused or uncertain rename is ignored — the board still
+/// starts. `--json` is machine output and renames nothing.
+fn draw_board<H: gear_herdr::HerdrAct>(
+    store: &mut gear_store::Store,
+    opts: &gear_board::Options,
+    herdr: Option<&mut H>,
+    tab_id: Option<String>,
+    out: &mut dyn std::io::Write,
+) -> GearResult<()> {
+    let mut herdr = herdr;
+    if !opts.json {
+        if let (Some(herdr), Some(tab_id)) = (herdr.as_mut(), tab_id.as_deref()) {
+            let label = board_tab_label(opts.project.as_deref());
+            let _ = herdr.tab_rename(tab_id, &label);
+        }
+    }
+    gear_board::run(store, opts, out, herdr.map(|h| h as &mut dyn gear_herdr::HerdrRead))
 }
 
 /// `gear whoami`: who this call is (design §10.7, row B9) — the pane it
@@ -2805,6 +2840,63 @@ mod tests {
             pane_id: Some(pane.into()),
             admin: false,
         }
+    }
+
+    /// A stdout that refuses the first write: the board never draws (T-278).
+    struct NoDraw;
+
+    impl std::io::Write for NoDraw {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("the board does not draw here"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// T-278: a board opened in a Herdr tab names that tab (`HERDR_TAB_ID`)
+    /// before it draws, `--json` renames nothing, and a draw that fails still
+    /// leaves the tab named — the rename comes first.
+    #[test]
+    fn the_board_names_its_herdr_tab_before_it_draws() {
+        std::env::set_var("HERDR_TAB_ID", "w1:t2");
+        let tab = herdr_tab_id();
+
+        // The board of project `p` labels its tab `p board`.
+        let (mut store, mut herdr) = world();
+        let opts = gear_board::Options { project: Some("p".into()), ..Default::default() };
+        let mut out = Vec::new();
+        draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut out).unwrap();
+        assert!(!out.is_empty(), "the board drew nothing");
+        assert_eq!(herdr.tab_renames_to("p board"), vec!["w1:t2"]);
+
+        // A stdout that refuses the draw proves the rename came before it.
+        let (mut store, mut herdr) = world();
+        let drawn = draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut NoDraw);
+        assert!(drawn.is_err(), "the draw was expected to fail");
+        assert_eq!(herdr.tab_renames_to("p board"), vec!["w1:t2"]);
+
+        // A board that shows every project says so.
+        let (mut store, mut herdr) = world();
+        let mut out = Vec::new();
+        draw_board(
+            &mut store,
+            &gear_board::Options::default(),
+            Some(&mut herdr),
+            tab.clone(),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(herdr.tab_renames_to("GEAR board"), vec!["w1:t2"]);
+
+        // `--json` is machine output: it renames nothing.
+        let (mut store, mut herdr) = world();
+        let json = gear_board::Options { project: Some("p".into()), json: true, ..Default::default() };
+        let mut out = Vec::new();
+        draw_board(&mut store, &json, Some(&mut herdr), tab, &mut out).unwrap();
+        assert!(herdr.calls.is_empty(), "the JSON board renamed a tab: {:?}", herdr.calls);
+
+        std::env::remove_var("HERDR_TAB_ID");
     }
 
     /// The project with one more task: another lane is working on T-8, so a
