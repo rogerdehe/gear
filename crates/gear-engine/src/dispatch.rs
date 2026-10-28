@@ -503,6 +503,96 @@ fn rebind_action(tx: &Tx<'_>, seat: &str, action: Action) -> GearResult<Action> 
     } else { action })
 }
 
+/// The meta key that holds what a lane's home worktree still had
+/// uncommitted before its next first attempt (T-291).
+pub(crate) fn dirty_home_key(seat: &str) -> String {
+    format!("engine.dirty_home.{seat}")
+}
+
+/// T-291 (M4 F-90): before a **first** attempt is created, read the lane's
+/// home worktree and keep what it holds uncommitted in
+/// `engine.dirty_home.<seat>` — `{"task": …, "paths": [the first five],
+/// "count": n}`, else "" (clean, no worktree path, or a failed read). The git
+/// call runs outside any transaction; nothing here blocks a delivery.
+fn note_dirty_home(store: &mut Store, cfg: &crate::EngineCfg, seat: &SeatRow, task: &str) -> GearResult<()> {
+    // A task that already has an attempt is a rework: its worktree story is
+    // the branch it worked on, not the home worktree.
+    if !store.read(|tx| tx.attempts_of_task(&seat.project, task))?.is_empty() {
+        return Ok(());
+    }
+    let path = store.read(|tx| tx.get_meta(&crate::onboard::worktree_path_key(&seat.id)))?;
+    let value = dirty_home_json(cfg, path.as_deref(), task);
+    store.write(|tx| tx.set_meta(&dirty_home_key(&seat.id), &value))
+}
+
+/// The value `note_dirty_home` writes: the worktree's uncommitted paths, or
+/// "" when it is clean or git could not read it.
+fn dirty_home_json(cfg: &crate::EngineCfg, path: Option<&str>, task: &str) -> String {
+    let Some(path) = path.filter(|path| !path.is_empty()) else { return String::new() };
+    let Ok(status) = cfg.review_git.run(path, &["status", "--porcelain"]) else { return String::new() };
+    let all: Vec<String> = status.lines().filter_map(porcelain_path).collect();
+    if all.is_empty() {
+        return String::new();
+    }
+    let count = all.len();
+    let paths: Vec<&String> = all.iter().take(5).collect();
+    serde_json::json!({"task": task, "paths": paths, "count": count}).to_string()
+}
+
+/// The path of one `git status --porcelain` line: the two status letters and
+/// their space, then the path (a rename or copy names its new path last).
+fn porcelain_path(line: &str) -> Option<String> {
+    let rest = line.get(3..)?.trim();
+    let path = rest.rsplit(" -> ").next().unwrap_or(rest).trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// The sentence a first packet gets when its worktree still holds earlier
+/// uncommitted work (T-291), or None when the record is not for this task.
+fn dirty_home_notice(value: &str, task: &str, branch: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(value).ok()?;
+    if value["task"].as_str() != Some(task) {
+        return None;
+    }
+    let count = value["count"].as_u64()?;
+    let paths = value["paths"]
+        .as_array()?
+        .iter()
+        .filter_map(|path| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        " Your worktree has uncommitted changes from earlier work ({count} paths: {paths}). Before you switch: commit them as a WIP commit on the branch they belong to and push it; never `git stash` (the stash is shared by every worktree of the repository) and never carry them into {branch}."
+    ))
+}
+
+/// Where the first sentence of `text` that names `branch` ends, just after
+/// its full stop (None when no sentence names it).
+fn branch_sentence_end(text: &str, branch: &str) -> Option<usize> {
+    let mut start = 0;
+    for sentence in text.split_inclusive(". ") {
+        let stop = start + sentence.len();
+        if sentence.contains(branch) {
+            return Some(if sentence.ends_with(". ") { stop - 1 } else { stop });
+        }
+        start = stop;
+    }
+    None
+}
+
+/// Put `notice` right after the branch sentence of a packet, keeping the rest
+/// of the text after it (T-291).
+fn insert_after_branch_sentence(text: &mut String, branch: &str, notice: &str) {
+    let Some(at) = branch_sentence_end(text, branch) else { return };
+    let rest = text.split_off(at);
+    text.push_str(notice);
+    let rest = rest.trim_start();
+    if !rest.is_empty() {
+        text.push(' ');
+        text.push_str(rest);
+    }
+}
+
 /// Create the attempt before preparing its session. An unsent attempt is
 /// retained across ticks, including engine restarts, while preparation waits.
 pub fn prepare_dispatch(
@@ -519,6 +609,12 @@ pub fn prepare_dispatch(
             Action::Assign { task } | Action::Continue { task } => task,
             _ => { ready.push((seat.clone(), action.clone())); continue; }
         };
+        // T-291 (M4 F-90): a first attempt lands in the lane's home worktree.
+        // What that worktree still holds uncommitted is read now, before the
+        // attempt exists, and the packet names it.
+        if matches!(action, Action::Assign { .. }) {
+            note_dirty_home(store, cfg, seat, task)?;
+        }
         let attempt = store.write(|tx| {
             if matches!(rebind_action(tx, &seat.id, action.clone())?, Action::None { .. }) {
                 return Ok(None);
@@ -639,6 +735,17 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                 } else {
                     assign_text(task, attempt.contract_version, &branch, &packet_ref(task))
                 };
+                // T-291 (M4 F-90): a first attempt into a worktree that still
+                // holds earlier uncommitted work says so, right after the
+                // branch sentence, and the record is spent.
+                if attempt.n == 1 {
+                    if let Some(value) = tx.get_meta(&dirty_home_key(&seat.id))? {
+                        if let Some(notice) = dirty_home_notice(&value, task, &branch) {
+                            insert_after_branch_sentence(&mut text, &branch, &notice);
+                            tx.set_meta(&dirty_home_key(&seat.id), "")?;
+                        }
+                    }
+                }
                 let action = attempt.session_action.as_deref().unwrap_or("");
                 if attempt.n == 1 && (action.starts_with("new") || action == "fresh" || action == "resume-fallback") {
                     if let Some(followup) = tx.get_task(project, task)?.and_then(|t| t.followup_of) {
@@ -1053,6 +1160,200 @@ mod tests {
         assert_eq!(
             assign_text("T-1", 1, "heat/t1", "`gear --show T-1`"),
             "New task T-1 (contract v1). Branch: heat/t1 (in your worktree). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // T-291 (M4 F-90): a first packet names what its home worktree still
+    // holds uncommitted.
+    // ----------------------------------------------------------------
+
+    /// One temp git repo for the module, as the lane's home worktree: `src/a.rs`
+    /// is committed and clean on entry. The tests below share it, so each takes
+    /// [`home_lock`] and resets it first.
+    fn home() -> &'static std::path::Path {
+        static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        HOME.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+            sh(
+                dir.path(),
+                "git init -q -b work && git add -A && \
+                 git -c user.email=gear@example.invalid -c user.name=gear commit -qm init",
+            );
+            dir
+        })
+        .path()
+    }
+
+    fn home_path() -> String {
+        home().to_str().unwrap().to_string()
+    }
+
+    /// The module's tests share the one repo: one at a time, clean on entry.
+    fn clean_home() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        sh(home(), "git checkout -q -- . && git clean -qfdx");
+        guard
+    }
+
+    fn sh(dir: &std::path::Path, command: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{command}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// The lane `heat` ready for the first assignment of `T-1`, with `path` as
+    /// its home worktree.
+    fn home_world(path: &str) -> (gear_store::Store, gear_herdr::fake::FakeHerdr, crate::EngineCfg) {
+        let mut store = gear_store::Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                let mut project = gear_store::testing::seed_project(tx, "p", "sess", NOW)?;
+                project.config_toml = config_toml("trunk");
+                tx.update_project(&project)?;
+                gear_store::testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
+                tx.set_meta(&crate::onboard::worktree_path_key("p:heat"), path)?;
+                // The agent is up with a fresh session: the packet needs no
+                // pane work, so the test reads its text at once.
+                tx.set_meta(&format!("engine.session_fresh.{}", "p:heat"), "1")?;
+                tx.insert_task(&ready_task("T-1"))?;
+                Ok(())
+            })
+            .unwrap();
+        let mut h = gear_herdr::fake::FakeHerdr::new();
+        h.add_agent_named("w1:p2", "opencode", gear_herdr::AgentStatus::Idle, "p-heat");
+        let cfg = crate::EngineCfg { profiles: gear_herdr::builtins(), ..Default::default() };
+        (store, h, cfg)
+    }
+
+    /// plan → (prepare, intend) → the text of the one delivery it makes.
+    fn first_packet(
+        store: &mut gear_store::Store,
+        h: &mut gear_herdr::fake::FakeHerdr,
+        cfg: &crate::EngineCfg,
+        task: &str,
+    ) -> String {
+        let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+        let actions = vec![(seat, Action::Assign { task: task.to_string() })];
+        let prepared = prepare_dispatch(store, h, cfg, "p", &actions, NOW).unwrap();
+        assert_eq!(prepared.len(), 1, "the packet is ready");
+        let ops = store.write(|tx| intend_dispatch(tx, "p", &prepared, NOW)).unwrap();
+        assert_eq!(ops.len(), 1, "one delivery");
+        ops[0].payload["text"].as_str().unwrap().to_string()
+    }
+
+    /// A dirty home worktree: the first packet names its paths, says how to
+    /// deal with them, and the record is spent.
+    #[test]
+    fn a_dirty_home_worktree_is_named_in_the_first_packet() {
+        let _home = clean_home();
+        std::fs::write(home().join("src/a.rs"), "fn a() { let _ = 1; }\n").unwrap();
+        let (mut store, mut h, cfg) = home_world(&home_path());
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert!(
+            text.contains("Your worktree has uncommitted changes from earlier work (1 paths: src/a.rs)"),
+            "{text}"
+        );
+        assert!(text.contains("never `git stash`"), "{text}");
+        assert!(text.contains("never carry them into heat/t1"), "{text}");
+        // Right after the sentence that names the branch, before the command
+        // that starts it.
+        let branch = "Branch: heat/t1.";
+        let at = text.find(branch).unwrap();
+        assert!(
+            text[at + branch.len()..].starts_with(" Your worktree has uncommitted changes"),
+            "{text}"
+        );
+        // The command that starts the branch is still there, after the notice.
+        assert!(
+            text.contains("heat/t1. Start it from the integration branch: git fetch origin"),
+            "{text}"
+        );
+        // The record is spent: a rework check of the same meta finds nothing.
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&dirty_home_key("p:heat"))).unwrap().as_deref(),
+            Some("")
+        );
+    }
+
+    /// A clean worktree gives today's text exactly.
+    #[test]
+    fn a_clean_home_worktree_gives_the_usual_text() {
+        let _home = clean_home();
+        let (mut store, mut h, cfg) = home_world(&home_path());
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert_eq!(
+            text,
+            first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`")
+        );
+    }
+
+    /// A rework (attempt 2) never carries the line, even when a record for the
+    /// task is still there.
+    #[test]
+    fn a_rework_never_carries_the_dirty_home_line() {
+        let _home = clean_home();
+        std::fs::write(home().join("src/a.rs"), "fn a() { let _ = 2; }\n").unwrap();
+        let (mut store, mut h, cfg) = home_world(&home_path());
+        store
+            .write(|tx| {
+                tx.set_meta(
+                    &dirty_home_key("p:heat"),
+                    &serde_json::json!({"task": "T-1", "paths": ["src/a.rs"], "count": 1}).to_string(),
+                )?;
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Delivered,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: NOW,
+                    updated: NOW,
+                })
+            })
+            .unwrap();
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert!(!text.contains("uncommitted changes from earlier work"), "{text}");
+        assert!(!text.contains("git stash"), "{text}");
+    }
+
+    /// A worktree git cannot read is a clean one: nothing to say, nothing
+    /// blocks the delivery.
+    #[test]
+    fn a_failed_read_says_nothing() {
+        let (mut store, mut h, cfg) = home_world("/nonexistent/gear/t291");
+        let text = first_packet(&mut store, &mut h, &cfg, "T-1");
+        assert_eq!(
+            text,
+            first_attempt_text("T-1", 1, "heat/t1", "origin", "trunk", "`gear --show T-1`")
+        );
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&dirty_home_key("p:heat"))).unwrap().as_deref(),
+            Some("")
         );
     }
 }
