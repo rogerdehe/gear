@@ -166,3 +166,90 @@ fn progress_from_an_earlier_generation_of_the_same_review_still_counts() {
     let op=s.read(|tx|tx.last_op(&seat.id,OpKind::Deliver)).unwrap().unwrap();
     assert_eq!(op.payload["nudge"],1);
 }
+
+// ---------- T-245: a direction check that stops is nudged like a review
+
+/// The same world with the seat on a direction job: the attempt is Started (a
+/// hand-in is not in yet) and the job meta says `running`.
+fn direction_world() -> (Store, SeatRow) {
+    let (mut s, seat) = world();
+    let id = seat.id.clone();
+    s.write(|tx| {
+        let mut attempt = tx.get_attempt("p", "T-7", 1)?.unwrap();
+        attempt.state = AttemptState::Started;
+        attempt.candidate = None;
+        tx.update_attempt(&attempt)?;
+        tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat": id, "generation": 1, "sha": "abc1234", "state": "running"
+        }).to_string())
+    })
+    .unwrap();
+    (s, seat)
+}
+
+/// The seats as a tick sees them, through the Herdr fake.
+fn observed(s: &mut Store, status: gear_herdr::AgentStatus) -> Vec<SeatObs> {
+    let mut h = gear_herdr::fake::FakeHerdr::new();
+    h.add_agent_named("w9:p1", "codex", status, "p-review-t7");
+    let agents = gear_engine::observe::snapshot(&mut h).unwrap();
+    s.read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &gear_herdr::builtins()))
+        .unwrap()
+}
+
+/// The idle direction seat whose job still runs is nudged once the cooldown
+/// has passed, and the nudge carries the direction packet again.
+#[test]
+fn an_idle_direction_seat_whose_job_runs_is_nudged() {
+    let (mut s, seat) = direction_world();
+    // Inside the cooldown: nothing.
+    let seen = observed(&mut s, gear_herdr::AgentStatus::Idle);
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &seen, COOLDOWN, T0 + 10).unwrap(),
+        (vec![], vec![])
+    );
+    let t = T0 + COOLDOWN + 1;
+    let seen = observed(&mut s, gear_herdr::AgentStatus::Idle);
+    let (nudged, flagged) = nudge_stopped_reviewers(&mut s, "p", &seen, COOLDOWN, t).unwrap();
+    assert_eq!((nudged, flagged), (vec![seat.id.clone()], vec![]));
+    let op = s.read(|tx| tx.last_op(&seat.id, OpKind::Deliver)).unwrap().unwrap();
+    let text = op.payload["text"].as_str().unwrap();
+    assert!(text.starts_with("You are idle and your direction check"), "{text}");
+    assert!(text.contains("Review T-7"), "the packet rides along: {text}");
+    assert_eq!(op.payload["nudge"], 1);
+}
+
+/// A direction seat that handed its result in is left alone.
+#[test]
+fn a_direction_seat_whose_result_is_in_is_left_alone() {
+    let (mut s, seat) = direction_world();
+    s.write(|tx| {
+        tx.insert_message(&gear_store::NewMessage { project: "p".into(), thread: "result:1".into(),
+            task: Some("T-7".into()), attempt: Some(1), sender: seat.id.clone(), sender_gen: 1,
+            recipient: "p:captain".into(), kind: gear_model::MsgKind::Result, urgent: false,
+            body: "ok".into(), reply_to: None, needs_ack: false, state: gear_model::MsgState::Info,
+            created: T0 + 5, meta: Some(serde_json::json!({"direction": true, "sha": "abc1234"}).to_string()) })
+    })
+    .unwrap();
+    let before = s.read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)).unwrap().len();
+    let seen = observed(&mut s, gear_herdr::AgentStatus::Idle);
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &seen, COOLDOWN, T0 + COOLDOWN + 1).unwrap(),
+        (vec![], vec![])
+    );
+    let after = s.read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)).unwrap().len();
+    assert_eq!(after, before, "no nudge is sent");
+}
+
+/// A direction seat that is working is left alone.
+#[test]
+fn a_working_direction_seat_is_left_alone() {
+    let (mut s, seat) = direction_world();
+    let before = s.read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)).unwrap().len();
+    let seen = observed(&mut s, gear_herdr::AgentStatus::Working);
+    assert_eq!(
+        nudge_stopped_reviewers(&mut s, "p", &seen, COOLDOWN, T0 + COOLDOWN + 1).unwrap(),
+        (vec![], vec![])
+    );
+    let after = s.read(|tx| tx.ops_of_seat_kind(&seat.id, OpKind::Deliver)).unwrap().len();
+    assert_eq!(after, before, "no nudge is sent");
+}
