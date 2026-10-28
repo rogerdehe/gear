@@ -1,7 +1,10 @@
 //! T-166: the board's fourth view (Decisions) and fifth view (Time & tokens),
 //! as the prototype of `gear/voyages/M4/board` draws them.
 
+use std::time::Duration;
+
 use gear_board::frame::{frame, Tab};
+use gear_board::{run_with, Event, Keys, Options};
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{
     testing, AttemptRow, AttemptStep, NewDecision, NewFriction, NewRound, RoundKey, RoundTokens,
@@ -810,4 +813,80 @@ fn the_frictions_are_the_ones_of_the_voyage_the_board_measures() {
     let frictions = &measured_m4.projects[0].frictions;
     let tasks: Vec<&str> = frictions.iter().map(|f| f.task.as_str()).collect();
     assert_eq!(tasks, ["T-1"], "M4 measured: the frictions of M4");
+}
+
+/// Keys the test presses, one per call; `q` after them.
+struct Presses(Vec<char>);
+
+impl Keys for Presses {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
+        if self.0.is_empty() {
+            return Some(Event::Key('q'));
+        }
+        Some(Event::Key(self.0.remove(0)))
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (120, 40)
+    }
+}
+
+/// The last frame the board drew: the frames are separated by the clear.
+fn last_frame(out: &[u8]) -> String {
+    let text = String::from_utf8_lossy(out);
+    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+}
+
+/// T-342 (README change 13): a decision is picked, its reason is not. `Down`
+/// on the log goes from the first starred decision to the second, over the
+/// why line between them.
+#[test]
+fn down_moves_over_the_reason_of_a_decision() {
+    let mut store = world();
+    // A second starred decision with a reason of its own: both are picks.
+    store
+        .write(|tx| {
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "d3".into(),
+                voyage: "M4".into(),
+                at: "2026-10-27 12:20".into(),
+                kind: "scope".into(),
+                what: "PR-mode landing was added as T-152".into(),
+                why: Some("the user asked for it at the kickoff".into()),
+                alt: None,
+                changes: None,
+                star: true,
+                source: "plan".into(),
+                line: None,
+                plan_version: None,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let mut keys = Presses(vec!['4', 'j']);
+
+    run_with(&mut store, &opts, &mut out, &mut keys, None).unwrap();
+
+    let frame = last_frame(&out);
+    let marked: Vec<&str> = frame.lines().filter(|line| line.starts_with('›')).collect();
+    assert_eq!(marked.len(), 1, "one row is picked: {frame}");
+    assert!(
+        marked[0].contains("★ scope") && marked[0].contains("12:20"),
+        "the second decision is picked, not the why line before it: {frame}"
+    );
+    assert!(
+        !frame.lines().any(|line| line.starts_with('›') && line.contains("why:")),
+        "a reason is not a pick: {frame}"
+    );
+    // Both reasons are still drawn, under their decisions.
+    assert!(frame.contains("why: needs token data from T-141 first"), "{frame}");
+    assert!(frame.contains("why: the user asked for it at the kickoff"), "{frame}");
 }

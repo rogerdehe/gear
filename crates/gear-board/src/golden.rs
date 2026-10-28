@@ -127,6 +127,28 @@ mod tests {
     }
 
     #[test]
+    fn copy_rows_copies_the_cells_and_their_styles() {
+        let mut from = Canvas::new(20, 8);
+        from.put_styled(1, 2, "ab", Style::fg(Color::Ok).and_bold());
+        from.light_row(3);
+        let mut canvas = Canvas::new(20, 8);
+        canvas.copy_rows(&from, 2, 5, 3);
+
+        assert_eq!(canvas.char_at(1, 5), 'a');
+        assert_eq!(canvas.style_at(1, 5), Style::fg(Color::Ok).and_bold());
+        assert_eq!(canvas.char_at(2, 5), 'b');
+        assert_eq!(canvas.style_at(1, 6).reverse, true, "the lit row keeps its style");
+        assert_eq!(canvas.style_at(0, 6), Style::PLAIN, "the lit row's first column stays");
+        assert_eq!(canvas.text().lines().nth(5).unwrap_or_default(), " ab");
+        // Rows off either canvas are not copied and do not panic.
+        let before = canvas.text();
+        from.put_styled(1, 7, "z", Style::fg(Color::Bad));
+        canvas.copy_rows(&from, 7, 8, 4);
+        canvas.copy_rows(&from, 8, 0, 4);
+        assert_eq!(canvas.text(), before);
+    }
+
+    #[test]
     fn a_cell_outside_the_canvas_is_a_space() {
         let canvas = Canvas::new(20, 8);
 

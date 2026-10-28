@@ -1221,10 +1221,12 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
 
     // Repeated `Down` walks to the last task and keeps it visible (F8). Every
     // press is read: the board redraws on its own too, and a pty whose output
-    // is not read blocks the board (F9).
+    // is not read blocks the board (F9). The heading scrolls away with the
+    // rows above the selected one (T-342), so the frames are drained by their
+    // footer.
     for _ in 0..16 {
         press(pty.master, b"j");
-        let _frame = frames.last_with("dev", Duration::from_secs(5));
+        let _frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
     }
     let frame = frames.last_with("T-17", Duration::from_secs(5));
     assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
@@ -1233,7 +1235,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // nothing (F8): the selection stays on the last task.
     press(pty.master, b"\x1b[<0;1;24M");
     press(pty.master, b"\x1b[<0;1;23M");
-    let _frame = frames.next("dev", Duration::from_secs(5));
+    let _frame = frames.next(FOOTER_START, Duration::from_secs(5));
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
@@ -1270,4 +1272,127 @@ fn a_long_graph_draws_its_last_task() {
     .unwrap();
     let text = gear_board::frame::frame(&board, &crate::screen(gear_board::frame::Tab::Tasks, 16, (80, 24)), None);
     assert!(text.contains("T-17"), "the last task is drawn: {text}");
+}
+
+/// Keys that send the given events, then `q`, on an 80x12 screen.
+struct Events(Vec<Event>);
+
+impl Keys for Events {
+    fn next_event(&mut self, _timeout: Duration) -> Option<Event> {
+        if self.0.is_empty() {
+            return Some(Event::Key('q'));
+        }
+        Some(self.0.remove(0))
+    }
+
+    fn size(&self) -> (usize, usize) {
+        (80, 12)
+    }
+}
+
+/// The last frame the board drew: the frames are separated by the clear.
+fn last_frame(out: &[u8]) -> String {
+    let text = String::from_utf8_lossy(out);
+    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+}
+
+/// T-342: a view with more picks than screen rows scrolls so the selected one
+/// is drawn, and a click on the drawn row keeps it selected.
+#[test]
+fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
+    use gear_board::frame::{self, Tab};
+    let mut store = world_with_a_long_graph();
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        now_seconds(),
+    )
+    .unwrap();
+    // The last of the seventeen tasks is selected: the view scrolled to it,
+    // and the heading scrolled away with the rows above it.
+    let size = (80, 12);
+    let canvas = frame::canvas(&board, &crate::screen(Tab::Tasks, 16, size), None);
+    let text = canvas.text();
+    assert!(text.contains("T-17"), "the selected task is drawn: {text}");
+    assert!(!text.contains("T-01"), "the view scrolled past the first task: {text}");
+    // Its row is the last row the view owns, and it is the lit one.
+    let row = 9;
+    assert!(text.lines().nth(row).unwrap_or_default().contains("T-17"), "{text}");
+    assert!(canvas.style_at(1, row).reverse, "the selected row is lit: {text}");
+
+    // Sixteen `Down` keys and then a click on the row T-17 is drawn on: the
+    // click adds the viewport's offset and picks the same task.
+    let mut events = vec![Event::Key('2')];
+    for _ in 0..16 {
+        events.push(Event::Key('j'));
+    }
+    events.push(Event::Mouse { button: 0, x: 1, y: 10 });
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+
+    let frame = last_frame(&out);
+    let rows: Vec<&str> = frame.lines().collect();
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("T-17"),
+        "the clicked row holds T-17: {frame}"
+    );
+    assert!(
+        rows.get(row).unwrap_or(&"").contains("\u{1b}[7m"),
+        "the clicked row stays the lit one: {frame}"
+    );
+    for (y, line) in rows.iter().enumerate() {
+        if y == row || y == frame::TAB_ROW {
+            continue;
+        }
+        assert!(!line.contains("\u{1b}[7m"), "row {y} is not lit: {line:?}");
+    }
+}
+
+/// T-342's rework (F1 of the review of attempt 1): the view's own first row is
+/// a row of the view, so after scrolling a click on it picks the task drawn
+/// there.
+#[test]
+fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
+    use gear_board::frame;
+    let mut store = world_with_a_long_graph();
+    // `2` is the graph; sixteen `Down` scroll the view to the last task. The
+    // click at x 1 y 6 is the view's first row, where T-13 is drawn (the
+    // viewport starts at `top` = 5, so screen row 6 is the view's first).
+    let mut events = vec![Event::Key('2')];
+    for _ in 0..16 {
+        events.push(Event::Key('j'));
+    }
+    events.push(Event::Mouse { button: 0, x: 1, y: 6 });
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+
+    let frame_text = last_frame(&out);
+    let rows: Vec<&str> = frame_text.lines().collect();
+    let lit: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(y, line)| *y != frame::TAB_ROW && line.contains("\u{1b}[7m"))
+        .map(|(y, _)| y)
+        .collect();
+    assert_eq!(lit.len(), 1, "one lit row: {frame_text}");
+    assert!(
+        rows[lit[0]].contains("T-13"),
+        "the click selected the task drawn on the view's first row: {frame_text}"
+    );
+    assert!(
+        !frame_text.contains("T-17"),
+        "the selection moved off the last task: {frame_text}"
+    );
 }
