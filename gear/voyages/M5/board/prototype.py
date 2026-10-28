@@ -3,6 +3,9 @@
 same colours, symbols, views, keys and panels; README.md lists every change against M4.
 Keys: 1-5 / Tab views · [ ] older / newer voyage · j/k or arrows select · Enter opens · q quit."""
 import curses
+import os
+import sys
+import unicodedata
 
 NOW = "14:32"
 # ---------------------------------------------------------------- fake data, one block per voyage
@@ -593,4 +596,137 @@ def main(w):
             elif view == 3:
                 lane = G["LANES"][sel]; OPENED[lane] = not OPENED.get(lane)
 
-curses.wrapper(main)
+# ---------------------------------------------------------------- golden frames: the export mode (T-276)
+# `python3 prototype.py --golden <dir>` draws the same frames into a FakeWin instead of a terminal and saves every
+# cell's character, colour and reverse in three files per frame. The drawing above is not touched: the same header,
+# view and footer calls write into the cells.
+GOLDEN_H, GOLDEN_W = 48, 160        # the fixed terminal size the golden frames are drawn at
+MARK = dict(b=1, ok=2, warn=4, bad=8, dim=16, acc=32, mag=64, blu=128, rev=256)   # distinct bits, so OR works
+LETTER = dict(ok="o", warn="w", bad="b", dim="d", acc="a", mag="m", blu="u")
+VIEW_NAME = {1: "now", 2: "tasks", 3: "cost", 4: "log"}   # the views' names in the file names (the tab labels)
+VIEWS = {1: view_now, 2: view_graph, 3: view_cost, 4: view_decisions}   # main's view numbers, kept here too
+
+
+class FakeCurses:
+    """The names the drawing code reads, as marker bits, so a cell's attribute is a set of markers the export can
+    name again. A_BOLD and A_REVERSE are two more markers, read from the same MARK table."""
+    A_BOLD = MARK["b"]
+    A_REVERSE = MARK["rev"]
+
+    class error(Exception):
+        pass
+
+
+def cell_width(ch):
+    """How many terminal cells a character takes (curses counts cells, not characters): a wide character of the
+    East Asian wide or fullwidth class takes two, a combining or format character none, everything else one."""
+    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+class FakeWin:
+    """A curses window that keeps its cells instead of opening a screen: getmaxyx, erase, addnstr (n characters,
+    a character that does not fit in the line's remaining cells is not drawn, chgat (sets a run of cells'
+    attribute, keeps their characters), refresh, keypad. A wide character is one glyph in two cells: the first cell
+    holds it, the second is its continuation (a space, tail[y][x] is True), both with the same attribute, as a
+    terminal draws it."""
+    def __init__(self, h=GOLDEN_H, w=GOLDEN_W):
+        self.h, self.w = h, w
+        self.erase()
+
+    def getmaxyx(self): return (self.h, self.w)
+
+    def erase(self):
+        self.chars = [[" "] * self.w for _ in range(self.h)]
+        self.attrs = [[0] * self.w for _ in range(self.h)]
+        self.tail = [[False] * self.w for _ in range(self.h)]      # the second cell of a wide character
+
+    def _blank(self, y, x):
+        """Overwrite one cell: a wide character whose other half sits here loses that half, as curses blanks it."""
+        if self.tail[y][x]:
+            self.chars[y][x] = " "; self.tail[y][x] = False
+        if x + 1 < self.w and self.tail[y][x + 1]:
+            self.chars[y][x + 1] = " "; self.tail[y][x + 1] = False
+
+    def addnstr(self, y, x, s, n, a=0):
+        if not (0 <= y < self.h and 0 <= x < self.w): return
+        cx = x
+        for c in s[:max(0, n)]:
+            cw = cell_width(c)
+            if cw == 0:                                        # combining: joins the character before it
+                if cx > x: self.chars[y][cx - 1] += c
+                continue
+            if cx + cw > self.w: return                        # does not fit in this line's cells
+            for i in range(cw):
+                self._blank(y, cx + i)
+                self.chars[y][cx + i] = c if i == 0 else " "
+                self.attrs[y][cx + i] = a
+                self.tail[y][cx + i] = i > 0
+            cx += cw
+
+    def chgat(self, y, x, n, a):
+        if not (0 <= y < self.h): return
+        for i in range(max(0, x), min(self.w, x + n)):
+            self.attrs[y][i] = a
+
+    def refresh(self): pass
+
+    def keypad(self, flag): pass
+
+
+def golden_footer():
+    """main's footer line, read from main's own code, so a golden frame carries exactly what main draws there."""
+    for c in main.__code__.co_consts:
+        if isinstance(c, str) and c.startswith("←→ / Tab / 1-4"):
+            return c
+    raise SystemExit("prototype.py: main's footer line not found; the export mode needs it")
+
+
+def golden_frame(view, detail):
+    """One frame as main draws one: erase, header, the view with sel = 0, the footer on the last line, refresh."""
+    DETAIL[0] = detail
+    w = FakeWin()
+    w.erase(); header(w, view); VIEWS[view](w, 0)
+    put(w, w.getmaxyx()[0] - 1, 1, golden_footer(), C["dim"])
+    w.refresh()
+    return w
+
+
+def golden_letter(a):
+    """A cell's colour as one letter, the seven colour markers apart; the letter is uppercase when the cell is bold,
+    and a bold cell with no colour is `*`."""
+    for k in ("ok", "warn", "bad", "dim", "acc", "mag", "blu"):
+        if a & MARK[k]:
+            return LETTER[k].upper() if a & MARK["b"] else LETTER[k]
+    return "*" if a & MARK["b"] else "."
+
+
+def golden_save(w, base):
+    """Write one frame as three files of GOLDEN_H lines of GOLDEN_W cells: the characters, the colours, reverse."""
+    txt = ["".join(w.chars[y]) for y in range(w.h)]
+    col = ["".join(golden_letter(a) for a in w.attrs[y]) for y in range(w.h)]
+    rev = ["".join("R" if a & MARK["rev"] else "." for a in w.attrs[y]) for y in range(w.h)]
+    for ext, rows in (("txt", txt), ("col", col), ("rev", rev)):
+        with open(base + "." + ext, "w", encoding="utf-8") as f:
+            f.write("\n".join(rows) + "\n")
+
+
+def golden(outdir):
+    """Draw every view of the first voyage folded and then unfolded (with sel = 0) and save the eight frames."""
+    global curses
+    curses = FakeCurses()                         # from here nothing opens a screen
+    for k, bit in MARK.items():
+        if k != "rev": C[k] = bit                 # C holds marker bits, not colour pairs
+    pick(0)
+    os.makedirs(outdir, exist_ok=True)
+    for view, name in VIEW_NAME.items():
+        for detail, fold in ((False, "folded"), (True, "open")):
+            golden_save(golden_frame(view, detail), os.path.join(outdir, f"{name}-{fold}"))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--golden":
+        golden(sys.argv[2])
+    else:
+        curses.wrapper(main)

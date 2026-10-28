@@ -1,0 +1,48 @@
+ GEAR · gear M5 ⛵   M4.2 ⚓   M4.1 ⚓   [ older   ] newer                                                                                                 14:32   
+ M5: small tasks, the board, the goal rule · ⛵  sailing                                                                                                         
+ ╔═ GOAL ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗  
+ ║ A small task lands without review in under 10 min; the board shows every voyage and uses the full width; a departed goal changes only with the user's     ║  
+ ║ yes.                                                                                                                                                      ║  
+ ║ Quality bar: DELIVERABLE — errors in normal use block a task; edge cases are logged                                                                       ║  
+ ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝  
+ Goal check    ✗ small task under 10 min: now 14 min (T-262)                                                                                                    
+               ✔ the board shows every voyage                                                                                                                   
+               ✗ goal lock: not started                                                                                                                         
+ Milestones    ✔ S1 small-task procedure merged — reached at 3h00m                                                                                              
+               ▶ S2 board views to the prototype — now, planned by 5h30m                                                                                        
+               · S3 goal lock + v0.5.0 — planned by 8h00m                                                                                                       
+ Time          ██████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░◆░│  used 3h32m · planned 8h00m · expected 7h35m (slowest lane: mast), 0h25m ahead of plan        
+               █ used   ◆ expected finish   │ planned end                                                                                                       
+ Tasks         ████████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░  5 of 12 merged · 4 in progress · 3 not started                                               
+               █ merged   ▓ in progress   ░ not started                                                                                                         
+                                                                                                                                            d: fold             
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │  1 Now  │  2 Tasks  │  3 Cost  │  4 Log  │                                                                                                                 │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+                                                                                                                                                                
+ WHAT CHANGED THE COURSE  (★)                                                                                                                                   
+   11:05 ★ light procedure: a task marked small skips review                                                                                                    
+   14:05 ★ T-262 v2: GOAL_LOCKED also covers milestone lines                                                                                                    
+                                                                                                                                                                
+ ALL DECISIONS (3)                                                                                                                                              
+ › 11:05 ★ scope      light procedure: a task marked small skips review                                                                                         
+                      why: user at kickoff                                                                                                                      
+   12:40   rework     T-260 round 2: accept proof missing                                                                                                       
+                      why: bug in normal use                                                                                                                    
+   14:05 ★ contract   T-262 v2: GOAL_LOCKED also covers milestone lines                                                                                         
+                      why: user agreed 13:58                                                                                                                    
+                                                                                                                                                                
+ FRICTION REPORTS FROM AGENTS                                                                                                                                   
+   T-260 hull  unread  accept proof needed a real plan file; wrote one by hand (8m)                                                                             
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ←→ / Tab / 1-4 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's t 
