@@ -49,6 +49,13 @@ markers the export can name again. It draws the first voyage (`pick(0)`) with `s
 3 Cost, 4 Log — once with `DETAIL[0] = False` and once with `True`, header and footer included, exactly as `main`
 draws a frame. Running it twice gives identical files.
 
+`FakeWin.chgat(y, x, n, attr)` sets the attribute of each of the n cells to `attr`: as in curses it **replaces** the
+old attribute (colour pair and bold included), it does not OR into it, so the row `hl` lights is reverse video with no
+colour and no bold — exactly change 13, "one colour".
+
+`fixture.json` is the fake data the frames were drawn from (VOYS, WHEN, NOW, REVIEW_MERGE and view_now's quota list);
+`crates/gear-board/tests/it/golden_fixture.rs` loads it into a store.
+
 Each frame is three files of 48 lines of 160 cells (UTF-8, one character per cell, a trailing newline per line):
 
 - `<view>-<folded|open>.txt` — the characters, a blank cell as a space; the second cell of a wide character is a
