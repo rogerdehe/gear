@@ -312,68 +312,73 @@ class Board:
             self.put(ry, rx, f"{prov:<12} {role:<7} {bar} {used}% · resets {reset}")
             ry += 1
 
-    # -- 2 Graph: dev as the main line, each task a branch from where its work is based
+    # -- 2 Graph: dev as the main line, each task a coloured branch from where its work starts
     def graph(self, top, w, h):
         tasks = T[self.v["id"]]
         lanes = LANES[self.v["id"]]
-        events = []
-        for t in tasks:
-            if t[7] is not None:
-                events.append((t[7], "start", t))
-            if t[8] is not None:
-                events.append((t[8], "merge", t))
-        events.sort(key=lambda e: (e[0], e[1] == "start"), reverse=True)
-        waiting = [t for t in tasks if t[7] is None and t[2] != "moved"]
-        col = {lane: 6 + 6 * i for i, lane in enumerate(lanes)}
+        col = {lane: 7 + 6 * i for i, lane in enumerate(lanes)}
+        info_x = col[lanes[-1]] + 5
+        tw = max(24, min(44, w - info_x - 40))
         y = top
         self.put(y, 1, "dev", curses.A_BOLD)
         for lane in lanes:
-            self.put(y, col[lane] - 1, lane[:5], self.lane_attr(lane))
-        self.put(y, col[lanes[-1]] + 6, "newest on top · ● merged into dev · ◉ working · ◎ in review · ↺ rework · ┆ waits",
-                 curses.A_DIM)
+            self.put(y, col[lane] - 1, lane[:4], self.lane_attr(lane) | curses.A_BOLD)
+        self.put(y, info_x, f"{'task':<7}{'what':<{tw}}  {'stage':<34}time", curses.A_DIM)
         y += 1
-        # waiting tasks hang dashed from the dependency they wait for
+        events = []
+        for t in tasks:
+            if t[7] is not None:
+                events.append((t[7], 0, t))      # starts: branch leaves dev
+            if t[8] is not None:
+                events.append((t[8], 1, t))      # merges: branch joins dev
+        events.sort(key=lambda e: (e[0], e[1]), reverse=True)
+        waiting = [t for t in tasks if t[7] is None and t[2] != "moved"]
+        open_ids = {t[0] for t in tasks if t[7] is not None and t[8] is None}
+        live = set(open_ids)                    # branches drawn as a vertical line on this row
+
+        def row(cells, t, text, attr):
+            nonlocal y
+            if y >= h - 3:
+                return
+            self.put(y, 2, "│", curses.A_DIM)
+            for x, ch, a in cells:
+                self.put(y, x, ch, a)
+            if text:
+                self.put(y, info_x, text, attr)
+            y += 1
+
+        def verticals(skip=None):
+            return [(col[o[1]], "│", self.lane_attr(o[1])) for o in tasks if o[0] in live and o[0] != skip]
+
+        def info(t):
+            stage = words(t)
+            time_ = f"{t[5]}/{t[4]}m" + (f" · {t[6]} rounds" if t[6] > 1 else "")
+            return f"{t[0]:<7}{t[3][:tw]:<{tw}}  {stage[:34]:<34}{time_}"
+
+        # not started yet: a dashed stub in its lane, naming what it waits for
         for t in waiting:
-            c = col[t[1]]
-            self.put(y, 1, "│")
-            self.put(y, c, "○", self.lane_attr(t[1]))
-            self.put(y, col[lanes[-1]] + 4, f"{t[0]} {t[3]} — {words(t)}", curses.A_DIM)
-            y += 1
-            self.put(y, 1, "│")
-            self.put(y, c, "┆", self.lane_attr(t[1]))
-            y += 1
-        active = {t[0] for t in tasks if t[7] is not None and t[8] is None}
-        live = set(active)
+            a = self.lane_attr(t[1])
+            row(verticals() + [(col[t[1]], "○", a | curses.A_BOLD)], t, info(t), curses.A_DIM)
+            row(verticals() + [(col[t[1]], "┆", a)], t, "", 0)
         for at, kind, t in events:
-            if y >= h - 2:
-                break
-            c = col[t[1]]
-            line = [" "] * (col[lanes[-1]] + 2)
-            line[1] = "│"
-            for other in tasks:
-                if other[0] in live and other[0] != t[0]:
-                    line[col[other[1]]] = "│"
-            if kind == "merge":
-                line[1] = "●"
-                for x in range(2, c):
-                    line[x] = "─"
-                line[c] = "╯"
+            c, a = col[t[1]], self.lane_attr(t[1])
+            if kind == 1:   # merge: ● on dev, the branch comes in from its lane
+                cells = verticals(skip=t[0]) + [(2, "●", curses.A_BOLD)]
+                cells += [(x, "─", a) for x in range(3, c)] + [(c, "╯", a)]
                 live.add(t[0])
-                label = f"{t[0]} {t[3]} — merged at +{hm(at)}" + (f" · ↺ {t[6]} rounds" if t[6] > 1 else "")
-            else:
-                line[1] = "├"
-                for x in range(2, c):
-                    line[x] = "─"
-                line[c] = "╮"
+                row(cells, t, info(t) + f"  merged +{hm(at)}", 0)
+            else:           # start: the branch leaves dev here
+                if t[0] in open_ids:   # still open: its node sits on the row it started
+                    node = {"working": "◉", "review": "◎", "rework": "↺", "handed": "◎",
+                            "passed": "◍", "merging": "◍"}.get(t[2], "◉")
+                    row(verticals(skip=t[0]) + [(c, node, a | curses.A_BOLD)], t, info(t), curses.A_BOLD)
+                cells = verticals(skip=t[0]) + [(2, "├", curses.A_DIM)]
+                cells += [(x, "─", a) for x in range(3, c)] + [(c, "╮", a)]
                 live.discard(t[0])
-                mark = {"working": "◉", "review": "◎", "rework": "↺"}.get(t[2], "")
-                label = f"{t[0]} starts at +{hm(at)}" + (f" (after {', '.join(t[9])})" if t[9] else "")
-                if t[0] in active:
-                    label = f"{mark} {t[0]} {t[3]} — {words(t)} · {t[5]}/{t[4]}m"
-            self.put(y, 0, "".join(line))
-            self.put(y, c, "".join(line)[c], self.lane_attr(t[1]) | curses.A_BOLD)
-            self.put(y, len(line) + 2, label, curses.A_BOLD if t[0] in active else 0)
-            y += 1
+                after = f" after {', '.join(t[9])}" if t[9] else ""
+                row(cells, t, f"{'':<7}starts +{hm(at)}{after}", curses.A_DIM)
+        self.put(h - 2, 1, "● merged into dev   ◉ working   ◎ in review   ↺ reworking   ○┆ not started   "
+                           "a branch leaves dev where its work starts and joins it where it merges", curses.A_DIM)
 
     # -- 3 Workload: is the work balanced, and when does each lane end?
     def workload(self, top, w, h):
