@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=607 -->
+<!-- gear-plan project=gear base=608 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -42,6 +42,8 @@ eta: 16h
 - station M-4570: keep course 180 min in, 29 done; forecast 1440 min; the eta waits for the user
 - 2026-10-29 02:50 hand-fix: the same lost Enter on hull: O-3638 "Continue T-273: run `gear` first" sat in pi's input box, hull idle (M-4576); one Enter sent; T-371 goes to the head of hull's queue ([now]): twice in ten minutes, both a Continue to a pi lane | why: hull idle | else: the next Continue stalls a lane again
 - station M-4586: keep course 184 min in, 30 done; forecast 1500 min; the eta waits for the user
+- 2026-10-29 03:05 override: T-322 passes over its review fail: the one finding is SQLite's -wal and -shm files appearing beside a store the command reads; they are SQLite's own bookkeeping, made by every reader of a WAL store (the engine and every gear call make them too), hold no data and change nothing a user sees; "no new file under the scratch HOME" was the captain's wording for "no new store and no directory", which the command meets | why: the work is right, the accept line was too literal | else: a rework that reads live stores as immutable, which the review itself warns against
+
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
