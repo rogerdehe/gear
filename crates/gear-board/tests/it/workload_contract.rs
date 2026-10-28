@@ -1,7 +1,6 @@
-//! T-158: the board's third view (Workload) and the projection per lane
-//! (design §10.7 row B4).
+//! T-158: the projection per lane (design §10.7 row B4).
 
-use gear_board::frame::{frame, lane_panel, Tab};
+use gear_board::frame::lane_panel;
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, Store, TaskRow};
 
@@ -186,24 +185,6 @@ fn the_burn_up_keeps_the_hours_without_progress() {
 }
 
 #[test]
-fn the_workload_view_shows_the_lanes_and_the_burn_up() {
-    let mut store = world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
-    assert!(text.contains("WORK DONE AND LEFT, BY LANE"), "{text}");
-    assert!(text.contains("hull"), "{text}");
-    assert!(text.contains("deck"), "{text}");
-    // The bars of the lanes: the done minutes and the minutes left.
-    assert!(text.contains("done 1 (30m) · left 1 (20m)"), "{text}");
-    assert!(text.contains("done 1 (30m) · left 1 (60m)"), "{text}");
-    // The burn-up and its hours.
-    assert!(text.contains("BURN-UP  (minutes of estimate merged, per voyage hour)"), "{text}");
-    assert!(text.contains("h0"), "{text}");
-    // The bars of the burn-up: the estimate merged in the hour.
-    assert!(text.contains("██"), "{text}");
-}
-
-#[test]
 fn the_lane_panel_shows_what_it_did_and_what_is_left() {
     let mut store = world();
     let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
@@ -281,59 +262,4 @@ fn the_lane_panel_shows_the_running_and_the_queued_work_once() {
     // LEFT holds the queued task only.
     assert!(text.contains("○ T-6"), "{text}");
     assert!(text.contains("left: 1 tasks, 15m of estimates"), "{text}");
-}
-
-/// A voyage whose tasks are all done: the Workload view keeps its
-/// measurements (F5).
-#[test]
-fn the_workload_view_keeps_the_measurements_of_a_finished_voyage() {
-    let mut store = finished_world();
-    let board = gear_board::build(&mut store, &gear_board::Options { project: Some("p".into()), ..Default::default() }, now_seconds()).unwrap();
-    // The voyage is over: no active voyage is measured any more.
-    assert!(board.projects[0].voyages.is_empty());
-    let text = frame(&board, Tab::Workload, 0, None, (120, 40));
-    // The lanes keep their completed scope: hull 30 + 20, deck 30 + 60.
-    assert!(text.contains("done 2 (50m)"), "{text}");
-    assert!(text.contains("done 2 (90m)"), "{text}");
-    assert!(text.contains("done 140m"), "{text}");
-    // The burn-up of the finished voyage is kept.
-    assert!(text.contains("BURN-UP"), "{text}");
-}
-
-/// A voyage whose every task is done, with the times of the work.
-fn finished_world() -> Store {
-    let mut store = Store::open_in_memory().unwrap();
-    let departure = now_seconds() - 3600;
-    store
-        .write(|tx| {
-            testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
-            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, "w1:p3", "pi", NOW)?;
-            tx.upsert_voyage(&gear_store::VoyageRow {
-                project: "p".into(),
-                milestone: "M4".into(),
-                title: "one seat model".into(),
-                done: Some("a rework resumes its session".into()),
-                bar: None,
-                eta: Some("12h".into()),
-                departure: Some(departure),
-                departure_tasks: Some(4),
-                departure_estimate_min: Some(140),
-                updated: NOW,
-            })?;
-            task(tx, "T-1", "hull", 1, TaskState::Done, Some(30))?;
-            task(tx, "T-2", "hull", 2, TaskState::Done, Some(20))?;
-            task(tx, "T-3", "deck", 3, TaskState::Done, Some(30))?;
-            task(tx, "T-4", "deck", 4, TaskState::Done, Some(60))
-        })
-        .unwrap();
-    store
-        .write(|tx| {
-            attempt(tx, "T-1", departure, departure + 30 * 60, departure + 30 * 60)?;
-            attempt(tx, "T-2", departure, departure + 20 * 60, departure + 30 * 60)?;
-            attempt(tx, "T-3", departure, departure + 30 * 60, departure + 60 * 60)?;
-            attempt(tx, "T-4", departure, departure + 60 * 60, departure + 60 * 60)
-        })
-        .unwrap();
-    store
 }

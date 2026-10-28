@@ -12,3 +12,17 @@ mod stations_contract;
 mod workload_contract;
 mod colour_contract;
 mod voyage_scope_contract;
+
+/// The screen state a test draws: a tab, a selected row and a size.
+pub fn screen(
+    tab: gear_board::frame::Tab,
+    selected: usize,
+    size: (usize, usize),
+) -> gear_board::frame::Screen {
+    gear_board::frame::Screen {
+        tab,
+        selected,
+        detail: false,
+        size,
+    }
+}

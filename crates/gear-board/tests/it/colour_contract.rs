@@ -168,7 +168,7 @@ fn column(line: &str, needle: &str) -> usize {
 #[test]
 fn a_task_over_its_estimate_has_a_yellow_bar() {
     let board = board();
-    let screen = canvas(&board, Tab::Now, 0, None, (160, 40));
+    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
     let text = screen.text();
     // T-2 has run 60 of its 30 minutes: the bar is full and yellow.
     let (row, x) = find(&text, "██████████ 60/30m");
@@ -201,7 +201,7 @@ fn a_merged_task_is_green_in_the_graph() {
     assert_eq!(line.styles[at], Style::fg(Color::Warn).and_bold());
     assert_eq!(lines[0].styles[2], Style::fg(Color::Ok).and_bold());
     // The terminal gets it as SGR codes: bold green.
-    let ansi = canvas(&board, Tab::Graph, 0, None, (160, 40)).ansi(true);
+    let ansi = canvas(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None).ansi(true);
     assert!(ansi.contains("\u{1b}[1;32m✓\u{1b}[0m"), "{ansi:?}");
 }
 
@@ -209,7 +209,7 @@ fn a_merged_task_is_green_in_the_graph() {
 fn the_time_bar_is_red_once_the_projected_finish_is_past_the_eta() {
     let mut board = board();
     board.projects[0].voyages[0].projected_min = Some(13 * 60);
-    let screen = canvas(&board, Tab::Now, 0, None, (160, 40));
+    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
     assert_eq!(screen.style_at(7, 1).fg, Some(Color::Bad), "{}", screen.text());
     let (row, x) = find(&screen.text(), "projected finish");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad));
@@ -217,7 +217,7 @@ fn the_time_bar_is_red_once_the_projected_finish_is_past_the_eta() {
 
     // Within the eta it is green.
     board.projects[0].voyages[0].projected_min = Some(11 * 60);
-    let screen = canvas(&board, Tab::Now, 0, None, (160, 40));
+    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
     assert_eq!(screen.style_at(7, 1).fg, Some(Color::Ok), "{}", screen.text());
 }
 
@@ -229,7 +229,7 @@ fn no_color_draws_no_colour_code() {
 
     let board = board();
     for tab in Tab::all() {
-        let screen = canvas(&board, tab, 0, None, (160, 40));
+        let screen = canvas(&board, &crate::screen(tab, 0, (160, 40)), None);
         let coloured = screen.ansi(true);
         let plain = screen.ansi(false);
         assert!(coloured.contains("\u{1b}[3") || coloured.contains("\u{1b}[9"), "{tab:?} has colour");
@@ -245,7 +245,7 @@ fn no_color_draws_no_colour_code() {
         assert!(plain.contains("\u{1b}[7m"), "the open tab stays in reverse video");
     }
     // The plain frame carries no code at all, and neither does the JSON.
-    assert!(!frame(&board, Tab::Now, 0, None, (160, 40)).contains('\u{1b}'));
+    assert!(!frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None).contains('\u{1b}'));
     assert!(!to_json(&board).unwrap().contains('\u{1b}'));
 }
 
@@ -282,7 +282,7 @@ fn a_long_lane_name_never_runs_into_the_next_column() {
 
     // Graph: the lane name is followed by a space before the goal, and the
     // goal starts at the same column on every row.
-    let graph = frame(&board, Tab::Graph, 0, None, size);
+    let graph = frame(&board, &crate::screen(Tab::Tasks, 0, size), None);
     assert!(graph.contains("rewrite Give internal/dbtest"), "{graph}");
     let long = line_with(&graph, " T-2 ");
     let short = line_with(&graph, " T-1 ");
@@ -294,27 +294,21 @@ fn a_long_lane_name_never_runs_into_the_next_column() {
     assert!(head.contains("hull") && head.contains("rewrite"), "{head:?}");
 
     // Now: the middle column starts at the same place for both lanes.
-    let now = frame(&board, Tab::Now, 0, None, size);
+    let now = frame(&board, &crate::screen(Tab::Now, 0, size), None);
     assert!(now.contains("rewrite T-2 Give internal"), "{now}");
     let long = line_with(&now, "rewrite T-2");
     let short = line_with(&now, "› hull");
     assert_eq!(column(long, "T-2"), column(short, "hull") + "rewrite".len() + 1, "{now}");
 
-    // Workload: the bars start at the same place.
-    let workload = frame(&board, Tab::Workload, 0, None, size);
-    let long = line_with(&workload, "  rewrite ");
-    let short = line_with(&workload, "› hull ");
-    assert_eq!(column(long, "done "), column(short, "done "), "{workload}");
-
     // Decisions: the friction's status follows the lane after a space.
-    let decisions = frame(&board, Tab::Decisions, 0, None, size);
+    let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
     let long = line_with(&decisions, "friction of rewrite");
     let short = line_with(&decisions, "friction of hull");
     assert!(long.contains("T-2 rewrite open"), "{decisions}");
     assert_eq!(column(long, "open"), column(short, "open"), "{decisions}");
 
     // Time & tokens: the estimates line up under their heading.
-    let tokens = frame(&board, Tab::Tokens, 0, None, size);
+    let tokens = frame(&board, &crate::screen(Tab::Cost, 0, size), None);
     let long = line_with(&tokens, " T-2 ");
     let short = line_with(&tokens, " T-1 ");
     assert!(long.contains("rewrite "), "{tokens}");

@@ -1442,8 +1442,12 @@ pub fn run_with(
     keys: &mut dyn Keys,
     mut herdr: Option<&mut dyn HerdrRead>,
 ) -> GearResult<()> {
-    let mut tab = tab_of(opts.view);
-    let mut selected = 0usize;
+    let mut screen = frame::Screen {
+        tab: tab_of(opts.view),
+        selected: 0,
+        detail: false,
+        size: keys.size(),
+    };
     let mut panel: Option<Vec<style::Line>> = None;
     // The project the board shows when it was opened without one (T-317):
     // the store is the session's, so its projects are the session's, and `p`
@@ -1479,9 +1483,10 @@ pub fn run_with(
         }
         // The selection never leaves the rows of the view (F4): a view that
         // shrank, or a key pressed at its end, does not lose the selection.
-        let rows = frame::view(&board, tab, selected).rows.len();
-        selected = selected.min(rows.saturating_sub(1));
-        let text = frame::canvas(&board, tab, selected, panel.as_deref(), keys.size()).ansi(opts.color);
+        screen.size = keys.size();
+        let rows = frame::view(&board, screen.tab, screen.selected).rows.len();
+        screen.selected = screen.selected.min(rows.saturating_sub(1));
+        let text = frame::canvas(&board, &screen, panel.as_deref()).ansi(opts.color);
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -1500,33 +1505,33 @@ pub fn run_with(
             match event {
                 Event::Key('q') | Event::Key('Q') | Event::Key('\u{3}') => return Ok(()),
                 Event::Right => {
-                    tab = tab.next();
-                    selected = 0;
+                    screen.tab = screen.tab.next();
+                    screen.selected = 0;
                     panel = None;
                     break;
                 }
                 Event::Left => {
-                    tab = tab.previous();
-                    selected = 0;
+                    screen.tab = screen.tab.previous();
+                    screen.selected = 0;
                     panel = None;
                     break;
                 }
                 Event::Key('\t') => {
-                    tab = tab.next();
-                    selected = 0;
+                    screen.tab = screen.tab.next();
+                    screen.selected = 0;
                     panel = None;
                     break;
                 }
                 Event::BackTab => {
-                    tab = tab.previous();
-                    selected = 0;
+                    screen.tab = screen.tab.previous();
+                    screen.selected = 0;
                     panel = None;
                     break;
                 }
                 Event::Key(character) if character.is_ascii_digit() => {
                     if let Some(picked) = Tab::of_number(character as u8 - b'0') {
-                        tab = picked;
-                        selected = 0;
+                        screen.tab = picked;
+                        screen.selected = 0;
                         panel = None;
                         break;
                     }
@@ -1535,22 +1540,22 @@ pub fn run_with(
                     // The next project of the session (T-317): the selection
                     // and the panel belong to the project that was shown.
                     shown += 1;
-                    selected = 0;
+                    screen.selected = 0;
                     panel = None;
                     break;
                 }
                 Event::Up | Event::Key('k') => {
-                    selected = selected.saturating_sub(1);
+                    screen.selected = screen.selected.saturating_sub(1);
                     panel = None;
                     break;
                 }
                 Event::Down | Event::Key('j') => {
-                    selected = (selected + 1).min(rows.saturating_sub(1));
+                    screen.selected = (screen.selected + 1).min(rows.saturating_sub(1));
                     panel = None;
                     break;
                 }
                 Event::Key('\r') | Event::Key('\n') => {
-                    panel = open_panel(&board, store, tab, selected)?;
+                    panel = open_panel(&board, store, screen.tab, screen.selected)?;
                     break;
                 }
                 Event::Mouse { button: 0, x, y } => {
@@ -1560,8 +1565,8 @@ pub fn run_with(
                     // the heading.
                     if y == frame::TAB_ROW as u16 + 1 {
                         if let Some(picked) = frame::tab_at(x) {
-                            tab = picked;
-                            selected = 0;
+                            screen.tab = picked;
+                            screen.selected = 0;
                             panel = None;
                             break;
                         }
@@ -1570,15 +1575,15 @@ pub fn run_with(
                         // (F8): the click is on the screen row, the spacer
                         // below the data and the footer's row select nothing.
                         let row = y.saturating_sub(1) as usize;
-                        let last = keys.size().1.saturating_sub(2);
+                        let last = screen.size.1.saturating_sub(2);
                         if row >= frame::FIRST_ROW && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
-                            let scroll = frame::scroll_of(rows, selected, keys.size().1);
+                            let scroll = frame::scroll_of(rows, screen.selected, screen.size.1);
                             let index = (row - frame::FIRST_ROW) + scroll;
                             // A click outside the rows of the view is ignored.
                             if index < rows {
-                                selected = index;
+                                screen.selected = index;
                                 panel = None;
                                 break;
                             }
@@ -1595,7 +1600,7 @@ pub fn run_with(
 /// the new one (the lanes are the first view, the dependencies are the graph).
 fn tab_of(view: View) -> frame::Tab {
     match view {
-        View::Deps | View::Graph => frame::Tab::Graph,
+        View::Deps | View::Graph => frame::Tab::Tasks,
         View::Lanes => frame::Tab::Now,
     }
 }
@@ -1610,15 +1615,15 @@ fn open_panel(
 ) -> GearResult<Option<Vec<style::Line>>> {
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
-        frame::Tab::Now | frame::Tab::Workload => Ok(project.lanes.get(selected).map(|lane| {
+        frame::Tab::Now => Ok(project.lanes.get(selected).map(|lane| {
             frame::styled_lane_panel(lane, frame::lane_color_of(project, &lane.lane))
         })),
-        frame::Tab::Graph => {
+        frame::Tab::Tasks => {
             let Some(task) = project.graph.get(selected) else { return Ok(None) };
             let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
-        frame::Tab::Tokens => {
+        frame::Tab::Cost => {
             // The task panel of the task the row names: its rounds with their
             // tokens.
             let tasks = frame::token_tasks(project);
@@ -1628,7 +1633,7 @@ fn open_panel(
             let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
-        _ => Ok(None),
+        frame::Tab::Log => Ok(None),
     }
 }
 
@@ -1647,7 +1652,21 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
         // project draws what it always drew.
         let mut one = board.clone();
         one.projects.truncate(1);
-        writeln!(out, "{}", frame::frame(&one, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
+        writeln!(
+            out,
+            "{}",
+            frame::frame(
+                &one,
+                &frame::Screen {
+                    tab: tab_of(opts.view),
+                    selected: 0,
+                    detail: false,
+                    size,
+                },
+                None
+            )
+        )
+        .map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }

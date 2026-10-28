@@ -73,8 +73,8 @@ fn two_builds_with_the_same_now_draw_the_same_frame() {
     )
     .unwrap();
 
-    let first_frame = canvas(&first, Tab::Now, 0, None, (120, 40)).text();
-    let second_frame = canvas(&second, Tab::Now, 0, None, (120, 40)).text();
+    let first_frame = canvas(&first, &crate::screen(Tab::Now, 0, (120, 40)), None).text();
+    let second_frame = canvas(&second, &crate::screen(Tab::Now, 0, (120, 40)), None).text();
 
     assert_eq!(first.now, now, "the board keeps the now it was built at");
     assert_eq!(first_frame, second_frame, "the frame depends on the store and now only");

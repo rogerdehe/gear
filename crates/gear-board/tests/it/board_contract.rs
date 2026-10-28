@@ -461,7 +461,7 @@ fn every_row_of_the_frame_starts_at_column_zero_in_raw_mode() {
         let _ = left.send(result.is_ok());
     });
 
-    let captured = read_until(pty.master, "q quit", Duration::from_secs(5));
+    let captured = read_until(pty.master, FOOTER_START, Duration::from_secs(5));
     // SAFETY: the byte is written to our own descriptor.
     unsafe { libc::write(pty.master, b"q".as_ptr() as *const libc::c_void, 1) };
     assert!(
@@ -686,6 +686,10 @@ struct Frames {
 /// The clear-screen prefix every frame starts with.
 const CLEAR: &str = "\x1b[H\x1b[2J";
 
+/// The start of the footer, which an 80 column terminal shows: the whole
+/// footer is longer than the screen.
+const FOOTER_START: &str = "←→ / Tab / 1-4";
+
 impl Frames {
     /// The next frame that holds `needle`.
     fn next(&mut self, needle: &str, timeout: Duration) -> String {
@@ -782,7 +786,7 @@ impl Frames {
     fn take_frame(&mut self) -> Option<String> {
         let start = self.buffer.find(CLEAR)? + CLEAR.len();
         let rest = &self.buffer[start..];
-        let end = rest.find(gear_board::frame::FOOTER)? + gear_board::frame::FOOTER.len();
+        let end = rest.find(FOOTER_START)? + FOOTER_START.len();
         // The frame is read as the user reads it: the colours and the
         // reverse video of the board are not part of the text.
         let frame = plain(&rest[..end]);
@@ -825,6 +829,46 @@ fn column_of(frame: &str, line: usize, needle: &str) -> u16 {
         .unwrap_or(0)
 }
 
+/// T-341: the four views the user chose: the tab row, the keys and the
+/// prototype's footer. The fifth view (Workload, and its burn-up) is gone.
+#[test]
+fn the_tab_row_has_the_four_views_of_the_user() {
+    use gear_board::frame::{self, Tab};
+    use gear_board::style::{Color, Style};
+
+    // The labels of the row, in order, and the keys 1 to 4.
+    assert_eq!(
+        Tab::all().map(|tab| tab.label()),
+        [" 1 Now ", " 2 Tasks ", " 3 Cost ", " 4 Log "]
+    );
+    // The fifth view has no key: key 5 changes nothing.
+    assert_eq!(Tab::of_number(5), None);
+    // The right arrow wraps from the last view to the first.
+    assert_eq!(Tab::Log.next(), Tab::Now);
+    assert_eq!(Tab::Now.previous(), Tab::Log);
+
+    let mut store = world();
+    let board = build(&mut store, &options(), T0 + 60).unwrap();
+    // The tab row holds the four labels; the last one ends the row.
+    let text = frame::frame(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    let row = text.lines().nth(frame::TAB_ROW).unwrap_or_default();
+    for label in [" 1 Now ", " 2 Tasks ", " 3 Cost "] {
+        assert!(row.contains(label), "{label:?} is not in {row:?}");
+    }
+    assert!(row.trim_end().ends_with(" 4 Log"), "{row:?}");
+    // No view draws a burn-up any more (the chart is removed).
+    for tab in Tab::all() {
+        let text = frame::frame(&board, &crate::screen(tab, 0, (160, 40)), None);
+        assert!(!text.contains("BURN-UP"), "{tab:?} draws a burn-up: {text}");
+    }
+    // The footer is the prototype's: it starts at column 1 of the last row,
+    // in Dim.
+    let canvas = frame::canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
+    let last = canvas.text().lines().last().unwrap_or_default().to_string();
+    assert!(last.starts_with(" ←→ / Tab / 1-4"), "{last:?}");
+    assert_eq!(canvas.style_at(1, 39), Style::fg(Color::Dim));
+}
+
 /// T-156: the new board in a pty of 80x24. The frame and the first view
 /// come from the store, the keys move between the views, a click picks a view
 /// and a row, and `Enter` opens the panel of the selected row.
@@ -853,7 +897,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let frame = frames.next("LANES", Duration::from_secs(5));
     assert!(frame.contains("GEAR · p"), "{frame}");
     assert!(frame.contains("1 Now"), "{frame}");
-    assert!(frame.contains("5 Time & tokens"), "{frame}");
+    assert!(frame.contains("4 Log"), "{frame}");
     assert!(frame.contains("LANES"), "{frame}");
     // The data of the store is on the frame: the idle reason of a lane, the
     // quota reading and the done sentence.
@@ -865,7 +909,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     assert!(frame.contains("time   ██░░░░░░░░░░░░░░░░░░░░░░"), "{frame}");
     // The footer keeps the last row of the screen.
     let rows: Vec<&str> = frame.lines().collect();
-    assert!(rows.last().unwrap_or(&"").contains("q quit"), "{frame}");
+    assert!(rows.last().unwrap_or(&"").contains(FOOTER_START), "{frame}");
 
     // The right arrow moves to the graph.
     press(pty.master, b"\x1b[C");
@@ -878,7 +922,7 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // A click on the Graph tab, where it is drawn, moves to the graph.
-    let tab = column_of(&frame, 3, "2 Graph") + 2;
+    let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("○ queued", Duration::from_secs(5));
 
@@ -1024,10 +1068,8 @@ fn a_board_of_one_project_has_no_project_key() {
     .unwrap();
     let text = gear_board::frame::frame(
         &board,
-        gear_board::frame::Tab::Now,
-        0,
+        &crate::screen(gear_board::frame::Tab::Now, 0, (80, 24)),
         None,
-        (80, 24),
     );
     let title = plain(text.lines().next().unwrap_or_default());
     assert!(title.starts_with("GEAR · p"), "{title}");
@@ -1040,10 +1082,8 @@ fn a_board_of_one_project_has_no_project_key() {
     let board = build(&mut store, &options(), T0).unwrap();
     let text = gear_board::frame::frame(
         &board,
-        gear_board::frame::Tab::Now,
-        0,
+        &crate::screen(gear_board::frame::Tab::Now, 0, (80, 24)),
         None,
-        (80, 24),
     );
     let title = plain(text.lines().next().unwrap_or_default());
     assert!(title.starts_with("GEAR · p"), "{title}");
@@ -1065,7 +1105,7 @@ fn a_frame_without_the_footer_is_never_accepted() {
     frames.buffer.push_str(gear_board::frame::FOOTER);
     let frame = frames.take_frame().expect("the whole frame");
     assert!(frame.contains("LANES"), "{frame}");
-    assert!(frame.ends_with("q quit"), "{frame}");
+    assert!(frame.ends_with(FOOTER_START), "{frame}");
 }
 
 /// A project with one lane and thirty queued tasks: the graph is longer than
@@ -1164,7 +1204,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     assert!(frame.contains("└"), "the bottom border of the panel: {frame}");
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
-        rows.last().unwrap_or(&"").contains("q quit"),
+        rows.last().unwrap_or(&"").contains(FOOTER_START),
         "the footer keeps its row: {frame}"
     );
     // Any key closes the panel.
@@ -1175,7 +1215,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // without a trailing newline, so the row the user sees is the row the hit
     // testing expects).
     let frame = frames.next("LANES", Duration::from_secs(5));
-    let tab = column_of(&frame, 3, "2 Graph") + 2;
+    let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
 
@@ -1204,7 +1244,7 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     assert!(frame.contains("└"), "the bottom border of the panel: {frame}");
     let rows: Vec<&str> = frame.lines().collect();
     assert!(
-        rows.last().unwrap_or(&"").contains("q quit"),
+        rows.last().unwrap_or(&"").contains(FOOTER_START),
         "the footer keeps its row: {frame}"
     );
 
@@ -1228,6 +1268,6 @@ fn a_long_graph_draws_its_last_task() {
         now_seconds(),
     )
     .unwrap();
-    let text = gear_board::frame::frame(&board, gear_board::frame::Tab::Graph, 16, None, (80, 24));
+    let text = gear_board::frame::frame(&board, &crate::screen(gear_board::frame::Tab::Tasks, 16, (80, 24)), None);
     assert!(text.contains("T-17"), "the last task is drawn: {text}");
 }
