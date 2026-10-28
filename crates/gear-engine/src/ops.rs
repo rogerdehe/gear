@@ -1426,7 +1426,7 @@ mod tests {
                 ref_msg: None,
                 plan_version: None,
                 payload: serde_json::json!({
-                    "text": "GEAR: 1 item(s) waiting for you. Run `gear` now.",
+                    "text": "GEAR: 1 item(s) waiting for you. Run the command `gear` (no arguments) in your own shell; it shows only your items.",
                     "covers": [message]
                 }),
                 created: T0 + 1,
