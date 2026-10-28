@@ -847,6 +847,12 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
         let picked = index == selected;
         let current = current_task(lane);
         let (middle, middle_style) = match (&lane.idle_text, current) {
+            // A lane that helps on the captain's instruction is shown as
+            // helping, not as idle (T-323).
+            (_, None) if lane.helping.is_some() => (
+                lane.helping.clone().unwrap_or_default(),
+                Style::fg(Color::Acc),
+            ),
             (Some(reason), _) => (format!("idle: {reason}"), Style::fg(Color::Bad)),
             (None, Some(task)) => (
                 format!("{} {}", task.id, task.title.chars().take(32).collect::<String>()),
