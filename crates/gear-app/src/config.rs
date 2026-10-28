@@ -363,7 +363,8 @@ pub struct TempsSection {
     pub profile: String,
 }
 
-/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3.
+/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
+/// the branches GEAR itself uses (T-252).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -374,6 +375,12 @@ pub struct Conventions {
     /// What the engine runs in its integration worktree after a merge, before
     /// it pushes (T-12).
     pub gate: String,
+    /// The branch a task's work goes on (T-252): a template with `{project}`,
+    /// `{lane}` and `{n}` filled in. Default `{lane}/t{n}`.
+    pub task_branch: String,
+    /// The branch a task is reviewed on (T-252), expanded like
+    /// `task_branch`. Default `review/t{n}`.
+    pub review_branch: String,
 }
 
 impl Default for Conventions {
@@ -384,6 +391,8 @@ impl Default for Conventions {
             staging: String::new(),
             review_max_rounds: 3,
             gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
+            task_branch: gear_model::branch::TASK_BRANCH.to_string(),
+            review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
         }
     }
 }
@@ -680,6 +689,20 @@ pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
             )
         })?;
     parse(&row.config_toml)
+}
+
+/// The project's `[conventions]` for a reader that only needs the branch names
+/// the engine cuts (T-252): the defaults when the project's config text is
+/// empty (a store written before a config was stored) or does not parse. A
+/// name is never a gate — the merge is checked on the candidate, not on the
+/// branch it came from — so a reader here never stops a hand-in over it.
+pub fn conventions_or_default(store: &mut Store, project: &str) -> GearResult<Conventions> {
+    let row = store.read(|tx| tx.get_project(project))?;
+    Ok(row
+        .filter(|row| !row.config_toml.trim().is_empty())
+        .and_then(|row| parse(&row.config_toml).ok())
+        .map(|config| config.conventions)
+        .unwrap_or_default())
 }
 
 /// The profile table of a project (T-31): `base` (the built-ins) with the
@@ -1089,6 +1112,41 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
+    // ---- the branch templates (T-252): the branch names GEAR cuts and
+    // checks. A template is expanded with `{project}`, `{lane}` and `{n}`;
+    // anything else stays a literal brace and git refuses the branch, so both
+    // are checked here — on a sample — rather than when a lane cannot push.
+    let templates = [
+        ("conventions.task_branch", &conventions.task_branch),
+        ("conventions.review_branch", &conventions.review_branch),
+    ];
+    let mut usable = [false; 2];
+    for (index, (field, template)) in templates.iter().enumerate() {
+        usable[index] = branch_template_issues(field, template, &mut issues);
+    }
+    if usable[0] && usable[1] {
+        let task = gear_model::branch::expand(
+            &conventions.task_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        let review = gear_model::branch::expand(
+            &conventions.review_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        if task == review {
+            issues.push(issue(
+                "conventions.review_branch",
+                format!(
+                    "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
+                ),
+            ));
+        }
+    }
+
     // ---- timing
     if cfg.timing.cooldown_s <= cfg.timing.tick_s {
         issues.push(issue(
@@ -1241,6 +1299,90 @@ fn issue(field: &str, problem: String) -> ConfigIssue {
     ConfigIssue {
         field: field.to_string(),
         problem,
+    }
+}
+
+/// The sample a branch template is expanded with to check it (T-252): one
+/// project, one lane, one task.
+const SAMPLE_PROJECT: &str = "p";
+const SAMPLE_LANE: &str = "l";
+const SAMPLE_TASK: &str = "T-1";
+
+/// The placeholders `template` names, filled in or not.
+fn placeholders(template: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        names.push(&after[..close]);
+        rest = &after[close + 1..];
+    }
+    names
+}
+
+/// Check one branch template (T-252): it must name `{n}`, it may name only
+/// `{project}`, `{lane}` and `{n}`, and its sample expansion must be a branch
+/// name git takes. Returns whether the template is usable.
+fn branch_template_issues(field: &str, template: &str, issues: &mut Vec<ConfigIssue>) -> bool {
+    let names = placeholders(template);
+    if let Some(unknown) = names
+        .iter()
+        .find(|name| !matches!(**name, "project" | "lane" | "n"))
+    {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {{project}}, {{lane}} and {{n}}"
+            ),
+        ));
+        return false;
+    }
+    if !names.contains(&"n") {
+        issues.push(issue(
+            field,
+            format!("the template {template:?} has no {{n}}: every task needs its own branch"),
+        ));
+        return false;
+    }
+    let sample = gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK);
+    if let Some(problem) = branch_name_problem(&sample) {
+        issues.push(issue(
+            field,
+            format!("the template {template:?} names the branch {sample:?}: {problem}"),
+        ));
+        return false;
+    }
+    true
+}
+
+/// What is wrong with `name` as a branch name, or `None` when git takes it
+/// (T-252): letters, digits, '.', '_', '-' and '/' only, no leading '/', '-'
+/// or '.', no ".." or "//", and no trailing '/' or ".lock".
+fn branch_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("a branch name must not be empty".to_string());
+    }
+    if name.starts_with(['/', '-', '.']) {
+        return Some("a branch name must not start with '/', '-' or '.'".to_string());
+    }
+    if name.contains("..") || name.contains("//") {
+        return Some("a branch name must not contain \"..\" or \"//\"".to_string());
+    }
+    if name.ends_with('/') {
+        return Some("a branch name must not end with '/'".to_string());
+    }
+    if name.ends_with(".lock") {
+        return Some("a branch name must not end with \".lock\"".to_string());
+    }
+    match name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')))
+    {
+        Some(bad) => Some(format!(
+            "a branch name holds only letters, digits, '.', '_', '-' and '/', not {bad:?}"
+        )),
+        None => None,
     }
 }
 

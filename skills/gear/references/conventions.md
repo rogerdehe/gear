@@ -100,6 +100,8 @@ release = "main"        # the release branch
 gate = "make test"      # the project's own build + test, run before every merge
 ```
 
+`[conventions] task_branch` (default `{lane}/t{n}`) and `review_branch` (default `review/t{n}`) name the branches; `{project}`, `{lane}`, `{n}` are filled in, e.g. `task_branch = "{project}/{lane}/t{n}"`.
+
 A repo may also carry a `[github]` mode (issues in, pull requests out); what the engine writes there and when: `gear --skill github`.
 
 Everything else here is not overridable.

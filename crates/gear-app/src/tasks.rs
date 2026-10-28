@@ -360,6 +360,18 @@ pub fn submit_result(tx: &Tx<'_>, project: &str, task: &str, n: i64, contract_ve
     Ok(())
 }
 
+/// The project's `[conventions]` as the store holds them (T-252): a project
+/// without a config, or with one that does not parse, keeps GEAR's own
+/// defaults — the branch names here are a hint for the merge, never a gate.
+fn conventions_of(tx: &Tx<'_>, project: &str) -> crate::config::Conventions {
+    tx.get_project(project)
+        .ok()
+        .flatten()
+        .and_then(|row| crate::config::parse(&row.config_toml).ok())
+        .map(|config| config.conventions)
+        .unwrap_or_default()
+}
+
 fn forbidden(detail: impl std::fmt::Display) -> GearError {
     GearError::new(ErrorCode::Forbidden, detail.to_string())
 }
@@ -975,10 +987,15 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
                 )
             })?,
         };
-        let branch = task_row
-            .lane
-            .as_deref()
-            .map(|lane| format!("{lane}/{}", task.to_lowercase().replace('-', "")));
+        let branch = match task_row.lane.as_deref() {
+            Some(lane) => Some(crate::base::task_branch(
+                &conventions_of(tx, project),
+                project,
+                lane,
+                task,
+            )),
+            None => None,
+        };
         let op = tx.insert_op(&NewOp {
             project: project.to_string(),
             seat: anchor.id,
