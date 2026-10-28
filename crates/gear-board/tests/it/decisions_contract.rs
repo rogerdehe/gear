@@ -712,3 +712,102 @@ fn the_json_carries_the_fresh_tokens_and_the_cache_reads_apart() {
     assert_eq!(task["tokens"], 512_000, "the fresh tokens: {task}");
     assert_eq!(task["cache_read"], 300_000, "the cache reads: {task}");
 }
+
+/// T-263: the friction reports, like the decisions beside them on the same
+/// view, are the measured voyage's only — a report of an older voyage is
+/// history, not something the captain reads under this voyage.
+fn two_voyages_with_frictions(old_open: bool) -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    let departure = now_seconds() - 7200;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", NOW)?;
+            testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
+            for (milestone, at) in [("M4", departure), ("M5", departure + 3600)] {
+                tx.upsert_voyage(&gear_store::VoyageRow {
+                    project: "p".into(),
+                    milestone: milestone.into(),
+                    title: format!("voyage {milestone}"),
+                    done: Some("it is delivered".into()),
+                    bar: None,
+                    eta: Some("8h".into()),
+                    departure: Some(at),
+                    departure_tasks: Some(2),
+                    departure_estimate_min: Some(60),
+                    updated: at,
+                })?;
+            }
+            // Each voyage: a task that is done and carries a report, and a
+            // task that leaves the voyage open or finished.
+            let m4_rest = if old_open { TaskState::Ready } else { TaskState::Done };
+            let m5_rest = if old_open { TaskState::Done } else { TaskState::Ready };
+            for (id, rank, milestone, with_friction) in [
+                ("T-1", 1, "M4", true),
+                ("T-2", 2, "M4", false),
+                ("T-3", 3, "M5", true),
+                ("T-4", 4, "M5", false),
+            ] {
+                let state = if with_friction {
+                    TaskState::Done
+                } else if milestone == "M4" {
+                    m4_rest
+                } else {
+                    m5_rest
+                };
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state,
+                    priority: "must".into(),
+                    lane: Some("hull".into()),
+                    milestone: Some(milestone.into()),
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: Some(30),
+                    issue: None,
+                    updated: NOW,
+                })?;
+                if with_friction {
+                    tx.insert_friction(&NewFriction {
+                        project: "p".into(),
+                        task: id.into(),
+                        attempt: 1,
+                        role: "dev".into(),
+                        seat: "p:hull".into(),
+                        body: format!("the friction of {milestone}"),
+                        required: false,
+                    })?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+#[test]
+fn the_frictions_are_the_ones_of_the_voyage_the_board_measures() {
+    // M5 is the voyage with work left: only its report is on the board.
+    let mut store = two_voyages_with_frictions(false);
+    let measured_m5 = board(&mut store);
+    let frictions = &measured_m5.projects[0].frictions;
+    let tasks: Vec<&str> = frictions.iter().map(|f| f.task.as_str()).collect();
+    assert_eq!(tasks, ["T-3"], "M5 measured: the frictions of M5");
+
+    // And with M4 the voyage that has work left, only the M4 report.
+    let mut store = two_voyages_with_frictions(true);
+    let measured_m4 = board(&mut store);
+    let frictions = &measured_m4.projects[0].frictions;
+    let tasks: Vec<&str> = frictions.iter().map(|f| f.task.as_str()).collect();
+    assert_eq!(tasks, ["T-1"], "M4 measured: the frictions of M4");
+}
