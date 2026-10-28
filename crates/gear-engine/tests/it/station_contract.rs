@@ -52,7 +52,7 @@ fn a_checkpoint_rings_in_the_same_tick_and_survives_reopening_the_store() {
     let fp = Fingerprint { pane_id: "w1:p1".into(), kind: Some("codex".into()), session_ref: None };
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
     assert!(page.text.contains("Station M2 [60 min, 25% eta]"), "{}", page.text);
-    assert!(page.text.contains("next: gear plan apply gear/voyages/M2.md"));
+    assert!(page.text.contains("next: gear plan apply gear/voyages/M2/plan.md"));
     home::record_view(&mut store, &page.view).unwrap();
     tick(&mut store, &mut herdr, &cfg, T0+3602).unwrap();
     drop(store);

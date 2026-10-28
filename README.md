@@ -65,7 +65,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    > Use the GEAR skill (`gear --skill captain`) to kick off a project named acme for: <your goal>.
 
-   The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1.md`.
+   The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1/plan.md`.
 
 3. **The captain registers the project** from the repository, with `GEAR_ADMIN=1 gear admin init gear/gear.toml`: your confirmed kickoff sheet is the consent, and you type nothing. It checks the config first with `gear admin init --check gear/gear.toml`, which starts nothing; `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge). A lane or reviewer never registers a project.
 

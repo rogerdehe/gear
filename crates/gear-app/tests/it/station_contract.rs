@@ -112,7 +112,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
-    assert!(page.text.contains("next: gear plan apply gear/voyages/M2.md"));
+    assert!(page.text.contains("next: gear plan apply gear/voyages/M2/plan.md"));
     assert!(page.text.contains(&format!("station {}: keep course|time-box|cut|move", ids[0])));
 }
 

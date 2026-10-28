@@ -58,7 +58,7 @@ queues the calls and never stops local work.
    give it the voyage file to check against the file you are editing.
 2. **Paste and edit** the block in the voyage file: `lane`, `milestone` and
    `estimate` are the captain's — an issue says what is wanted, not who does it.
-3. **`gear plan apply gear/voyages/<M>.md`** — the block's `issue: #n` binds the
+3. **`gear plan apply gear/voyages/<M>/plan.md`** — the block's `issue: #n` binds the
    task to its issue, and the merge closes it.
 
 ## Agents never write with `gh`
