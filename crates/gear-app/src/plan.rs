@@ -1523,8 +1523,13 @@ pub fn end_parked_lanes(
         if seat.role != SeatRole::Lane || seat.state != SeatState::Parked {
             continue;
         }
-        // A quota park is the quota path's business.
-        if tx.get_meta(&format!("resume:{}", seat.id))?.is_some() {
+        // A quota park is the quota path's business: it writes the resume
+        // deadline under its own key (`engine.resume.<seat>`), and a park
+        // without that deadline there is no quota park.
+        if tx
+            .get_meta(&format!("engine.resume.{}", seat.id))?
+            .is_some_and(|deadline| !deadline.is_empty())
+        {
             continue;
         }
         let Some(reason) = seat.state_reason.as_deref() else {

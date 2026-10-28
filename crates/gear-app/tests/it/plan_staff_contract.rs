@@ -522,17 +522,45 @@ fn an_until_task_park_ends_when_the_task_is_done() {
     assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
 }
 
-/// T-190: a lane parked on quota is the quota path's business.
+/// T-190, T-338: a lane parked on quota is the quota path's business, even
+/// when its reason looks like a timed park: the engine's resume deadline is
+/// written under `engine.resume.<seat>`.
 #[test]
 fn a_quota_park_is_untouched() {
     let mut s = world();
     let mut herdr = session();
     parked(&mut s, "heat", "quota: minimax-cn 5h; resume at 1800003600");
     // The engine's quota park carries the resume deadline.
-    s.write(|tx| tx.set_meta("resume:p:heat", "1800003600"))
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", "1800003600"))
         .unwrap();
     run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
     assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+}
+
+/// T-338: the quota check reads the key the quota path writes, so a seat
+/// whose `engine.resume.<seat>` is set keeps a timed park that has expired.
+#[test]
+fn a_quota_park_with_an_expired_until_stays() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", "T-1"))
+        .unwrap();
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Parked);
+}
+
+/// T-338: an empty resume deadline is no quota park: the timed park ends.
+#[test]
+fn an_empty_resume_deadline_does_not_hold_the_park() {
+    let mut s = world();
+    let mut herdr = session();
+    parked(&mut s, "heat", &format!("until={}", at(-1)));
+    s.write(|tx| tx.set_meta("engine.resume.p:heat", ""))
+        .unwrap();
+    run_with_agents(&mut s, &mut herdr, "- hold wire reason=x\n", "r1").unwrap();
+    assert_eq!(seat(&mut s, "heat").0, SeatState::Active);
+    assert_eq!(seat(&mut s, "heat").1, Some("park ended".into()));
 }
 
 /// T-190: a parked lane whose agent is gone is released: it is queued again
