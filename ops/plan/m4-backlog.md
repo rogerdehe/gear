@@ -82,7 +82,7 @@ The station's "projected finish" multiplies the sum of all open estimates by the
   Resume is the CLI's own resume of the task's recorded session, in the same pane: the in-pane command when the CLI takes a session id there, else exit and restart with the profile's `resume_args` (what onboard.rs does today). Never an interactive picker the engine must drive.
   The session choice is a fixed rule the engine applies, never a captain call at dispatch: a review is always new, a re-review or rework resumes, a lane's next task is new unless its plan block says it continues an earlier task (then keep, compacted). The only difference between lanes and reviewers is the idle release time, a config value per role: a reviewer seat is released after a short idle spell, a lane keeps its pane, worktree and build cache.
 
-## M4.1: fixes from real use (user, 2026-10-28)
+## M4.2: fixes from real use (user, 2026-10-28; M4.1 took only T-226 and T-227)
 
 Problems found after M4's landing and in other projects' first voyages are collected here and fixed together in one short voyage, not one by one.
 
@@ -109,6 +109,9 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - An urgent instruction cannot reach a lane inside a long tool call (a captain on another project, 2026-10-28): the message waits in the agent's queue (pi "Steering") until a 3-minute `go test ./...` returns, and `gear send --urgent` does not interrupt. An urgent instruction interrupts the working turn first (the profile's interrupt key, as quiet.rs does for a stuck turn), then delivers, and says so to the captain.
 - The home page's `next: gear reply M-n --resolve` cannot be run as printed: `gear reply` requires `-m` (trial project feedback B04-02, v0.3.4; still so in v0.4.6, home.rs). Print `gear reply M-n --resolve -m "<what was done>"`.
 - "deliveries not confirmed: N" on the home page counts old operations: with no lane working it showed 3 on this project (v0.4.6), and a trial captain read it as lost messages (B04-01). Count only deliveries still waiting for their check-in, and name them.
+- Run-dry and idle notices only when work can move (user, 2026-10-28, M4.1): "lane X has nothing to start after T-n", "runs dry in ~28 min" and "lane X is IDLE" rang for every lane of a voyage whose plan had nothing left to start anywhere, and again after each plan apply. They are worth a captain's look only when another lane still has queued work that could be moved (an imbalance); when no lane has queued work, the voyage is in its tail and they stay quiet. Each fact rings once, not again per apply. Same family as "no idle items once a voyage is ready to land".
+- A lane that thinks instead of coding is not caught (M4.1 T-227, 2026-10-28): keel (MiniMax Flash) spent 30+ min re-reading one unclear contract sentence with no file committed. The 20-min no-push question fired (M-3936) but it queued behind the lane's working turn and was never read; the 10-min stuck-turn interrupt did not fire because the session kept being written (thinking tokens). The captain had to interrupt by hand. Fix: the no-push question interrupts the turn first (as an urgent instruction should), and a working turn with tokens flowing but no worktree change for 15 min counts as stuck. Root on the captain's side: an unclear contract sentence (lesson 30).
+- Lane model for GEAR's own work (user, 2026-10-28, after M4.1 T-227): MiniMax M3.1 Flash is for simple edits (comments, tests) and goes to projects like acme; GEAR's own lanes move to DeepSeek V4.1 Flash once the user has looked into it (opencode-go/deepseek-v4.1-flash, already in [models.switch]). Settle at the next kickoff.
 
 ## Later fixes (not urgent; collected 2026-10-28)
 
