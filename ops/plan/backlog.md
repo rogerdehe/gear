@@ -1,5 +1,7 @@
 # Backlog: open items for coming voyages (not bound to one voyage; each voyage takes its scope at kickoff)
 
+One pool of open items, not bound to a voyage. At a voyage's kickoff the items it takes move out of here into gear/voyages/<id>.md; an item the user already placed ("for M5") says so, but the scope is still decided at that kickoff. The older m2/m3/m3.1 files are history.
+
 ## First item of M4 (user, 2026-10-26): a seat follows the work (B02-01)
 
 A trial project had a lane bound to a repo whose work was a dozen lines; the voyage ran 30-40 hours, that lane stood idle 99% of the time and held its slot for good. M4 must fix it:

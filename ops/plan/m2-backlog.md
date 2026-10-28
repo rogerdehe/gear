@@ -1,3 +1,5 @@
+> Retired (2026-10-28): history only. Open items live in ops/plan/backlog.md (one pool, not bound to a voyage); each voyage's scope is in gear/voyages/<id>.md.
+
 # M2 backlog (ideas, not yet tasks)
 
 - A lane's `result` should not be a captain action item once the engine starts the reviewer (it rings the captain for nothing); make it an information line, and ring the captain only for the review verdict / failed merge.
