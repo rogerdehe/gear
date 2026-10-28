@@ -5,7 +5,8 @@
 //! worktree of the task's repo (`<project>/merge`, created once from that repo's
 //! integration branch, reopened afterwards):
 //!
-//! 1. fetch every branch of origin and reset to `origin/<integration>`: a
+//! 1. fetch every branch of the project's remote (`[conventions].remote`,
+//!    `origin` by default) and reset to `<remote>/<integration>`: a
 //!    half-done earlier run is discarded, and a retry of the same op cannot
 //!    merge twice;
 //! 2. merge the **approved candidate by commit**, wherever it is (T-61): the
@@ -35,7 +36,7 @@
 //! runs per repo.
 //!
 //! Any failure before the push leaves the remote integration branch untouched
-//! (`git reset --hard origin/<integration>`), records the op Failed with the
+//! (`git reset --hard <remote>/<integration>`), records the op Failed with the
 //! output tail and puts one item in the captain's inbox. An op the previous
 //! engine left `Executing` becomes `Unknown` on start; a merge op in `Unknown`
 //! re-runs the same idempotent sequence, so a restart can neither merge twice
@@ -279,7 +280,7 @@ pub fn merge_passed(
                     insert_land_op(tx, project, &op, pr, &head, method, finished.at)
                 })?;
             }
-            Report::Busy => retry_merge(store, project, op, "merge will retry from origin", finished.at)?,
+            Report::Busy => retry_merge(store, project, op, "merge will retry from the remote", finished.at)?,
             // The merge waits for another task: it is not a failure. The op
             // goes back to Unknown and the captain is told once which task it
             // waits for (T-62).
@@ -308,7 +309,7 @@ pub fn merge_passed(
     }
 
     // One worker per repo. Unknown ops are restart recovery: merge_one
-    // resets to origin before doing any merges, and adopts a completed push.
+    // resets to the remote before doing any merges, and adopts a completed push.
     for op in merge_order(ready_merges(store, project)?) {
         let task = op.task.clone().unwrap_or_default();
         // The work of this attempt is already on the integration branch: it
@@ -1874,7 +1875,7 @@ fn git_sha(text: &str) -> Option<String> {
 /// A branch that is not this task's (a human's branch) is left alone too.
 ///
 /// Returns the branches that were closed and the ones that were left.
-/// What `for-each-ref --contains=<candidate>` answered about origin: the refs
+/// What `for-each-ref --contains=<candidate>` answered about the remote: the refs
 /// that hold the candidate, and those whose tip it is. One git process answers
 /// the "is it pushed" question and gives the branch-closing step its list
 /// (T-127).
@@ -2120,7 +2121,7 @@ fn is_task_branch(branch: &str, task_branch: &str) -> bool {
     branch == task_branch || branch.starts_with(&format!("{task_branch}-"))
 }
 
-/// Close a branch on origin. A branch that is already gone is closed too.
+/// Close a branch on the remote. A branch that is already gone is closed too.
 fn delete_remote(dir: &Path, branch: &str, remote: Target<'_>) -> bool {
     remote.delete(dir, branch)
 }
