@@ -31,7 +31,7 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 | `<lane>/t<n>` | a task branch, cut from the latest integration branch of the lane's repo, pushed as you commit, deleted after the merge |
 | `home/<lane>` | the anchor of a lane's long-lived worktree; never committed to |
 
-Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches.
+Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches. They never run `git stash`: every worktree of the repository shares one stash, so a stash can carry their work to another lane or theirs to them — work set aside is committed on the task branch and pushed.
 
 The branch names, the remote and the voyage folder are configuration: a project names its own in `[conventions]`, as templates with the placeholders filled in. These are the defaults (the names GEAR itself uses):
 
