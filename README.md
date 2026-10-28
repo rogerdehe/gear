@@ -6,7 +6,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Use it for** big, long-running work with several agents and a plan that changes as you go. For anything smaller, talk to an agent directly.
 
-> **Status:** v0.4.9, an early release for trial use — what changed: [docs/releases/v0.4.9.md](docs/releases/v0.4.9.md). Feedback is welcome — see [Feedback](#feedback).
+> **Status:** v0.4.10, an early release for trial use — what changed: [docs/releases/v0.4.10.md](docs/releases/v0.4.10.md). Feedback is welcome — see [Feedback](#feedback).
 
 ## Requirements
 
@@ -19,7 +19,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 1. **The plugin** (downloads a prebuilt `gear` and checks its SHA-256; no Rust needed):
 
    ```bash
-   herdr plugin install rogerdehe/gear --ref v0.4.9
+   herdr plugin install rogerdehe/gear --ref v0.4.10
    ```
 
    Add `--yes` in a non-interactive shell.
@@ -30,7 +30,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
    export PATH="$(herdr plugin list --json | sed -n 's/.*"plugin_id":"herdr-gear","plugin_root":"\([^"]*\)".*/\1/p')/bin:$PATH"
    ```
 
-   Check: `gear --version` prints `gear 0.4.9`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
+   Check: `gear --version` prints `gear 0.4.10`. If the line above prints nothing, take `plugin_root` from `herdr plugin list --json` and add its `bin` to PATH.
 
 3. **A key for the plan board**, in `~/.config/herdr/config.toml`, then `herdr server reload-config`:
 
@@ -67,13 +67,7 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
    The captain runs `gear admin kickoff` (which agent CLIs and models this machine has), proposes lanes, models and a plan, and asks you twice: first the quality bar (fastest / deliverable / strict), then the whole kickoff sheet — answer "confirm", or type what to change. It writes `gear/gear.toml` and the first plan `gear/voyages/M1.md`.
 
-3. **Register the project — in your own shell** (not inside an agent), in the repository:
-
-   ```bash
-   GEAR_ADMIN=1 gear admin init gear/gear.toml
-   ```
-
-   Creating a project is your act: `init` refuses an agent that tries, whatever `GEAR_ADMIN` says. After this, the captain re-applies the config itself whenever it changes (that is the one `init` an agent may run). `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge) — fix it and run it again.
+3. **The captain registers the project** from the repository, with `GEAR_ADMIN=1 gear admin init gear/gear.toml`: your confirmed kickoff sheet is the consent, and you type nothing. It checks the config first with `gear admin init --check gear/gear.toml`, which starts nothing; `init` lists every problem at once (for example a missing `gate`: your own build + test command, run before every merge). A lane or reviewer never registers a project.
 
 4. **Tell the captain to apply the plan.** The engine starts in the background, brings up the lanes in their own Herdr worktrees and delivers their first tasks. From here on nobody asks you anything until the voyage lands.
 
