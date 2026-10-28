@@ -171,6 +171,7 @@ fn spoke_since(
 mod tests {
     use super::*;
     use crate::observe::Presence;
+    use gear_herdr::fake::FakeHerdr;
     use gear_herdr::AgentStatus;
     use gear_model::SeatState;
     use gear_store::{testing, NewRound, RoundKey};
@@ -458,6 +459,36 @@ mod tests {
         insert_round(&mut world, 1, NOW - 11 * 60, None);
         let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
         assert_eq!(flagged, vec![SEAT.to_string()]);
+        assert_eq!(alerts(&mut world).len(), 1);
+    }
+
+    /// The whole engine tick (review round 1, F1): a silent seat raises one
+    /// captain alert, on its own thread. It must not also land in
+    /// `report.flagged`: that path sends a second, generic stall alert.
+    #[test]
+    fn a_full_tick_raises_one_captain_alert_for_a_silent_seat() {
+        let mut world = the_world();
+        insert_round(&mut world, 1, NOW - 11 * 60, None);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named("w1:p9", "pi", AgentStatus::Working, "p-captain");
+        herdr.add_agent_named("w1:p2", "pi", AgentStatus::Idle, "p-review-1");
+        let mut cfg = crate::EngineCfg::default();
+        cfg.profiles = world.profiles.clone();
+
+        crate::tick(&mut world.store, &mut herdr, &cfg, NOW).unwrap();
+        let messages = alerts(&mut world);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert_eq!(messages[0].recipient, CAPTAIN);
+        assert!(messages[0].urgent);
+        assert_eq!(messages[0].thread, format!("silent:{SEAT}"));
+        let stall = world
+            .store
+            .read(|tx| tx.thread_messages("p", &format!("stall:{SEAT}")))
+            .unwrap();
+        assert!(stall.is_empty(), "no second, generic stall alert: {stall:?}");
+
+        // The second tick says nothing new.
+        crate::tick(&mut world.store, &mut herdr, &cfg, NOW).unwrap();
         assert_eq!(alerts(&mut world).len(), 1);
     }
 }

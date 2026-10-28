@@ -329,8 +329,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         report.flagged.retain(|seat| !restarted.contains(seat));
 
         // A seat that holds work and has produced nothing for ten minutes
-        // reaches the captain (T-227): one alert per round.
-        report.flagged.extend(silent::tick(store, &project, &observed, &profiles, now)?);
+        // reaches the captain (T-227): one alert per round. Its seats stay
+        // out of report.flagged: that path sends a second, generic stall
+        // alert (review round 1, F1).
+        let _ = silent::tick(store, &project, &observed, &profiles, now)?;
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the
