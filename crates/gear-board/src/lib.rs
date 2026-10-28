@@ -401,6 +401,21 @@ pub fn project_with_agents(
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
+    // The voyage the board measures: the active one, else the latest departed
+    // one (F5 of the T-166 review). The board shows that voyage and nothing
+    // that landed before it (T-246): a task of an older voyage is history —
+    // unless it still waits for work, which is a decision the captain owes.
+    let workload = workload_voyage(tx, project, now)?;
+    let tasks: Vec<_> = match &workload {
+        Some(voyage) => tasks
+            .into_iter()
+            .filter(|task| {
+                !task.state.is_terminal()
+                    || task.milestone.as_deref() == Some(voyage.milestone.as_str())
+            })
+            .collect(),
+        None => tasks,
+    };
     // The seats whose provider is in a back-off (T-75): the engine recorded
     // the wait, and the board says so instead of "working".
     let backoff = tx.seats_in_backoff(project)?;
@@ -555,8 +570,13 @@ pub fn project_with_agents(
             .sum();
     }
 
-    // The work as a graph (design §8.1).
-    let graph = graph::tasks(tx, project, now)?;
+    // The work as a graph (design §8.1), of the tasks the board shows (T-246).
+    let shown: std::collections::BTreeSet<&str> =
+        tasks.iter().map(|task| task.id.as_str()).collect();
+    let graph: Vec<graph::GraphTask> = graph::tasks(tx, project, now)?
+        .into_iter()
+        .filter(|task| shown.contains(task.id.as_str()))
+        .collect();
     let graph_lanes = graph::lanes(tx, project)?;
 
     // The captain's inbox: the items that wait for an answer.
@@ -628,7 +648,6 @@ pub fn project_with_agents(
     }
 
     let voyages = voyage::reports(tx, project, now)?;
-    let workload = workload_voyage(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
     let decisions = decisions_of(
         tx,
