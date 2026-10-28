@@ -494,3 +494,113 @@ fn check_reports_the_issues_init_reports() {
     assert_eq!(checked, stderr(&o), "the same issue text");
     assert_eq!(config_version(&db), 0, "nothing was registered");
 }
+
+/// A config for project `id` on `repo`, with the default branch templates.
+fn config_for(dir: &Path, id: &str, repo: &Path) -> PathBuf {
+    let path = dir.join(format!("{id}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = {id}\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 0\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[conventions]\ngate = \"make gate\"\n",
+            id = serde_json::json!(id).to_string(),
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// T-256: `gear admin init --check` refuses a config that would cut the same
+/// branch names as a registered project on the same repository — the existing
+/// store is only read, and a config on another repository still passes.
+#[test]
+fn check_refuses_a_second_project_on_the_same_repo() {
+    let dir = scratch("check-clash");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the other repo");
+    let db = dir.join("gear.db");
+    // With no store yet there is nothing to collide with, and the check says
+    // what it skipped.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "p", &repo), None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stderr(&o).trim(), "cross-project check skipped: no store");
+    assert!(!db.exists(), "a check creates no store");
+    // The user registers `p` on the repository.
+    let o = init(&dir, &db, &config_for(&dir, "p", &repo), None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let before = std::fs::metadata(&db).expect("the store").len();
+
+    // `q` on the same repository with the default templates is refused,
+    // naming `p` and the repository.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &repo), None, false, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
+    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
+    assert!(err.contains("put {project} in conventions.task_branch"), "{err}");
+    assert_eq!(std::fs::metadata(&db).expect("the store").len(), before, "a check writes nothing");
+
+    // On another repository the same config passes.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "config ok: project q, 0 lanes, 0 reviewers");
+}
+
+/// `gear admin init <config>` as the user's own shell with no `GEAR_DB`: the
+/// default store of `home` (T-256 F1).
+fn init_without_db(home: &Path, config: &Path) -> Output {
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home).expect("install the skill");
+    }
+    Command::new(env!("CARGO_BIN_EXE_gear"))
+        .args(["admin", "init", config.to_str().expect("a utf-8 path")])
+        .env("HOME", home)
+        .env("GEAR_ADMIN", "1")
+        .env_remove("GEAR_DB")
+        .env_remove("GEAR_CTX")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .expect("run gear")
+}
+
+/// T-256 (review F1): with no `GEAR_DB`, `--check` reads the default store the
+/// registration would use, so a second project on one repository is refused in
+/// the user's own shell too.
+#[test]
+fn check_reads_the_default_store_when_gear_db_is_unset() {
+    let dir = scratch("check-default");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the other repo");
+
+    // `p` is registered into the default store of the temporary HOME.
+    let o = init_without_db(&home, &config_for(&dir, "p", &repo));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let db = home.join(".local/state/gear/gear.db");
+    assert!(db.exists(), "the registration made the default store");
+
+    // With no GEAR_DB, `--check` of `q` on the same repository still sees `p`.
+    let o = check_cmd_without_db(&home, &config_for(&dir, "q", &repo));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
+    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
+    assert!(!err.contains("skipped"), "the check read the default store: {err}");
+
+    // On another repository the same config passes, and still says nothing of a
+    // skipped check.
+    let o = check_cmd_without_db(&home, &config_for(&dir, "q", &elsewhere));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stderr(&o).is_empty(), "{}", stderr(&o));
+}

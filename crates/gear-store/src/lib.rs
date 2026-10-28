@@ -648,6 +648,25 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an **existing** database for reading only (T-256): `gear admin
+    /// init --check` reads the other projects' configs to see whether two
+    /// projects would cut the same branch names, and that check writes
+    /// nothing — it creates no file, applies no schema and migrates nothing.
+    /// A database of another schema version is read as it is.
+    pub fn open_read_only(path: &Path) -> GearResult<Store> {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(map_sqlite)?;
+        let store = Store { conn };
+        store
+            .conn
+            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+            .map_err(map_sqlite)?;
+        Ok(store)
+    }
+
     /// In-memory database for tests (schema applied).
     pub fn open_in_memory() -> GearResult<Store> {
         let conn = Connection::open_in_memory().map_err(map_sqlite)?;

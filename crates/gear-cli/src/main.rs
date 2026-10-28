@@ -414,8 +414,9 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   T-10). `--skill` and `--help` never get here.
 /// - `captain handover` moves a seat's binding: it must not start an engine
 ///   (T-104);
-/// - `admin init --check` only validates a config: it opens no store, so there
-///   is nothing to keep moving (T-228).
+/// - `admin init --check` only validates a config: it reads the store's other
+///   projects for the branch check but writes nothing, so there is nothing to
+///   keep moving (T-228, T-256).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     match cmd {
         None => true,
@@ -496,14 +497,27 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// `GEAR_DB`.
 ///
 /// With `--check` (T-228) it only validates the config: `GEAR_ADMIN` is not
-/// needed, no store is opened, nothing starts, and the command says what it
-/// read (`config ok: project <id>, <n> lanes, <m> reviewers`).
+/// needed, no store is written, nothing starts, and the command says what it
+/// read (`config ok: project <id>, <n> lanes, <m> reviewers`). Its
+/// cross-project branch check (T-256) reads an existing store, never creates
+/// one, and says so when there is none.
 fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
         let text = read_config(config)?;
         let parsed = gear_app::admin::check(&text, None)?;
+        // T-256: another project of this store on the same repository is a
+        // branch clash, reported before anything is registered. The store is
+        // only read, and only when it exists already: a check creates nothing.
+        match other_projects()? {
+            Some(others) => {
+                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &others) {
+                    return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
+                }
+            }
+            None => eprintln!("cross-project check skipped: no store"),
+        }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
         if json {
@@ -596,6 +610,42 @@ fn read_config(config: &std::path::Path) -> GearResult<String> {
             format!("cannot read {}: {e}", config.display()),
         )
     })
+}
+
+/// The other projects of the store this `gear` call would use — `(id,
+/// config_toml)` — for the branch check of `admin init --check` (T-256), or
+/// `None` when there is no store to read: none at the path, or no `HOME` to
+/// find the default one under. The path is `GEAR_DB` when the caller names
+/// one, else the default store of this session — resolved with
+/// [`default_store_in`], never with [`default_store_path`], which creates the
+/// directory. Only an existing store is opened, and read-only: a check creates
+/// no file, applies no schema and migrates nothing (T-228).
+fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store
+        .read(|tx| {
+            let mut others = Vec::new();
+            for id in tx.project_ids()? {
+                if let Some(row) = tx.get_project(&id)? {
+                    others.push((row.id, row.config_toml));
+                }
+            }
+            Ok(others)
+        })
+        .map(Some)
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).
