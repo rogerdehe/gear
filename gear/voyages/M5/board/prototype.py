@@ -3,6 +3,7 @@
 same colours, symbols, views, keys and panels; README.md lists every change against M4.
 Keys: 1-5 / Tab views · [ ] older / newer voyage · j/k or arrows select · Enter opens · q quit."""
 import curses
+import json
 import os
 import sys
 import unicodedata
@@ -627,10 +628,11 @@ def cell_width(ch):
 
 class FakeWin:
     """A curses window that keeps its cells instead of opening a screen: getmaxyx, erase, addnstr (n characters,
-    a character that does not fit in the line's remaining cells is not drawn, chgat (sets a run of cells'
-    attribute, keeps their characters), refresh, keypad. A wide character is one glyph in two cells: the first cell
-    holds it, the second is its continuation (a space, tail[y][x] is True), both with the same attribute, as a
-    terminal draws it."""
+    a character that does not fit in the line's remaining cells is not drawn, chgat (sets the attribute of a run
+    of cells, keeps their characters, and REPLACES the old attribute: as in curses it does not OR into it, so a row
+    lit by hl is reverse and nothing else — no colour, no bold), refresh, keypad. A wide character is one glyph in
+    two cells: the first cell holds it, the second is its continuation (a space, tail[y][x] is True), both with the
+    same attribute, as a terminal draws it."""
     def __init__(self, h=GOLDEN_H, w=GOLDEN_W):
         self.h, self.w = h, w
         self.erase()
@@ -666,6 +668,8 @@ class FakeWin:
             cx += cw
 
     def chgat(self, y, x, n, a):
+        """Set the attribute of each of the n cells at y from x to a: it replaces the old attribute (colour pair and
+        bold included), it does not OR into it, as curses' chgat does."""
         if not (0 <= y < self.h): return
         for i in range(max(0, x), min(self.w, x + n)):
             self.attrs[y][i] = a
@@ -712,8 +716,19 @@ def golden_save(w, base):
             f.write("\n".join(rows) + "\n")
 
 
+def golden_fixture(path):
+    """The fake data the frames were drawn from, so the real board's test loads it instead of retyping it: the
+    voyages, WHEN, NOW, REVIEW_MERGE and view_now's quota list (the one its loop draws, in the same order)."""
+    quota = [dict(provider="tokenrhythm", window="5h", used=41, resets="22:00"),
+             dict(provider="codex", window="week", used=63, resets="Oct 30")]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"now": NOW, "review_merge_m": REVIEW_MERGE, "quota": quota, "voyages": VOYS,
+                   "when": WHEN}, f, ensure_ascii=False, indent=1, sort_keys=True)
+
+
 def golden(outdir):
-    """Draw every view of the first voyage folded and then unfolded (with sel = 0) and save the eight frames."""
+    """Draw every view of the first voyage folded and then unfolded (with sel = 0) and save the eight frames and
+    the fixture the frames were drawn from (fixture.json)."""
     global curses
     curses = FakeCurses()                         # from here nothing opens a screen
     for k, bit in MARK.items():
@@ -723,6 +738,7 @@ def golden(outdir):
     for view, name in VIEW_NAME.items():
         for detail, fold in ((False, "folded"), (True, "open")):
             golden_save(golden_frame(view, detail), os.path.join(outdir, f"{name}-{fold}"))
+    golden_fixture(os.path.join(outdir, "fixture.json"))
 
 
 if __name__ == "__main__":
