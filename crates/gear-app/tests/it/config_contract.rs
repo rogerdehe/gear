@@ -56,8 +56,15 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
         cfg.conventions,
         // T-255: `gate` has no default; the fixture names one.
         Conventions {
+            integration: "dev".into(),
+            release: "main".into(),
+            staging: "".into(),
+            review_max_rounds: 3,
+            // T-255: `gate` has no default; the fixture names one.
             gate: "make test".into(),
-            ..Conventions::default()
+            task_branch: "{lane}/t{n}".into(),
+            review_branch: "review/t{n}".into(),
+            seat_branch: "{project}/{seat}".into(),
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");
@@ -761,4 +768,92 @@ fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
     assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
     assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
     assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
+}
+
+// T-252: branch names are configuration. The defaults are the names GEAR
+// itself uses; a project may name its own, with `{project}`, `{lane}`, `{n}`.
+
+#[test]
+fn branch_templates_default_to_the_names_gear_uses() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.task_branch, gear_model::branch::TASK_BRANCH);
+    assert_eq!(cfg.conventions.review_branch, gear_model::branch::REVIEW_BRANCH);
+    assert_eq!(validate(&cfg), vec![], "the defaults are valid");
+
+    let text = format!(
+        "{MINIMAL}\n[conventions]\ntask_branch = \"{{project}}/{{lane}}/t{{n}}\"\nreview_branch = \"{{project}}/review/t{{n}}\"\n"
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.conventions.task_branch, "{project}/{lane}/t{n}");
+    assert_eq!(validate(&cfg), vec![], "a project may name its own branches");
+}
+
+#[test]
+fn a_branch_template_must_be_expandable_and_usable() {
+    let with = |field: &str, value: &str| {
+        parse(&format!("{MINIMAL}\n[conventions]\n{field} = \"{value}\"\n")).unwrap()
+    };
+    // No `{n}`: every task would share one branch.
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{lane}/work"))),
+        vec!["conventions.task_branch"]
+    );
+    assert_eq!(
+        fields(&validate(&with("review_branch", "review"))),
+        vec!["conventions.review_branch"]
+    );
+    // A placeholder GEAR does not fill in stays a brace in the name.
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{team}/t{n}"))),
+        vec!["conventions.task_branch"]
+    );
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{lane}/{task}"))),
+        vec!["conventions.task_branch"]
+    );
+    // A name git would refuse: a leading '/', "..", "//", a trailing '/', and
+    // a trailing ".lock".
+    for bad in ["/x/t{n}", "a..b/t{n}", "{lane}/../t{n}", "{lane}//t{n}", "{lane}/t{n}/", "{lane}/t{n}.lock"] {
+        assert_eq!(
+            fields(&validate(&with("task_branch", bad))),
+            vec!["conventions.task_branch"],
+            "{bad:?}"
+        );
+    }
+    // Two templates that name the same branch for the same task.
+    assert_eq!(
+        fields(&validate(&with("review_branch", "{lane}/t{n}"))),
+        vec!["conventions.review_branch"]
+    );
+}
+
+#[test]
+fn a_seat_branch_names_the_project_and_the_seat() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.seat_branch, gear_model::branch::SEAT_BRANCH);
+    assert_eq!(validate(&cfg), vec![], "the default seat branch is valid");
+
+    let with = |value: &str| {
+        parse(&format!("{MINIMAL}\n[conventions]\nseat_branch = \"{value}\"\n")).unwrap()
+    };
+    // No `{seat}`: every seat would share one worktree branch.
+    assert_eq!(
+        fields(&validate(&with("{project}/work"))),
+        vec!["conventions.seat_branch"]
+    );
+    // The task placeholders belong to the task branches, not to a seat's.
+    for bad in ["{project}/{lane}", "{project}/t{n}", "{project}/{team}"] {
+        assert_eq!(
+            fields(&validate(&with(bad))),
+            vec!["conventions.seat_branch"],
+            "{bad:?}"
+        );
+    }
+    // A name git would refuse.
+    assert_eq!(
+        fields(&validate(&with("{project}//{seat}"))),
+        vec!["conventions.seat_branch"]
+    );
+    // A seat branch is free to be any name git takes.
+    assert_eq!(validate(&with("{project}-{seat}")), vec![]);
 }

@@ -364,7 +364,8 @@ pub struct TempsSection {
 }
 
 /// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
-/// gate "" (none: a project names its own gate, T-255).
+/// the branches GEAR itself uses (T-252), gate "" (none: a project names its
+/// own gate, T-255).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -377,6 +378,16 @@ pub struct Conventions {
     /// build + test command, so the project names its own — a `[[repos]]`
     /// entry may name its gate instead.
     pub gate: String,
+    /// The branch a task's work goes on (T-252): a template with `{project}`,
+    /// `{lane}` and `{n}` filled in. Default `{lane}/t{n}`.
+    pub task_branch: String,
+    /// The branch a task is reviewed on (T-252), expanded like
+    /// `task_branch`. Default `review/t{n}`.
+    pub review_branch: String,
+    /// The branch of a seat's own worktree (T-252), with `{project}` and
+    /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
+    /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
+    pub seat_branch: String,
 }
 
 impl Default for Conventions {
@@ -387,6 +398,9 @@ impl Default for Conventions {
             staging: String::new(),
             review_max_rounds: 3,
             gate: String::new(),
+            task_branch: gear_model::branch::TASK_BRANCH.to_string(),
+            review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
+            seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
         }
     }
 }
@@ -686,6 +700,20 @@ pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
             )
         })?;
     parse(&row.config_toml)
+}
+
+/// The project's `[conventions]` for a reader that only needs the branch names
+/// the engine cuts (T-252): the defaults when the project's config text is
+/// empty (a store written before a config was stored) or does not parse. A
+/// name is never a gate — the merge is checked on the candidate, not on the
+/// branch it came from — so a reader here never stops a hand-in over it.
+pub fn conventions_or_default(store: &mut Store, project: &str) -> GearResult<Conventions> {
+    let row = store.read(|tx| tx.get_project(project))?;
+    Ok(row
+        .filter(|row| !row.config_toml.trim().is_empty())
+        .and_then(|row| parse(&row.config_toml).ok())
+        .map(|config| config.conventions)
+        .unwrap_or_default())
 }
 
 /// The profile table of a project (T-31): `base` (the built-ins) with the
@@ -1120,6 +1148,65 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
+    // ---- the branch templates (T-252): the branch names GEAR cuts and
+    // checks. A template is expanded with its placeholders; anything else stays
+    // a literal brace and git refuses the branch, so each is checked here — on
+    // a sample — rather than when a lane cannot push.
+    let templates: [(&str, &str, &str, &[&str]); 3] = [
+        // the field, the template, the placeholder it must name, the ones it
+        // may name
+        (
+            "conventions.task_branch",
+            &conventions.task_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.review_branch",
+            &conventions.review_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.seat_branch",
+            &conventions.seat_branch,
+            "seat",
+            &["project", "seat"],
+        ),
+    ];
+    let mut usable = [false; 3];
+    for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
+        let sample = if *required == "seat" {
+            gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
+        } else {
+            gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
+        };
+        usable[index] =
+            branch_template_issues(field, template, required, allowed, &sample, &mut issues);
+    }
+    if usable[0] && usable[1] {
+        let task = gear_model::branch::expand(
+            &conventions.task_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        let review = gear_model::branch::expand(
+            &conventions.review_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        if task == review {
+            issues.push(issue(
+                "conventions.review_branch",
+                format!(
+                    "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
+                ),
+            ));
+        }
+    }
+
     // ---- timing
     if cfg.timing.cooldown_s <= cfg.timing.tick_s {
         issues.push(issue(
@@ -1272,6 +1359,98 @@ fn issue(field: &str, problem: String) -> ConfigIssue {
     ConfigIssue {
         field: field.to_string(),
         problem,
+    }
+}
+
+/// The sample a branch template is expanded with to check it (T-252): one
+/// project, one lane, one seat, one task.
+const SAMPLE_PROJECT: &str = "p";
+const SAMPLE_LANE: &str = "l";
+const SAMPLE_SEAT: &str = "s";
+const SAMPLE_TASK: &str = "T-1";
+
+/// The placeholders `template` names, filled in or not.
+fn placeholders(template: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        names.push(&after[..close]);
+        rest = &after[close + 1..];
+    }
+    names
+}
+
+/// Check one branch template (T-252): it must name `required`, it may name only
+/// `allowed`, and its sample expansion must be a branch name git takes. Returns
+/// whether the template is usable.
+fn branch_template_issues(
+    field: &str,
+    template: &str,
+    required: &str,
+    allowed: &[&str],
+    sample: &str,
+    issues: &mut Vec<ConfigIssue>,
+) -> bool {
+    let filled: Vec<String> = allowed.iter().map(|name| format!("{{{name}}}")).collect();
+    let names = placeholders(template);
+    if let Some(unknown) = names.iter().find(|name| !allowed.contains(name)) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    if !names.contains(&required) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} has no {{{required}}}: each one needs its own branch"
+            ),
+        ));
+        return false;
+    }
+    if let Some(problem) = branch_name_problem(sample) {
+        issues.push(issue(
+            field,
+            format!("the template {template:?} names the branch {sample:?}: {problem}"),
+        ));
+        return false;
+    }
+    true
+}
+
+/// What is wrong with `name` as a branch name, or `None` when git takes it
+/// (T-252): letters, digits, '.', '_', '-' and '/' only, no leading '/', '-'
+/// or '.', no ".." or "//", and no trailing '/' or ".lock".
+fn branch_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("a branch name must not be empty".to_string());
+    }
+    if name.starts_with(['/', '-', '.']) {
+        return Some("a branch name must not start with '/', '-' or '.'".to_string());
+    }
+    if name.contains("..") || name.contains("//") {
+        return Some("a branch name must not contain \"..\" or \"//\"".to_string());
+    }
+    if name.ends_with('/') {
+        return Some("a branch name must not end with '/'".to_string());
+    }
+    if name.ends_with(".lock") {
+        return Some("a branch name must not end with \".lock\"".to_string());
+    }
+    match name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')))
+    {
+        Some(bad) => Some(format!(
+            "a branch name holds only letters, digits, '.', '_', '-' and '/', not {bad:?}"
+        )),
+        None => None,
     }
 }
 
