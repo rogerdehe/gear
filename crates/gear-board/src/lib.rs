@@ -602,7 +602,10 @@ pub fn project_with_agents(
         blocked: temps_seats.iter().filter(|seat| blocked_seat(seat)).count(),
     };
 
-    // The deliveries in flight: a Deliver op that is not settled yet.
+    // The deliveries in flight: a Deliver op that is not settled yet, and only
+    // while the seat it names is still the live incumbent (T-233). An op of a
+    // retired seat, or of an older generation of a live one, is history: the
+    // home page showed it as a lost message.
     let mut unconfirmed_deliveries = 0;
     for state in [
         OpState::Intended,
@@ -610,11 +613,18 @@ pub fn project_with_agents(
         OpState::Submitted,
         OpState::Unknown,
     ] {
-        unconfirmed_deliveries += tx
-            .ops_in_state(project, state)?
-            .iter()
-            .filter(|op| op.kind == OpKind::Deliver)
-            .count();
+        for op in tx.ops_in_state(project, state)? {
+            if op.kind != OpKind::Deliver {
+                continue;
+            }
+            let live = tx.get_seat(&op.seat)?.is_some_and(|seat| {
+                matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Starting)
+                    && seat.generation == op.generation
+            });
+            if live {
+                unconfirmed_deliveries += 1;
+            }
+        }
     }
 
     let voyages = voyage::reports(tx, project, now)?;
