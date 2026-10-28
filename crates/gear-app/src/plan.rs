@@ -1671,11 +1671,18 @@ fn remerge(
         }
     }
     // The same payload the engine writes when a review passes: the lane's
-    // branch (a hint for closing it), the accepted candidate and the review
-    // branch.
+    // branch (a hint for closing it, named by the project's template — T-252),
+    // the accepted candidate and the review branch.
     let lane = task.lane.clone().unwrap_or_default();
     let slug = task_id.to_lowercase().replace('-', "");
-    let branch = if lane.is_empty() { String::new() } else { format!("{lane}/{slug}") };
+    let conventions = project_config(tx, project)?
+        .map(|config| config.conventions)
+        .unwrap_or_default();
+    let branch = if lane.is_empty() {
+        String::new()
+    } else {
+        crate::base::task_branch(&conventions, project, &lane, task_id)
+    };
     tx.insert_op(&gear_store::NewOp {
         project: project.to_string(),
         seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },

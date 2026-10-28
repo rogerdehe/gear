@@ -1861,7 +1861,11 @@ fn hand_in_reply(
         .and_then(|row| row.lane)
         .or_else(|| env.ctx.as_ref().map(|ctx| ctx.seat.clone()))
         .unwrap_or_default();
-    let branch = gear_app::base::task_branch(&lane, task);
+    // The branch is the project's own template (T-252); a project whose config
+    // cannot be read keeps the name GEAR uses.
+    let conventions =
+        gear_app::config::conventions_or_default(store, &project).unwrap_or_default();
+    let branch = gear_app::base::task_branch(&conventions, &project, &lane, task);
     Ok(Some(format!(
         "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
     )))
