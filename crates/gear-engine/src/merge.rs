@@ -154,6 +154,10 @@ enum Report {
     /// have not landed on the integration branch yet (T-62). Each task is
     /// named with whether it has passed its review.
     Waiting(Vec<(String, bool)>),
+    /// The merge lost the push race on every try (T-280): the integration
+    /// branch moved under each attempt, so the merge goes back to the queue
+    /// instead of failing.
+    Raced(String),
     /// The merge failed: the reason, and whether it can clear.
     Failed(Failed),
 }
@@ -295,6 +299,24 @@ pub fn merge_passed(
                 )?;
                 tell_captain_waiting(store, project, op, &blocked, finished.at)?;
             }
+            // The integration branch moved under every try (T-280): another
+            // merge landed each time, so this is not a failure and no
+            // captain item. The op goes back to Unknown and runs again from
+            // the new tip on the next tick.
+            Report::Raced(reason) => {
+                let first = reason.lines().next().unwrap_or_default();
+                retry_merge(
+                    store,
+                    project,
+                    op,
+                    &format!(
+                        "{first} — the integration branch moved during each of {} tries; \
+                         it merges again from the new tip on the next tick",
+                        MERGE_RETRIES + 1
+                    ),
+                    finished.at,
+                )?
+            }
             // The worker already retried a reason that can clear (T-61): what
             // comes back is the failure that stands.
             Report::Failed(failed) => fail_merge(store, project, op, &failed.reason, finished.at)?,
@@ -415,6 +437,7 @@ pub fn merge_passed(
                         Step::Merged(lines) => Report::Merged(lines),
                         Step::Pr { pr, head } => Report::Pr { pr, head },
                         Step::Waiting(tasks) => Report::Waiting(tasks),
+                        Step::Raced(reason) => Report::Raced(reason),
                         Step::Failed(failed) => Report::Failed(failed),
                     }
                 }))
@@ -594,6 +617,9 @@ enum Step {
     /// The merge waits: the candidate carries the work of other tasks that
     /// have not landed yet. Each task is named with whether it has passed.
     Waiting(Vec<(String, bool)>),
+    /// The merge lost the push race on every try (T-280): the integration
+    /// branch moved under each attempt.
+    Raced(String),
     /// The merge failed.
     Failed(Failed),
 }
@@ -618,6 +644,7 @@ fn merge_with_retries(
             Step::Merged(lines) => return Step::Merged(lines),
             Step::Pr { pr, head } => return Step::Pr { pr, head },
             Step::Waiting(tasks) => return Step::Waiting(tasks),
+            Step::Raced(reason) => return Step::Raced(reason),
             Step::Failed(mut failed) => {
                 if failed.blocker != Blocker::Clear || attempt >= MERGE_RETRIES {
                     if attempt > 0 {
@@ -625,6 +652,14 @@ fn merge_with_retries(
                             "{}\n(retried {attempt} time(s), each with a growing wait)",
                             failed.reason
                         );
+                    }
+                    // A push race that ran through every retry is not a
+                    // failure (T-280): the remote moved each time, so the
+                    // merge goes back to the queue. A "cannot lock ref"
+                    // failure is not that — it can be a stale local lock —
+                    // and PR mode keeps its Failed end (T-280 §3).
+                    if pr.is_none() && lost_the_race(&failed.reason) {
+                        return Step::Raced(failed.reason);
                     }
                     return Step::Failed(failed);
                 }
@@ -1537,8 +1572,18 @@ fn step_result(step: Step) -> Result<String, Failed> {
                 .collect::<Vec<String>>()
                 .join(", ")
         ))),
+        Step::Raced(reason) => Err(Failed::clear(reason)),
         Step::Failed(failed) => Err(failed),
     }
+}
+
+/// Whether a push failure lost the race because the remote moved (T-280):
+/// another merge landed on the integration branch between the fetch and the
+/// push. A "cannot lock ref" failure is not that: it can be a stale local
+/// lock, so it keeps the failed end.
+fn lost_the_race(reason: &str) -> bool {
+    reason.starts_with(RACE)
+        && (reason.contains("non-fast-forward") || reason.contains("fetch first"))
 }
 
 fn merge_one_locked(
@@ -4525,6 +4570,50 @@ gate = "{gate}"
         }
     }
 
+    /// A runner that loses the push race `times` times (T-280): the remote
+    /// rejects the push, then behaves like [`FetchRemote`].
+    #[derive(Debug)]
+    struct RaceRemote {
+        left: std::sync::atomic::AtomicUsize,
+        reason: String,
+        /// Every push, refused or not: how many tries a test cost.
+        pushes: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RaceRemote {
+        fn new(times: usize, reason: &str) -> RaceRemote {
+            RaceRemote {
+                left: std::sync::atomic::AtomicUsize::new(times),
+                reason: reason.to_string(),
+                pushes: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn pushes(&self) -> usize {
+            self.pushes.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl Remote for RaceRemote {
+        fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String> {
+            self.pushes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let left = self.left.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.left
+                    .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                return Err(self.reason.clone());
+            }
+            FetchRemote.push(dir, remote, dst)
+        }
+
+        fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+            FetchRemote.delete(dir, remote, branch)
+        }
+    }
+
+    /// What a remote says when the integration branch moved under the push.
+    const REJECTED: &str = "! [rejected] dev -> dev (non-fast-forward)";
+
     /// T-61: a push race is not a failure. The merge waits, tries again from
     /// the new tip of the integration branch, and lands.
     #[test]
@@ -4550,6 +4639,82 @@ gate = "{gate}"
         assert!(log.contains("racer"), "the race happened: {log}");
         assert!(log.contains("task"), "the task landed: {log}");
         assert!(scratch.dev_has_task_commit());
+    }
+
+    /// T-280: a merge that loses the push race on every try is not a failed
+    /// merge. The step says it raced, so the op goes back to the queue
+    /// instead of a captain item and a `- remerge` by hand.
+    #[test]
+    fn a_merge_that_loses_the_push_race_on_every_try_is_raced() {
+        let scratch = Scratch::new("raced-step");
+        let worktree = scratch.merge_worktree();
+        let remote = RaceRemote::new(4, REJECTED);
+
+        let failed = merge_retried_with(
+            &worktree,
+            &repo("true"),
+            &op(&scratch.head_of("heat/t5")),
+            &remote,
+            &RetryWait::immediate(),
+        )
+        .unwrap_err();
+
+        assert!(failed.reason.starts_with(RACE), "{}", failed.reason);
+        assert_eq!(failed.blocker, Blocker::Clear, "a race can clear");
+        assert_eq!(remote.pushes(), MERGE_RETRIES as usize + 1, "one push per try");
+        assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
+    }
+
+    /// T-280: several fleets merge on one integration branch. A merge that
+    /// loses the race on every try of one tick goes back to the queue and
+    /// lands from the new tip on the next tick: no Failed state on the way,
+    /// no captain item.
+    #[test]
+    fn a_merge_that_races_every_try_goes_back_to_the_queue_and_lands() {
+        let scratch = Scratch::new("raced-queue");
+        let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, "true");
+        let remote = Arc::new(RaceRemote::new(MERGE_RETRIES as usize + 1, REJECTED));
+        cfg.remote = remote.clone();
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            let state = op_state(store, "O-1");
+            assert_ne!(state, Some(OpState::Failed), "a race is not a failure");
+            state == Some(OpState::Confirmed)
+        });
+
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed, "{op:?}");
+        // The first launch raced every try; the second launch's push landed.
+        assert_eq!(remote.pushes(), MERGE_RETRIES as usize + 2, "one push per try");
+        assert!(scratch.dev_has_task_commit(), "T-5 landed on dev");
+        assert!(
+            failed_items(&mut store, "T-5").is_empty(),
+            "a race rings no captain"
+        );
+    }
+
+    /// T-280: every other clear failure keeps today's three retries and its
+    /// Failed end — a push a hook declines is not the remote moving.
+    #[test]
+    fn a_push_a_hook_declines_every_try_still_fails_and_rings_the_captain() {
+        let scratch = Scratch::new("declined");
+        let (mut store, mut herdr, mut cfg) = queued_merge(&scratch, "true");
+        cfg.remote = Arc::new(RaceRemote::new(usize::MAX, "hook declined"));
+
+        drive(&mut store, &mut herdr, &cfg, |store| {
+            op_state(store, "O-1") == Some(OpState::Failed)
+        });
+
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Failed, "{op:?}");
+        let items = failed_items(&mut store, "T-5");
+        assert_eq!(items.len(), 1, "the captain hears once: {items:?}");
+        assert!(
+            items[0].body.contains("push failed: hook declined"),
+            "{}",
+            items[0].body
+        );
+        assert!(!scratch.dev_has_task_commit(), "nothing of T-5 was pushed");
     }
 
     /// T-61: a gate that could not run (the toolchain is missing) is an
