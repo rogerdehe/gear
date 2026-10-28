@@ -561,11 +561,49 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         });
         lines
     };
+    // T-269: one store per Herdr session (v0.4.5). A config that names
+    // another session would register into this session's store, where its
+    // engine never reaches the panes — so it is refused before `--check`
+    // prints "config ok" and before a real init writes anything. Nothing is
+    // checked without a socket, for the default session, or when the caller
+    // names a store of its own with `GEAR_DB`.
+    let refuse_a_foreign_session =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let Ok(socket) = std::env::var("HERDR_SOCKET_PATH") else {
+                return Ok(());
+            };
+            let Some(name) = session_name_of(&home, &socket) else {
+                return Ok(());
+            };
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a caller that named another store itself is
+            // checked by nothing, since that store need not be a session's.
+            if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
+                if std::path::PathBuf::from(db) != default_store_in(&home, Some(&socket)) {
+                    return Ok(());
+                }
+            }
+            let configured = &parsed.project.herdr_session;
+            if *configured == name {
+                return Ok(());
+            }
+            Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
+                    parsed.project.id
+                ),
+            ))
+        };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
         let text = read_config(config)?;
         let parsed = gear_app::admin::check(&text, None)?;
+        refuse_a_foreign_session(&parsed)?;
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
@@ -611,6 +649,10 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         ));
     }
     let text = read_config(config)?;
+    // T-269: a config for another session never lands in this one's store.
+    if let Ok(parsed) = gear_app::config::parse(&text) {
+        refuse_a_foreign_session(&parsed)?;
+    }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
     // another project's seat (T-100); a seat may re-apply its own project's

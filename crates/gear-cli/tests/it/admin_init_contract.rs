@@ -740,3 +740,120 @@ fn init_names_the_lanes_and_reviewers_after_registering() {
     assert!(printed.contains("  reviewers: 1 × codex review/model"), "{printed}");
     assert_eq!(config_version(&db), 1, "the project was registered");
 }
+
+/// A config for project `p` on `repo` that names Herdr session `session`
+/// (T-269).
+fn config_in_session(dir: &Path, repo: &Path, session: &str) -> PathBuf {
+    let path = dir.join(format!("gear-{session}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = {session}\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[conventions]\ngate = \"make test\"\n",
+            session = serde_json::json!(session).to_string(),
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// `gear admin init [--check] <config>` from a shell inside the Herdr session
+/// at `socket`, over an injected `HOME` — with no `GEAR_DB` unless `db` names
+/// one (T-269).
+fn init_from_session(
+    home: &Path,
+    socket: &Path,
+    config: &Path,
+    check: bool,
+    db: Option<&Path>,
+) -> Output {
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home).expect("install the skill");
+    }
+    let mut args = vec!["admin", "init"];
+    if check {
+        args.push("--check");
+    }
+    args.push(config.to_str().expect("a utf-8 path"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+    cmd.args(args)
+        .env("HOME", home)
+        .env("GEAR_ADMIN", "1")
+        .env("HERDR_SOCKET_PATH", socket)
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("GEAR_CTX");
+    match db {
+        Some(db) => cmd.env("GEAR_DB", db),
+        None => cmd.env_remove("GEAR_DB"),
+    };
+    cmd.output().expect("run gear")
+}
+
+/// T-269: one store per Herdr session since v0.4.5, so a config naming another
+/// session would register into this session's store, where its engine never
+/// reaches the panes — refused by `--check` and by `init`, before either says
+/// or writes anything.
+#[test]
+fn init_refuses_a_config_for_another_herdr_session() {
+    let dir = scratch("session");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let alpha = home.join(".config/herdr/sessions/alpha/herdr.sock");
+    let refused = "project p names herdr_session beta, but this shell runs in session alpha: \
+                   its store and engine are this session's; run init from a pane of session beta, \
+                   or fix herdr_session";
+    let beta = config_in_session(&dir, &repo, "beta");
+
+    // `--check` refuses it before printing "config ok".
+    let o = init_from_session(&home, &alpha, &beta, true, None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    assert!(err.contains(refused), "{err}");
+    assert!(!stdout(&o).contains("config ok"), "no headline: {}", stdout(&o));
+
+    // A real init writes nothing at all.
+    let o = init_from_session(&home, &alpha, &beta, false, None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains(refused), "{}", stderr(&o));
+    assert!(
+        !home.join(".local/state/gear/alpha/gear.db").exists(),
+        "nothing was registered"
+    );
+
+    // The session the config names passes, and registers.
+    let named = config_in_session(&dir, &repo, "alpha");
+    let o = init_from_session(&home, &alpha, &named, true, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(headline(&o), "config ok: project p, 0 lanes, 0 reviewers");
+    let o = init_from_session(&home, &alpha, &named, false, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        home.join(".local/state/gear/alpha/gear.db").exists(),
+        "registered into alpha's own store"
+    );
+
+    // The default session belongs to nobody in particular: it passes either
+    // way, whatever the config names.
+    let default_socket = home.join(".config/herdr/herdr.sock");
+    let db = dir.join("gear.db");
+    let o = init_from_session(&home, &default_socket, &beta, true, Some(&db));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(headline(&o), "config ok: project p, 0 lanes, 0 reviewers");
+    let o = init_from_session(&home, &default_socket, &beta, false, Some(&db));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    // A store the caller names with `GEAR_DB` is not a session's: nothing is
+    // checked, so a named session's socket passes too.
+    let explicit = dir.join("explicit.db");
+    let o = init_from_session(&home, &alpha, &beta, true, Some(&explicit));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = init_from_session(&home, &alpha, &beta, false, Some(&explicit));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(config_version(&explicit), 1, "registered into the named store");
+}
