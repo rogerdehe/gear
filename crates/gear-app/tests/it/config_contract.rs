@@ -268,6 +268,69 @@ fn the_plain_model_chain_still_parses() {
     assert_eq!(cfg.lanes[0].models[0].cli(), Some("codex"));
 }
 
+/// T-235: the claude CLI takes a bare model id or alias
+/// (`claude-sonnet-5-5`), never `provider/model` — it refuses the prefixed
+/// one, which used to cost a review round to find out at runtime.
+#[test]
+fn a_claude_seat_gets_a_bare_model_id() {
+    let prefixed = format!(
+        "{MINIMAL}\n[temps]\nkind = \"claude\"\nprofile = \"claude\"\n\n[models]\nreview = [\"anthropic/claude-sonnet-5-5\"]\non_quota = {{ review = \"wait\" }}\n"
+    );
+    let issues = validate(&parse(&prefixed).unwrap());
+    assert_eq!(fields(&issues), vec!["models.review"]);
+    assert_eq!(
+        issues[0].problem,
+        "the claude CLI takes a bare model id such as claude-sonnet-5-5, not anthropic/claude-sonnet-5-5"
+    );
+
+    // The bare id is what the CLI wants.
+    let bare = prefixed.replace("anthropic/claude-sonnet-5-5", "claude-sonnet-5-5");
+    assert!(validate(&parse(&bare).unwrap()).is_empty());
+
+    // Another CLI keeps its `provider/model` ids: a pi lane is no claude seat.
+    let pi_lane = MINIMAL.replace(
+        "kind = \"opencode\"\nprofile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
+        "kind = \"pi\"\nprofile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
+    ) + "\n[models]\nlanes = [\"minimax-cn/MiniMax-M3.1-Flash\"]\non_quota = { lanes = \"wait\" }\n";
+    let cfg = parse(&pi_lane).unwrap();
+    assert_eq!(cfg.lanes[0].kind, "pi");
+    assert_eq!(validate(&cfg), vec![]);
+}
+
+/// T-235: an entry's CLI is the one it names, else the kind of the seat that
+/// runs it — a lane's own kind, every lane for `models.lanes`, the captain's.
+#[test]
+fn the_claude_rule_reads_an_entrys_cli_else_the_seats_kind() {
+    // An entry that names claude is checked against claude, whoever runs it.
+    let own_cli = format!(
+        "{MINIMAL}\n[models]\nlanes = [\"gpt-6.1-sol\", {{ model = \"anthropic/claude-sonnet-5-5\", cli = \"claude\" }}]\n"
+    );
+    assert_eq!(fields(&validate(&parse(&own_cli).unwrap())), vec!["models.lanes"]);
+
+    // `models.lanes` is shared by every lane: a claude lane is enough.
+    let claude_lane = MINIMAL.replace(
+        "kind = \"opencode\"\nprofile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
+        "kind = \"claude\"\nprofile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
+    );
+    let shared = format!(
+        "{claude_lane}\n[models]\nlanes = [\"anthropic/claude-sonnet-5-5\", \"claude-sonnet-5-5\"]\n"
+    );
+    assert_eq!(fields(&validate(&parse(&shared).unwrap())), vec!["models.lanes"]);
+
+    // A lane's own chain is checked against that lane's kind.
+    let lane_own = claude_lane.replace(
+        "profile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
+        "profile = \"opencode\"\nmodels = [\"anthropic/claude-sonnet-5-5\"]\n\n[[lanes]]\nname = \"pricing\"",
+    );
+    assert_eq!(fields(&validate(&parse(&lane_own).unwrap())), vec!["lanes[0].models"]);
+
+    // The captain's chain follows the captain's kind, not a lane's.
+    let captain = format!("{MINIMAL}\n[models]\ncaptain = [\"anthropic/claude-sonnet-5-5\"]\n");
+    assert_eq!(validate(&parse(&captain).unwrap()), vec![], "the captain is a codex");
+    let claude_captain = captain.replace("kind = \"codex\"", "kind = \"claude\"");
+    assert_eq!(fields(&validate(&parse(&claude_captain).unwrap())), vec!["models.captain"]);
+}
+
 /// A broken entry is a bad format, and the detail says where.
 #[test]
 fn a_broken_model_entry_is_bad_format() {

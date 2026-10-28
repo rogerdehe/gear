@@ -743,7 +743,9 @@ pub fn profile_table(
 /// - a non-empty `models.review` holds at least one model different from every
 ///   lane's primary (`models[0]`, else `models.lanes[0]`), so the reviewer
 ///   never runs the model it reviews;
-/// - `models.quota_reset_h ≥ 1`.
+/// - `models.quota_reset_h ≥ 1`;
+/// - an entry whose CLI is `claude` (its own, else the kind of the seat that
+///   runs it) names a bare model id or alias, never `provider/model` (T-235).
 /// Empty chains are valid: models are not managed by GEAR then.
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
@@ -1121,6 +1123,33 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
+    // ---- the claude CLI takes a bare model id or alias, never a
+    // `provider/model` one (T-235): `anthropic/claude-sonnet-5-5` is refused
+    // by the CLI itself, which costs a review round to find out. The CLI of
+    // an entry is its own, else the kind of the seat that runs it.
+    let lane_kinds: Vec<&str> = cfg.lanes.iter().map(|lane| lane.kind.trim()).collect();
+    let temps_kinds: Vec<&str> = cfg
+        .temps
+        .iter()
+        .map(|temps| temps.kind.trim())
+        .collect();
+    claude_model_issues("models.lanes", &models.lanes, &lane_kinds, &mut issues);
+    claude_model_issues("models.review", &models.review, &temps_kinds, &mut issues);
+    claude_model_issues(
+        "models.captain",
+        &models.captain,
+        &[cfg.captain.kind.trim()],
+        &mut issues,
+    );
+    for (index, lane) in cfg.lanes.iter().enumerate() {
+        claude_model_issues(
+            &format!("lanes[{index}].models"),
+            &lane.models,
+            &[lane.kind.trim()],
+            &mut issues,
+        );
+    }
+
     // ---- the GitHub mode (T-79): absent = local-only, so there is nothing
     // to check then; present = it must name a repo.
     if let Some(github) = &cfg.github {
@@ -1237,6 +1266,34 @@ fn chain_problem(chain: &[ModelEntry]) -> Option<String> {
         seen.push(key);
     }
     None
+}
+
+/// T-235: the claude CLI takes a bare model id or alias
+/// (`claude-sonnet-5-5`), never a `provider/model` one. An entry's CLI is the
+/// one it names, else the kind of the seat that runs it (a lane's kind, the
+/// temps seat's, the captain's); a chain shared by several seats is checked
+/// against every one of their kinds.
+fn claude_model_issues(
+    field: &str,
+    chain: &[ModelEntry],
+    kinds: &[&str],
+    issues: &mut Vec<ConfigIssue>,
+) {
+    for entry in chain {
+        let claude = match entry.cli() {
+            Some(cli) => cli == "claude",
+            None => kinds.iter().any(|kind| *kind == "claude"),
+        };
+        let model = entry.model();
+        if claude && model.contains('/') {
+            issues.push(issue(
+                field,
+                format!(
+                    "the claude CLI takes a bare model id such as claude-sonnet-5-5, not {model}"
+                ),
+            ));
+        }
+    }
 }
 
 /// The chain a lane runs on (T-35): its own entries when it names any, else
