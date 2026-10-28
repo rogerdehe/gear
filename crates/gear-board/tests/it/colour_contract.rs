@@ -108,6 +108,7 @@ fn world() -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: NOW,
+                mechanical: None,
             })?;
             tx.insert_attempt(&attempt("T-1", "hull", AttemptState::Accepted, departure))?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, departure)?;

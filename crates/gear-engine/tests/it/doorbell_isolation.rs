@@ -252,6 +252,7 @@ fn warm_reviewer(w: &mut World) -> SeatRow {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             // The attempt the reviewer reads: handed in, its candidate pushed.
             gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;

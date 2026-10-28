@@ -20,7 +20,7 @@ fn world(tasks: &[TaskRow]) -> Store {
         for t in tasks {
             tx.insert_task(t)?;
             tx.insert_contract(&ContractRow { project: "p".into(), task: t.id.clone(), version: 1, goal: "g".into(),
-                accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+                accept: "a".into(), evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         }
         Ok(())
     }).unwrap();

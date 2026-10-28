@@ -29,7 +29,7 @@ fn world() -> Store {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)
     }).unwrap();

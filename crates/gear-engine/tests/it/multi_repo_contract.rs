@@ -341,6 +341,7 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
             tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;

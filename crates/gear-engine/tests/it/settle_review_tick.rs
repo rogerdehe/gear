@@ -55,6 +55,7 @@ fn world_verdict(passed: bool) -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
         on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;

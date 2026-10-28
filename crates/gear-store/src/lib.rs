@@ -230,6 +230,9 @@ pub struct ContractRow {
     pub evidence_due_min: Option<i64>,
     pub body: String,
     pub created: Ts,
+    /// v7 (T-272): the reason the task is mechanical — the merge gate alone
+    /// proves the change, so the review is skipped. None: reviewed as before.
+    pub mechanical: Option<String>,
 }
 
 /// One attempt of a task (design/06).
@@ -1941,8 +1944,9 @@ impl<'s> Tx<'s> {
         self.tx
             .execute(
                 "INSERT INTO contracts
-                   (project, task, version, goal, accept, evidence_files, evidence_due_min, body, created)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                   (project, task, version, goal, accept, evidence_files, evidence_due_min, body, created,
+                    mechanical)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     row.project,
                     row.task,
@@ -1953,6 +1957,7 @@ impl<'s> Tx<'s> {
                     row.evidence_due_min,
                     row.body,
                     row.created,
+                    row.mechanical,
                 ],
             )
             .map_err(map_sqlite)?;
@@ -1963,7 +1968,8 @@ impl<'s> Tx<'s> {
         let row: Option<ContractRow> = self
             .tx
             .query_row(
-                "SELECT project, task, version, goal, accept, evidence_files, evidence_due_min, body, created
+                "SELECT project, task, version, goal, accept, evidence_files, evidence_due_min, body, created,
+                        mechanical
                  FROM contracts WHERE project=?1 AND task=?2 AND version=?3",
                 params![project, task, version],
                 contract_from_row,
@@ -3470,6 +3476,7 @@ fn contract_from_row(row: &rusqlite::Row) -> rusqlite::Result<ContractRow> {
         evidence_due_min: row.get(6)?,
         body: row.get(7)?,
         created: row.get(8)?,
+        mechanical: row.get(9)?,
     })
 }
 

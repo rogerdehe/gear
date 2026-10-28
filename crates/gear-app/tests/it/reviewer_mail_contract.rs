@@ -65,6 +65,7 @@ fn world() -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: NOW,
+            mechanical: None,
         })?;
         Ok(())
     })

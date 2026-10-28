@@ -15,7 +15,7 @@ fn world(followup:bool) -> (Store, FakeHerdr, EngineCfg) {
         testing::seed_active_seat(tx,"p","heat",SeatRole::Lane,PANE,"opencode",T)?;
         tx.set_binding_session_ref("p:heat",1,"old")?;
         tx.insert_task(&TaskRow { repo:None,base:None,gate:None,rework_estimate_min:None,project:"p".into(),id:"T-1".into(),rank:1,state:TaskState::Ready,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:followup.then(|| "T-7".into()),wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:T })?;
-        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
         Ok(())
     }).unwrap();
     let mut h=FakeHerdr::new(); h.add_agent_named("w1:p1","codex",AgentStatus::Idle,"p-captain"); h.add_agent_named(PANE,"opencode",AgentStatus::Idle,"p-heat"); h.set_agent_session(PANE,"old");
@@ -142,7 +142,7 @@ fn recovering_existing_round_consumes_fresh_marker_before_unrelated_task() {
         let mut a=tx.get_attempt("p","T-1",1)?.unwrap(); a.state=gear_model::AttemptState::Accepted; tx.update_attempt(&a)?;
         let mut t=tx.get_task("p","T-1")?.unwrap(); t.state=TaskState::Done; tx.update_task(&t)?;
         t.id="T-2".into(); t.state=TaskState::Ready; t.rank=2; tx.insert_task(&t)?;
-        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T+5})?;
+        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T+5, mechanical: None,})?;
         Ok(())
     }).unwrap();
     advance(&mut s,&mut h,&c,5);
@@ -162,7 +162,7 @@ fn retiring_lane_recovers_its_open_round_without_receiving_new_work() {
         tx.add_round_session(&key,"old")?;
         tx.set_seat_state("p:heat",gear_model::SeatState::Retiring,Some("finish current work"),T+1)?;
         let mut task=tx.get_task("p","T-1")?.unwrap(); task.id="T-2".into(); task.state=TaskState::Ready; task.rank=2; tx.insert_task(&task)?;
-        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T})?;
+        tx.insert_contract(&ContractRow {project:"p".into(),task:"T-2".into(),version:1,goal:"new".into(),accept:"done".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:T, mechanical: None,})?;
         Ok(())
     }).unwrap();
     h.add_shell(PANE);

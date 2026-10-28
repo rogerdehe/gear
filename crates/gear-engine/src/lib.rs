@@ -1029,7 +1029,7 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             testing::seed_active_seat(tx,"p","captain",SeatRole::Captain,"w1:p9","claude",NOW)?;
             if role==SeatRole::Temp { tx.set_seat_task(&seat.id,"T-1")?; }
             tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
-            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+            tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW, mechanical: None,})?;
             tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some("codex".into()),session_action:None,sent_at:Some(NOW)})?;
             let round_role=if role==SeatRole::Lane {"dev"} else {"review"};
             tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:"codex".into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
@@ -1151,7 +1151,7 @@ review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort=
                     tx.set_seat_task(&seat.id, "T-1")?;
                 }
                 tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
-                tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+                tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW, mechanical: None,})?;
                 tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some(binding_kind.into()),session_action:None,sent_at:Some(NOW)})?;
                 let round_role = if role == SeatRole::Lane { "dev" } else { "review" };
                 tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:binding_kind.into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
