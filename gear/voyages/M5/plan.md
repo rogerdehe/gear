@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=595 -->
+<!-- gear-plan project=gear base=596 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -633,3 +633,27 @@ goal: [v0.5.3 S4] The board's README says which task built each change, so the p
 accept: The README holds the table with every row above and each label replaced by a T-number of the plan. No cargo run is needed; the merge gate runs `make gate`.
 deps: T-358
 estimate: 10
+
+## T-366 [must] lane=mast milestone=M5 required
+goal: [v0.5.0 S1] Release v0.5.0, station S1 of M5. Change, no other design: (1) the version is 0.5.0 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.0.md, in the form of docs/releases/v0.4.10.md: one line per task of station S1 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.0 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.0"; docs/releases/v0.5.0.md lists every merged S1 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-257, T-258, T-259, T-260, T-261, T-262, T-263, T-264, T-265, T-266, T-267, T-268, T-269, T-270, T-271, T-274, T-277, T-278, T-279, T-280, T-281, T-282, T-283, T-284, T-285, T-286, T-287, T-288, T-289, T-290, T-291, T-292, T-293, T-294, T-295, T-296, T-297, T-298, T-299, T-300, T-301, T-302, T-303, T-304, T-305, T-306, T-307, T-308, T-309, T-310, T-311, T-312, T-313, T-314, T-315, T-316, T-317, T-318, T-319, T-320, T-321, T-322
+estimate: 15
+
+## T-367 [must] lane=mast milestone=M5 required
+goal: [v0.5.1 S2] Release v0.5.1, station S2 of M5. Change, no other design: (1) the version is 0.5.1 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.1.md, in the form of docs/releases/v0.4.10.md: one line per task of station S2 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.1 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.1"; docs/releases/v0.5.1.md lists every merged S2 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-272, T-273, T-275, T-323, T-324, T-325, T-326, T-327, T-328, T-338
+estimate: 15
+
+## T-368 [must] lane=mast milestone=M5 required
+goal: [v0.5.2 S3] Release v0.5.2, station S3 of M5. Change, no other design: (1) the version is 0.5.2 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.2.md, in the form of docs/releases/v0.4.10.md: one line per task of station S3 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.2 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.2"; docs/releases/v0.5.2.md lists every merged S3 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-329, T-330, T-331, T-332, T-333, T-334, T-335, T-336, T-337
+estimate: 15
+
+## T-369 [must] lane=mast milestone=M5 required
+goal: [v0.5.3 S4] Release v0.5.3, station S4 of M5. Change, no other design: (1) the version is 0.5.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.3.md, in the form of docs/releases/v0.4.10.md: one line per task of station S4 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.3 and publishes the release; this task does not. The code change is in these files only.
+accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.3"; docs/releases/v0.5.3.md lists every merged S4 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
+deps: T-276, T-339, T-340, T-341, T-342, T-343, T-344, T-345, T-346, T-347, T-348, T-349, T-350, T-351, T-352, T-353, T-354, T-355, T-356, T-357, T-358, T-359, T-360, T-361, T-362, T-363, T-364, T-365
+estimate: 15
