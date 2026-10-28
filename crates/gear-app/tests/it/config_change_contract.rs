@@ -332,3 +332,62 @@ profile = "opencode"
     assert_eq!(captain.role, SeatRole::Captain);
     assert_eq!(captain.profile, "codex");
 }
+
+/// T-304: a Ready task on a retired lane brings it back only while the lane
+/// quota has a free slot; the quota counts the lane seats that are not Retired.
+#[test]
+fn a_full_lane_quota_leaves_a_retired_lane_retired() {
+    const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+    let mut s = Store::open_in_memory().unwrap();
+    let three = config_with(
+        &format!("{HEAT}{PRICING}{SAIL}"),
+        "\"minimax-cn/MiniMax-M3.1-Flash\"",
+    );
+    init_with_home(&mut s, &admin(), &three, Some(crate::skill_home()), T0).unwrap();
+    // sail is reclaimed, then the captain lowers the quota to two: heat and
+    // pricing fill it, sail is retired and does not count (T-304).
+    s.write(|tx| tx.set_seat_state("harbor:sail", SeatState::Retired, Some("reclaimed"), T0 + 1))
+        .unwrap();
+    let two = three.replace("lanes = 3", "lanes = 2");
+    init_with_home(&mut s, &admin(), &two, Some(crate::skill_home()), T0 + 2).unwrap();
+
+    // A NEW task names sail: the quota is full, so it stays retired and the
+    // apply says why.
+    let applied = apply_task_on(&mut s, "sail", 0, "r1");
+    assert!(
+        !applied.staffed.iter().any(|line| line == "start sail"),
+        "{:?}",
+        applied.staffed
+    );
+    assert!(
+        applied.warnings.contains(&"lane sail stays retired: 2 lanes run and the quota allows 2; retire another lane or raise [quota] lanes".to_string()),
+        "{:?}",
+        applied.warnings
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Retired);
+    assert_eq!(sail.state_reason.as_deref(), Some("reclaimed"));
+
+    // Another lane retires, so a slot is free: the Ready task on sail brings
+    // it back.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 4)
+    })
+    .unwrap();
+    let applied = apply_task_on(&mut s, "heat", 1, "r2");
+    assert!(
+        applied.staffed.contains(&"start sail".to_string()),
+        "{:?}",
+        applied.staffed
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Queued, "the engine onboards it again");
+    assert_eq!(sail.state_reason.as_deref(), Some("a task names it again"));
+}

@@ -1014,3 +1014,43 @@ fn check_models_warns_about_a_model_its_cli_does_not_list() {
     assert!(!stderr(&o).contains("warning:"), "{}", stderr(&o));
     assert!(!marker.exists(), "a plain --check runs no CLI");
 }
+
+/// T-304: `--check` refuses a config whose lanes would run past the lane
+/// quota — with no store there is no retired lane to leave out, so three lanes
+/// under `lanes = 2` are refused and nothing is written.
+#[test]
+fn check_refuses_more_lanes_than_the_quota_allows() {
+    let dir = scratch("check-quota");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 2\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/heat/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"keel\"\nduty = \"everything\"\nowns = [\"src/keel/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"sail\"\nduty = \"everything\"\nowns = [\"src/sail/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\ngate = \"make test\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, None, false, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let checked = stderr(&o);
+    assert!(checked.contains("ERROR BAD_FORMAT"), "{checked}");
+    assert!(
+        checked.contains(
+            "quota.lanes: 3 lanes would run but the quota allows 2 (a retired lane does not count)"
+        ),
+        "{checked}"
+    );
+    assert!(!db.exists(), "a check writes nothing");
+}

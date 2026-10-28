@@ -470,3 +470,64 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     assert_eq!(row.config_version, 1, "a refused re-registration writes nothing");
     assert!(row.config_toml.contains("elsewhere"), "{}", row.config_toml);
 }
+
+/// The third lane of the quota test (T-304), appended to a config.
+const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+
+/// The contract's config with a third lane, so that three lanes run under a
+/// quota of two.
+fn three_lanes() -> String {
+    CONFIG.replace("[conventions]\n", &format!("{SAIL}\n[conventions]\n"))
+}
+
+/// T-304: the lane quota counts the lanes that would run, so a first
+/// registration of three lanes under `lanes = 2` is refused — a first
+/// registration has no retired lane to leave out.
+#[test]
+fn a_first_registration_over_the_lane_quota_is_refused() {
+    let mut s = Store::open_in_memory().unwrap();
+    let e = init_with_home(&mut s, &admin(), &three_lanes(), Some(crate::skill_home()), T0)
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "quota.lanes: 3 lanes would run but the quota allows 2 (a retired lane does not count)"
+    );
+    assert!(
+        s.read(|tx| tx.get_project("harbor")).unwrap().is_none(),
+        "nothing written"
+    );
+    assert!(s.read(|tx| tx.seats_of_project("harbor")).unwrap().is_empty());
+}
+
+/// T-304: a retired lane keeps its seat but takes no quota slot, so a re-apply
+/// may list it together with new lanes that fill the quota.
+#[test]
+fn a_retired_lane_takes_no_quota_slot_on_re_apply() {
+    let mut s = Store::open_in_memory().unwrap();
+    init_with_home(&mut s, &admin(), CONFIG, Some(crate::skill_home()), T0).unwrap();
+    // pricing is reclaimed: its seat stays, retired.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 1)
+    })
+    .unwrap();
+
+    // The new config lists heat, pricing and sail under the same quota of two:
+    // heat and sail run, pricing does not count.
+    let r = init_with_home(&mut s, &admin(), &three_lanes(), Some(crate::skill_home()), T0 + 2)
+        .unwrap();
+    assert_eq!(r.config_version, 2);
+    let seats = s.read(|tx| tx.seats_of_project("harbor")).unwrap();
+    let pricing = seats.iter().find(|seat| seat.name == "pricing").unwrap();
+    assert_eq!(pricing.state, SeatState::Retired, "a retired lane stays retired");
+    assert!(seats
+        .iter()
+        .any(|seat| seat.name == "sail" && seat.state == SeatState::Queued));
+}

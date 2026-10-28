@@ -795,7 +795,8 @@ pub fn profile_table(
 ///   path prefix of the other on a `/` boundary (`src/a/` vs `src/a/b.rs` overlap;
 ///   `src/a` vs `src/ab` do not) — only between lanes of the **same** repo
 ///   (T-52): the same paths in two repos are two different files;
-/// - number of lanes ≤ `quota.lanes`;
+/// - the lane quota (`quota.lanes`) is not checked here: only the seats know
+///   which lanes are retired (T-304), so `admin::lane_quota_problem` does it;
 /// - every `[[quota.sources]]`: a provider name and a reader the engine knows
 ///   (`minimax`, `opencode-go`, `codex`);
 /// - every `[[repos]]` name: `[a-z][a-z0-9-]*` and unique;
@@ -968,17 +969,9 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
-    // ---- quota
-    if cfg.lanes.len() as u32 > cfg.quota.lanes {
-        issues.push(issue(
-            "quota.lanes",
-            format!(
-                "{} lanes are configured but the quota allows {}",
-                cfg.lanes.len(),
-                cfg.quota.lanes
-            ),
-        ));
-    }
+    // ---- quota: not checked here. The quota counts the lanes that can run,
+    // which means the seats, retired ones excluded (T-304); `validate` sees only
+    // the config, so `admin::lane_quota_problem` makes that finding.
 
     // ---- captain: nothing to check here (pane, kind and profile are checked
     // against Herdr by `gear admin init`).
