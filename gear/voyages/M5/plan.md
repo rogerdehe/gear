@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=632 -->
+<!-- gear-plan project=gear base=633 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -59,9 +59,6 @@ eta: 16h
 - station M-4739: keep course 308 min in, 51 done; forecast 1500 min; the eta waits for the user
 - station M-4754: keep course 320 min in, 54 done; forecast 1422 min; the eta waits for the user
 - station M-4768: keep course 337 min in, 57 done; forecast 1407 min; the eta waits for the user
-
-# Verdicts
-- T-321 attempt=1 contract=2 candidate=fffb4ce734e869c1cd0ec7f91e5d42216f71bf51 fail estimate=15 rework="The merge into dev conflicts in crates/gear-cli/tests/it/admin_init_contract.rs (another task's tests landed there first). Merge origin/dev into your branch, keep both sides' tests, run make check CRATE=gear-cli and make check CRATE=gear-app, and hand in again. No other change."
 
 # Queue
 
