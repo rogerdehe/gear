@@ -111,7 +111,7 @@ pub struct Draft {
     pub project: String,
     pub base: i64,
     pub goal: String,
-    /// (title line after `# Milestone `, body)
+    /// (title line after `# Milestone ` or `# Voyage `, body)
     pub milestones: Vec<(String, String)>,
     pub decisions: Vec<String>,
     /// in rank order
@@ -121,8 +121,8 @@ pub struct Draft {
     pub reviews: Vec<ReviewLine>,
 }
 
-/// The id and title of a `# Milestone <id>: <title>` block, from the header
-/// text (the part after `# Milestone `). The id is the first word without its
+/// The id and title of a `# Milestone <id>: <title>` (or `# Voyage <id>:
+/// <title>`) block, from the header text (the part after `# Milestone `). The id is the first word without its
 /// trailing colon, as [`parse`] reads it.
 pub fn milestone_parts(header: &str) -> (&str, &str) {
     let id = header
@@ -160,8 +160,8 @@ pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<S
 
 /// Parse a draft. Header `<!-- gear-plan project=<id> base=<n> -->` on the
 /// first non-empty line is required. Sections may be absent; known sections
-/// only (`Goal`, `Milestone …`, `Decisions`, `Queue`, `Staff`, `Verdicts`,
-/// `Review`). Queue field lines are `<name>: <value>`; a value runs to the end
+/// only (`Goal`, `Milestone …`/`Voyage …`, `Decisions`, `Queue`, `Staff`,
+/// `Verdicts`, `Review`). Queue field lines are `<name>: <value>`; a value runs to the end
 /// of the line.
 pub fn parse(text: &str) -> GearResult<Draft> {
     let lines: Vec<&str> = text.lines().collect();
@@ -216,7 +216,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                 index += 1;
                 draft.goal = collect_body(&lines, &mut index);
             }
-            "Milestone" => {
+            "Milestone" | "Voyage" => {
                 let id = rest
                     .split_whitespace()
                     .next()
@@ -224,7 +224,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
                     .trim_end_matches(':')
                     .to_string();
                 if id.is_empty() {
-                    return Err(bad(line_no, "a milestone header needs an id, e.g. `# Milestone M2: …`"));
+                    return Err(bad(line_no, "a voyage header needs an id, e.g. `# Voyage M2: …`"));
                 }
                 if seen_milestones.contains(&id) {
                     return Err(bad(line_no, format!("milestone {id} appears twice")));
@@ -328,7 +328,7 @@ fn parse_header(line: &str) -> Option<(String, i64)> {
     Some((project?, base?))
 }
 
-/// The lines of a free-text section (Goal, Milestone), joined and trimmed.
+/// The lines of a free-text section (Goal, Milestone/Voyage), joined and trimmed.
 fn collect_body(lines: &[&str], index: &mut usize) -> String {
     let mut body: Vec<&str> = Vec::new();
     while *index < lines.len() && !is_section(lines[*index]) {
@@ -1250,5 +1250,27 @@ mod tests {
         let text = format!("{HEADER}# Milestone M2: A\na\n\n# Milestone M2: B\nb\n");
         let detail = detail_of(&text);
         assert!(detail.starts_with("line 5: "), "{detail}");
+    }
+
+    #[test]
+    fn a_voyage_section_is_read_as_a_milestone() {
+        let body = "done: users log in\nbar: block only a broken login\neta: 8h\n";
+        let voyage = format!("{HEADER}# Voyage M2: A\n{body}");
+        let milestone = format!("{HEADER}# Milestone M2: A\n{body}");
+        let from_voyage = parse(&voyage).unwrap();
+        let from_milestone = parse(&milestone).unwrap();
+        assert_eq!(from_voyage.milestones, from_milestone.milestones);
+        assert_eq!(from_voyage.milestones, vec![("M2: A".to_string(), body.trim().to_string())]);
+        let (done, bar, eta) = milestone_fields(&from_voyage.milestones[0].1);
+        assert_eq!(done.as_deref(), Some("users log in"));
+        assert_eq!(bar.as_deref(), Some("block only a broken login"));
+        assert_eq!(eta.as_deref(), Some("8h"));
+    }
+
+    #[test]
+    fn a_voyage_and_a_milestone_with_one_id_are_refused() {
+        let text = format!("{HEADER}# Voyage M2: A\na\n\n# Milestone M2: B\nb\n");
+        let detail = detail_of(&text);
+        assert!(detail.contains("milestone M2 appears twice"), "{detail}");
     }
 }
