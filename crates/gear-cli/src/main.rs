@@ -613,6 +613,45 @@ fn cmd_admin_init(
                 ),
             ))
         };
+    // T-316: a repository under the system temp directory is a fixture (M4.2
+    // #35: a leftover fixture project with empty tokens appeared in the
+    // user's board, its captain seat bound to the real captain's pane). A
+    // fixture registers only into a store the caller names itself with
+    // `GEAR_DB`, never into this session's store, where the user would see
+    // it. Like T-269, nothing is refused when the caller names its own store.
+    let refuse_a_fixture_into_this_store =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let temp = canonical(&temp);
+            let repo = canonical(&parsed.project.repo);
+            if !std::path::Path::new(&repo).starts_with(&temp) {
+                return Ok(());
+            }
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a `GEAR_DB` that differs was named by the caller.
+            let db = match std::env::var_os(gear_model::ctx::ENV_DB) {
+                Some(db) => {
+                    let db = std::path::PathBuf::from(db);
+                    if db != default_store_in(&home, socket.as_deref()) {
+                        return Ok(());
+                    }
+                    db
+                }
+                None => default_store_in(&home, socket.as_deref()),
+            };
+            Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {} lives under the temp directory ({repo}): a fixture registers only into a store named with GEAR_DB, never into this session's store {}",
+                    parsed.project.id,
+                    db.display()
+                ),
+            ))
+        };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
@@ -679,6 +718,8 @@ fn cmd_admin_init(
     // T-269: a config for another session never lands in this one's store.
     if let Ok(parsed) = gear_app::config::parse(&text) {
         refuse_a_foreign_session(&parsed)?;
+        // T-316: nor does a fixture, unless the caller named its store.
+        refuse_a_fixture_into_this_store(&parsed)?;
     }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by

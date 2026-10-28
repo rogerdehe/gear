@@ -584,8 +584,10 @@ fn check_reads_the_default_store_when_gear_db_is_unset() {
     let dir = scratch("check-default");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("the home");
-    let repo = dir.join("repo");
-    std::fs::create_dir_all(&repo).expect("the repo");
+    // T-316: an ordinary repository, outside the temp directory — a fixture
+    // below it registers only into a store the caller names with `GEAR_DB`.
+    // `elsewhere` is only ever `--check`ed, which registers nothing.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let elsewhere = dir.join("elsewhere");
     std::fs::create_dir_all(&elsewhere).expect("the other repo");
 
@@ -801,8 +803,10 @@ fn init_refuses_a_config_for_another_herdr_session() {
     let dir = scratch("session");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("the home");
-    let repo = dir.join("repo");
-    std::fs::create_dir_all(&repo).expect("the repo");
+    // T-316: a repository outside the temp directory, since a fixture below
+    // it registers only into a store the caller names with `GEAR_DB`. This
+    // test is about the session checks, and about the default store.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let alpha = home.join(".config/herdr/sessions/alpha/herdr.sock");
     let refused = "project p names herdr_session beta, but this shell runs in session alpha: \
                    its store and engine are this session's; run init from a pane of session beta, \
@@ -856,6 +860,83 @@ fn init_refuses_a_config_for_another_herdr_session() {
     let o = init_from_session(&home, &alpha, &beta, false, Some(&explicit));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(config_version(&explicit), 1, "registered into the named store");
+}
+
+/// T-316: a repository under the system temp directory is a fixture (M4.2
+/// #35: a leftover fixture project with empty tokens appeared in the user's
+/// board, its captain seat bound to the real captain's pane). A fixture
+/// registers only into a store the caller names itself with `GEAR_DB`, never
+/// into this session's store — the default one or a named session's. `--check`
+/// is untouched, and every repository outside the temp directory registers as
+/// it did before.
+#[test]
+fn init_refuses_a_fixture_into_the_sessions_store() {
+    let dir = scratch("fixture");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    // A repository under the temp directory: the fixtures of the acceptance.
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let default_socket = home.join(".config/herdr/herdr.sock");
+    let shared = home.join(".local/state/gear/gear.db");
+
+    // `--check` still validates it: it writes nothing, so it is no threat.
+    let o = init_from_session(&home, &default_socket, &config(&dir, &repo), true, None);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(headline(&o), "config ok: project p, 0 lanes, 0 reviewers");
+
+    // A real init into the default store of this session is refused.
+    let o = init_from_session(&home, &default_socket, &config(&dir, &repo), false, None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    assert!(err.contains("lives under the temp directory"), "{err}");
+    assert!(
+        err.contains("a fixture registers only into a store named with GEAR_DB"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("never into this session's store {}", shared.display())),
+        "{err}"
+    );
+    assert!(!shared.exists(), "nothing was registered");
+
+    // So is one into a named session's store.
+    let alpha = home.join(".config/herdr/sessions/alpha/herdr.sock");
+    let alpha_store = home.join(".local/state/gear/alpha/gear.db");
+    let o = init_from_session(&home, &alpha, &config_in_session(&dir, &repo, "alpha"), false, None);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(
+        err.contains(&format!("never into this session's store {}", alpha_store.display())),
+        "{err}"
+    );
+    assert!(!alpha_store.exists(), "nothing was registered");
+
+    // A store the caller names with `GEAR_DB` is not this session's: the same
+    // fixture registers there as it always did.
+    let named = dir.join("named.db");
+    let o = init_from_session(&home, &default_socket, &config(&dir, &repo), false, Some(&named));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(config_version(&named), 1, "registered into the named store");
+
+    // A repository outside the temp directory is no fixture: it registers
+    // into this session's default store. A home of its own, since the store
+    // named above is already the default one for `home`'s session.
+    let outside = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let outside_home = dir.join("outside-home");
+    std::fs::create_dir_all(&outside_home).expect("the outside home");
+    let outside_socket = outside_home.join(".config/herdr/herdr.sock");
+    let o = init_from_session(
+        &outside_home,
+        &outside_socket,
+        &config(&dir, &outside),
+        false,
+        None,
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let outside_store = outside_home.join(".local/state/gear/gear.db");
+    assert_eq!(config_version(&outside_store), 1, "an ordinary repository registers");
 }
 
 /// T-315: `--check --models` asks each seat's CLI for the models it lists and
