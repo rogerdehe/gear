@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=646 -->
+<!-- gear-plan project=gear base=647 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -72,6 +72,7 @@ eta: 16h
 - station M-4874: keep course 414 min in, 69 done; forecast 1381 min; the eta waits for the user
 
 - station M-4881: keep course 420 min in, 70 done; forecast 1250 min (21 h) after the moves to mast; mast is now the slower lane (830 against 677), most of it the board chain; the eta waits for the user
+- station M-4894: keep course 433 min in, 72 done; forecast 1223 min; the eta waits for the user
 # Queue
 
 ## T-379 [must] lane=hull milestone=M5 required
