@@ -51,6 +51,55 @@ pub fn release_finished_reviews(
     // next one (the rules below apply to it right away).
     crate::review::standby_after_verdict(store, project, now)?;
 
+    // T-264: a reviewer whose agent died in the middle of a review. Its pane
+    // holds no agent, so no verdict will ever come in: the seat holds its
+    // slot for ever and the task waits in `Verifying` — and a dead reviewing
+    // seat could only be cleared by a captain verdict nobody reviewed. The
+    // seat leaves like any other: its job ends, its binding ends, its pane
+    // goes, and the `Releasing` step below frees the slot — so the normal
+    // `start_reviews` pass starts the review again on a free seat. The task
+    // keeps its handed-in attempt and nothing is sent to the lane.
+    //
+    // A pane that cannot be read is an observation failure, not an absence
+    // (design/08, as in `runs_a_reviewer`): such a seat keeps its slot.
+    for seat in store.read(|tx| tx.seats_of_project(project))? {
+        if seat.role != SeatRole::Temp
+            || seat.state != SeatState::Active
+            || seat.task_id.is_none()
+        {
+            continue;
+        }
+        let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
+        let Some(binding) = binding.filter(|binding| binding.status == BindingStatus::Active) else {
+            continue;
+        };
+        match herdr.agent_get(&binding.pane_id) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => continue,
+        }
+        store.write(|tx| {
+            tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+            tx.clear_seat_task(&seat.id)?;
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Releasing),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Releasing.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Releasing,
+                Some("its agent is gone mid-review"),
+                now,
+            )
+        })?;
+        // Its pane holds no agent: closing it ends the shell the seat leaves
+        // behind. A refused or uncertain close does not keep the seat (T-264).
+        match herdr.pane_close(&binding.pane_id) {
+            Outcome::Ok(()) | Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
+        }
+    }
+
     let seats = store.read(|tx| tx.seats_of_project(project))?;
     for seat in seats {
         if seat.role != SeatRole::Temp {
@@ -1909,5 +1958,158 @@ profile = "codex"
             store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
             SeatState::Unknown
         );
+    }
+
+    /// T-1 was handed in: its task is `Verifying` and its attempt is
+    /// `Submitted` with a candidate — what a reviewer works on.
+    fn hand_in(store: &mut Store) {
+        store
+            .write(|tx| {
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })
+            })
+            .unwrap();
+    }
+
+    /// The Git a review start records: the fixture has no real repository.
+    #[derive(Debug)]
+    struct NoGit;
+    impl crate::review::ReviewGit for NoGit {
+        fn run(&self, _path: &str, _args: &[&str]) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    fn review_cfg() -> crate::EngineCfg {
+        let mut cfg = crate::EngineCfg {
+            review_git: std::sync::Arc::new(NoGit),
+            ..Default::default()
+        };
+        for kind in ["codex", "opencode", "claude"] {
+            cfg.profiles.insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
+        }
+        cfg
+    }
+
+    /// T-264: a reviewer whose agent died in the middle of a review holds no
+    /// reviewer at all — the seat leaves, its pane goes, and the task keeps
+    /// waiting in `Verifying` for a reviewer that comes from the next tick.
+    #[test]
+    fn an_active_reviewer_whose_agent_is_gone_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        hand_in(&mut store);
+        let mut herdr = FakeHerdr::new();
+        // An empty shell: the pane holds no agent.
+        herdr.add_shell("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+        assert!(report.failed.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released, "the slot is free");
+        assert_eq!(seat.task_id, None, "its job binding ended");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "the dead pane is not reused");
+        assert!(removes(&herdr).is_empty(), "its worktree is kept");
+        assert!(
+            herdr
+                .calls
+                .iter()
+                .any(|call| matches!(call, Call::PaneClose { pane } if pane == "w2:p2")),
+            "its pane is closed: {:?}",
+            herdr.calls
+        );
+        // Nothing is sent to the lane, and the task keeps its hand-in.
+        let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
+        assert_eq!(task.state, TaskState::Verifying, "the hand-in still waits for a review");
+        assert!(!herdr.calls.iter().any(|call| matches!(call, Call::Prompt { pane, .. } if pane == "w2:p2")));
+    }
+
+    /// T-264: with the dead seat free, the normal `start_reviews` pass starts
+    /// the review of the same task again.
+    #[test]
+    fn the_review_starts_again_on_a_free_seat() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        hand_in(&mut store);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell("w2:p2");
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
+
+        let cfg = review_cfg();
+        let report = crate::review::start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 20)
+            .unwrap();
+
+        assert_eq!(report.started.len(), 1, "the review of T-1 starts again: {report:?}");
+        let seat = store
+            .read(|tx| tx.get_seat(&report.started[0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the review runs again");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        assert_eq!(
+            store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+            TaskState::Verifying
+        );
+    }
+
+    /// T-264: a pane that cannot be read is an observation failure, not an
+    /// absence (design/08): the seat keeps its task and its state.
+    #[test]
+    fn an_agent_read_failure_keeps_the_reviewer() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        hand_in(&mut store);
+        let mut herdr = FakeHerdr::new();
+        herdr.observe_fails = true;
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "not released on a guess");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "its job is kept");
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Active, "its binding is kept");
+        assert!(!herdr.calls.iter().any(|call| matches!(call, Call::PaneClose { .. })));
+    }
+
+    /// T-264: a reviewer whose pane holds its agent is a working reviewer: it
+    /// is left alone.
+    #[test]
+    fn an_active_reviewer_with_its_agent_is_untouched() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        hand_in(&mut store);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+
+        assert!(report.released.is_empty(), "{report:?}");
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active);
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Active);
+        assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
 }
