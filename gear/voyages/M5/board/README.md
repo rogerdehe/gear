@@ -54,8 +54,9 @@ Each frame is three files of 48 lines of 160 cells (UTF-8, one character per cel
 - `<view>-<folded|open>.txt` — the characters, a blank cell as a space; the second cell of a wide character is a
   space too, so a line is 160 characters whether it holds wide glyphs or not;
 - `<view>-<folded|open>.col` — one letter per cell for the colour: `.` no colour, `o` ok, `w` warn, `b` bad, `d`
-  dim, `a` acc, `m` mag, `u` blu; the letter is uppercase when the cell is bold (bold without a colour stays `.`,
-  and the reverse cells a bold `chgat` of the selected row sets carry no colour either);
+  dim, `a` acc, `m` mag, `u` blu; the letter is uppercase when the cell is bold, and a bold cell with no colour is
+  `*` (the header titles, the picked voyage and the picked tab); the cells a `chgat` of a selected row lights carry
+  reverse and no colour, so they read `.`;
 - `<view>-<folded|open>.rev` — `R` where reverse is on, else `.`.
 
 The views are named as their tabs are: `now`, `tasks`, `cost`, `log`. Eight frames, 24 files. A change to the

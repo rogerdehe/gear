@@ -694,11 +694,12 @@ def golden_frame(view, detail):
 
 
 def golden_letter(a):
-    """A cell's colour as one letter, the seven colour markers apart; the letter is uppercase when the cell is bold."""
+    """A cell's colour as one letter, the seven colour markers apart; the letter is uppercase when the cell is bold,
+    and a bold cell with no colour is `*`."""
     for k in ("ok", "warn", "bad", "dim", "acc", "mag", "blu"):
         if a & MARK[k]:
             return LETTER[k].upper() if a & MARK["b"] else LETTER[k]
-    return "."
+    return "*" if a & MARK["b"] else "."
 
 
 def golden_save(w, base):
