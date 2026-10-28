@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=627 -->
+<!-- gear-plan project=gear base=628 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -55,6 +55,7 @@ eta: 16h
 - 2026-10-29 05:05 scope: a second-round review can loop for ever (another project's T-117 attempt 2, 70 min with three reviewers in standby; its review-2 session step stuck at wait_exit for round T-117:2): fn handed_a_verdict names the job by the seat's last Deliver op, which is still round 1's packet while round 2's session is being resumed, so round 1's verdict puts the seat back to Standby before round 2's packet goes, every tick; T-375 fixes it at the head of hull's queue, T-376 rings the captain for any hand-in that waits 20 min without a review packet | why: a normal-use error that parks every rework's review | else: the captain settles candidates unreviewed
 
 - station M-4718: keep course 289 min in, 48 done; hull 1312 min against mast 892 after the new engine fixes: T-303, T-313, T-338 and T-377 move to mast; the eta waits for the user
+- station M-4728: keep course 300 min in, 50 done of 121; forecast 1476 min; the eta waits for the user
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
