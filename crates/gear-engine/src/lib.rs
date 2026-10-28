@@ -655,25 +655,44 @@ fn restart_missing_jobs(
                 store.write(|tx| tx.set_meta(&marker, "starting"))?;
             }
             let entry = if plan.is_some() { None } else {
-                let Some(binding) = binding.as_ref() else { continue };
+                if binding.is_none() { continue }
                 let project_row = store.read(|tx| tx.get_project(project))?;
                 let Some(config) = project_row.and_then(|p| gear_app::config::parse(&p.config_toml).ok()) else { continue };
                 let saved = store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?.filter(|s| !s.is_empty());
-                let reviewer = if seat.role == SeatRole::Temp {
-                    store.read(|tx| tx.get_meta(&format!("engine.review_model_entry.{}", seat.id)))?
-                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                } else { None };
-                let (model, args) = if let Some(meta) = reviewer {
-                    (meta["model"].as_str().map(str::to_owned).or(saved.clone()).unwrap_or_default(), meta["args"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default())
+                // T-226: the restart follows the **current** config, not the
+                // snapshot the round began with: the entry of the current
+                // chain whose model is the seat's saved model, else the first
+                // entry. The CLI is the entry's own, else the role's current
+                // kind — never the kind of the old binding.
+                let (model, cli, args) = if seat.role == SeatRole::Temp {
+                    let chain = crate::model::review_chain(&config);
+                    let kind = config.temps.as_ref().map(|temps| temps.kind.clone()).unwrap_or_default();
+                    let chosen = saved.as_deref()
+                        .and_then(|model| chain.iter().find(|entry| entry.model() == model))
+                        .or_else(|| chain.first())
+                        .copied();
+                    match chosen {
+                        Some(entry) => (entry.model().to_string(), entry.cli().map(str::to_owned).unwrap_or(kind), entry.args().to_vec()),
+                        None => (saved.unwrap_or_default(), kind, Vec::new()),
+                    }
                 } else {
                     let lane = config.lanes.iter().find(|l| l.name == seat.name);
-                    let selected = lane.map(|l| crate::model::role_chain(&config, &l.name).into_iter().find(|entry| entry.cli().unwrap_or(&l.kind) == binding.kind && saved.as_deref().is_none_or(|m| entry.model() == m)));
-                    match selected.flatten() {
-                        Some(entry) => (entry.model().to_string(), entry.args().to_vec()),
-                        None => (saved.unwrap_or_default(), Vec::new()),
+                    let chain = lane.map(|l| crate::model::role_chain(&config, &l.name)).unwrap_or_default();
+                    let kind = lane.map(|l| l.kind.clone()).unwrap_or_default();
+                    let chosen = saved.as_deref()
+                        .and_then(|model| chain.iter().find(|entry| entry.model() == model))
+                        .or_else(|| chain.first())
+                        .copied();
+                    match chosen {
+                        Some(entry) => (entry.model().to_string(), entry.cli().map(str::to_owned).unwrap_or(kind), entry.args().to_vec()),
+                        None => (saved.unwrap_or_default(), kind, Vec::new()),
                     }
                 };
-                Some(gear_app::config::ModelEntry::Entry(gear_app::config::ModelSpec { model, cli: Some(binding.kind.clone()), args, context_window_k: None }))
+                if seat.role == SeatRole::Temp {
+                    let chosen = serde_json::json!({"cli": cli, "model": model, "args": args}).to_string();
+                    store.write(|tx| tx.set_meta(&format!("engine.review_model_entry.{}", seat.id), &chosen))?;
+                }
+                Some(gear_app::config::ModelEntry::Entry(gear_app::config::ModelSpec { model, cli: Some(cli), args, context_window_k: None }))
             };
             match restart::advance(store, herdr, cfg, profiles, project, &seat, entry.as_ref(), now) {
                 Ok(Some(_)) => {
@@ -988,6 +1007,233 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             let lane_stall=store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
             assert_eq!(if role==SeatRole::Lane {lane_stall.len()} else {stall.len()},1);
             assert_eq!(if role==SeatRole::Lane {lane_stall[0].state} else {stall[0].state},MsgState::Open);
+        }
+    }
+}
+
+/// T-226: a restarted agent takes the **current** config, not the snapshot
+/// its round began with. The model, the CLI and the arguments of a restart
+/// come from the chain of the config as it is now.
+#[cfg(test)]
+mod t226_restart_tests {
+    use super::*;
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::AgentStatus;
+    use gear_model::{AttemptState, SeatRole, TaskState};
+    use gear_store::{testing, AttemptRow, ContractRow, NewRound, RoundKey, TaskRow};
+
+    const NOW: Ts = 1_900_000_100;
+
+    /// The config of the project: the lane's kind and model and the review
+    /// chain. The reviewer chain names its CLI, the lane chain does not (the
+    /// lane takes its CLI from its own kind).
+    fn config(lane_kind: &str, lane_model: &str, review_model: &str, review_effort: &str) -> String {
+        format!(
+            r#"
+[project]
+id="p"
+herdr_session="sess"
+repo="/repo"
+[quota]
+lanes=1
+temps=1
+[captain]
+pane="w1:p9"
+kind="claude"
+profile="claude"
+[[lanes]]
+name="heat"
+duty="everything"
+owns=["src/"]
+kind="{lane_kind}"
+profile="{lane_kind}"
+[temps]
+kind="claude"
+profile="claude"
+[models]
+lanes=[{{model="{lane_model}"}}]
+review=[{{model="{review_model}",cli="codex",args=["-c","model_reasoning_effort={review_effort}"]}}]
+"#
+        )
+    }
+
+    /// The world of the T-209 test: one seat with a binding, an open attempt
+    /// and the model of its round in the meta.
+    fn fixture(
+        role: SeatRole,
+        binding_kind: &str,
+        config_toml: &str,
+    ) -> (Store, FakeHerdr, EngineCfg, String) {
+        let mut store = Store::open_in_memory().unwrap();
+        let pane = if role == SeatRole::Lane { "w1:p1" } else { "w1:p2" };
+        let seat_name = if role == SeatRole::Lane { "heat" } else { "review-1" };
+        let task_state = if role == SeatRole::Lane {
+            TaskState::Running
+        } else {
+            TaskState::Verifying
+        };
+        let attempt_state = if role == SeatRole::Lane {
+            AttemptState::Started
+        } else {
+            AttemptState::Submitted
+        };
+        let seat = store
+            .write(|tx| {
+                let mut p = testing::seed_project(tx, "p", "sess", NOW)?;
+                p.config_toml = config_toml.into();
+                tx.update_project(&p)?;
+                let seat = testing::seed_active_seat(tx, "p", seat_name, role, pane, binding_kind, NOW)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "claude", NOW)?;
+                if role == SeatRole::Temp {
+                    tx.set_seat_task(&seat.id, "T-1")?;
+                }
+                tx.insert_task(&TaskRow {project:"p".into(),id:"T-1".into(),rank:1,state:task_state,priority:"must".into(),lane:Some("heat".into()),milestone:None,required:false,contract_version:1,deps:vec![],followup_of:None,wait_on:None,wait_cond:None,rework_note:None,estimate_min:Some(30),issue:None,updated:NOW,repo:None,base:None,gate:None,rework_estimate_min:None})?;
+                tx.insert_contract(&ContractRow {project:"p".into(),task:"T-1".into(),version:1,goal:"goal".into(),accept:"accept".into(),evidence_files:vec![],evidence_due_min:None,body:String::new(),created:NOW})?;
+                tx.insert_attempt(&AttemptRow {project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:attempt_state,candidate:(role==SeatRole::Temp).then(||"abc1234".into()),report:None,safe_point:None,started:NOW,updated:NOW,session_ref:None,session_cli:Some(binding_kind.into()),session_action:None,sent_at:Some(NOW)})?;
+                let round_role = if role == SeatRole::Lane { "dev" } else { "review" };
+                tx.insert_round(&NewRound {key:RoundKey {project:"p".into(),task:"T-1".into(),attempt:1,role:round_role.into()},seat:seat.id.clone(),generation:1,cli:binding_kind.into(),model:Some("gpt-6.1-sol".into()),start_at:NOW})?;
+                tx.set_meta(&crate::model::model_meta_key(&seat.id),"gpt-6.1-sol")?;
+                if role == SeatRole::Temp {
+                    tx.set_meta("engine.review_model_entry.p:review-1",&serde_json::json!({"cli":"codex","model":"gpt-6.1-sol","args":["-c","model_reasoning_effort=high"]}).to_string())?;
+                    tx.set_meta("engine.review_pending.p:review-1","T-1")?;
+                    tx.set_meta("engine.review_path.p:review-1","/work/review")?;
+                    tx.set_meta("engine.review_repo.p:review-1","/repo")?;
+                } else {
+                    tx.set_meta(&crate::onboard::worktree_path_key(&seat.id),"/work/heat")?;
+                }
+                Ok(seat)
+            })
+            .unwrap();
+        let _ = seat;
+        let mut herdr = FakeHerdr::new();
+        herdr.add_shell(pane);
+        herdr.add_shell("w1:p9");
+        let mut cfg = EngineCfg { db_path: "/tmp/t226.db".into(), ..EngineCfg::default() };
+        for kind in ["codex", "claude", "opencode", "pi"] {
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+        }
+        (store, herdr, cfg, pane.into())
+    }
+
+    /// The starts of the engine, in order: (kind, args).
+    fn starts(herdr: &FakeHerdr) -> Vec<(String, Vec<String>)> {
+        herdr
+            .calls
+            .iter()
+            .filter_map(|call| {
+                if let Call::AgentStart { kind, args, .. } = call {
+                    Some((kind.clone(), args.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The agent of the round is in its pane; it exits; the engine restarts
+    /// it in place (T-209).
+    fn exit_and_restart(
+        store: &mut Store,
+        herdr: &mut FakeHerdr,
+        cfg: &EngineCfg,
+        pane: &str,
+        kind: &str,
+    ) {
+        herdr.add_agent(pane, kind, AgentStatus::Idle);
+        tick(store, herdr, cfg, NOW + 1).unwrap();
+        assert!(starts(herdr).is_empty(), "a live agent is not restarted");
+        herdr.exit_agent(pane);
+        tick(store, herdr, cfg, NOW + 2).unwrap();
+    }
+
+    /// (a) A reviewer whose round began on model X, with the config applied
+    /// again and the review chain [Y]: the restart starts Y with Y's
+    /// arguments, and the reviewer's meta entry now holds Y.
+    #[test]
+    fn a_restarted_reviewer_takes_the_current_review_chain() {
+        let (mut store, mut herdr, cfg, pane) = fixture(
+            SeatRole::Temp,
+            "codex",
+            &config("codex", "gpt-6.1-sol", "gpt-6.1-sol", "high"),
+        );
+        // The config is applied again with a new review chain.
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("codex", "gpt-6.1-sol", "gpt-6.2-codex", "low");
+                tx.update_project(&p)
+            })
+            .unwrap();
+        exit_and_restart(&mut store, &mut herdr, &cfg, &pane, "codex");
+        let started = starts(&herdr);
+        assert_eq!(started.len(), 1, "{started:?}");
+        assert_eq!(started[0].0, "codex", "{started:?}");
+        assert!(started[0].1.iter().any(|arg| arg == "gpt-6.2-codex"), "{:?}", started[0].1);
+        assert!(started[0].1.iter().any(|arg| arg == "model_reasoning_effort=low"), "{:?}", started[0].1);
+        assert!(!started[0].1.iter().any(|arg| arg == "model_reasoning_effort=high"), "{:?}", started[0].1);
+        // The meta of the reviewer now holds the entry it was restarted with.
+        let recorded = store
+            .read(|tx| tx.get_meta("engine.review_model_entry.p:review-1"))
+            .unwrap()
+            .unwrap();
+        let recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+        assert_eq!(recorded["model"], "gpt-6.2-codex");
+        assert_eq!(recorded["cli"], "codex");
+        assert_eq!(recorded["args"][1], "model_reasoning_effort=low");
+    }
+
+    /// (b) A lane bound with the CLI opencode, whose config now says the kind
+    /// pi with the model M: the restart starts the pi CLI with M — the kind
+    /// of the old binding is never used.
+    #[test]
+    fn a_restarted_lane_takes_the_current_kind_and_model() {
+        let (mut store, mut herdr, cfg, pane) = fixture(
+            SeatRole::Lane,
+            "opencode",
+            &config("opencode", "gpt-6.1-sol", "gpt-6.1-sol", "high"),
+        );
+        store
+            .write(|tx| {
+                let mut p = tx.get_project("p")?.unwrap();
+                p.config_toml = config("pi", "pi-model", "gpt-6.1-sol", "high");
+                tx.update_project(&p)
+            })
+            .unwrap();
+        exit_and_restart(&mut store, &mut herdr, &cfg, &pane, "opencode");
+        let started = starts(&herdr);
+        assert_eq!(started.len(), 1, "{started:?}");
+        assert_eq!(started[0].0, "pi", "{started:?}");
+        assert!(started[0].1.iter().any(|arg| arg == "--model"), "{:?}", started[0].1);
+        assert!(started[0].1.iter().any(|arg| arg == "pi-model"), "{:?}", started[0].1);
+        // The model of the seat follows the restart.
+        assert_eq!(
+            store
+                .read(|tx| tx.get_meta(&crate::model::model_meta_key("p:heat")))
+                .unwrap()
+                .as_deref(),
+            Some("pi-model")
+        );
+    }
+
+    /// (c) An unchanged config: the restart is exactly as before — the same
+    /// model, the same CLI and the same arguments.
+    #[test]
+    fn an_unchanged_config_restarts_as_before() {
+        for role in [SeatRole::Lane, SeatRole::Temp] {
+            let (mut store, mut herdr, cfg, pane) = fixture(
+                role,
+                "codex",
+                &config("codex", "gpt-6.1-sol", "gpt-6.1-sol", "high"),
+            );
+            exit_and_restart(&mut store, &mut herdr, &cfg, &pane, "codex");
+            let started = starts(&herdr);
+            assert_eq!(started.len(), 1, "{role:?}: {started:?}");
+            assert_eq!(started[0].0, "codex", "{role:?}: {started:?}");
+            assert!(started[0].1.iter().any(|arg| arg == "gpt-6.1-sol"), "{:?}", started[0].1);
+            if role == SeatRole::Temp {
+                // The reviewer's entry carries the arguments of its chain.
+                assert!(started[0].1.iter().any(|arg| arg == "model_reasoning_effort=high"), "{:?}", started[0].1);
+            }
         }
     }
 }
