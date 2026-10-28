@@ -34,7 +34,15 @@ owns = ["src/pricing/"]
 not = ["UI"]
 kind = "opencode"
 profile = "opencode"
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
+
+/// The gate line of [`MINIMAL`]: the tests that name other conventions put
+/// their lines next to it, in the same section.
+const GATE_LINE: &str = "gate = \"make test\"";
 
 fn fields(issues: &[ConfigIssue]) -> Vec<&str> {
     issues.iter().map(|i| i.field.as_str()).collect()
@@ -50,15 +58,20 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
     assert_eq!(cfg.temps, None);
     assert_eq!(
         cfg.conventions,
-        // T-12 added `gate`; the rest of the defaults are unchanged.
+        // T-255: `gate` has no default; the fixture names one.
         Conventions {
             integration: "dev".into(),
             release: "main".into(),
             staging: "".into(),
             review_max_rounds: 3,
-            gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
+            // T-255: `gate` has no default; the fixture names one.
+            gate: "make test".into(),
+            task_branch: "{lane}/t{n}".into(),
+            review_branch: "review/t{n}".into(),
+            seat_branch: "{project}/{seat}".into(),
         }
     );
+    assert_eq!(Conventions::default().gate, "", "the gate has no default");
     assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180, handin_base_window_min: 30 });
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
@@ -66,7 +79,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
 
 #[test]
 fn partial_sections_keep_other_defaults() {
-    let text = format!("{MINIMAL}\n[conventions]\nstaging = \"staging\"\n\n[timing]\ncooldown_s = 120\n\n[profiles.opencode]\nbusy_markers = [\"esc interrupt\"]\n");
+    let text = format!("{}\n[timing]\ncooldown_s = 120\n\n[profiles.opencode]\nbusy_markers = [\"esc interrupt\"]\n", MINIMAL.replace("gate = \"make test\"", "gate = \"make test\"\nstaging = \"staging\""));
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.conventions.integration, "dev");
     assert_eq!(cfg.conventions.staging, "staging");
@@ -402,6 +415,10 @@ duty = "price engine"
 owns = ["lib/pricing/"]
 kind = "opencode"
 profile = "opencode"
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
 
 /// The project's repos. The `api` repo declares no branch and no gate: it
@@ -419,6 +436,31 @@ release = "main"
 gate = "npm test"
 "#;
 
+/// The same repos, each with its own gate: `[conventions]` may then name none
+/// (T-255).
+const REPOS_EACH_GATED: &str = r#"
+[[repos]]
+name = "api"
+path = "crates/api"
+gate = "make api-gate"
+
+[[repos]]
+name = "web"
+path = "apps/web"
+integration = "feat/web"
+release = "main"
+gate = "npm test"
+"#;
+
+/// The lane of [`MULTI`] that works in the project root.
+const PRICING_LANE: &str = r#"[[lanes]]
+name = "pricing"
+duty = "price engine"
+owns = ["lib/pricing/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+
 /// A config without `[[repos]]` is a single-repo project: it behaves exactly
 /// as before.
 #[test]
@@ -433,18 +475,74 @@ fn a_project_without_repos_has_only_the_root_repo() {
             path: "/repo".into(),
             integration: "dev".into(),
             release: "main".into(),
-            gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
+            gate: "make test".into(),
             github: None,
         }
     );
     assert_eq!(validate(&cfg), vec![]);
 }
 
+/// T-255: the gate has no default. A project that names none is refused,
+/// because the engine would then merge into the integration branch and run
+/// nothing before pushing.
+#[test]
+fn a_project_without_a_gate_is_told_to_name_one() {
+    let text = MINIMAL.replace("gate = \"make test\"", "gate = \"\"");
+    let issues = validate(&parse(&text).unwrap());
+    assert_eq!(fields(&issues), vec!["conventions.gate"]);
+    assert!(
+        issues[0].problem.starts_with("name the command the merge gate runs"),
+        "{}",
+        issues[0].problem
+    );
+
+    // A `[[repos]]` entry without a gate runs `conventions.gate`, so with the
+    // conventions gate empty that repo has nothing to run either.
+    let text = format!(
+        "{}{REPOS}",
+        MULTI.replace("gate = \"make test\"", "gate = \"\"")
+    );
+    assert_eq!(fields(&validate(&parse(&text).unwrap())), vec!["conventions.gate"]);
+}
+
+/// T-255: a gate in `[conventions]` is enough, and so is a gate in every
+/// repo the project runs work in when `[conventions]` names none (M-4220: the
+/// root repo counts only when it is the whole project or a lane works there).
+#[test]
+fn conventions_gate_or_every_repo_gate_satisfies_the_rule() {
+    assert_eq!(validate(&parse(MINIMAL).unwrap()), vec![], "[conventions] gate");
+
+    // Every repo has its own gate, and no lane works in the root: the empty
+    // root gate never runs.
+    let text = format!(
+        "{}{REPOS_EACH_GATED}",
+        MULTI.replace("gate = \"make test\"\n", "")
+            .replace(PRICING_LANE, "")
+    );
+    assert_eq!(validate(&parse(&text).unwrap()), vec![], "every repo has its own gate");
+
+    // The `pricing` lane works in the root, so the root runs a gate too and
+    // `[conventions]` must name it.
+    let text = format!(
+        "{}{REPOS_EACH_GATED}",
+        MULTI.replace("gate = \"make test\"\n", "")
+    );
+    assert_eq!(
+        fields(&validate(&parse(&text).unwrap())),
+        vec!["conventions.gate"],
+        "a lane works in the root"
+    );
+}
+
 /// A repo without branches or a gate uses the project's `[conventions]`.
 #[test]
 fn a_repo_without_its_own_branches_uses_the_conventions() {
     let text = format!(
-        "{MULTI}{REPOS}\n[conventions]\nintegration = \"feat/dev\"\nrelease = \"feat/main\"\ngate = \"cargo test\"\n"
+        "{}{REPOS}",
+        MULTI.replace(
+            "gate = \"make test\"",
+            "integration = \"feat/dev\"\nrelease = \"feat/main\"\ngate = \"cargo test\""
+        )
     );
     let cfg = parse(&text).unwrap();
     let api = cfg.repo_of_lane("heat");
@@ -674,4 +772,103 @@ fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
     assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
     assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
     assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
+}
+
+// T-252: branch names are configuration. The defaults are the names GEAR
+// itself uses; a project may name its own, with `{project}`, `{lane}`, `{n}`.
+
+#[test]
+fn branch_templates_default_to_the_names_gear_uses() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.task_branch, gear_model::branch::TASK_BRANCH);
+    assert_eq!(cfg.conventions.review_branch, gear_model::branch::REVIEW_BRANCH);
+    assert_eq!(validate(&cfg), vec![], "the defaults are valid");
+
+    // T-255 gave the fixture its own `[conventions]` section: the templates
+    // join it rather than a second one.
+    let text = MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\ntask_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"",
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.conventions.task_branch, "{project}/{lane}/t{n}");
+    assert_eq!(validate(&cfg), vec![], "a project may name its own branches");
+}
+
+#[test]
+fn a_branch_template_must_be_expandable_and_usable() {
+    let with = |field: &str, value: &str| {
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\n{field} = \"{value}\""),
+        ))
+        .unwrap()
+    };
+    // No `{n}`: every task would share one branch.
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{lane}/work"))),
+        vec!["conventions.task_branch"]
+    );
+    assert_eq!(
+        fields(&validate(&with("review_branch", "review"))),
+        vec!["conventions.review_branch"]
+    );
+    // A placeholder GEAR does not fill in stays a brace in the name.
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{team}/t{n}"))),
+        vec!["conventions.task_branch"]
+    );
+    assert_eq!(
+        fields(&validate(&with("task_branch", "{lane}/{task}"))),
+        vec!["conventions.task_branch"]
+    );
+    // A name git would refuse: a leading '/', "..", "//", a trailing '/', and
+    // a trailing ".lock".
+    for bad in ["/x/t{n}", "a..b/t{n}", "{lane}/../t{n}", "{lane}//t{n}", "{lane}/t{n}/", "{lane}/t{n}.lock"] {
+        assert_eq!(
+            fields(&validate(&with("task_branch", bad))),
+            vec!["conventions.task_branch"],
+            "{bad:?}"
+        );
+    }
+    // Two templates that name the same branch for the same task.
+    assert_eq!(
+        fields(&validate(&with("review_branch", "{lane}/t{n}"))),
+        vec!["conventions.review_branch"]
+    );
+}
+
+#[test]
+fn a_seat_branch_names_the_project_and_the_seat() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.seat_branch, gear_model::branch::SEAT_BRANCH);
+    assert_eq!(validate(&cfg), vec![], "the default seat branch is valid");
+
+    let with = |value: &str| {
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\nseat_branch = \"{value}\""),
+        ))
+        .unwrap()
+    };
+    // No `{seat}`: every seat would share one worktree branch.
+    assert_eq!(
+        fields(&validate(&with("{project}/work"))),
+        vec!["conventions.seat_branch"]
+    );
+    // The task placeholders belong to the task branches, not to a seat's.
+    for bad in ["{project}/{lane}", "{project}/t{n}", "{project}/{team}"] {
+        assert_eq!(
+            fields(&validate(&with(bad))),
+            vec!["conventions.seat_branch"],
+            "{bad:?}"
+        );
+    }
+    // A name git would refuse.
+    assert_eq!(
+        fields(&validate(&with("{project}//{seat}"))),
+        vec!["conventions.seat_branch"]
+    );
+    // A seat branch is free to be any name git takes.
+    assert_eq!(validate(&with("{project}-{seat}")), vec![]);
 }

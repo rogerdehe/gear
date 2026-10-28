@@ -68,9 +68,11 @@ pub fn gate_for(store: &mut Store, env: &Env) -> GearResult<BaseGate> {
     })
 }
 
-/// The task branch of a lane: `<lane>/t<n>` (conventions 17 §3).
-pub fn task_branch(lane: &str, task: &str) -> String {
-    format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+/// The task branch of a lane (T-252): the project's
+/// `[conventions].task_branch` template with `{project}`, `{lane}` and `{n}`
+/// filled in — `<lane>/t<n>` by default (conventions 17 §3).
+pub fn task_branch(conventions: &crate::config::Conventions, project: &str, lane: &str, task: &str) -> String {
+    gear_model::branch::expand(&conventions.task_branch, project, lane, task)
 }
 
 /// Refuse unless `candidate` is on `origin/<branch>` (T-83): M2.1's T-60 was

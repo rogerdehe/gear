@@ -55,6 +55,7 @@ mod blocked_contract;
 mod guardrails_contract;
 mod blocked_delivery_contract;
 mod parallel_contract;
+mod project_failure_contract;
 mod multi_repo_contract;
 mod reviewer_quota_contract;
 mod pi_lane_contract;

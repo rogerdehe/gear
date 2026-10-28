@@ -123,6 +123,9 @@ struct Fact {
     /// The repo the task's lane works in: `owner/name` on GitHub.
     github: Github,
     integration: String,
+    /// The project's task-branch template (T-252), `None` = GEAR's own
+    /// `{lane}/t{n}`.
+    task_branch: Option<String>,
     issue: u64,
     goal: String,
     attempts: Vec<AttemptFact>,
@@ -289,7 +292,7 @@ fn adopt_claim(
         return Ok(None);
     }
     *budget -= 1;
-    let branch = branch_of(&fact.lane, &fact.task);
+    let branch = branch_of(fact.task_branch.as_deref(), project, &fact.lane, &fact.task);
     // A forge that cannot answer keeps the claim unknown: the next tick
     // tries again.
     let pr = match forge.pr_by_head(&fact.github.repo, &branch) {
@@ -481,7 +484,7 @@ fn merged_result(state: &crate::PrState) -> Option<String> {
 /// request for its branch, naming the issue it closes and carrying the CLAIM
 /// marker.
 fn claim_call(project: &str, fact: &Fact) -> Call {
-    let branch = branch_of(&fact.lane, &fact.task);
+    let branch = branch_of(fact.task_branch.as_deref(), project, &fact.lane, &fact.task);
     Call {
         key: format!("{}:claim", fact.task),
         task: fact.task.clone(),
@@ -733,6 +736,7 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
             lane,
             github,
             integration,
+            task_branch: config.conventions.task_branch.clone(),
             issue,
             goal,
             attempts,
@@ -742,11 +746,16 @@ fn facts(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Fact>> {
     Ok(facts)
 }
 
-/// The branch of a task: the one the engine cuts for it (`<lane>/t<n>`, the
-/// same rule as `gear_engine::dispatch::task_branch` — this crate cannot call
-/// the engine, which calls it).
-fn branch_of(lane: &str, task: &str) -> String {
-    format!("{lane}/{}", task.to_lowercase().replace('-', ""))
+/// The branch of a task (T-252): the project's `[conventions].task_branch`
+/// template — `{lane}/t<n>` when it says nothing, the same rule as
+/// `gear_engine::dispatch::task_branch`.
+fn branch_of(template: Option<&str>, project: &str, lane: &str, task: &str) -> String {
+    gear_model::branch::expand(
+        template.unwrap_or(gear_model::branch::TASK_BRANCH),
+        project,
+        lane,
+        task,
+    )
 }
 
 /// The first words of a goal, for a pull request's title.
@@ -802,6 +811,9 @@ struct Config {
 struct Conventions {
     #[serde(default)]
     integration: Option<String>,
+    /// The project's task-branch template (T-252); `None` = `{lane}/t{n}`.
+    #[serde(default)]
+    task_branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

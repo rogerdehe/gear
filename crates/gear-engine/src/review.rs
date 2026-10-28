@@ -1729,7 +1729,7 @@ fn review_packet(
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
-         Diff to review: `{integration}..{candidate}`\n\
+         Diff to review: `git diff {integration}...{candidate}` (three dots: the change since the merge base)\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
@@ -3020,7 +3020,7 @@ review = [
         assert!(text.contains("the goal"), "{text}");
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
-        assert!(text.contains("dev..abc1234"), "{text}");
+        assert!(text.contains("git diff dev...abc1234"), "{text}");
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
@@ -3785,7 +3785,10 @@ review = [
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+        assert!(
+            packet.contains("Diff to review: `git diff web-dev...abc1234` (three dots: the change since the merge base)"),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3805,7 +3808,12 @@ review = [
         assert_eq!(repo, "/repo/web");
         assert_eq!(base, "original-base");
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `original-base..abc1234`"), "{packet}");
+        assert!(
+            packet.contains(
+                "Diff to review: `git diff original-base...abc1234` (three dots: the change since the merge base)"
+            ),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3844,7 +3852,12 @@ profile = "opencode"
             assert!(door.calls.iter().any(|call| matches!(call,
                 Call::WorktreeOpen { repo: got, .. } if got == repo)));
             let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
-            assert!(packet.contains(&format!("Diff to review: `{base}..abc1234`")), "{packet}");
+            assert!(
+                packet.contains(&format!(
+                    "Diff to review: `git diff {base}...abc1234` (three dots: the change since the merge base)"
+                )),
+                "{packet}"
+            );
             release_review_job(&mut store, n);
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
@@ -4215,9 +4228,11 @@ profile = "opencode"
 const REVIEW_NUDGE_BUDGET: i64 = 3;
 
 /// Reviewers that stopped before handing in their verdict are told to go on
-/// (L-53). The signal is Herdr's own state — the agent is idle while its job
-/// (a verdict for the attempt it reviews) is not done — whatever stopped it: a
-/// server error ("model at capacity"), a dropped connection, a pause. Screen
+/// (L-53). The same holds for a direction check whose result is not in
+/// (T-245): its attempt is Started, its job `running`, and the seat is idle.
+/// The signal is Herdr's own state — the agent is idle while its job is not
+/// done — whatever stopped it: a server error ("model at capacity"), a dropped
+/// connection, a pause. Screen
 /// text only rules out the cases a nudge cannot fix (quota, auth). After
 /// [`REVIEW_NUDGE_BUDGET`] nudges the seat is returned as flagged, which opens
 /// the captain's stall item.
@@ -4260,7 +4275,17 @@ pub(crate) fn nudge_flag_current(tx: &Tx<'_>, project: &str, seat_id: &str, now:
     let Some(seat) = tx.get_seat(seat_id)? else { return Ok(false) };
     let Some(task) = seat.task_id.as_deref() else { return Ok(false) };
     let Some(attempt) = tx.attempts_of_task(project, task)?.into_iter().last() else { return Ok(false) };
-    if attempt.state != gear_model::AttemptState::Submitted || tx.get_review_verdict(project, task, attempt.n)?.is_some() { return Ok(false) }
+    // A direction seat is flagged on its own job, as a review seat is (T-245).
+    if direction_seat(tx, project, task, attempt.n, &seat)? {
+        let running = tx.get_meta(&direction_key(project, task, attempt.n))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|job| job["state"] == "running");
+        let handed_in = tx.direction_results_of_attempt(project, task, attempt.n)?.iter()
+            .any(|m| m.sender == seat_id && m.sender_gen == seat.generation);
+        if !running || handed_in { return Ok(false) }
+    } else if attempt.state != gear_model::AttemptState::Submitted || tx.get_review_verdict(project, task, attempt.n)?.is_some() {
+        return Ok(false)
+    }
     let progress = review_progress(tx, project, &seat, task, attempt.n, now)?;
     let ops: Vec<_> = tx.ops_of_seat_kind(seat_id, OpKind::Deliver)?.into_iter()
         .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt.n)).collect();
@@ -4292,8 +4317,25 @@ pub fn nudge_stopped_reviewers(
             let Some(attempt) = tx.attempts_of_task(project, &task)?.into_iter().last() else {
                 return Ok(None);
             };
-            if direction_seat(tx, project, &task, attempt.n, seat)? { return Ok(None) }
-            if attempt.state != gear_model::AttemptState::Submitted
+            // A direction check is nudged on its own job (T-245): its attempt
+            // is Started, not Submitted, so the review test below is not the
+            // one that applies. The signal is the same — the seat is idle while
+            // its job is not done: the job must still be `running`, and this
+            // seat and generation must have handed no result in.
+            let direction = direction_seat(tx, project, &task, attempt.n, seat)?;
+            if direction {
+                let running = tx.get_meta(&direction_key(project, &task, attempt.n))?
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .is_some_and(|job| job["state"] == "running");
+                if !running {
+                    return Ok(None); // starting, or done
+                }
+                let handed_in = tx.direction_results_of_attempt(project, &task, attempt.n)?.iter()
+                    .any(|m| m.sender == seat.id && m.sender_gen == seat.generation);
+                if handed_in {
+                    return Ok(None);
+                }
+            } else if attempt.state != gear_model::AttemptState::Submitted
                 || tx.get_review_verdict(project, &task, attempt.n)?.is_some()
             {
                 return Ok(None);
@@ -4334,10 +4376,17 @@ pub fn nudge_stopped_reviewers(
                 ref_msg: None,
                 plan_version: None,
                 payload: serde_json::json!({
-                    "text": format!(
-                        "You are idle and your verdict on {task} is not in. If you never got your review packet (it can be lost right after a start), here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in the verdict with the `gear send --kind review` command from the packet.\n\n{}",
-                        packet_text(tx, &seat.id, &task, attempt.n)?
-                    ),
+                    "text": if direction {
+                        format!(
+                            "You are idle and your direction check on {task} is not in. If you never got your packet, here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in with the `gear send --kind result --direction` command from the packet.\n\n{}",
+                            packet_text(tx, &seat.id, &task, attempt.n)?
+                        )
+                    } else {
+                        format!(
+                            "You are idle and your verdict on {task} is not in. If you never got your review packet (it can be lost right after a start), here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in the verdict with the `gear send --kind review` command from the packet.\n\n{}",
+                            packet_text(tx, &seat.id, &task, attempt.n)?
+                        )
+                    },
                     "nudge": used + 1,
                 }),
                 created: now,
