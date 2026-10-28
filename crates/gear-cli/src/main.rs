@@ -3983,7 +3983,7 @@ path="api"
         }).unwrap();
         let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
         let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
-        assert!(out.contains("rebind heat: waits for T-1"), "{out}");
+        assert!(out.contains("rebind heat: repo root → api, owns [src/] → [src/, tests/]: waits for T-1"), "{out}");
     }
 
     /// The JSON output carries the same warnings as the text: the lanes that

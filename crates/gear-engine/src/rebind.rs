@@ -213,7 +213,7 @@ gate="new-gate"
         let env=Env {ctx:Some(GearCtx {project:"p".into(),seat:"captain".into(),generation:1}),pane_id:Some("w1:p1".into()),admin:false};
         let fp=Fingerprint {pane_id:"w1:p1".into(),kind:Some("codex".into()),session_ref:None};
         let result=plan::apply(store,&env,Some(&fp),None,&draft::parse(text).unwrap(),text,"rebind",T+1).unwrap();
-        assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+        assert!(result.warnings.iter().any(|w| w.starts_with("rebind heat: repo old → new, owns [src/] → [src/]: waits for T-1")), "{:?}", result.warnings);
     }
     fn staff(store: &mut Store, command: &str, now: Ts) {
         let version = store.read(|tx| tx.plan_version("p")).unwrap();

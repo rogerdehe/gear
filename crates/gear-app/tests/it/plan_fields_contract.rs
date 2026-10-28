@@ -379,7 +379,11 @@ fn rebind_waits_for_all_open_attempts_then_changes_config_and_preserves_old_task
         tx.update_attempt(&a)
     }).unwrap();
     let result = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/core/, tests/]\n", "rebind").unwrap();
-    assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+    assert!(
+        result.warnings.contains(&"rebind heat: repo api → engine, owns [src/heat/] → [src/core/, tests/]: waits for T-1; nothing changes until then (to withdraw: - rebind heat cancel)".to_string()),
+        "{:?}",
+        result.warnings
+    );
     let before = gear_app::config::latest(&mut s, "p").unwrap();
     assert_eq!(before.repo_of_lane("heat").name, "api");
     assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
@@ -406,7 +410,11 @@ fn idle_rebind_applies_at_once_and_invalid_targets_are_atomic() {
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
     let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/wire/]\n", "idle").unwrap();
-    assert!(result.warnings.contains(&"rebind wire: applied".into()));
+    assert!(
+        result.warnings.contains(&"rebind wire: repo root → api, owns [src/wire/] → [src/wire/]: applied".to_string()),
+        "{:?}",
+        result.warnings
+    );
     assert_eq!(gear_app::config::latest(&mut s, "p").unwrap().repo_of_lane("wire").name, "api");
     assert!(parse("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind wire repo=api owns=[]\n").is_err());
 }
@@ -423,7 +431,11 @@ fn idle_rebind_and_new_task_in_one_apply_use_the_destination_repo() {
         tx.update_task(&old)
     }).unwrap();
     let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/new/]\n# Queue\n## T-2 [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\n## NEW [must] lane=wire\ngoal: new repo work\naccept: done\nestimate: 10\ndeps: -\n", "rebind-and-new").unwrap();
-    assert!(result.warnings.contains(&"rebind wire: applied".into()));
+    assert!(
+        result.warnings.contains(&"rebind wire: repo root → api, owns [src/wire/] → [src/new/]: applied".to_string()),
+        "{:?}",
+        result.warnings
+    );
     let new = task(&mut s, &result.created[0]);
     assert_eq!((new.repo.as_deref(), new.base.as_deref(), new.gate.as_deref()), (Some("/repo/crates/api"), Some("feat/api"), Some("cargo test -p api")));
     let old = task(&mut s, "T-2");
@@ -470,7 +482,11 @@ fn overlapping_pending_rebinds_in_one_apply_are_refused_atomically() {
 fn overlapping_pending_rebinds_across_applies_refuse_only_the_second() {
     let mut s = world_with_two_pending_attempts();
     let first = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/]\n", "first-valid").unwrap();
-    assert!(first.warnings.contains(&"rebind heat: waits for T-1".into()));
+    assert!(
+        first.warnings.contains(&"rebind heat: repo api → engine, owns [src/heat/] → [src/]: waits for T-1; nothing changes until then (to withdraw: - rebind heat cancel)".to_string()),
+        "{:?}",
+        first.warnings
+    );
     let error = run_at(&mut s, "# Staff\n- rebind wire repo=engine owns=[src/deep/]\n", "second-conflict").unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("overlaps"), "{}", error.detail);
@@ -483,4 +499,69 @@ fn overlapping_pending_rebinds_across_applies_refuse_only_the_second() {
     assert_eq!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(), vec!["heat"]);
     assert_eq!(gear_app::config::latest(&mut s, "p").unwrap().repo_of_lane("heat").name, "engine");
     assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+}
+
+/// T-305: the apply line is the preview — an idle lane's rebind names the old
+/// repo and owns, the new ones, and the line that undoes it.
+#[test]
+fn an_idle_rebinds_apply_line_names_what_changes_and_the_undo() {
+    let mut s = world();
+    s.write(|tx| {
+        let mut p = tx.get_project("p")?.unwrap();
+        p.config_toml.push_str("\n[[repos]]\nname='engine'\npath='crates/engine'\nintegration='engine-dev'\ngate='cargo test -p engine'\n");
+        tx.update_project(&p)
+    }).unwrap();
+    let result = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/core/, tests/]\n", "idle-undo").unwrap();
+    assert_eq!(
+        result.warnings,
+        vec![
+            "rebind heat: repo api → engine, owns [src/heat/] → [src/core/, tests/]: applied (to undo: - rebind heat repo=api owns=[src/heat/])".to_string()
+        ]
+    );
+    // The undo line is a real line: once the engine has moved the lane's
+    // worktree (it clears this marker), it puts the lane back.
+    s.write(|tx| tx.set_meta("lane-rebind-applied:p:heat", "")).unwrap();
+    run_at(&mut s, "# Staff\n- rebind heat repo=api owns=[src/heat/]\n", "undo").unwrap();
+    let back = gear_app::config::latest(&mut s, "p").unwrap();
+    assert_eq!(back.repo_of_lane("heat").name, "api");
+    assert_eq!(back.lanes.iter().find(|l| l.name == "heat").unwrap().owns, ["src/heat/"]);
+}
+
+/// T-305: `- rebind <lane> cancel` withdraws a recorded request, so the
+/// engine applies nothing when the lane's last attempt settles.
+#[test]
+fn a_cancel_withdraws_a_pending_rebind_and_nothing_is_applied() {
+    let mut s = world_with_two_pending_attempts();
+    let waiting = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/]\n", "pending").unwrap();
+    assert!(
+        waiting.warnings.contains(&"rebind heat: repo api → engine, owns [src/heat/] → [src/]: waits for T-1; nothing changes until then (to withdraw: - rebind heat cancel)".to_string()),
+        "{:?}",
+        waiting.warnings
+    );
+    assert!(!s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key("p:heat"))).unwrap().unwrap().is_empty());
+    let cancelled = run_at(&mut s, "# Staff\n- rebind heat cancel\n", "cancel").unwrap();
+    assert_eq!(cancelled.warnings, vec!["rebind heat: the pending rebind is withdrawn".to_string()]);
+    assert_eq!(s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key("p:heat"))).unwrap().as_deref(), Some(""));
+    s.write(|tx| {
+        let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+        attempt.state = AttemptState::Accepted;
+        tx.update_attempt(&attempt)
+    }).unwrap();
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+    let after = gear_app::config::latest(&mut s, "p").unwrap();
+    assert_eq!(after.repo_of_lane("heat").name, "api");
+    assert_eq!(after.lanes.iter().find(|l| l.name == "heat").unwrap().owns, ["src/heat/"]);
+}
+
+/// T-305: a cancel with nothing pending warns, and is refused while the lane's
+/// worktree is still moving.
+#[test]
+fn a_cancel_with_nothing_pending_warns_and_a_moving_lane_is_refused() {
+    let mut s = world();
+    let result = run_at(&mut s, "# Staff\n- rebind wire cancel\n", "nothing").unwrap();
+    assert_eq!(result.warnings, vec!["rebind wire: nothing pending to withdraw".to_string()]);
+    s.write(|tx| tx.set_meta("lane-rebind-applied:p:wire", "{}")).unwrap();
+    let error = run_at(&mut s, "# Staff\n- rebind wire cancel\n", "moving").unwrap_err();
+    assert_eq!(error.code, ErrorCode::BadFormat);
+    assert!(error.detail.contains("lane wire is still moving to its new worktree"), "{}", error.detail);
 }
