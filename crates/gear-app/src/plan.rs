@@ -2052,7 +2052,7 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
         ),
         // Tasks predate the first block: the departure is known, the words are not.
         _ => format!(
-            "Voyage {} {} · not described yet (no `# Milestone {}` block)",
+            "Voyage {} {} · not described yet (no `# Voyage {}` block)",
             voyage.milestone, voyage.title, voyage.milestone
         ),
     };
