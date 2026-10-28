@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=592 -->
+<!-- gear-plan project=gear base=593 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -27,6 +27,7 @@ eta: 16h
 - station M-4409: keep course 60 min in; hull 124 min left, mast 55: S4's board work starts on mast now (golden frames first), and the delivery-confirmation fix goes to hull after T-267
 - ★ 2026-10-29 00:20 scope: the decision to write the queue in waves is withdrawn (user: "肯定是把所有要做的事情都提前拆解好…有一些拆解可能不合理，到时候根据实际情况再调"): every remaining M5 item is decomposed into tasks now, while the lanes work their queues, and the plan carries the whole voyage; tasks are adjusted later, not added in waves | why: decomposing as we go drops work and hides the voyage's size | else: waves
 - station M-4430: keep course 70 min in, 15 done; the rest of the voyage is being decomposed now (★ 00:20)
+- station M-4468: keep course 99 min in, 18 done; 64 tasks now planned for the whole voyage
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
@@ -118,7 +119,7 @@ estimate: 30
 
 ## T-274 [must] lane=hull milestone=M5 required
 goal: [v0.5.0 S1] The engine crate's tests run in under 60 s with 2 test threads (M4.2 F-115/F-117 and M5 F-123: `make check CRATE=gear-engine` takes 2-4 min, near the whole-suite red line of 300 s, and every review round pays it). Change test code in crates/gear-engine only (src/**/tests modules and tests/), no behaviour change and no other design: run `cargo nextest run -p gear-engine --no-fail-fast` and take every test over 3 s; make each one faster by building its git or process fixture once per test file (`std::sync::OnceLock`, copied per test when a test writes to it), by replacing a wall-clock wait with the injected clock or the fakes the crate already has, or by shrinking its fixture; no test is deleted, ignored or loses an assertion, and no `--test-threads` tuning. Write the before/after table (test, before, after) into your report.
-accept: `make check CRATE=gear-engine` passes and its nextest summary shows under 60 s; no engine test over 3 s; the number of engine tests is unchanged or higher. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+accept: `make check CRATE=gear-engine` passes; the sum of the engine tests' durations (nextest, 2 threads) is at most 350 s against today's 880 s, measured before and after under the same conditions, and no engine test is over 3 s; the machine is shared with another project, so the report gives the load average with each measurement and the reviewer judges the numbers with it (hull's question M-4457: the 60 s wall time cannot be measured on a loaded machine); the number of engine tests is unchanged or higher. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
 estimate: 45
 
 ## T-275 [must] lane=mast milestone=M5 required
