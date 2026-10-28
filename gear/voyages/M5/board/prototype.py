@@ -144,16 +144,23 @@ def wrap(text, width):
 def header(w, view):
     V, T = G["V"], G["T"]
     wd = w.getmaxyx()[1]
-    # line 0: as in M4, plus the voyage's state and the [ ] keys (change 1)
+    # change 1: line 0 lists every voyage, newest first; the picked one is lit, [ and ] move the pick
+    put(w, 0, 1, f"GEAR · {V['project']}  ", C["b"])
+    x = 4 + len(V["project"]) + 4
+    for i, v in enumerate(VOYS):
+        mark = "⛵" if v["V"]["state"] == "sailing" else "⚓"
+        label = f" {v['V']['milestone']} {mark} "
+        put(w, 0, x, label, (curses.A_REVERSE | C["b"]) if i == G["i"] else C["dim"])
+        x += len(label) + 1
+    put(w, 0, x + 1, "[ older   ] newer", C["dim"])
+    put(w, 0, wd - 8, NOW, C["dim"])
+    # line 1: the picked voyage, as M4's title line
     state = "⛵ sailing" if V["state"] == "sailing" else "⚓ landed"
-    put(w, 0, 1, f"GEAR · {V['project']} · {V['milestone']}: {V['title']}", C["b"])
-    older = VOYS[G["i"] + 1]["V"]["milestone"] if G["i"] + 1 < len(VOYS) else "-"
-    newer = VOYS[G["i"] - 1]["V"]["milestone"] if G["i"] > 0 else "-"
-    put(w, 0, wd - 46, f"{state}   [ {older}  ] {newer}   {NOW}", C["dim"])
+    put(w, 1, 1, f"{V['milestone']}: {V['title']} · {state}", C["b"])
     # change 2: the goal, boxed and bright, under the title
     bw = wd - 3
-    put(w, 1, 1, "╔═ GOAL " + "═" * (bw - 9) + "╗", C["warn"] | C["b"])
-    y = 2
+    put(w, 2, 1, "╔═ GOAL " + "═" * (bw - 9) + "╗", C["warn"] | C["b"])
+    y = 3
     for line in wrap(V["goal"], bw - 4):
         put(w, y, 1, "║ " + line.ljust(bw - 4) + " ║", C["warn"] | C["b"]); y += 1
     put(w, y, 1, "╚" + "═" * (bw - 2) + "╝", C["warn"] | C["b"]); y += 1

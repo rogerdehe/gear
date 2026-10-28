@@ -6,7 +6,7 @@
 
 Changes against M4, each from the user's review of the real board (2026-10-28):
 
-1. **Every voyage, one at a time.** The board keeps every voyage of the project; `[` picks the older one, `]` the newer one, and the whole board then shows that voyage only (header, every view, every panel). The header's first line names the voyage, its state (⛵ sailing, ⚓ landed) and the voyage each key goes to. A landed voyage keeps its data (no "time unknown", no empty lanes: its lanes read "retired at the landing").
+1. **Every voyage, one at a time.** The board keeps every voyage of the project; `[` picks the older one, `]` the newer one, and the whole board then shows that voyage only (header, every view, every panel). The header's first line lists every voyage, newest first (⛵ sailing, ⚓ landed), with the picked one lit; the second line names the picked voyage. A landed voyage keeps its data (no "time unknown", no empty lanes: its lanes read "retired at the landing").
 2. **The goal, boxed and bright,** under the title: the voyage's done sentence in a yellow bold box. When the goal was changed (with the user's yes), a red line under the box gives the time, before and after.
 3. **The goal's clauses and the milestones in the header.** M4's Now view listed the done sentence's clauses at the bottom ("DONE SENTENCE"); they move into the header as `goal n/m met` (✔ met, · not yet). A new `milestones` row lists the voyage's stations: ✔ reached (when), ▶ the current one (planned by), · next.
 4. **Time against the plan.** The M4 time row keeps its bar and words and adds ◆ (projected finish) and │ (planned end) on the bar, and says how far ahead or behind plan it is; a landed voyage says how long it took against the plan.
