@@ -3,7 +3,7 @@
 
 use gear_engine::dispatch::lane_view;
 use gear_model::{AttemptState, OpKind, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, NewOp, SeatRow, Store, TaskRow};
+use gear_store::{testing, AttemptRow, AttemptStep, NewOp, SeatRow, Store, TaskRow};
 
 const T0: i64 = 1_800_000_000;
 
@@ -40,10 +40,36 @@ fn ready_tasks_are_this_lanes_ready_with_done_deps_in_rank_order() {
         task("T-9", 9, "wire", TaskState::Ready, "must", &[]),           // other lane
         task("T-5", 5, "heat", TaskState::Ready, "wont", &[]),           // wont
         task("T-6", 6, "heat", TaskState::Draft, "must", &[]),           // not ready
-    ], &[]);
+    ], &[attempt("T-1", AttemptState::Accepted)]);
+    // T-1 is Done, so its work is merged (T-236).
+    s.write(|tx| tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0)).unwrap();
     let v = s.read(|tx| lane_view(tx, &seat, None, T0)).unwrap();
     assert_eq!(v.ready_tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-3", "T-2"]);
     assert_eq!((v.attempt.clone(), v.pending_op.clone(), v.last_deliver_at, v.nudges_since_progress, v.safe_for_next), (None, None, None, 0, false));
+}
+
+/// T-236 (F-76): Done is set at the review pass, before the merge reaches the
+/// integration branch, so a dependency counts only once its work is merged.
+#[test]
+fn a_done_dependency_counts_only_once_its_work_is_merged() {
+    let (mut s, seat) = world(
+        &[
+            task("T-1", 1, "heat", TaskState::Done, "must", &[]),
+            task("T-2", 2, "heat", TaskState::Ready, "must", &["T-1"]),
+        ],
+        &[attempt("T-1", AttemptState::Accepted)],
+    );
+    let ready = |s: &mut Store| {
+        s.read(|tx| lane_view(tx, &seat, None, T0))
+            .unwrap()
+            .ready_tasks
+            .iter()
+            .map(|t| t.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert!(ready(&mut s).is_empty(), "a Done dependency whose work is not merged does not count");
+    s.write(|tx| tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, T0 + 60)).unwrap();
+    assert_eq!(ready(&mut s), vec!["T-2".to_string()], "the merged dependency releases its dependant");
 }
 
 #[test]
