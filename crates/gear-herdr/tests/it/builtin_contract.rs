@@ -132,6 +132,17 @@ fn a_low_codex_limit_is_not_a_quota_stop() {
     }
 }
 
+/// T-284: a server-side stop is not a quota and not a login. The reviewer of
+/// T-242 sat idle on exactly this screen, and a nudge fixes it (it is a
+/// retry, not a spent plan): the screen flags must not stop the nudge.
+#[test]
+fn a_codex_model_at_capacity_is_neither_a_quota_nor_an_auth_stop() {
+    let p = builtin("codex").expect("codex is built in");
+    let flags = classify_screen(&p, "■ Selected model is at capacity. Please try a different model.");
+    assert!(!flags.contains(&ScreenFlag::Quota), "{flags:?}");
+    assert!(!flags.contains(&ScreenFlag::Auth), "{flags:?}");
+}
+
 #[test]
 fn unverified_kinds_are_not_built_in() {
     // `codex` left this list with T-5: its SOP is verified
