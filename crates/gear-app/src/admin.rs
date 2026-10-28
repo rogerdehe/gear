@@ -74,8 +74,10 @@ pub fn init_with_home(
     }
 
     // 2. everything that needs no store: the config itself, the profiles and
-    //    the GEAR skills (`check`, T-228).
-    let config = check(config_text, home)?;
+    //    the GEAR skills (`check`, T-228). The other projects of the branch
+    //    check (T-256) are this store's, so `register`/`re_register` read them
+    //    inside the transaction, before any write.
+    let config = check(config_text, home, &[])?;
 
     let project_id = config.project.id.clone();
 
@@ -122,12 +124,17 @@ pub fn init_with_home(
 /// The checks `init` makes before it touches the store (T-228): the config's
 /// shape and every issue at once, each seat's profile, and the GEAR skill of
 /// every kind the project can start. A caller that only wants to validate its
-/// `gear.toml` runs this: it opens no store, reaches no Herdr and starts
+/// `gear.toml` runs this: it opens no store (the other projects it compares the
+/// branches with are the caller's, T-256), reaches no Herdr and starts
 /// nothing. The caller-context checks (`init`'s step 2b) need the store and
 /// stay there.
+/// `others` are the **other** projects of the caller's store — `(id,
+/// config_toml)` — for the branch check of T-256; a caller with no store (a
+/// machine without one yet) passes an empty slice.
 pub fn check(
     config_text: &str,
     home: Option<&std::path::Path>,
+    others: &[(String, String)],
 ) -> GearResult<config::ProjectConfig> {
     // Parse and validate the config; every issue is reported at once.
     let config = config::parse(config_text)?;
@@ -244,6 +251,19 @@ pub fn check(
         }
     }
 
+    // Two projects on one repository must not cut the same branch names
+    // (T-256): the store's other projects are the caller's, and one that does
+    // not parse is skipped — it is not the config being checked.
+    for (other_id, other_text) in others {
+        if *other_id == config.project.id {
+            continue;
+        }
+        let Ok(other) = config::parse(other_text) else {
+            continue;
+        };
+        branch_clash(&config, other_id, &other)?;
+    }
+
     Ok(config)
 }
 
@@ -316,6 +336,71 @@ fn prove_captain(
     result
 }
 
+/// The branch check of a registration (T-256), against every other project of
+/// the store: a project's `config_toml` that does not parse is skipped, since
+/// it says nothing about the branches it cuts.
+fn check_other_projects(tx: &Tx<'_>, config: &config::ProjectConfig) -> GearResult<()> {
+    for other_id in tx.project_ids()? {
+        if other_id == config.project.id {
+            continue;
+        }
+        let Some(other) = tx.get_project(&other_id)? else {
+            continue;
+        };
+        let Ok(other_config) = config::parse(&other.config_toml) else {
+            continue;
+        };
+        branch_clash(config, &other_id, &other_config)?;
+    }
+    Ok(())
+}
+
+/// Refuse a config that would cut the same branch names as `other` (T-256): two
+/// fleets in one Herdr session may work on one repository, and their task,
+/// review and seat branch templates then need `{project}` so `hull/t12` and
+/// `review/t12` belong to one project only.
+pub fn branch_clash(
+    config: &config::ProjectConfig,
+    other_id: &str,
+    other: &config::ProjectConfig,
+) -> GearResult<()> {
+    let ours = repo_paths(config);
+    let theirs = repo_paths(other);
+    let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
+        return Ok(());
+    };
+    let conventions = &config.conventions;
+    let templated = [
+        &conventions.task_branch,
+        &conventions.review_branch,
+        &conventions.seat_branch,
+    ]
+    .iter()
+    .all(|template| template.contains("{project}"));
+    if templated {
+        return Ok(());
+    }
+    Err(GearError::new(
+        ErrorCode::BadFormat,
+        format!(
+            "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
+        ),
+    ))
+}
+
+/// A config's repo paths, each canonicalized to compare two configs that name
+/// one repository differently; a path that does not exist stays its text.
+fn repo_paths(config: &config::ProjectConfig) -> Vec<String> {
+    config
+        .repos()
+        .into_iter()
+        .map(|repo| match std::fs::canonicalize(&repo.path) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(_) => repo.path,
+        })
+        .collect()
+}
+
 /// First registration: the project row and one seat per role. The captain is
 /// bound Active as generation 1 (T-63): it is the user's running agent in
 /// `captain.pane`. The lanes stay Queued — the engine onboards them.
@@ -326,6 +411,7 @@ fn register(
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = config.project.id.clone();
+    check_other_projects(tx, config)?;
 
     tx.insert_project(&ProjectRow {
         id: project_id.clone(),
@@ -424,6 +510,7 @@ fn re_register(
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
+    check_other_projects(tx, config)?;
 
     // The session the project lives in does not change mid-run.
     if config.project.herdr_session != project.herdr_session {

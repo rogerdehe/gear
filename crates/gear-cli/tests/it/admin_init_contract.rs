@@ -494,3 +494,53 @@ fn check_reports_the_issues_init_reports() {
     assert_eq!(checked, stderr(&o), "the same issue text");
     assert_eq!(config_version(&db), 0, "nothing was registered");
 }
+
+/// A config for project `id` on `repo`, with the default branch templates.
+fn config_for(dir: &Path, id: &str, repo: &Path) -> PathBuf {
+    let path = dir.join(format!("{id}.toml"));
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = {id}\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 0\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n",
+            id = serde_json::json!(id).to_string(),
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// T-256: `gear admin init --check` refuses a config that would cut the same
+/// branch names as a registered project on the same repository — the existing
+/// store is only read, and a config on another repository still passes.
+#[test]
+fn check_refuses_a_second_project_on_the_same_repo() {
+    let dir = scratch("check-clash");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the other repo");
+    let db = dir.join("gear.db");
+    // The user registers `p` on the repository.
+    let o = init(&dir, &db, &config_for(&dir, "p", &repo), None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let before = std::fs::metadata(&db).expect("the store").len();
+
+    // `q` on the same repository with the default templates is refused,
+    // naming `p` and the repository.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &repo), None, false, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
+    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
+    assert!(err.contains("put {project} in conventions.task_branch"), "{err}");
+    assert_eq!(std::fs::metadata(&db).expect("the store").len(), before, "a check writes nothing");
+
+    // On another repository the same config passes.
+    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "config ok: project q, 0 lanes, 0 reviewers");
+}
