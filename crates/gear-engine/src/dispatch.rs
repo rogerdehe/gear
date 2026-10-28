@@ -252,16 +252,20 @@ pub fn assign_text(task: &str, version: i64, branch: &str, packet: &str) -> Stri
 /// started a task on the previous task's branch, so the candidate carried
 /// another task or work landed on a handed-in branch).
 ///
-/// `New task <task> (contract v<version>). Branch: <branch>. Start it from the integration branch: git fetch origin && git switch -c <branch> origin/<integration> (if it exists already: git switch <branch>). Run `gear` first (…). …`
+/// `New task <task> (contract v<version>). Branch: <branch>. Start it from the integration branch: git fetch <remote> && git switch -c <branch> <remote>/<integration> (if it exists already: git switch <branch>). Run `gear` first (…). …`
+///
+/// The remote is the project's `[conventions].remote` (T-262): a team that
+/// calls it `upstream` reads its branches from there.
 pub fn first_attempt_text(
     task: &str,
     version: i64,
     branch: &str,
+    remote: &str,
     integration: &str,
     packet: &str,
 ) -> String {
     format!(
-        "New task {task} (contract v{version}). Branch: {branch}. Start it from the integration branch: git fetch origin && git switch -c {branch} origin/{integration} (if it exists already: git switch {branch}). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
+        "New task {task} (contract v{version}). Branch: {branch}. Start it from the integration branch: git fetch {remote} && git switch -c {branch} {remote}/{integration} (if it exists already: git switch {branch}). Run `gear` first (it records that you got this). Task packet: {packet}. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
     )
 }
 
@@ -587,6 +591,7 @@ pub fn intend_dispatch(tx: &Tx<'_>, project: &str, actions: &[(SeatRow, Action)]
                         task,
                         attempt.contract_version,
                         &branch,
+                        &conventions.remote,
                         &integration_branch(tx, project, &seat.name),
                         &packet_ref(task),
                     )
@@ -1000,7 +1005,7 @@ mod tests {
     #[test]
     fn the_two_packet_writings() {
         assert_eq!(
-            first_attempt_text("T-1", 1, "heat/t1", "dev", "`gear --show T-1`"),
+            first_attempt_text("T-1", 1, "heat/t1", "origin", "dev", "`gear --show T-1`"),
             "New task T-1 (contract v1). Branch: heat/t1. Start it from the integration branch: git fetch origin && git switch -c heat/t1 origin/dev (if it exists already: git switch heat/t1). Run `gear` first (it records that you got this). Task packet: `gear --show T-1`. Read it before starting; report with gear send. After your result, end your turn: the next task comes when you are idle."
         );
         assert_eq!(

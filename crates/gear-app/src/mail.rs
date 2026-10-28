@@ -455,7 +455,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     args.friction.as_deref(),
                     now,
                 )?;
-                crate::tasks::submit_result(
+                let handed_in = crate::tasks::submit_result(
                     tx,
                     &ctx.project,
                     task.as_deref().ok_or_else(|| {
@@ -472,7 +472,23 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     })?,
                     &args.body,
                     now,
-                )?;
+                );
+                // T-266: a hand-in that fails because the lane's work was
+                // already sent back is answered with the rework that waits
+                // for it, not with the state error the engine hit. Every
+                // other failure keeps its own text.
+                if let Err(error) = handed_in {
+                    if let Some(rework) = rework_waiting(
+                        tx,
+                        &ctx.project,
+                        &seat.id,
+                        result_task,
+                        result_attempt,
+                    )? {
+                        return Err(rework);
+                    }
+                    return Err(error);
+                }
                 store_friction(
                     tx,
                     &ctx.project,
@@ -952,6 +968,45 @@ fn progress_meta(left: Option<i64>, blocker: Option<&str>) -> GearResult<Option<
         );
     }
     Ok(Some(serde_json::Value::Object(fields).to_string()))
+}
+
+/// T-266: the rework that waits for a lane whose hand-in failed.
+///
+/// After a fail verdict the engine opens the next attempt on the lane's seat
+/// and delivers its packet only when the lane is idle. A lane still in its
+/// turn hands in the old attempt again and reads a state error; this finds
+/// the newer attempt (same seat, not handed in yet) so the refusal can say
+/// what actually waits. `None` when there is no such attempt: every other
+/// failure keeps its own text.
+fn rework_waiting(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &str,
+    task: &str,
+    named: i64,
+) -> GearResult<Option<GearError>> {
+    let mut newer = None;
+    for attempt in tx.attempts_of_task(project, task)? {
+        if attempt.n <= named || attempt.seat != seat {
+            continue;
+        }
+        // Not handed in yet: the rework has not reached the reviewer.
+        if matches!(
+            attempt.state,
+            AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown
+        ) {
+            newer = Some(attempt.n);
+        }
+    }
+    Ok(newer.map(|n| {
+        GearError::new(
+            ErrorCode::BadTransition,
+            format!(
+                "a rework of {task} (attempt {n}) is waiting for you: end your turn now and its \
+                 packet arrives; do not hand in attempt {named} again"
+            ),
+        )
+    }))
 }
 
 /// A declared wait (design §5.3): the lane's task cannot finish until another

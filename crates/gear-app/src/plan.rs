@@ -1652,7 +1652,14 @@ fn remerge(
             }
         }
     }
-    merges.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+    // The order of ops: the time they were created, then their number — not
+    // their id as a string, where O-999 sorts after O-1000 (T-268).
+    let op_number = |id: &str| -> u64 {
+        id.strip_prefix("O-")
+            .and_then(|rest| rest.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    merges.sort_by(|a, b| (a.created, op_number(&a.id)).cmp(&(b.created, op_number(&b.id))));
     let Some(last) = merges.into_iter().last() else {
         return Err(bad(
             line,
@@ -1679,7 +1686,6 @@ fn remerge(
     // branch (a hint for closing it, named by the project's template — T-252),
     // the accepted candidate and the review branch.
     let lane = task.lane.clone().unwrap_or_default();
-    let slug = task_id.to_lowercase().replace('-', "");
     let conventions = project_config(tx, project)?
         .map(|config| config.conventions)
         .unwrap_or_default();
@@ -1700,7 +1706,12 @@ fn remerge(
         payload: serde_json::json!({
             "branch": branch,
             "candidate": candidate,
-            "review": format!("review/{slug}"),
+            "review": gear_model::branch::expand(
+                &conventions.review_branch,
+                project,
+                &lane,
+                task_id
+            ),
             "remerge": true,
         }),
         created: now,
