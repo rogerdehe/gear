@@ -43,10 +43,7 @@ JSON
 printf '\n%s' "STATUS"
 "#;
     script
-        .replace(
-            "ARGS",
-            &headers.with_file_name("args.txt").display().to_string(),
-        )
+        .replace("ARGS", &headers.with_file_name("args.txt").display().to_string())
         .replace("HEADERS", &headers.display().to_string())
         .replace("BODY", body)
         .replace("STATUS", &status.to_string())
@@ -81,9 +78,7 @@ fn with_fake_curl(dir: &Path, script: &str, f: impl FnOnce(&Path)) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let _guard = PATH_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = PATH_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let old = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{}", bin.display(), old));
     f(dir);
@@ -107,35 +102,36 @@ fn the_minimax_windows_are_read() {
         "base_resp": {"status_code": 0, "status_msg": "success"}
     })
     .to_string();
-    with_fake_curl(dir.path(), &curl_script(&body, &headers), |dir| {
-        let reading = read_quota_in(QuotaReader::Minimax, KEY, None, T13, dir).unwrap();
-        // The call is the one of §9.1: curl, the timeout, the header on
-        // standard input and the URL of the provider.
-        let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
-        assert!(args.contains("-sS"), "{args}");
-        assert!(args.contains("--max-time 15"), "{args}");
-        assert!(args.contains("-H @-"), "{args}");
-        assert!(
-            args.contains("https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains"),
-            "{args}"
-        );
-        assert_eq!(reading.provider, "minimax");
-        assert_eq!(reading.read_at, T13);
-        assert_eq!(reading.windows.len(), 2, "{reading:?}");
-        let five_hours = &reading.windows[0];
-        assert_eq!(five_hours.name, "MiniMax-M3.1-Flash 5h");
-        // The provider says how much is left; the reading says how much is
-        // used.
-        assert!(
-            (five_hours.used_percent - 57.5).abs() < 1e-9,
-            "{five_hours:?}"
-        );
-        assert_eq!(five_hours.resets_at, Some(1_793_016_000));
-        let weekly = &reading.windows[1];
-        assert_eq!(weekly.name, "MiniMax-M3.1-Flash weekly");
-        assert!((weekly.used_percent - 20.0).abs() < 1e-9, "{weekly:?}");
-        assert_eq!(weekly.resets_at, Some(1_793_600_000));
-    });
+    with_fake_curl(
+        dir.path(),
+        &curl_script(&body, &headers),
+        |dir| {
+            let reading = read_quota_in(QuotaReader::Minimax, KEY, None, T13, dir).unwrap();
+            // The call is the one of §9.1: curl, the timeout, the header on
+            // standard input and the URL of the provider.
+            let args = std::fs::read_to_string(dir.join("args.txt")).unwrap();
+            assert!(args.contains("-sS"), "{args}");
+            assert!(args.contains("--max-time 15"), "{args}");
+            assert!(args.contains("-H @-"), "{args}");
+            assert!(
+                args.contains("https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains"),
+                "{args}"
+            );
+            assert_eq!(reading.provider, "minimax");
+            assert_eq!(reading.read_at, T13);
+            assert_eq!(reading.windows.len(), 2, "{reading:?}");
+            let five_hours = &reading.windows[0];
+            assert_eq!(five_hours.name, "MiniMax-M3.1-Flash 5h");
+            // The provider says how much is left; the reading says how much is
+            // used.
+            assert!((five_hours.used_percent - 57.5).abs() < 1e-9, "{five_hours:?}");
+            assert_eq!(five_hours.resets_at, Some(1_793_016_000));
+            let weekly = &reading.windows[1];
+            assert_eq!(weekly.name, "MiniMax-M3.1-Flash weekly");
+            assert!((weekly.used_percent - 20.0).abs() < 1e-9, "{weekly:?}");
+            assert_eq!(weekly.resets_at, Some(1_793_600_000));
+        },
+    );
 }
 
 #[test]
@@ -150,40 +146,47 @@ fn the_opencode_go_windows_are_read() {
         }
     })
     .to_string();
-    with_fake_curl(dir.path(), &curl_script(&body, &headers), |dir| {
-        let reading = read_quota_in(QuotaReader::OpencodeGo, KEY, None, T13, dir).unwrap();
-        assert_eq!(reading.provider, "opencode-go");
-        assert_eq!(reading.windows.len(), 3, "{reading:?}");
-        assert_eq!(reading.windows[0].name, "rolling");
-        assert!((reading.windows[0].used_percent - 42.0).abs() < 1e-9);
-        assert_eq!(reading.windows[0].resets_at, Some(1_793_016_000));
-        assert_eq!(reading.windows[1].name, "weekly");
-        assert!((reading.windows[1].used_percent - 55.5).abs() < 1e-9);
-        assert_eq!(reading.windows[1].resets_at, Some(1_793_600_000));
-        assert_eq!(reading.windows[2].name, "monthly");
-        assert!((reading.windows[2].used_percent - 60.25).abs() < 1e-9);
-        assert_eq!(reading.windows[2].resets_at, Some(1_796_000_000));
-    });
+    with_fake_curl(
+        dir.path(),
+        &curl_script(&body, &headers),
+        |dir| {
+            let reading = read_quota_in(QuotaReader::OpencodeGo, KEY, None, T13, dir).unwrap();
+            assert_eq!(reading.provider, "opencode-go");
+            assert_eq!(reading.windows.len(), 3, "{reading:?}");
+            assert_eq!(reading.windows[0].name, "rolling");
+            assert!((reading.windows[0].used_percent - 42.0).abs() < 1e-9);
+            assert_eq!(reading.windows[0].resets_at, Some(1_793_016_000));
+            assert_eq!(reading.windows[1].name, "weekly");
+            assert!((reading.windows[1].used_percent - 55.5).abs() < 1e-9);
+            assert_eq!(reading.windows[1].resets_at, Some(1_793_600_000));
+            assert_eq!(reading.windows[2].name, "monthly");
+            assert!((reading.windows[2].used_percent - 60.25).abs() < 1e-9);
+            assert_eq!(reading.windows[2].resets_at, Some(1_796_000_000));
+        },
+    );
 }
 
 #[test]
 fn the_key_never_appears_on_the_command_line() {
     let dir = tempfile::tempdir().unwrap();
     let headers = dir.path().join("headers.txt");
-    let body = json!({"usage": {"rolling": {"percent": 1.0, "resetsAt": 1_793_016_000_000i64}}})
-        .to_string();
-    with_fake_curl(dir.path(), &curl_script(&body, &headers), |dir| {
-        // The fake curl refuses to run when the key is among its
-        // arguments: the reading comes back, so the key was not there.
-        let reading = read_quota_in(QuotaReader::OpencodeGo, KEY, None, T13, dir).unwrap();
-        assert_eq!(reading.windows.len(), 1, "{reading:?}");
-        // It was on standard input, in the header.
-        let header = std::fs::read_to_string(dir.join("headers.txt")).unwrap();
-        assert!(
-            header.contains(&format!("Authorization: Bearer {KEY}")),
-            "{header}"
-        );
-    });
+    let body = json!({"usage": {"rolling": {"percent": 1.0, "resetsAt": 1_793_016_000_000i64}}}).to_string();
+    with_fake_curl(
+        dir.path(),
+        &curl_script(&body, &headers),
+        |dir| {
+            // The fake curl refuses to run when the key is among its
+            // arguments: the reading comes back, so the key was not there.
+            let reading = read_quota_in(QuotaReader::OpencodeGo, KEY, None, T13, dir).unwrap();
+            assert_eq!(reading.windows.len(), 1, "{reading:?}");
+            // It was on standard input, in the header.
+            let header = std::fs::read_to_string(dir.join("headers.txt")).unwrap();
+            assert!(
+                header.contains(&format!("Authorization: Bearer {KEY}")),
+                "{header}"
+            );
+        },
+    );
 }
 
 #[test]
@@ -316,7 +319,14 @@ fn the_codex_windows_are_read_from_the_newest_count_of_the_rollout() {
     );
     assert!(path.is_file());
 
-    let reading = read_quota_in(QuotaReader::Codex, "", Some(thread), T13, &home).unwrap();
+    let reading = read_quota_in(
+        QuotaReader::Codex,
+        "",
+        Some(thread),
+        T13,
+        &home,
+    )
+    .unwrap();
     assert_eq!(reading.provider, "codex");
     assert_eq!(reading.read_at, T13);
     assert_eq!(reading.windows.len(), 2, "{reading:?}");

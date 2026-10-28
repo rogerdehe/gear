@@ -21,9 +21,7 @@ fn store_with_project() -> Store {
 
 /// A Submitted doorbell op covering `covers`, created at `created`.
 fn submitted_op(store: &mut Store, covers: &[&str], created: i64) -> String {
-    store
-        .write(|tx| Ok(submitted_op_within(tx, covers, created)))
-        .unwrap()
+    store.write(|tx| Ok(submitted_op_within(tx, covers, created))).unwrap()
 }
 
 /// The same, inside an existing transaction (so a test can move it further).
@@ -43,10 +41,8 @@ fn submitted_op_within(tx: &Tx<'_>, covers: &[&str], created: i64) -> String {
         })
         .unwrap()
         .id;
-    tx.set_op_state("p", &id, OpState::Executing, None, created)
-        .unwrap();
-    tx.set_op_state("p", &id, OpState::Submitted, None, created)
-        .unwrap();
+    tx.set_op_state("p", &id, OpState::Executing, None, created).unwrap();
+    tx.set_op_state("p", &id, OpState::Submitted, None, created).unwrap();
     id
 }
 
@@ -85,11 +81,7 @@ fn matching_view_confirms() {
     assert_eq!(confirmed, vec![id.clone()]);
     assert!(flagged.is_empty());
     assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
-    assert_eq!(
-        op(&mut store, &id).check_budget,
-        0,
-        "a confirmed op needs no further checks"
-    );
+    assert_eq!(op(&mut store, &id).check_budget, 0, "a confirmed op needs no further checks");
 }
 
 /// L-69: any view after the doorbell answers it, even one that did not list
@@ -115,10 +107,7 @@ fn older_view_does_not_confirm() {
 
     let (confirmed, _) = confirm_pending(&mut store, "p", 3, T0 + 20).unwrap();
 
-    assert!(
-        confirmed.is_empty(),
-        "a view from before the intent proves nothing"
-    );
+    assert!(confirmed.is_empty(), "a view from before the intent proves nothing");
     assert_eq!(op(&mut store, &id).state, OpState::Submitted);
     assert_eq!(op(&mut store, &id).check_budget, 1);
 }
@@ -156,8 +145,7 @@ fn unknown_op_confirms() {
         .write(|tx| {
             // An op whose Herdr call was Uncertain waits in Unknown.
             let id = submitted_op_within(tx, &["M-1"], T0 + 1);
-            tx.set_op_state("p", &id, OpState::Unknown, Some("deadline"), T0 + 2)
-                .unwrap();
+            tx.set_op_state("p", &id, OpState::Unknown, Some("deadline"), T0 + 2).unwrap();
             Ok(id)
         })
         .unwrap();
@@ -201,10 +189,7 @@ fn budget_exhaustion_flags_seat() {
     assert_eq!(flagged, vec![SEAT.to_string()], "the seat needs a check");
 
     let (_, flagged) = confirm_pending(&mut store, "p", 2, T0 + 8).unwrap();
-    assert!(
-        flagged.is_empty(),
-        "the seat is flagged once, not on every check"
-    );
+    assert!(flagged.is_empty(), "the seat is flagged once, not on every check");
 }
 
 #[test]
@@ -214,11 +199,7 @@ fn no_resend_on_exhaustion() {
 
     let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 6).unwrap();
     assert!(confirmed.is_empty());
-    assert_eq!(
-        flagged,
-        vec![SEAT.to_string()],
-        "the budget of one check is used up"
-    );
+    assert_eq!(flagged, vec![SEAT.to_string()], "the budget of one check is used up");
 
     // A later check flags nothing new and resends nothing.
     let (_, flagged) = confirm_pending(&mut store, "p", 1, T0 + 7).unwrap();
@@ -317,13 +298,8 @@ fn an_unanswered_doorbell_expires() {
     let (confirmed, _) = confirm_pending(&mut store, "p", 1000, T0 + 60).unwrap();
     assert!(confirmed.is_empty(), "still within its time");
 
-    let (confirmed, _) = confirm_pending(
-        &mut store,
-        "p",
-        1000,
-        T0 + gear_engine::ops::DOORBELL_EXPIRY_S,
-    )
-    .unwrap();
+    let (confirmed, _) =
+        confirm_pending(&mut store, "p", 1000, T0 + gear_engine::ops::DOORBELL_EXPIRY_S).unwrap();
     assert_eq!(confirmed, vec![id.clone()]);
     assert_eq!(op(&mut store, &id).state, OpState::Confirmed);
 }

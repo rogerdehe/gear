@@ -42,21 +42,9 @@ impl History {
 
     /// When the task started, when it was handed in and when it was merged.
     fn span(&self) -> (Option<Ts>, Option<Ts>, Option<Ts>) {
-        let start = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.started)
-            .min();
-        let handed_in = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.handed_in)
-            .max();
-        let merged = self
-            .times
-            .iter()
-            .filter_map(|(_, times)| times.merged)
-            .max();
+        let start = self.times.iter().filter_map(|(_, times)| times.started).min();
+        let handed_in = self.times.iter().filter_map(|(_, times)| times.handed_in).max();
+        let merged = self.times.iter().filter_map(|(_, times)| times.merged).max();
         (start, handed_in, merged)
     }
 }
@@ -193,24 +181,23 @@ pub fn lanes(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
     Ok(tx
         .seats_of_project(project)?
         .into_iter()
-        .filter(|seat| {
-            seat.role == gear_model::SeatRole::Lane && seat.state != gear_model::SeatState::Retired
-        })
+        .filter(|seat| seat.role == gear_model::SeatRole::Lane && seat.state != gear_model::SeatState::Retired)
         .map(|seat| seat.name)
         .collect())
 }
 
 /// The stage of a task: its state, and whether it is already accepted.
-fn stage_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<GraphStage> {
+fn stage_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &gear_store::TaskRow,
+) -> GearResult<GraphStage> {
     Ok(match task.state {
         TaskState::Done => GraphStage::Done,
         TaskState::Running => GraphStage::Working,
         TaskState::Verifying => {
             // An accepted task waits for its merge.
-            let accepted = tx
-                .verdicts_of_task(project, &task.id)?
-                .iter()
-                .any(|verdict| verdict.passed);
+            let accepted = tx.verdicts_of_task(project, &task.id)?.iter().any(|verdict| verdict.passed);
             if accepted {
                 GraphStage::Merging
             } else {
@@ -238,10 +225,7 @@ fn actual_of(history: &History, now: Ts) -> (Option<i64>, Option<Ts>) {
 /// `selected` is the row the user has on: its dependencies and the tasks that
 /// wait for it are marked.
 pub fn lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usize>) -> Vec<String> {
-    styled_lines(tasks, lanes, selected)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    styled_lines(tasks, lanes, selected).into_iter().map(|line| line.text).collect()
 }
 
 /// The colour of a stage (the prototype's STAGE_COL).
@@ -286,14 +270,7 @@ impl Columns {
         let lane_x = id_x + id_w;
         // The goal: 35 columns, then a space before the info.
         let info_x = lane_x + lane_w + 36;
-        Columns {
-            step,
-            id_x,
-            lane_x,
-            lane_w,
-            info_x,
-            mark_x: info_x + 33,
-        }
+        Columns { step, id_x, lane_x, lane_w, info_x, mark_x: info_x + 33 }
     }
 
     /// The column of a lane: the first lane at 14, every next one a step
@@ -337,11 +314,7 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 row.put(columns.lane(lane_index) + 1, "│", lane_style(lane));
             }
         }
-        row.put(
-            x,
-            task.stage.symbol(),
-            Style::fg(stage_color(task.stage)).and_bold(),
-        );
+        row.put(x, task.stage.symbol(), Style::fg(stage_color(task.stage)).and_bold());
         if task.stage == GraphStage::Done {
             // The task was merged into dev: the line of the merge.
             row.put(3, "●", Style::fg(Color::Ok).and_bold());
@@ -354,19 +327,10 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
                 }
             }
         }
-        row.put(
-            columns.id_x,
-            &task.id,
-            lane_style(&task.lane).reversed_if(picked),
-        );
+        row.put(columns.id_x, &task.id, lane_style(&task.lane).reversed_if(picked));
         row.put(
             columns.lane_x,
-            &format!(
-                "{:<w$}{:<35}",
-                task.lane,
-                cut(&task.title, 34),
-                w = columns.lane_w
-            ),
+            &format!("{:<w$}{:<35}", task.lane, cut(&task.title, 34), w = columns.lane_w),
             Style::PLAIN.reversed_if(picked),
         );
         let info_style = match task.stage {
@@ -414,10 +378,7 @@ pub fn styled_lines(tasks: &[GraphTask], lanes: &[String], selected: Option<usiz
 /// The index of a lane in the columns; a lane that is not a column (a task of
 /// a lane that is retired) goes to the last column.
 fn lane_index(lanes: &[String], lane: &str) -> usize {
-    lanes
-        .iter()
-        .position(|name| name == lane)
-        .unwrap_or(lanes.len().saturating_sub(1))
+    lanes.iter().position(|name| name == lane).unwrap_or(lanes.len().saturating_sub(1))
 }
 
 /// The text of the info column: what happened to the task.
@@ -446,10 +407,7 @@ fn info(task: &GraphTask) -> String {
 /// The task panel: the rounds of the task, what it depends on, what needs
 /// it.
 pub fn panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<String>> {
-    Ok(styled_panel(tx, project, task, now)?
-        .into_iter()
-        .map(|line| line.text)
-        .collect())
+    Ok(styled_panel(tx, project, task, now)?.into_iter().map(|line| line.text).collect())
 }
 
 /// The colour of a task's state in a panel: the stage colours of the graph.
@@ -465,9 +423,7 @@ fn state_color(state: TaskState) -> Color {
 /// The task panel, in the prototype's colours.
 pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<Line>> {
     let Some(row) = tx.get_task(project, task)? else {
-        return Ok(vec![Line::plain(format!(
-            "{task} is not a task of {project}"
-        ))]);
+        return Ok(vec![Line::plain(format!("{task} is not a task of {project}"))]);
     };
     let history = History::of(tx, project, task)?;
     let order = lanes(tx, project)?;
@@ -500,11 +456,7 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
     let over = estimate > 0 && actual > estimate;
     lines.push(Line::styled(
         format!("estimate {estimate}m · actual {actual}m"),
-        if over {
-            Style::fg(Color::Warn)
-        } else {
-            Style::PLAIN
-        },
+        if over { Style::fg(Color::Warn) } else { Style::PLAIN },
     ));
     lines.push(Line::new());
     lines.push(Line::styled("ROUNDS", Style::bold()));
@@ -556,11 +508,8 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
                 format!("{}", attempt.n)
             )));
             if let Some(verdict) = tx.get_review_verdict(project, task, attempt.n)? {
-                let (outcome, color) = if verdict.passed {
-                    ("pass", Color::Ok)
-                } else {
-                    ("fail: rework", Color::Warn)
-                };
+                let (outcome, color) =
+                    if verdict.passed { ("pass", Color::Ok) } else { ("fail: rework", Color::Warn) };
                 lines.push(
                     Line::plain(format!(
                         "  review {:<7} {:<6}          ",
@@ -611,10 +560,7 @@ pub fn styled_panel(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResu
 /// One line of the "depends on" list.
 fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<Line> {
     let Some(row) = tx.get_task(project, dep)? else {
-        return Ok(Line::styled(
-            format!("  {dep} (unknown)"),
-            Style::fg(Color::Dim),
-        ));
+        return Ok(Line::styled(format!("  {dep} (unknown)"), Style::fg(Color::Dim)));
     };
     Ok(Line::styled(
         format!(
@@ -630,8 +576,7 @@ fn dependency_line(tx: &Tx<'_>, project: &str, dep: &str) -> GearResult<Line> {
 
 /// The goal of a task (its title).
 fn goal_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<String> {
-    Ok(tx
-        .get_contract(project, &task.id, task.contract_version)?
+    Ok(tx.get_contract(project, &task.id, task.contract_version)?
         .map(|contract| contract.goal)
         .unwrap_or_default())
 }
@@ -670,9 +615,7 @@ struct Row {
 
 impl Row {
     fn new(width: usize) -> Row {
-        Row {
-            cells: vec![(' ', Style::PLAIN); width],
-        }
+        Row { cells: vec![(' ', Style::PLAIN); width] }
     }
 
     /// Write a text at a column, in a style.

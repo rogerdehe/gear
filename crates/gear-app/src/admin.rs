@@ -44,7 +44,12 @@ const CAPTAIN: &str = "captain";
 ///      the next config version (see [`re_register`]).
 /// Checks that need Herdr or git (session, repo, branch) are not part of this
 /// cut.
-pub fn init(store: &mut Store, env: &Env, config_text: &str, now: Ts) -> GearResult<InitResult> {
+pub fn init(
+    store: &mut Store,
+    env: &Env,
+    config_text: &str,
+    now: Ts,
+) -> GearResult<InitResult> {
     init_with_home(store, env, config_text, None, now)
 }
 
@@ -146,21 +151,15 @@ pub fn check(
     // project's own) and must be able to run unattended (T-31): an agent that
     // stops on a permission dialog cannot be driven by GEAR.
     let table = config::profile_table(&gear_herdr::builtins(), &config)?;
-    let seats_to_check: Vec<(&str, &str)> =
-        std::iter::once(("captain", config.captain.profile.as_str()))
-            .chain(
-                config
-                    .lanes
-                    .iter()
-                    .map(|lane| (lane.name.as_str(), lane.profile.as_str())),
-            )
-            .chain(
-                config
-                    .temps
-                    .iter()
-                    .map(|temps| ("temps", temps.profile.as_str())),
-            )
-            .collect();
+    let seats_to_check: Vec<(&str, &str)> = std::iter::once(("captain", config.captain.profile.as_str()))
+        .chain(config.lanes.iter().map(|lane| (lane.name.as_str(), lane.profile.as_str())))
+        .chain(
+            config
+                .temps
+                .iter()
+                .map(|temps| ("temps", temps.profile.as_str())),
+        )
+        .collect();
     for (name, profile_name) in &seats_to_check {
         let Some(profile) = table.get(*profile_name) else {
             return Err(GearError::new(
@@ -193,10 +192,12 @@ pub fn check(
         Some(home) => home.to_path_buf(),
         None => match std::env::var_os("HOME") {
             Some(home) => std::path::PathBuf::from(home),
-            None => return Err(GearError::new(
-                ErrorCode::BadFormat,
-                "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
-            )),
+            None => {
+                return Err(GearError::new(
+                    ErrorCode::BadFormat,
+                    "HOME is not set: `gear admin init` cannot check that the GEAR skill is installed",
+                ))
+            }
         },
     };
     let mut kinds: Vec<(String, String)> = Vec::new();
@@ -218,16 +219,8 @@ pub fn check(
             &format!("the model chain of lane {}", lane.name),
         );
     }
-    note_chain(
-        &mut kinds,
-        &config.models.review,
-        "the reviewers' model chain",
-    );
-    note_chain(
-        &mut kinds,
-        &config.models.captain,
-        "the captain's model chain",
-    );
+    note_chain(&mut kinds, &config.models.review, "the reviewers' model chain");
+    note_chain(&mut kinds, &config.models.captain, "the captain's model chain");
 
     for (kind, who) in &kinds {
         let Ok(agent) = crate::skill::SkillAgent::parse(kind) else {
@@ -356,7 +349,10 @@ fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
 /// branches, so this config's task, review and seat branch templates must name
 /// `{project}`: two fleets in one Herdr session then keep `hull/t12` and
 /// `review/t12` to themselves.
-pub fn branch_clash(config: &config::ProjectConfig, others: &[(String, String)]) -> Option<String> {
+pub fn branch_clash(
+    config: &config::ProjectConfig,
+    others: &[(String, String)],
+) -> Option<String> {
     let ours = repo_paths(config);
     for (other_id, other_text) in others {
         if *other_id == config.project.id {
@@ -695,11 +691,7 @@ fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearR
         .collect();
     // The newest seats fill the slots; the id breaks a tie so the choice is
     // the same on every run.
-    idle.sort_by(|a, b| {
-        b.state_since
-            .cmp(&a.state_since)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    idle.sort_by(|a, b| b.state_since.cmp(&a.state_since).then_with(|| a.id.cmp(&b.id)));
 
     let reason = format!("temps quota lowered to {quota}");
     for seat in idle.into_iter().skip(room) {

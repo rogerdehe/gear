@@ -80,10 +80,7 @@ pub struct GearError {
 
 impl GearError {
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
-        GearError {
-            code,
-            detail: detail.into(),
-        }
+        GearError { code, detail: detail.into() }
     }
 }
 

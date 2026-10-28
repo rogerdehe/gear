@@ -9,14 +9,7 @@ use crate::shared::{iso, write_lines, T12, T13, T14};
 const SESSION: &str = "0199aaaa-bbbb-cccc-dddd-eeeeffff0000";
 
 /// One assistant message of Claude, with its usage.
-fn assistant(
-    id: &str,
-    time: i64,
-    input: i64,
-    cache_read: i64,
-    cache_write: i64,
-    output: i64,
-) -> serde_json::Value {
+fn assistant(id: &str, time: i64, input: i64, cache_read: i64, cache_write: i64, output: i64) -> serde_json::Value {
     json!({
         "type": "assistant",
         "uuid": format!("uuid-{id}"),
@@ -96,10 +89,7 @@ fn a_session_without_a_file_is_unknown() {
         T14,
         home.path(),
     );
-    assert!(
-        usage.is_none(),
-        "a session without a file is unknown, not zero"
-    );
+    assert!(usage.is_none(), "a session without a file is unknown, not zero");
 }
 
 #[test]

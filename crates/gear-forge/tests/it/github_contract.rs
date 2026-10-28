@@ -185,13 +185,7 @@ fn open_claim_opens_a_draft_and_names_the_pull_request() {
     answer(&dir, "https://github.com/owner/name/pull/7\n");
     let body = format!("Closes #12\n\n{}", marker::claim("base", 12));
     let pr = forge
-        .open_claim(
-            "owner/name",
-            "base/t78",
-            "dev",
-            "The forge layer (#12)",
-            &body,
-        )
+        .open_claim("owner/name", "base/t78", "dev", "The forge layer (#12)", &body)
         .expect("the claim");
     assert_eq!(
         argv(&dir),
@@ -233,15 +227,7 @@ fn comment_names_the_repo_and_the_number() {
     forge.comment(&pr, "handed in").expect("the comment");
     assert_eq!(
         argv(&dir),
-        vec![
-            "pr",
-            "comment",
-            "7",
-            "--repo",
-            "owner/name",
-            "--body",
-            "handed in"
-        ]
+        vec!["pr", "comment", "7", "--repo", "owner/name", "--body", "handed in"]
     );
 }
 
@@ -254,23 +240,14 @@ fn merge_takes_the_method() {
         number: 7,
         url: String::new(),
     };
-    let result = forge
-        .merge(&pr, MergeMethod::Squash, "")
-        .expect("the merge");
+    let result = forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
     assert_eq!(
         argv(&dir),
         vec!["pr", "merge", "7", "--repo", "owner/name", "--squash"]
     );
-    assert_eq!(
-        calls(&dir),
-        vec!["pr view", "pr merge"],
-        "a ready pull request is not re-readied"
-    );
+    assert_eq!(calls(&dir), vec!["pr view", "pr merge"], "a ready pull request is not re-readied");
     assert!(result.merged, "{result:?}");
-    assert!(
-        result.message.contains("Merged pull request #7"),
-        "{result:?}"
-    );
+    assert!(result.message.contains("Merged pull request #7"), "{result:?}");
 
     let (dir, forge) = forge_with("merge-commit", None);
     ready_pr(&dir);
@@ -293,18 +270,10 @@ fn a_draft_claim_is_made_ready_before_it_merges() {
     answer_for(&dir, "pr-merge", "✔ Merged pull request #7\n");
 
     let pr = forge
-        .open_claim(
-            "owner/name",
-            "base/t78",
-            "dev",
-            "The forge layer",
-            "Closes #12",
-        )
+        .open_claim("owner/name", "base/t78", "dev", "The forge layer", "Closes #12")
         .expect("the claim");
     assert!(pr.is_open());
-    let result = forge
-        .merge(&pr, MergeMethod::Squash, "")
-        .expect("the merge");
+    let result = forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
 
     assert_eq!(
         calls(&dir),
@@ -329,9 +298,7 @@ fn a_ready_pull_request_is_not_made_ready_again() {
         number: 7,
         url: String::new(),
     };
-    forge
-        .merge(&pr, MergeMethod::Squash, "")
-        .expect("the merge");
+    forge.merge(&pr, MergeMethod::Squash, "").expect("the merge");
     assert_eq!(calls(&dir), vec!["pr view", "pr merge"]);
 }
 
@@ -355,11 +322,7 @@ fn a_failed_readiness_is_a_typed_error() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
-    assert_eq!(
-        calls(&dir),
-        vec!["pr view", "pr ready"],
-        "no merge after a failed readiness"
-    );
+    assert_eq!(calls(&dir), vec!["pr view", "pr ready"], "no merge after a failed readiness");
 }
 
 #[test]
@@ -389,15 +352,9 @@ fn a_closed_pull_request_is_never_asked_about() {
     let (dir, forge) = forge_with("none", None);
     let none = PrRef::none("owner/name");
     forge.comment(&none, "x").expect("no call");
-    let merged = forge
-        .merge(&none, MergeMethod::Squash, "")
-        .expect("no call");
+    let merged = forge.merge(&none, MergeMethod::Squash, "").expect("no call");
     assert!(!merged.merged, "{merged:?}");
-    assert!(
-        calls(&dir).is_empty(),
-        "the forge was called: {:?}",
-        calls(&dir)
-    );
+    assert!(calls(&dir).is_empty(), "the forge was called: {:?}", calls(&dir));
 }
 
 #[test]

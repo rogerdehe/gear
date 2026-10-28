@@ -90,29 +90,19 @@ impl ProjectConfig {
         let Some(path) = task.repo.as_deref() else {
             return self.repo_of_lane(task.lane.as_deref().unwrap_or_default());
         };
-        let mut repo = self
-            .repos()
-            .into_iter()
-            .find(|r| r.path == path)
-            .unwrap_or_else(|| {
-                // A removed repo is still a valid historical target. Do not use a
-                // different repo's GitHub settings or worker key for it.
-                let mut hash = 0xcbf29ce484222325u64;
-                for b in path.bytes() {
-                    hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3);
-                }
-                let mut fallback = self.root_repo();
-                fallback.name = format!("snapshot-{hash:x}");
-                fallback.path = path.to_string();
-                fallback.github = None;
-                fallback
-            });
-        if let Some(base) = &task.base {
-            repo.integration = base.clone();
-        }
-        if let Some(gate) = &task.gate {
-            repo.gate = gate.clone();
-        }
+        let mut repo = self.repos().into_iter().find(|r| r.path == path).unwrap_or_else(|| {
+            // A removed repo is still a valid historical target. Do not use a
+            // different repo's GitHub settings or worker key for it.
+            let mut hash = 0xcbf29ce484222325u64;
+            for b in path.bytes() { hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3); }
+            let mut fallback = self.root_repo();
+            fallback.name = format!("snapshot-{hash:x}");
+            fallback.path = path.to_string();
+            fallback.github = None;
+            fallback
+        });
+        if let Some(base) = &task.base { repo.integration = base.clone(); }
+        if let Some(gate) = &task.gate { repo.gate = gate.clone(); }
         repo
     }
 
@@ -531,11 +521,7 @@ impl ModelEntry {
     pub fn cli(&self) -> Option<&str> {
         match self {
             ModelEntry::Plain(_) => None,
-            ModelEntry::Entry(spec) => spec
-                .cli
-                .as_deref()
-                .map(str::trim)
-                .filter(|cli| !cli.is_empty()),
+            ModelEntry::Entry(spec) => spec.cli.as_deref().map(str::trim).filter(|cli| !cli.is_empty()),
         }
     }
 
@@ -548,10 +534,7 @@ impl ModelEntry {
     }
 
     pub fn context_window_k(&self) -> Option<u64> {
-        match self {
-            ModelEntry::Plain(_) => None,
-            ModelEntry::Entry(spec) => spec.context_window_k,
-        }
+        match self { ModelEntry::Plain(_) => None, ModelEntry::Entry(spec) => spec.context_window_k }
     }
 
     /// The entry as one line, for a log or a message: the model id, and the
@@ -629,12 +612,7 @@ impl<'de> serde::de::Visitor<'de> for ModelEntryVisitor {
             }
         }
         let model = model.ok_or_else(|| serde::de::Error::missing_field("model"))?;
-        Ok(ModelEntry::Entry(ModelSpec {
-            model,
-            cli,
-            args,
-            context_window_k,
-        }))
+        Ok(ModelEntry::Entry(ModelSpec { model, cli, args, context_window_k }))
     }
 }
 
@@ -733,12 +711,14 @@ pub fn parse(text: &str) -> GearResult<ProjectConfig> {
 /// reads both in **one** transaction and parses outside it, so a config change
 /// can never be seen half-applied (review R-63).
 pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
-    let row = store.read(|tx| tx.get_project(project))?.ok_or_else(|| {
-        GearError::new(
-            ErrorCode::NoTarget,
-            format!("no project {project} in the store"),
-        )
-    })?;
+    let row = store
+        .read(|tx| tx.get_project(project))?
+        .ok_or_else(|| {
+            GearError::new(
+                ErrorCode::NoTarget,
+                format!("no project {project} in the store"),
+            )
+        })?;
     parse(&row.config_toml)
 }
 
@@ -779,10 +759,7 @@ pub fn profile_table(
         // A name that is not built in starts from the operational defaults
         // (16 lines, two confirmation rounds), not from an all-zero profile
         // (review R2).
-        let current = table
-            .get(name)
-            .cloned()
-            .unwrap_or_else(gear_herdr::Profile::for_new);
+        let current = table.get(name).cloned().unwrap_or_else(gear_herdr::Profile::for_new);
         let mut profile = current.patched(&patch, name);
         // A profile the user configured is one GEAR may drive: they wrote the
         // kind, the args and the exit keys (T-31). `gear admin init` refuses
@@ -862,10 +839,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
     if cfg.timing.delivery_grace_s == 0 {
-        issues.push(issue(
-            "timing.delivery_grace_s",
-            "must be at least one second".to_string(),
-        ));
+        issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
     }
     // A cap of zero would refuse every task (T-279): the captain plans each
     // task's time, and no estimate is under it.
@@ -876,26 +850,12 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
     for (model, price) in &cfg.prices {
-        if !model
-            .split_once('/')
-            .is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty())
-        {
-            issues.push(issue(
-                &format!("prices.{model}"),
-                "must name a provider/model".to_string(),
-            ));
+        if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {
+            issues.push(issue(&format!("prices.{model}"), "must name a provider/model".to_string()));
         }
-        for (field, value) in [
-            ("input", price.input),
-            ("output", price.output),
-            ("cache_read", price.cache_read),
-            ("cache_write", price.cache_write),
-        ] {
+        for (field, value) in [("input",price.input),("output",price.output),("cache_read",price.cache_read),("cache_write",price.cache_write)] {
             if !value.is_finite() || value < 0.0 {
-                issues.push(issue(
-                    &format!("prices.{model}.{field}"),
-                    "must be a finite non-negative rate".to_string(),
-                ));
+                issues.push(issue(&format!("prices.{model}.{field}"), "must be a finite non-negative rate".to_string()));
             }
         }
     }
@@ -912,16 +872,14 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     if cfg.conventions.gate.contains("TODO") {
         issues.push(issue(
             "conventions.gate",
-            "conventions.gate must be your build + test command (it runs before every merge)"
-                .to_string(),
+            "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
         ));
     }
     let gate_missing = cfg.conventions.gate.trim().is_empty();
-    let repo_without_own_gate = cfg.repos.iter().any(|repo| {
-        repo.gate
-            .as_deref()
-            .is_none_or(|gate| gate.trim().is_empty())
-    });
+    let repo_without_own_gate = cfg
+        .repos
+        .iter()
+        .any(|repo| repo.gate.as_deref().is_none_or(|gate| gate.trim().is_empty()));
     let root_has_work = cfg.repos.is_empty()
         || cfg.lanes.iter().any(|lane| {
             lane.repo
@@ -939,16 +897,8 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // chain with `fallback` is really "park for quota_reset_h hours" — say so
     // at kickoff instead of finding out when every lane stops.
     for (field, chain, policy) in [
-        (
-            "models.lanes",
-            &cfg.models.lanes,
-            &cfg.models.on_quota.lanes,
-        ),
-        (
-            "models.review",
-            &cfg.models.review,
-            &cfg.models.on_quota.review,
-        ),
+        ("models.lanes", &cfg.models.lanes, &cfg.models.on_quota.lanes),
+        ("models.review", &cfg.models.review, &cfg.models.on_quota.review),
     ] {
         if *policy == QuotaPolicy::Fallback && chain.len() == 1 {
             issues.push(issue(
@@ -987,7 +937,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     if !is_name(&cfg.project.id) {
         issues.push(issue(
             "project.id",
-            format!("project id {:?} must match [a-z][a-z0-9-]*", cfg.project.id),
+            format!(
+                "project id {:?} must match [a-z][a-z0-9-]*",
+                cfg.project.id
+            ),
         ));
     }
     if !agent_name_fits(&cfg.project.id, "captain") {
@@ -1037,10 +990,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         match first_lane_with_name.get(lane.name.as_str()) {
             Some(first) => issues.push(issue(
                 &field,
-                format!(
-                    "lane name {:?} is already used by lanes[{first}]",
-                    lane.name
-                ),
+                format!("lane name {:?} is already used by lanes[{first}]", lane.name),
             )),
             None => {
                 first_lane_with_name.insert(lane.name.as_str(), index);
@@ -1076,12 +1026,15 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 &owns_field,
                 "an owns entry is empty after trimming".to_string(),
             ));
-        } else if let Some(other) = cfg.lanes[..index].iter().find(|earlier| {
-            // Two lanes overlap only when they work in the same repo
-            // (T-52): the same paths in two repos are two different
-            // files, and a lane's `owns` is relative to its repo.
-            earlier.repo == lane.repo && owns_overlap(&earlier.owns, &lane.owns)
-        }) {
+        } else if let Some(other) = cfg.lanes[..index]
+            .iter()
+            .find(|earlier| {
+                // Two lanes overlap only when they work in the same repo
+                // (T-52): the same paths in two repos are two different
+                // files, and a lane's `owns` is relative to its repo.
+                earlier.repo == lane.repo && owns_overlap(&earlier.owns, &lane.owns)
+            })
+        {
             issues.push(issue(
                 &owns_field,
                 format!("overlaps the paths owned by lane {:?}", other.name),
@@ -1105,10 +1058,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         match first_repo_with_name.get(repo.name.as_str()) {
             Some(first) => issues.push(issue(
                 &name_field,
-                format!(
-                    "repo name {:?} is already used by repos[{first}]",
-                    repo.name
-                ),
+                format!("repo name {:?} is already used by repos[{first}]", repo.name),
             )),
             None => {
                 first_repo_with_name.insert(repo.name.as_str(), index);
@@ -1183,10 +1133,7 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                 ));
             }
             if gate_pipes_without_pipefail(gate) {
-                issues.push(issue(
-                    &format!("repos.{}.gate", repo.name),
-                    GATE_PIPE.to_string(),
-                ));
+                issues.push(issue(&format!("repos.{}.gate", repo.name), GATE_PIPE.to_string()));
             }
         }
     }
@@ -1321,17 +1268,11 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     }
 
     if cfg.timing.captain_item_stale_min == 0 {
-        issues.push(issue(
-            "timing.captain_item_stale_min",
-            "must be at least one minute".to_string(),
-        ));
+        issues.push(issue("timing.captain_item_stale_min", "must be at least one minute".to_string()));
     }
 
     if cfg.timing.lane_busy_idle_min == 0 {
-        issues.push(issue(
-            "timing.lane_busy_idle_min",
-            "must be at least one minute".to_string(),
-        ));
+        issues.push(issue("timing.lane_busy_idle_min", "must be at least one minute".to_string()));
     }
 
     // ---- models (17 §0): empty chains mean models are not managed
@@ -1370,7 +1311,8 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         if !independent {
             issues.push(issue(
                 "models.review",
-                "the review chain must hold a model that no lane runs as its primary".to_string(),
+                "the review chain must hold a model that no lane runs as its primary"
+                    .to_string(),
             ));
         }
     }
@@ -1387,7 +1329,11 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // by the CLI itself, which costs a review round to find out. The CLI of
     // an entry is its own, else the kind of the seat that runs it.
     let lane_kinds: Vec<&str> = cfg.lanes.iter().map(|lane| lane.kind.trim()).collect();
-    let temps_kinds: Vec<&str> = cfg.temps.iter().map(|temps| temps.kind.trim()).collect();
+    let temps_kinds: Vec<&str> = cfg
+        .temps
+        .iter()
+        .map(|temps| temps.kind.trim())
+        .collect();
     claude_model_issues("models.lanes", &models.lanes, &lane_kinds, &mut issues);
     claude_model_issues("models.review", &models.review, &temps_kinds, &mut issues);
     claude_model_issues(
@@ -1453,9 +1399,7 @@ fn is_github_repo(repo: &str) -> bool {
         && !name.is_empty()
         && !name.contains('/')
         && !owner.contains('/')
-        && repo
-            .chars()
-            .all(|c| !c.is_whitespace() && !matches!(c, '@' | ':' | '\\'))
+        && repo.chars().all(|c| !c.is_whitespace() && !matches!(c, '@' | ':' | '\\'))
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1705,10 +1649,7 @@ mod tests {
     fn agent_names_are_at_most_32_characters() {
         assert!(agent_name_fits("harbor", "heat"));
         assert!(agent_name_fits("harbor", "captain"));
-        assert!(!agent_name_fits(
-            "harbor",
-            "a-very-long-lane-name-for-harbor"
-        ));
+        assert!(!agent_name_fits("harbor", "a-very-long-lane-name-for-harbor"));
     }
 
     #[test]

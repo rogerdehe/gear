@@ -63,13 +63,14 @@ pub fn release_finished_reviews(
     // A pane that cannot be read is an observation failure, not an absence
     // (design/08, as in `runs_a_reviewer`): such a seat keeps its slot.
     for seat in store.read(|tx| tx.seats_of_project(project))? {
-        if seat.role != SeatRole::Temp || seat.state != SeatState::Active || seat.task_id.is_none()
+        if seat.role != SeatRole::Temp
+            || seat.state != SeatState::Active
+            || seat.task_id.is_none()
         {
             continue;
         }
         let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-        let Some(binding) = binding.filter(|binding| binding.status == BindingStatus::Active)
-        else {
+        let Some(binding) = binding.filter(|binding| binding.status == BindingStatus::Active) else {
             continue;
         };
         match herdr.agent_get(&binding.pane_id) {
@@ -105,27 +106,15 @@ pub fn release_finished_reviews(
             continue;
         }
         let pending_key = format!("engine.review_pending.{}", seat.id);
-        let mut pending = store
-            .read(|tx| tx.get_meta(&pending_key))?
-            .filter(|task| !task.is_empty());
+        let mut pending = store.read(|tx| tx.get_meta(&pending_key))?.filter(|task| !task.is_empty());
         if seat.state != SeatState::Starting {
             if let Some(task) = pending.as_deref() {
                 if !under_review(store, project, &seat, task)? {
                     store.write(|tx| {
                         tx.set_meta(&pending_key, "")?;
                         if seat.state == SeatState::Queued {
-                            tx.set_seat_state(
-                                &seat.id,
-                                SeatState::Starting,
-                                Some("cancelled reservation"),
-                                now,
-                            )?;
-                            tx.set_seat_state(
-                                &seat.id,
-                                SeatState::Released,
-                                Some("cancelled reservation"),
-                                now,
-                            )?;
+                            tx.set_seat_state(&seat.id, SeatState::Starting, Some("cancelled reservation"), now)?;
+                            tx.set_seat_state(&seat.id, SeatState::Released, Some("cancelled reservation"), now)?;
                         }
                         Ok(())
                     })?;
@@ -275,11 +264,7 @@ fn cancel_start(
     //    are still live for that job are voided (the captain's decision of
     //    M-2603: the `Intended` and the `Submitted` ones — an op in flight
     //    ends on its own).
-    let job = store
-        .read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id)))
-        .map_err(|e| e.detail)?
-        .filter(|s| !s.is_empty())
-        .or_else(|| seat.task_id.clone());
+    let job = store.read(|tx| tx.get_meta(&format!("engine.review_pending.{}", seat.id))).map_err(|e| e.detail)?.filter(|s| !s.is_empty()).or_else(|| seat.task_id.clone());
     let live = store
         .read(|tx| tx.slot_ops(&seat.id))
         .map_err(|e| e.detail)?;
@@ -347,24 +332,21 @@ fn cancel_start(
 /// Whether the reviewer still has work: its task is `Verifying`, its attempt is
 /// the one the reviewer was started for, that attempt is `Submitted`, and the
 /// reviewer has not handed in its verdict yet.
-fn under_review(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
+fn under_review(
+    store: &mut Store,
+    project: &str,
+    seat: &SeatRow,
+    task: &str,
+) -> GearResult<bool> {
     store.read(|tx| {
         let Some(row) = tx.get_task(project, task)? else {
             return Ok(false);
         };
         if let Some(attempt) = tx.attempts_of_task(project, task)?.into_iter().last() {
             let key = format!("engine.direction.{project}.{task}.{}", attempt.n);
-            let direction = tx
-                .get_meta(&key)?
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
-            if matches!(
-                attempt.state,
-                AttemptState::Started | AttemptState::Submitted
-            ) && direction.is_some_and(|job| {
-                job["seat"] == seat.id
-                    && (job["state"] == "starting"
-                        || (job["state"] == "running" && job["generation"] == seat.generation))
-            }) {
+            let direction = tx.get_meta(&key)?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
+            if matches!(attempt.state, AttemptState::Started | AttemptState::Submitted)
+                && direction.is_some_and(|job| job["seat"] == seat.id && (job["state"] == "starting" || (job["state"] == "running" && job["generation"] == seat.generation))) {
                 return Ok(true);
             }
         }
@@ -378,9 +360,7 @@ fn under_review(store: &mut Store, project: &str, seat: &SeatRow, task: &str) ->
             return Ok(false);
         }
         // A newer attempt handed in means this reviewer read an older one.
-        let pending = tx
-            .get_meta(&format!("engine.review_pending.{}", seat.id))?
-            .filter(|value| !value.is_empty());
+        let pending = tx.get_meta(&format!("engine.review_pending.{}", seat.id))?.filter(|value| !value.is_empty());
         if pending.as_deref() != Some(task) && seat.task_id.as_deref() == Some(task) {
             if let Some(job) = tx.last_op(&seat.id, OpKind::Deliver)? {
                 if job.task.as_deref() == Some(task) && job.attempt != Some(latest.n) {
@@ -575,9 +555,7 @@ pub(crate) fn runs_a_reviewer(
     seat: &SeatRow,
 ) -> GearResult<bool> {
     let binding = store.read(|tx| tx.get_binding(&seat.id, seat.generation))?;
-    let Some(binding) = binding else {
-        return Ok(false);
-    };
+    let Some(binding) = binding else { return Ok(false) };
     if binding.status == BindingStatus::Void {
         return Ok(false);
     }
@@ -609,25 +587,26 @@ fn release_dead(
             Outcome::Refused { .. } | Outcome::Uncertain { .. } => {}
         }
     }
-    store.write(|tx| {
-        if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
-            if binding.status != BindingStatus::Void {
-                tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+    store
+        .write(|tx| {
+            if let Some(binding) = tx.get_binding(&seat.id, seat.generation)? {
+                if binding.status != BindingStatus::Void {
+                    tx.set_binding_status(&seat.id, seat.generation, BindingStatus::Void)?;
+                }
             }
-        }
-        require_transition(
-            SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Released),
-            "seat",
-            seat.state.as_str(),
-            SeatState::Released.as_str(),
-        )?;
-        tx.set_seat_state(
-            &seat.id,
-            SeatState::Released,
-            Some("no reviewer runs in it"),
-            now,
-        )
-    })
+            require_transition(
+                SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Released),
+                "seat",
+                seat.state.as_str(),
+                SeatState::Released.as_str(),
+            )?;
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Released,
+                Some("no reviewer runs in it"),
+                now,
+            )
+        })
 }
 
 /// Finish the retirement of a lane (design/10, plan T-65).
@@ -660,10 +639,7 @@ pub fn retire_finished_lanes(
         // the lane's safe point (design/10: submitted ones continue through
         // acceptance without the lane).
         let open = store.read(|tx| tx.open_attempts_of_seat(&seat.id))?;
-        if !open
-            .iter()
-            .all(|attempt| attempt.state == AttemptState::Submitted)
-        {
+        if !open.iter().all(|attempt| attempt.state == AttemptState::Submitted) {
             continue;
         }
         // A lane mid-turn is not cut off; one whose agent is already gone has
@@ -671,7 +647,9 @@ pub fn retire_finished_lanes(
         let settled = observed
             .iter()
             .find(|obs| obs.seat.id == seat.id)
-            .map(|obs| obs.idle || matches!(obs.presence, crate::observe::Presence::Missing))
+            .map(|obs| {
+                obs.idle || matches!(obs.presence, crate::observe::Presence::Missing)
+            })
             .unwrap_or(false);
         if !settled {
             continue;
@@ -909,15 +887,8 @@ profile = "codex"
                     issue: None,
                     updated: T0,
                 })?;
-                let lane = testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    "w1:p1",
-                    "opencode",
-                    T0,
-                )?;
+                let lane =
+                    testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p1", "opencode", T0)?;
                 // The lane works: its attempt is `Started` (W = 1).
                 gear_app::tasks::start_attempt(tx, "p", "T-2", &lane.id, 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
@@ -1067,15 +1038,7 @@ profile = "codex"
                     issue: None,
                     updated: T0,
                 })?;
-                let seat = testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    pane,
-                    "opencode",
-                    T0,
-                )?;
+                let seat = testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, pane, "opencode", T0)?;
                 if state != SeatState::Active {
                     tx.set_seat_state(&seat.id, state, Some("retiring for the test"), T0)?;
                 }
@@ -1112,15 +1075,9 @@ profile = "codex"
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Idle);
 
-        let retired = retire_finished_lanes(
-            &mut store,
-            &mut herdr,
-            "p",
-            &idle_obs(&seat),
-            &profiles(),
-            T0 + 10,
-        )
-        .unwrap();
+        let retired =
+            retire_finished_lanes(&mut store, &mut herdr, "p", &idle_obs(&seat), &profiles(), T0 + 10)
+                .unwrap();
 
         assert_eq!(retired, vec![seat.id.clone()], "the lane is retired");
         let calls: Vec<&str> = herdr
@@ -1134,11 +1091,7 @@ profile = "codex"
             .collect();
         assert_eq!(calls, vec!["exit", "close"], "exit, then the closed pane");
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat(&seat.id))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
             SeatState::Retired
         );
         // Once: the next tick has nothing left to do.
@@ -1166,37 +1119,25 @@ profile = "codex"
             .write(|tx| {
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
-                tx.set_seat_state(
-                    &seat.id,
-                    SeatState::Retiring,
-                    Some("retired by the plan"),
-                    T0 + 1,
-                )
+                tx.set_seat_state(&seat.id, SeatState::Retiring, Some("retired by the plan"), T0 + 1)
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w1:p1", "opencode", gear_herdr::AgentStatus::Working);
 
-        assert!(
-            retire_finished_lanes(
-                &mut store,
-                &mut herdr,
-                "p",
-                &idle_obs(&seat),
-                &profiles(),
-                T0 + 10
-            )
-            .unwrap()
-            .is_empty(),
-            "a working attempt keeps the lane"
-        );
+        assert!(retire_finished_lanes(
+            &mut store,
+            &mut herdr,
+            "p",
+            &idle_obs(&seat),
+            &profiles(),
+            T0 + 10
+        )
+        .unwrap()
+        .is_empty(), "a working attempt keeps the lane");
         assert!(herdr.calls.is_empty(), "{:?}", herdr.calls);
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat(&seat.id))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
             SeatState::Retiring
         );
 
@@ -1207,23 +1148,12 @@ profile = "codex"
             })
             .unwrap();
         assert_eq!(
-            retire_finished_lanes(
-                &mut store,
-                &mut herdr,
-                "p",
-                &idle_obs(&seat),
-                &profiles(),
-                T0 + 20
-            )
-            .unwrap(),
+            retire_finished_lanes(&mut store, &mut herdr, "p", &idle_obs(&seat), &profiles(), T0 + 20)
+                .unwrap(),
             vec![seat.id.clone()]
         );
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat(&seat.id))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap().state,
             SeatState::Retired
         );
     }
@@ -1272,22 +1202,12 @@ profile = "codex"
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
-        assert!(
-            removes(&herdr).is_empty(),
-            "the seat's worktree is kept (T-18)"
-        );
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         assert_eq!(exits(&herdr), 1, "the close is not repeated");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", seat.generation))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            binding.status,
-            BindingStatus::Void,
-            "the closed pane is not reused"
-        );
+        let binding = store.read(|tx| tx.get_binding("p:r-1", seat.generation)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "the closed pane is not reused");
         // A further tick does nothing.
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
         assert!(report.released.is_empty());
@@ -1304,9 +1224,7 @@ profile = "codex"
         let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         // The engine died right after the exit keys were sent.
         store
-            .write(|tx| {
-                tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5)
-            })
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
 
         // The agent is still there (an older engine's exit keys were
@@ -1322,10 +1240,7 @@ profile = "codex"
 
         assert_eq!(report.released, vec!["p:r-1".to_string()]);
         assert_eq!(exits(&herdr), 1, "no second close");
-        assert!(
-            removes(&herdr).is_empty(),
-            "the seat's worktree is kept (T-18)"
-        );
+        assert!(removes(&herdr).is_empty(), "the seat's worktree is kept (T-18)");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
     }
@@ -1342,9 +1257,7 @@ profile = "codex"
         herdr.add_agent(&worktree.pane_id, "codex", gear_herdr::AgentStatus::Idle);
         let mut store = world(TaskState::Cancelled, &worktree.pane_id, "codex");
         store
-            .write(|tx| {
-                tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5)
-            })
+            .write(|tx| tx.set_seat_state("p:r-1", SeatState::Releasing, Some("review done"), T0 + 5))
             .unwrap();
         herdr.observe_fails = true;
 
@@ -1407,18 +1320,11 @@ profile = "codex"
 
         assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
         assert!(report.failed.is_empty(), "{report:?}");
-        assert!(
-            removes(&herdr).is_empty(),
-            "no seat's worktree is removed (T-18)"
-        );
+        assert!(removes(&herdr).is_empty(), "no seat's worktree is removed (T-18)");
         let first_seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(first_seat.state, SeatState::Released);
         let second_seat = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
-        assert_eq!(
-            second_seat.state,
-            SeatState::Releasing,
-            "its agent was still there"
-        );
+        assert_eq!(second_seat.state, SeatState::Releasing, "its agent was still there");
         assert_eq!(exits(&herdr), 1, "its pane is closed");
 
         // Its pane is gone: it is released too.
@@ -1445,17 +1351,11 @@ profile = "codex"
 
         assert!(report.released.is_empty(), "{report:?}");
         assert!(
-            herdr
-                .calls
-                .iter()
-                .any(|call| matches!(call, Call::PaneClose { pane } if pane == &worktree.pane_id)),
+            herdr.calls.iter().any(|call| matches!(call, Call::PaneClose { pane } if pane == &worktree.pane_id)),
             "the pane is closed: {:?}",
             herdr.calls
         );
-        assert!(
-            herdr.prompts_to(&worktree.pane_id).is_empty(),
-            "no exit command is sent"
-        );
+        assert!(herdr.prompts_to(&worktree.pane_id).is_empty(), "no exit command is sent");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Releasing);
     }
@@ -1543,20 +1443,11 @@ profile = "codex"
         assert_eq!(seat.state, SeatState::Released, "the seat is free");
         assert_eq!(exits(&herdr), 1, "its pane is closed");
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
-        let op = store
-            .read(|tx| tx.get_op("p", &deliver.id))
-            .unwrap()
-            .unwrap();
+        let op = store.read(|tx| tx.get_op("p", &deliver.id)).unwrap().unwrap();
         assert_eq!(op.state, OpState::Void, "its start op is voided");
-        let op = store
-            .read(|tx| tx.get_op("p", &doorbell.id))
-            .unwrap()
-            .unwrap();
+        let op = store.read(|tx| tx.get_op("p", &doorbell.id)).unwrap().unwrap();
         assert_eq!(op.state, OpState::Void, "the op it sent is voided too");
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Void, "its binding ends");
     }
 
@@ -1564,118 +1455,51 @@ profile = "codex"
     fn a_cancelled_pending_review_releases_its_starting_seat() {
         let mut herdr = FakeHerdr::new();
         let mut store = world(TaskState::Ready, "w2:p2", "codex");
-        store
-            .write(|tx| {
-                tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
-                tx.clear_seat_task("p:r-1")?;
-                tx.set_meta("engine.review_pending.p:r-1", "T-1")
-            })
-            .unwrap();
+        store.write(|tx| {
+            tx.set_seat_state("p:r-1", SeatState::Starting, Some("starting"), T0)?;
+            tx.clear_seat_task("p:r-1")?;
+            tx.set_meta("engine.review_pending.p:r-1", "T-1")
+        }).unwrap();
         herdr.add_shell("w2:p2");
         let report = release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
         assert_eq!(report.released, vec!["p:r-1"]);
-        assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
-            SeatState::Released
-        );
-        assert_eq!(
-            store
-                .read(|tx| tx.get_meta("engine.review_pending.p:r-1"))
-                .unwrap()
-                .as_deref(),
-            Some("")
-        );
+        assert_eq!(store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state, SeatState::Released);
+        assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
     }
 
     #[test]
     fn cancelled_reservation_is_cleared_before_onboarding() {
         let mut herdr = FakeHerdr::new();
         let mut store = world(TaskState::Ready, "w2:p2", "codex");
-        store
-            .write(|tx| {
-                tx.set_seat_state("p:r-1", SeatState::Released, None, T0)?;
-                tx.clear_seat_task("p:r-1")?;
-                tx.set_meta("engine.review_pending.p:r-1", "T-1")
-            })
-            .unwrap();
+        store.write(|tx| {
+            tx.set_seat_state("p:r-1", SeatState::Released, None, T0)?;
+            tx.clear_seat_task("p:r-1")?;
+            tx.set_meta("engine.review_pending.p:r-1", "T-1")
+        }).unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
-        assert_eq!(
-            store
-                .read(|tx| tx.get_meta("engine.review_pending.p:r-1"))
-                .unwrap()
-                .as_deref(),
-            Some("")
-        );
+        assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
 
-        store
-            .write(|tx| {
-                tx.set_seat_state("p:r-1", SeatState::Queued, None, T0)?;
-                tx.set_meta("engine.review_pending.p:r-1", "T-1")
-            })
-            .unwrap();
+        store.write(|tx| {
+            tx.set_seat_state("p:r-1", SeatState::Queued, None, T0)?;
+            tx.set_meta("engine.review_pending.p:r-1", "T-1")
+        }).unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 11).unwrap();
-        assert_eq!(
-            store
-                .read(|tx| tx.get_meta("engine.review_pending.p:r-1"))
-                .unwrap()
-                .as_deref(),
-            Some("")
-        );
-        assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
-            SeatState::Released
-        );
+        assert_eq!(store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(), Some(""));
+        assert_eq!(store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state, SeatState::Released);
     }
 
     #[test]
     fn invalid_pending_reservation_does_not_release_the_live_active_job() {
-        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
-        let mut herdr = FakeHerdr::new();
-        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
-        store
-            .write(|tx| {
-                tx.insert_attempt(&gear_store::AttemptRow {
-                    session_ref: None,
-                    session_cli: None,
-                    session_action: None,
-                    sent_at: None,
-                    project: "p".into(),
-                    task: "T-1".into(),
-                    n: 1,
-                    seat: "p:heat".into(),
-                    generation: 1,
-                    contract_version: 1,
-                    adopted_version: 1,
-                    pending_update: None,
-                    state: AttemptState::Submitted,
-                    candidate: Some("abc1234".into()),
-                    report: None,
-                    safe_point: None,
-                    started: T0,
-                    updated: T0,
-                })?;
-                tx.set_meta("engine.review_pending.p:r-1", "T-absent")
-            })
-            .unwrap();
-        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
-        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(seat.state, SeatState::Active);
-        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
-        assert_eq!(
-            store
-                .read(|tx| tx.get_meta("engine.review_pending.p:r-1"))
-                .unwrap()
-                .as_deref(),
-            Some("")
-        );
+        let mut store=world(TaskState::Verifying,"w2:p2","codex");
+        let mut herdr=FakeHerdr::new(); herdr.add_agent("w2:p2","codex",gear_herdr::AgentStatus::Idle);
+        store.write(|tx| {
+            tx.insert_attempt(&gear_store::AttemptRow {session_ref:None,session_cli:None,session_action:None,sent_at:None,project:"p".into(),task:"T-1".into(),n:1,seat:"p:heat".into(),generation:1,contract_version:1,adopted_version:1,pending_update:None,state:AttemptState::Submitted,candidate:Some("abc1234".into()),report:None,safe_point:None,started:T0,updated:T0})?;
+            tx.set_meta("engine.review_pending.p:r-1","T-absent")
+        }).unwrap();
+        release_finished_reviews(&mut store,&mut herdr,"p",T0+10).unwrap();
+        let seat=store.read(|tx|tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state,SeatState::Active); assert_eq!(seat.task_id.as_deref(),Some("T-1"));
+        assert_eq!(store.read(|tx|tx.get_meta("engine.review_pending.p:r-1")).unwrap().as_deref(),Some(""));
     }
 
     /// T-143 (design §3.6): a reviewer that is still starting and whose job
@@ -1731,28 +1555,26 @@ profile = "codex"
         let mut store = world(TaskState::Verifying, &worktree.pane_id, "codex");
         store
             .write(|tx| {
-                let mut attempt =
-                    tx.get_attempt("p", "T-1", 1)?
-                        .unwrap_or(gear_store::AttemptRow {
-                            session_ref: None,
-                            session_cli: None,
-                            session_action: None,
-                            sent_at: None,
-                            project: "p".into(),
-                            task: "T-1".into(),
-                            n: 1,
-                            seat: "p:heat".into(),
-                            generation: 1,
-                            contract_version: 1,
-                            adopted_version: 1,
-                            pending_update: None,
-                            state: AttemptState::Submitted,
-                            candidate: Some("abc1234".into()),
-                            report: None,
-                            safe_point: None,
-                            started: T0,
-                            updated: T0,
-                        });
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap_or(gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 1,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("abc1234".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                });
                 attempt.state = AttemptState::Submitted;
                 attempt.candidate = Some("abc1234".into());
                 tx.insert_attempt(&attempt)?;
@@ -1787,17 +1609,9 @@ profile = "codex"
         // Its verdict ends its job (L-58): the reviewer waits for the next
         // one, its agent alive and its pane open (design §3.6).
         let parked = crate::review::standby_after_verdict(&mut store, "p", T0 + 30).unwrap();
-        assert_eq!(
-            parked,
-            vec!["p:r-1".to_string()],
-            "the reviewer waits for the next review"
-        );
+        assert_eq!(parked, vec!["p:r-1".to_string()], "the reviewer waits for the next review");
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(
-            seat.state,
-            SeatState::Standby,
-            "the reviewer waits for the next review"
-        );
+        assert_eq!(seat.state, SeatState::Standby, "the reviewer waits for the next review");
         assert_eq!(seat.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
 
@@ -1819,23 +1633,12 @@ profile = "codex"
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
-        assert_eq!(
-            row.state,
-            SeatState::Standby,
-            "the reviewer waits for the next review"
-        );
+        assert_eq!(row.state, SeatState::Standby, "the reviewer waits for the next review");
         assert_eq!(row.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
-        let binding = store
-            .read(|tx| tx.get_binding(&seat.id, 1))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            binding.status,
-            BindingStatus::Active,
-            "its agent is still there"
-        );
+        let binding = store.read(|tx| tx.get_binding(&seat.id, 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Active, "its agent is still there");
     }
 
     /// F1 of the T-143 review: the verdict of an earlier attempt does not
@@ -1855,16 +1658,8 @@ profile = "codex"
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 30).unwrap();
 
         let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
-        assert_eq!(
-            row.state,
-            SeatState::Active,
-            "the review of attempt 2 goes on"
-        );
-        assert_eq!(
-            row.task_id.as_deref(),
-            Some("T-1"),
-            "the seat keeps its job"
-        );
+        assert_eq!(row.state, SeatState::Active, "the review of attempt 2 goes on");
+        assert_eq!(row.task_id.as_deref(), Some("T-1"), "the seat keeps its job");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
 
         // The verdict of attempt 2 ends the job: the reviewer waits for the
@@ -1873,11 +1668,7 @@ profile = "codex"
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 40).unwrap();
 
         let row = store.read(|tx| tx.get_seat(&seat.id)).unwrap().unwrap();
-        assert_eq!(
-            row.state,
-            SeatState::Standby,
-            "the reviewer waits for the next review"
-        );
+        assert_eq!(row.state, SeatState::Standby, "the reviewer waits for the next review");
         assert_eq!(row.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
     }
@@ -1986,11 +1777,7 @@ profile = "codex"
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
 
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(
-            seat.state,
-            SeatState::Standby,
-            "it waits for the next review"
-        );
+        assert_eq!(seat.state, SeatState::Standby, "it waits for the next review");
         assert_eq!(seat.task_id, None, "its job binding ended");
         assert_eq!(exits(&herdr), 0, "its pane stays open");
 
@@ -2024,11 +1811,7 @@ profile = "codex"
         // The one that waits longest goes first: its pane is closed and it is
         // on its way out.
         let first = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
-        assert_eq!(
-            first.state,
-            SeatState::Releasing,
-            "the longest waiting reviewer goes"
-        );
+        assert_eq!(first.state, SeatState::Releasing, "the longest waiting reviewer goes");
         assert_eq!(exits(&herdr), 1, "its pane is closed");
         let second = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(second.state, SeatState::Standby, "the other one waits");
@@ -2091,15 +1874,8 @@ profile = "codex"
         assert_eq!(released, vec!["p:r-1".to_string()]);
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            binding.status,
-            BindingStatus::Void,
-            "its binding ends with it"
-        );
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends with it");
         assert_eq!(exits(&herdr), 1, "its pane is closed");
 
         // A NeedsCheck reviewer that still holds a task waits for the captain
@@ -2112,15 +1888,9 @@ profile = "codex"
                 Ok(())
             })
             .unwrap();
-        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20)
-            .unwrap()
-            .is_empty());
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20).unwrap().is_empty());
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
             SeatState::NeedsCheck
         );
 
@@ -2134,15 +1904,9 @@ profile = "codex"
             })
             .unwrap();
         herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
-        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30)
-            .unwrap()
-            .is_empty());
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30).unwrap().is_empty());
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
             SeatState::NeedsCheck
         );
     }
@@ -2167,15 +1931,8 @@ profile = "codex"
         assert_eq!(released, vec!["p:r-1".to_string()]);
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released);
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            binding.status,
-            BindingStatus::Void,
-            "its binding ends with it"
-        );
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends with it");
 
         // The same seat with an agent in its pane and a live binding: it is a
         // reviewer, not a dead seat — it keeps its slot.
@@ -2187,30 +1944,18 @@ profile = "codex"
             })
             .unwrap();
         herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
-        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20)
-            .unwrap()
-            .is_empty());
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20).unwrap().is_empty());
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
             SeatState::Unknown
         );
 
         // A pane that cannot be read is an observation failure, not an
         // absence: the seat keeps its slot (design/08).
         herdr.observe_fails = true;
-        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30)
-            .unwrap()
-            .is_empty());
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30).unwrap().is_empty());
         assert_eq!(
-            store
-                .read(|tx| tx.get_seat("p:r-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
             SeatState::Unknown
         );
     }
@@ -2259,8 +2004,7 @@ profile = "codex"
             ..Default::default()
         };
         for kind in ["codex", "opencode", "claude"] {
-            cfg.profiles
-                .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
+            cfg.profiles.insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
         }
         cfg
     }
@@ -2283,15 +2027,8 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Released, "the slot is free");
         assert_eq!(seat.task_id, None, "its job binding ended");
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            binding.status,
-            BindingStatus::Void,
-            "the dead pane is not reused"
-        );
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "the dead pane is not reused");
         assert!(removes(&herdr).is_empty(), "its worktree is kept");
         assert!(
             herdr
@@ -2303,15 +2040,8 @@ profile = "codex"
         );
         // Nothing is sent to the lane, and the task keeps its hand-in.
         let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
-        assert_eq!(
-            task.state,
-            TaskState::Verifying,
-            "the hand-in still waits for a review"
-        );
-        assert!(!herdr
-            .calls
-            .iter()
-            .any(|call| matches!(call, Call::Prompt { pane, .. } if pane == "w2:p2")));
+        assert_eq!(task.state, TaskState::Verifying, "the hand-in still waits for a review");
+        assert!(!herdr.calls.iter().any(|call| matches!(call, Call::Prompt { pane, .. } if pane == "w2:p2")));
     }
 
     /// T-264: with the dead seat free, the normal `start_reviews` pass starts
@@ -2327,15 +2057,10 @@ profile = "codex"
         assert_eq!(report.released, vec!["p:r-1".to_string()], "{report:?}");
 
         let cfg = review_cfg();
-        let report =
-            crate::review::start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 20)
-                .unwrap();
+        let report = crate::review::start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 20)
+            .unwrap();
 
-        assert_eq!(
-            report.started.len(),
-            1,
-            "the review of T-1 starts again: {report:?}"
-        );
+        assert_eq!(report.started.len(), 1, "the review of T-1 starts again: {report:?}");
         let seat = store
             .read(|tx| tx.get_seat(&report.started[0]))
             .unwrap()
@@ -2343,11 +2068,7 @@ profile = "codex"
         assert_eq!(seat.state, SeatState::Active, "the review runs again");
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
         assert_eq!(
-            store
-                .read(|tx| tx.get_task("p", "T-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
             TaskState::Verifying
         );
     }
@@ -2367,15 +2088,9 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active, "not released on a guess");
         assert_eq!(seat.task_id.as_deref(), Some("T-1"), "its job is kept");
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Active, "its binding is kept");
-        assert!(!herdr
-            .calls
-            .iter()
-            .any(|call| matches!(call, Call::PaneClose { .. })));
+        assert!(!herdr.calls.iter().any(|call| matches!(call, Call::PaneClose { .. })));
     }
 
     /// T-264: a reviewer whose pane holds its agent is a working reviewer: it
@@ -2393,10 +2108,7 @@ profile = "codex"
         let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Active);
         assert_eq!(seat.task_id.as_deref(), Some("T-1"));
-        let binding = store
-            .read(|tx| tx.get_binding("p:r-1", 1))
-            .unwrap()
-            .unwrap();
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
         assert_eq!(binding.status, BindingStatus::Active);
         assert_eq!(exits(&herdr), 0, "its pane stays open");
     }

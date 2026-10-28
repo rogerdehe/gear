@@ -32,10 +32,7 @@ fn a_flagged_lane_opens_one_captain_item() {
     assert!(s.write(|tx| alert(tx, "p:heat", T0 + 10)).unwrap());
     // Flagged again while the item is open: nothing new.
     assert!(!s.write(|tx| alert(tx, "p:heat", T0 + 20)).unwrap());
-    assert_eq!(
-        captain_items(&mut s),
-        vec![("p:captain".to_string(), MsgState::Open)]
-    );
+    assert_eq!(captain_items(&mut s), vec![("p:captain".to_string(), MsgState::Open)]);
 }
 
 #[test]

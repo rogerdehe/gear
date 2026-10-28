@@ -11,11 +11,7 @@ use clap::{Args, Parser, Subcommand};
 use gear_model::{GearError, GearResult};
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "gear",
-    about = "GEAR: keep an agent fleet working under one captain",
-    version
-)]
+#[command(name = "gear", about = "GEAR: keep an agent fleet working under one captain", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -317,12 +313,7 @@ fn main() {
 
 /// True for the read-only validation `gear admin init --check`.
 fn checks_a_config(cmd: &Option<Cmd>) -> bool {
-    matches!(
-        cmd,
-        Some(Cmd::Admin {
-            op: AdminOp::Init { check: true, .. }
-        })
-    )
+    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
@@ -363,9 +354,7 @@ fn default_store_in(home: &std::path::Path, socket: Option<&str>) -> std::path::
 /// The name of a named Herdr session from its socket
 /// (`~/.config/herdr/sessions/<name>/herdr.sock`); None for the default one.
 fn session_name_of(home: &std::path::Path, socket: &str) -> Option<String> {
-    let rest = std::path::Path::new(socket)
-        .strip_prefix(home.join(".config/herdr/sessions"))
-        .ok()?;
+    let rest = std::path::Path::new(socket).strip_prefix(home.join(".config/herdr/sessions")).ok()?;
     let mut parts = rest.components();
     let name = parts.next()?.as_os_str().to_str()?.to_string();
     (parts.as_path() == std::path::Path::new("herdr.sock")).then_some(name)
@@ -384,15 +373,14 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Send(c)) => cmd_send(c, cli.json),
         Some(Cmd::Reply(c)) => cmd_reply(c, cli.json),
         Some(Cmd::Plan { op }) => match op {
-            PlanOp::Apply {
-                path,
-                keep,
-                next,
-                request_id,
-            } => cmd_plan(path, keep, next, request_id, cli.json),
+            PlanOp::Apply { path, keep, next, request_id } => {
+                cmd_plan(path, keep, next, request_id, cli.json)
+            }
             PlanOp::Show { task } => cmd_plan_show(&task),
             PlanOp::Check {} => cmd_plan_check(cli.json),
-            PlanOp::ImportIssues { path, label } => cmd_import_issues(path, label, cli.json),
+            PlanOp::ImportIssues { path, label } => {
+                cmd_import_issues(path, label, cli.json)
+            }
         },
         Some(Cmd::Board { deps, project }) => cmd_board(deps, project.as_deref(), cli.json),
         Some(Cmd::Queue { json }) => cmd_queue(json),
@@ -402,27 +390,18 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin {
-            op:
-                AdminOp::Init {
-                    config,
-                    check,
-                    models,
-                },
-        }) => cmd_admin_init(&config, check, models, cli.json),
-        Some(Cmd::Admin {
-            op: AdminOp::Kickoff,
-        }) => cmd_admin_kickoff(cli.json),
-        Some(Cmd::Admin {
-            op: AdminOp::InstallSkill { agent },
-        }) => cmd_admin_install_skill(&agent, cli.json),
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models } }) => {
+            cmd_admin_init(&config, check, models, cli.json)
+        }
+        Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
+        Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
+            cmd_admin_install_skill(&agent, cli.json)
+        }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
-        Some(Cmd::Captain {
-            op: CaptainOp::Handover { pane },
-        }) => cmd_captain_handover(&pane, cli.json),
-        Some(Cmd::Captain {
-            op: CaptainOp::Take { project },
-        }) => cmd_captain_take(project.as_deref(), cli.json),
+        Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
+            cmd_captain_handover(&pane, cli.json)
+        }
+        Some(Cmd::Captain { op: CaptainOp::Take { project } }) => cmd_captain_take(project.as_deref(), cli.json),
         Some(Cmd::Whoami) => cmd_whoami(cli.json),
     }
 }
@@ -446,23 +425,15 @@ fn run(cli: Cli) -> GearResult<()> {
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     match cmd {
         None => true,
-        Some(Cmd::Admin {
-            op: AdminOp::Init { check, .. },
-        }) => !check,
+        Some(Cmd::Admin { op: AdminOp::Init { check, .. } }) => !check,
         Some(Cmd::Run)
         | Some(Cmd::Admin { op: AdminOp::Stop })
-        | Some(Cmd::Admin {
-            op: AdminOp::Kickoff,
-        })
-        | Some(Cmd::Admin {
-            op: AdminOp::InstallSkill { .. },
-        })
+        | Some(Cmd::Admin { op: AdminOp::Kickoff })
+        | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
         | Some(Cmd::Board { .. })
         | Some(Cmd::Report { .. })
         | Some(Cmd::Whoami)
-        | Some(Cmd::Plan {
-            op: PlanOp::ImportIssues { .. },
-        })
+        | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
         | Some(Cmd::Captain { .. }) => false,
         Some(_) => true,
     }
@@ -591,10 +562,7 @@ fn cmd_admin_init(
             .iter()
             .zip(lane_list(parsed))
             .map(|(lane, (name, kind, model))| {
-                format!(
-                    "  lane {name}: {kind} {model} · owns {}",
-                    lane.owns.join(", ")
-                )
+                format!("  lane {name}: {kind} {model} · owns {}", lane.owns.join(", "))
             })
             .collect();
         lines.push(match &parsed.temps {
@@ -614,36 +582,37 @@ fn cmd_admin_init(
     // prints "config ok" and before a real init writes anything. Nothing is
     // checked without a socket, for the default session, or when the caller
     // names a store of its own with `GEAR_DB`.
-    let refuse_a_foreign_session = |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
-        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
-            return Ok(());
-        };
-        let Ok(socket) = std::env::var("HERDR_SOCKET_PATH") else {
-            return Ok(());
-        };
-        let Some(name) = session_name_of(&home, &socket) else {
-            return Ok(());
-        };
-        // `default_store_path` fills `GEAR_DB` in with this session's own
-        // default store: a caller that named another store itself is
-        // checked by nothing, since that store need not be a session's.
-        if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
-            if std::path::PathBuf::from(db) != default_store_in(&home, Some(&socket)) {
+    let refuse_a_foreign_session =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let Ok(socket) = std::env::var("HERDR_SOCKET_PATH") else {
+                return Ok(());
+            };
+            let Some(name) = session_name_of(&home, &socket) else {
+                return Ok(());
+            };
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a caller that named another store itself is
+            // checked by nothing, since that store need not be a session's.
+            if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
+                if std::path::PathBuf::from(db) != default_store_in(&home, Some(&socket)) {
+                    return Ok(());
+                }
+            }
+            let configured = &parsed.project.herdr_session;
+            if *configured == name {
                 return Ok(());
             }
-        }
-        let configured = &parsed.project.herdr_session;
-        if *configured == name {
-            return Ok(());
-        }
-        Err(GearError::new(
+            Err(GearError::new(
                 gear_model::ErrorCode::BadFormat,
                 format!(
                     "project {} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session",
                     parsed.project.id
                 ),
             ))
-    };
+        };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
@@ -716,7 +685,8 @@ fn cmd_admin_init(
     // another project's seat (T-100); a seat may re-apply its own project's
     // config (T-86). Refused before anything is written, and it rings nobody.
     if let Ok(parsed) = gear_app::config::parse(&text) {
-        let registered = store.read(|tx| Ok(tx.get_project(&parsed.project.id)?.is_some()))?;
+        let registered =
+            store.read(|tx| Ok(tx.get_project(&parsed.project.id)?.is_some()))?;
         if !registered {
             refuse_first_registration_by_an_agent(&env)?;
         }
@@ -729,15 +699,10 @@ fn cmd_admin_init(
         Some(ctx) => store.read(|tx| Ok(tx.get_project(&ctx.project)?.is_some()))?,
         None => false,
     };
-    let mut herdr = if needs_proof {
-        Some(open_herdr()?)
-    } else {
-        None
-    };
+    let mut herdr = if needs_proof { Some(open_herdr()?) } else { None };
     let ancestors = gear_app::identity::process_ancestors();
-    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> = herdr
-        .as_mut()
-        .map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead);
+    let herdr_ref: Option<&mut dyn gear_herdr::HerdrRead> =
+        herdr.as_mut().map(|herdr| herdr as &mut dyn gear_herdr::HerdrRead);
     let r = gear_app::admin::init_checked(
         &mut store,
         &env,
@@ -755,10 +720,7 @@ fn cmd_admin_init(
     ) {
         let registry = targets_path_in(std::path::Path::new(&home));
         if let Err(e) = register_store(&registry, &socket, &canonical(&db)) {
-            eprintln!(
-                "gear: could not register the store in {}: {e}",
-                registry.display()
-            );
+            eprintln!("gear: could not register the store in {}: {e}", registry.display());
         }
     }
     // The config parsed already (init validated it): say which seats it
@@ -768,14 +730,8 @@ fn cmd_admin_init(
     if json {
         let mut value = serde_json::to_value(&r).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
-            object.insert(
-                "lane_list".to_string(),
-                serde_json::json!(lane_json(&lanes)),
-            );
-            object.insert(
-                "review_model".to_string(),
-                serde_json::json!(review_model(&parsed)),
-            );
+            object.insert("lane_list".to_string(), serde_json::json!(lane_json(&lanes)));
+            object.insert("review_model".to_string(), serde_json::json!(review_model(&parsed)));
         }
         println!("{value}");
     } else {
@@ -908,12 +864,7 @@ fn request_id_at(now_ms: u64, pid: u32) -> String {
     let mut last = LAST_REQUEST_MS.load(Ordering::Relaxed);
     let ms = loop {
         let candidate = if now_ms > last { now_ms } else { last + 1 };
-        match LAST_REQUEST_MS.compare_exchange(
-            last,
-            candidate,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
+        match LAST_REQUEST_MS.compare_exchange(last, candidate, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => break candidate,
             Err(current) => last = current,
         }
@@ -935,14 +886,7 @@ fn cmd_home(show: Option<&str>, json: bool) -> GearResult<()> {
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
-    run_home(
-        &mut store,
-        &env,
-        &mut herdr,
-        now_ts(),
-        json,
-        &mut std::io::stdout(),
-    )
+    run_home(&mut store, &env, &mut herdr, now_ts(), json, &mut std::io::stdout())
 }
 
 /// `gear --show <target>` over injected state: the task packet of a task id.
@@ -1019,9 +963,7 @@ fn run_home(
     let fp = observe_identity(store, env, herdr)?;
     let agents = if env.ctx.as_ref().is_some_and(|ctx| ctx.seat == "captain") {
         herdr.agents().ok()
-    } else {
-        None
-    };
+    } else { None };
     let home = gear_app::home::build_with_agents(store, env, fp.as_ref(), now, agents.as_deref())?;
     if json {
         let doc = serde_json::json!({
@@ -1038,16 +980,12 @@ fn run_home(
                 "shown_contract": &home.view.shown_contract,
             }
         });
-        writeln!(
-            out,
-            "{}",
-            serde_json::to_string(&doc).map_err(|e| {
-                GearError::new(
-                    gear_model::ErrorCode::BadFormat,
-                    format!("cannot serialize the home page: {e}"),
-                )
-            })?
-        )
+        writeln!(out, "{}", serde_json::to_string(&doc).map_err(|e| {
+            GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!("cannot serialize the home page: {e}"),
+            )
+        })?)
         .map_err(output_error)?;
     } else {
         writeln!(out, "{}", home.text).map_err(output_error)?;
@@ -1170,11 +1108,7 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
         db: std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from),
         json,
         // The dependency tree instead of the queues of the lanes.
-        view: if deps {
-            gear_board::View::Deps
-        } else {
-            gear_board::View::Lanes
-        },
+        view: if deps { gear_board::View::Deps } else { gear_board::View::Lanes },
         ..Default::default()
     };
     let mut out = std::io::stdout();
@@ -1184,9 +1118,7 @@ fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
 /// The Herdr tab this call runs in (`HERDR_TAB_ID`), when Herdr set one. The
 /// user's shell, a terminal outside Herdr, has none.
 fn herdr_tab_id() -> Option<String> {
-    std::env::var("HERDR_TAB_ID")
-        .ok()
-        .filter(|id| !id.is_empty())
+    std::env::var("HERDR_TAB_ID").ok().filter(|id| !id.is_empty())
 }
 
 /// The label the board gives its Herdr tab (T-278): `<project> board`, or
@@ -1216,12 +1148,7 @@ fn draw_board<H: gear_herdr::HerdrAct>(
             let _ = herdr.tab_rename(tab_id, &label);
         }
     }
-    gear_board::run(
-        store,
-        opts,
-        out,
-        herdr.map(|h| h as &mut dyn gear_herdr::HerdrRead),
-    )
+    gear_board::run(store, opts, out, herdr.map(|h| h as &mut dyn gear_herdr::HerdrRead))
 }
 
 /// `gear whoami`: who this call is (design §10.7, row B9) — the pane it
@@ -1310,15 +1237,7 @@ fn cmd_report_voyage(voyage: Option<String>, all: bool, json: bool) -> GearResul
     let mut store = open_store()?;
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
-    let out = run_report_voyage(
-        &mut store,
-        &env,
-        &mut herdr,
-        voyage.as_deref(),
-        all,
-        json,
-        now_ts(),
-    )?;
+    let out = run_report_voyage(&mut store, &env, &mut herdr, voyage.as_deref(), all, json, now_ts())?;
     println!("{out}");
     Ok(())
 }
@@ -1394,8 +1313,15 @@ fn run_report_voyage(
         None => current_voyage(store, env)?,
     };
     let overrides = caller_open_round_usage(store, env, now);
-    let report =
-        gear_app::voyage::build_with(store, env, fp.as_ref(), &milestone, all, now, &overrides)?;
+    let report = gear_app::voyage::build_with(
+        store,
+        env,
+        fp.as_ref(),
+        &milestone,
+        all,
+        now,
+        &overrides,
+    )?;
     if json {
         return serde_json::to_string(&report).map_err(json_error);
     }
@@ -1472,18 +1398,13 @@ fn cmd_send(c: SendCmd, json: bool) -> GearResult<()> {
     };
     // Announce before any write: a lost receipt is replayed with this id.
     let request_id = announce_request_id(c.request_id.clone());
-    let c = SendCmd {
-        request_id: Some(request_id),
-        ..c
-    };
+    let c = SendCmd { request_id: Some(request_id), ..c };
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     // A hand-in must contain the project's current integration branch (T-19);
     // the gate is built here, from this process's worktree and config.
     let base = match parse_kind(&c.kind)? {
-        gear_model::MsgKind::Result if c.direction.is_none() => {
-            Some(gear_app::base::gate_for(&mut store, &env)?)
-        }
+        gear_model::MsgKind::Result if c.direction.is_none() => Some(gear_app::base::gate_for(&mut store, &env)?),
         _ => None,
     };
     let out = run_send(&mut store, &env, &mut herdr, &c, body, base, now_ts(), json)?;
@@ -1495,10 +1416,7 @@ fn cmd_reply(c: ReplyCmd, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let request_id = announce_request_id(c.request_id.clone());
-    let c = ReplyCmd {
-        request_id: Some(request_id),
-        ..c
-    };
+    let c = ReplyCmd { request_id: Some(request_id), ..c };
     let mut herdr = open_herdr()?;
     let env = resolve_caller(&mut store, &mut herdr, env)?;
     let out = run_reply(&mut store, &env, &mut herdr, &c, now_ts(), json)?;
@@ -1528,15 +1446,8 @@ fn cmd_captain_handover(pane: &str, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::handover(
-        &mut store,
-        &env,
-        &mut herdr,
-        &ancestors,
-        &cwd,
-        pane,
-        now_ts(),
-    )?;
+    let result =
+        gear_app::captain::handover(&mut store, &env, &mut herdr, &ancestors, &cwd, pane, now_ts())?;
     if json {
         println!(
             "{}",
@@ -1563,10 +1474,7 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
     let mut store = open_store()?;
     let mut herdr = match project.and_then(session_socket_of) {
         Some(path) => gear_herdr::SocketHerdr::connect(&path).map_err(|e| {
-            GearError::new(
-                gear_model::ErrorCode::NotRegistered,
-                format!("cannot reach herdr at {}: {}", path.display(), e.0),
-            )
+            GearError::new(gear_model::ErrorCode::NotRegistered, format!("cannot reach herdr at {}: {}", path.display(), e.0))
         })?,
         None => open_herdr()?,
     };
@@ -1577,15 +1485,8 @@ fn cmd_captain_take(project: Option<&str>, json: bool) -> GearResult<()> {
             format!("cannot read the working directory: {e}"),
         )
     })?;
-    let result = gear_app::captain::take(
-        &mut store,
-        &env,
-        &mut herdr,
-        &ancestors,
-        &cwd,
-        project,
-        now_ts(),
-    )?;
+    let result =
+        gear_app::captain::take(&mut store, &env, &mut herdr, &ancestors, &cwd, project, now_ts())?;
     if json {
         println!(
             "{}",
@@ -1812,11 +1713,7 @@ fn run_import_issues(
         Ok((ctx.project.clone(), seat))
     })?;
     let config = gear_app::config::latest(store, &project)?;
-    let Some(github) = config
-        .github
-        .as_ref()
-        .and_then(|section| section.resolved())
-    else {
+    let Some(github) = config.github.as_ref().and_then(|section| section.resolved()) else {
         return Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
@@ -1974,7 +1871,11 @@ fn run_plan(
     // Verdicts section goes (verdicts live in the store), and the staff
     // lines the apply used go with it (B5: an instruction that was carried
     // out must not be carried out again).
-    let used_staff: Vec<usize> = draft.staff.iter().map(gear_app::plan::staff_line).collect();
+    let used_staff: Vec<usize> = draft
+        .staff
+        .iter()
+        .map(gear_app::plan::staff_line)
+        .collect();
     let rewritten =
         gear_app::draft::rewrite_applied(&text, result.version, &result.created, &used_staff);
     write_in_place(path, &rewritten).map_err(|e| {
@@ -2126,9 +2027,7 @@ fn run_send(
     let fp = observe_identity(store, env, herdr)?;
     let result = if c.direction.is_some() {
         gear_app::mail::send_direction(store, env, fp.as_ref(), &args, now)?
-    } else {
-        gear_app::mail::send(store, env, fp.as_ref(), &args, now)?
-    };
+    } else { gear_app::mail::send(store, env, fp.as_ref(), &args, now)? };
     // T-130: an urgent message, and every captain instruction to a lane whose
     // agent queues input (pi, claude), is typed into the pane before this call
     // returns. A replay already typed it once.
@@ -2185,11 +2084,7 @@ fn hand_in_reply(
     task: Option<&str>,
 ) -> GearResult<Option<String>> {
     let Some(task) = task else { return Ok(None) };
-    let project = env
-        .ctx
-        .as_ref()
-        .map(|ctx| ctx.project.clone())
-        .unwrap_or_default();
+    let project = env.ctx.as_ref().map(|ctx| ctx.project.clone()).unwrap_or_default();
     let lane = store
         .read(|tx| tx.get_task(&project, task))
         .ok()
@@ -2199,7 +2094,8 @@ fn hand_in_reply(
         .unwrap_or_default();
     // The branch is the project's own template (T-252); a project whose config
     // cannot be read keeps the name GEAR uses.
-    let conventions = gear_app::config::conventions_or_default(store, &project).unwrap_or_default();
+    let conventions =
+        gear_app::config::conventions_or_default(store, &project).unwrap_or_default();
     let branch = gear_app::base::task_branch(&conventions, &project, &lane, task);
     Ok(Some(format!(
         "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
@@ -2224,26 +2120,15 @@ fn ring_recipient_now(
         let Some(message) = tx.get_message(&result.project, &result.msg_id)? else {
             return Ok(None);
         };
-        let Some(seat) = tx.get_seat(&message.recipient)? else {
-            return Ok(None);
-        };
-        let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
-            return Ok(None);
-        };
+        let Some(seat) = tx.get_seat(&message.recipient)? else { return Ok(None) };
+        let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { return Ok(None) };
         let captain = tx.captain_of(&result.project)?.map(|row| row.id);
-        if !gear_engine::doorbell::reaches_while_working(
-            &message,
-            &seat,
-            &binding.kind,
-            captain.as_deref(),
-        ) {
+        if !gear_engine::doorbell::reaches_while_working(&message, &seat, &binding.kind, captain.as_deref()) {
             return Ok(None);
         }
         Ok(Some((seat.id, seat.generation, message.id, message.urgent)))
     })?;
-    let Some((seat, generation, id, urgent)) = target else {
-        return Ok(None);
-    };
+    let Some((seat, generation, id, urgent)) = target else { return Ok(None) };
     gear_engine::ops::deliver_doorbell_now(
         store,
         herdr,
@@ -2339,26 +2224,16 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
 /// Reply mode and its wait fields: `--wait <who> [--until <t>]`, `--note`,
 /// `--reopen`, or `--resolve` (the default; `--downgrade` alone also means a
 /// note).
-fn reply_mode(
-    c: &ReplyCmd,
-    now: i64,
-) -> GearResult<(gear_app::mail::ReplyMode, Option<String>, Option<i64>)> {
+fn reply_mode(c: &ReplyCmd, now: i64) -> GearResult<(gear_app::mail::ReplyMode, Option<String>, Option<i64>)> {
     use gear_app::mail::ReplyMode;
     if c.reopen {
         return Ok((ReplyMode::Reopen, None, None));
     }
     if let Some(who) = &c.wait {
         let until = c.until.as_deref().ok_or_else(|| {
-            GearError::new(
-                gear_model::ErrorCode::BadFormat,
-                "--wait needs --until <t>".to_string(),
-            )
+            GearError::new(gear_model::ErrorCode::BadFormat, "--wait needs --until <t>".to_string())
         })?;
-        return Ok((
-            ReplyMode::Wait,
-            Some(who.clone()),
-            Some(parse_until(until, now)?),
-        ));
+        return Ok((ReplyMode::Wait, Some(who.clone()), Some(parse_until(until, now)?)));
     }
     if c.note || (c.downgrade && !c.resolve) {
         return Ok((ReplyMode::Note, None, None));
@@ -2401,10 +2276,7 @@ fn json_error(e: serde_json::Error) -> GearError {
 fn read_stdin() -> GearResult<String> {
     let mut body = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut body).map_err(|e| {
-        GearError::new(
-            gear_model::ErrorCode::BadFormat,
-            format!("cannot read stdin: {e}"),
-        )
+        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read stdin: {e}"))
     })?;
     Ok(body)
 }
@@ -2415,14 +2287,10 @@ fn open_herdr() -> GearResult<gear_herdr::SocketHerdr> {
     // The project's own Herdr session first: an agent whose tools run in a
     // shared daemon (Codex's app-server) inherits HERDR_SOCKET_PATH from
     // wherever that daemon was started, which may be another session.
-    let path = match project_session_socket()
-        .or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(std::path::PathBuf::from))
-    {
+    let path = match project_session_socket().or_else(|| std::env::var_os("HERDR_SOCKET_PATH").map(std::path::PathBuf::from)) {
         Some(path) => path,
         None => {
-            let home = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_default();
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
             home.join(".config/herdr/herdr.sock")
         }
     };
@@ -2455,10 +2323,7 @@ fn project_session_socket() -> Option<std::path::PathBuf> {
             continue;
         }
         let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-        let socket = home
-            .join(".config/herdr/sessions")
-            .join(&config.project.herdr_session)
-            .join("herdr.sock");
+        let socket = home.join(".config/herdr/sessions").join(&config.project.herdr_session).join("herdr.sock");
         return socket.exists().then_some(socket);
     }
     None
@@ -2469,10 +2334,7 @@ fn session_socket_of(project: &str) -> Option<std::path::PathBuf> {
     let mut store = open_store().ok()?;
     let config = gear_app::config::latest(&mut store, project).ok()?;
     let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
-    let socket = home
-        .join(".config/herdr/sessions")
-        .join(&config.project.herdr_session)
-        .join("herdr.sock");
+    let socket = home.join(".config/herdr/sessions").join(&config.project.herdr_session).join("herdr.sock");
     socket.exists().then_some(socket)
 }
 
@@ -2480,11 +2342,7 @@ fn session_socket_of(project: &str) -> Option<std::path::PathBuf> {
 /// (`<herdr worktrees>/<project>/…`), where its lanes and reviewers run.
 fn worktree_of_project(cwd: &std::path::Path, project: &str) -> bool {
     cwd.components().collect::<Vec<_>>().windows(2).any(|pair| {
-        pair[0]
-            .as_os_str()
-            .to_string_lossy()
-            .ends_with("herdr-worktrees")
-            && pair[1].as_os_str() == project
+        pair[0].as_os_str().to_string_lossy().ends_with("herdr-worktrees") && pair[1].as_os_str() == project
     })
 }
 
@@ -2501,8 +2359,9 @@ fn cmd_run() -> GearResult<()> {
         return Err(GearError::new(gear_model::ErrorCode::Forbidden, why));
     }
     // The single-instance lock lives next to the database (design/08 startup).
-    let db = std::env::var_os("GEAR_DB")
-        .ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    let db = std::env::var_os("GEAR_DB").ok_or_else(|| {
+        GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set")
+    })?;
     let dir = std::path::Path::new(&db)
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -2520,18 +2379,8 @@ fn cmd_run() -> GearResult<()> {
     let cfg = engine_cfg(&db.to_string_lossy());
     install_stop_handler();
     let mut clock = now_ts;
-    let mut out = Stamped {
-        inner: std::io::stdout(),
-        at_line_start: true,
-    };
-    let _ = std::io::Write::write_fmt(
-        &mut out,
-        format_args!(
-            "engine start pid={} db={}\n",
-            std::process::id(),
-            db.to_string_lossy()
-        ),
-    );
+    let mut out = Stamped { inner: std::io::stdout(), at_line_start: true };
+    let _ = std::io::Write::write_fmt(&mut out, format_args!("engine start pid={} db={}\n", std::process::id(), db.to_string_lossy()));
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
 }
 
@@ -2569,8 +2418,7 @@ impl<W: std::io::Write> std::io::Write for Stamped<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         for line in buf.split_inclusive(|b| *b == b'\n') {
             if self.at_line_start {
-                self.inner
-                    .write_all(format!("{} ", utc(now_ts())).as_bytes())?;
+                self.inner.write_all(format!("{} ", utc(now_ts())).as_bytes())?;
             }
             self.inner.write_all(line)?;
             self.at_line_start = line.ends_with(b"\n");
@@ -2594,23 +2442,13 @@ fn utc(ts: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        secs / 3600,
-        secs % 3600 / 60,
-        secs % 60
-    )
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
 /// The engine's directory: next to `GEAR_DB`; `None` when it is not set.
 fn engine_dir() -> Option<std::path::PathBuf> {
     let db = std::env::var_os(gear_model::ctx::ENV_DB)?;
-    Some(
-        std::path::Path::new(&db)
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default(),
-    )
+    Some(std::path::Path::new(&db).parent().map(std::path::Path::to_path_buf).unwrap_or_default())
 }
 
 /// Start the engine in the background when nobody holds its lock. Every
@@ -2643,11 +2481,7 @@ fn register_store(path: &std::path::Path, socket: &str, db: &str) -> std::io::Re
     let mut lines: Vec<String> = std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter(|line| {
-            line.split_once('\t')
-                .map(|(s, _)| s != socket)
-                .unwrap_or(false)
-        })
+        .filter(|line| line.split_once('\t').map(|(s, _)| s != socket).unwrap_or(false))
         .map(str::to_string)
         .collect();
     lines.push(format!("{socket}\t{db}"));
@@ -2664,10 +2498,8 @@ fn canonical(path: &str) -> String {
 /// Whether the engine may run on `GEAR_DB` here: a Herdr session is known and
 /// `GEAR_DB` is the store registered for it. `Err` says why not.
 fn engine_target_ok() -> Result<(), String> {
-    let socket = std::env::var("HERDR_SOCKET_PATH")
-        .map_err(|_| "not inside Herdr (HERDR_SOCKET_PATH unset)".to_string())?;
-    let db =
-        std::env::var(gear_model::ctx::ENV_DB).map_err(|_| "GEAR_DB is not set".to_string())?;
+    let socket = std::env::var("HERDR_SOCKET_PATH").map_err(|_| "not inside Herdr (HERDR_SOCKET_PATH unset)".to_string())?;
+    let db = std::env::var(gear_model::ctx::ENV_DB).map_err(|_| "GEAR_DB is not set".to_string())?;
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let registry = targets_path_in(std::path::Path::new(&home));
     match registered_store(&registry, &socket) {
@@ -2688,10 +2520,7 @@ fn ensure_engine() {
         Err(_) => return,       // already running (or unusable: `gear run` reports it)
     }
     match spawn_engine(&dir) {
-        Ok(pid) => eprintln!(
-            "gear: engine started in the background (pid {pid}, log {})",
-            dir.join("engine.log").display()
-        ),
+        Ok(pid) => eprintln!("gear: engine started in the background (pid {pid}, log {})", dir.join("engine.log").display()),
         Err(e) => eprintln!("gear: could not start the engine: {e}"),
     }
 }
@@ -2700,10 +2529,7 @@ fn ensure_engine() {
 /// `engine.log`. Two racing starts are fine: the loser fails on the lock.
 fn spawn_engine(dir: &std::path::Path) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt as _;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("engine.log"))?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("engine.log"))?;
     let mut cmd = std::process::Command::new(std::env::current_exe()?);
     cmd.arg("run")
         .env_remove(gear_model::ctx::ENV_CTX)
@@ -2725,13 +2551,9 @@ fn spawn_engine(dir: &std::path::Path) -> std::io::Result<u32> {
 fn cmd_admin_stop() -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
-        return Err(GearError::new(
-            gear_model::ErrorCode::Forbidden,
-            "agents do not stop the engine",
-        ));
+        return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not stop the engine"));
     }
-    let dir = engine_dir()
-        .ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    let dir = engine_dir().ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
     if let Ok(lock) = take_engine_lock(&dir) {
         drop(lock);
         println!("engine not running");
@@ -2739,17 +2561,11 @@ fn cmd_admin_stop() -> GearResult<()> {
     }
     let text = std::fs::read_to_string(dir.join("engine.lock")).unwrap_or_default();
     let pid: i32 = text.trim().parse().map_err(|_| {
-        GearError::new(
-            gear_model::ErrorCode::NoTarget,
-            "engine is running but its pid is unknown",
-        )
+        GearError::new(gear_model::ErrorCode::NoTarget, "engine is running but its pid is unknown")
     })?;
     // SAFETY: plain kill(2) on a pid read from our own lock file.
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return Err(GearError::new(
-            gear_model::ErrorCode::NoTarget,
-            format!("cannot stop pid {pid}"),
-        ));
+        return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("cannot stop pid {pid}")));
     }
     // The engine leaves its loop only between ticks (see `install_stop_handler`),
     // so wait for the lock it holds: a merge gate may still be running, and the
@@ -2862,10 +2678,7 @@ fn take_engine_lock(dir: &std::path::Path) -> GearResult<std::fs::File> {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(GearError::new(
             gear_model::ErrorCode::Forbidden,
-            format!(
-                "engine already running (another process holds {})",
-                path.display()
-            ),
+            format!("engine already running (another process holds {})", path.display()),
         )),
         Err(std::fs::TryLockError::Error(e)) => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
@@ -2884,16 +2697,7 @@ fn run_engine(
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    run_engine_with(
-        store,
-        herdr,
-        cfg,
-        clock,
-        ticks,
-        out,
-        &|| STOP.load(std::sync::atomic::Ordering::SeqCst),
-        &mut gear_engine::tick,
-    )
+    run_engine_with(store, herdr, cfg, clock, ticks, out, &|| STOP.load(std::sync::atomic::Ordering::SeqCst), &mut gear_engine::tick)
 }
 
 /// [`run_engine`] with the tick call injectable, so a test can drive the
@@ -2996,16 +2800,8 @@ mod tests {
         use clap::CommandFactory;
         let help = Cli::command().render_long_help().to_string();
         for topic in gear_app::skill::TOPICS {
-            let shown = if topic.name == "main" {
-                "(none)=SKILL.md"
-            } else {
-                topic.name
-            };
-            assert!(
-                help.contains(shown),
-                "--skill help misses topic {}",
-                topic.name
-            );
+            let shown = if topic.name == "main" { "(none)=SKILL.md" } else { topic.name };
+            assert!(help.contains(shown), "--skill help misses topic {}", topic.name);
         }
     }
 
@@ -3026,24 +2822,8 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "captain",
-                    SeatRole::Captain,
-                    CAP_PANE,
-                    "codex",
-                    T0,
-                )?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    LANE_PANE,
-                    "opencode",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
                 Ok(())
             })
             .unwrap();
@@ -3055,11 +2835,7 @@ mod tests {
 
     fn env(seat: &str, pane: &str) -> gear_app::Env {
         gear_app::Env {
-            ctx: Some(GearCtx {
-                project: "p".into(),
-                seat: seat.into(),
-                generation: 1,
-            }),
+            ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
             pane_id: Some(pane.into()),
             admin: false,
         }
@@ -3087,10 +2863,7 @@ mod tests {
 
         // The board of project `p` labels its tab `p board`.
         let (mut store, mut herdr) = world();
-        let opts = gear_board::Options {
-            project: Some("p".into()),
-            ..Default::default()
-        };
+        let opts = gear_board::Options { project: Some("p".into()), ..Default::default() };
         let mut out = Vec::new();
         draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut out).unwrap();
         assert!(!out.is_empty(), "the board drew nothing");
@@ -3098,13 +2871,7 @@ mod tests {
 
         // A stdout that refuses the draw proves the rename came before it.
         let (mut store, mut herdr) = world();
-        let drawn = draw_board(
-            &mut store,
-            &opts,
-            Some(&mut herdr),
-            tab.clone(),
-            &mut NoDraw,
-        );
+        let drawn = draw_board(&mut store, &opts, Some(&mut herdr), tab.clone(), &mut NoDraw);
         assert!(drawn.is_err(), "the draw was expected to fail");
         assert_eq!(herdr.tab_renames_to("p board"), vec!["w1:t2"]);
 
@@ -3123,18 +2890,10 @@ mod tests {
 
         // `--json` is machine output: it renames nothing.
         let (mut store, mut herdr) = world();
-        let json = gear_board::Options {
-            project: Some("p".into()),
-            json: true,
-            ..Default::default()
-        };
+        let json = gear_board::Options { project: Some("p".into()), json: true, ..Default::default() };
         let mut out = Vec::new();
         draw_board(&mut store, &json, Some(&mut herdr), tab, &mut out).unwrap();
-        assert!(
-            herdr.calls.is_empty(),
-            "the JSON board renamed a tab: {:?}",
-            herdr.calls
-        );
+        assert!(herdr.calls.is_empty(), "the JSON board renamed a tab: {:?}", herdr.calls);
 
         std::env::remove_var("HERDR_TAB_ID");
     }
@@ -3165,8 +2924,7 @@ mod tests {
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })
             })
             .unwrap();
@@ -3178,20 +2936,9 @@ mod tests {
         let (mut store, mut herdr) = world();
         herdr.set_status(LANE_PANE, AgentStatus::Working);
         let mut out = Vec::new();
-        run_home(
-            &mut store,
-            &env("captain", CAP_PANE),
-            &mut herdr,
-            T0,
-            false,
-            &mut out,
-        )
-        .unwrap();
+        run_home(&mut store, &env("captain", CAP_PANE), &mut herdr, T0, false, &mut out).unwrap();
         let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.contains("heat · agent working · no current task · 0 queued"),
-            "{text}"
-        );
+        assert!(text.contains("heat · agent working · no current task · 0 queued"), "{text}");
     }
 
     /// The world with a task the lane works on, so a hand-in goes through.
@@ -3299,10 +3046,7 @@ mod tests {
 
         assert!(out.contains("Delivered to p:captain"), "{out}");
         assert!(out.contains("M-1"), "{out}");
-        let stored = store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .unwrap();
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(stored.kind, MsgKind::Question);
         assert_eq!(stored.body, "Schema v1 or v2?");
     }
@@ -3337,17 +3081,9 @@ mod tests {
             let (mut store, mut herdr) = world();
             let mut c = send_cmd("question");
             set(&mut c);
-            let err = run_send(
-                &mut store,
-                &env("heat", LANE_PANE),
-                &mut herdr,
-                &c,
-                "x".into(),
-                None,
-                T0 + 1,
-                false,
-            )
-            .unwrap_err();
+            let err =
+                run_send(&mut store, &env("heat", LANE_PANE), &mut herdr, &c, "x".into(), None, T0 + 1, false)
+                    .unwrap_err();
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{flag}");
             assert!(err.detail.contains(flag), "{flag}: {}", err.detail);
         }
@@ -3359,8 +3095,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("gear-draft-{}-{nanos}.md", std::process::id()));
+        let path = std::env::temp_dir()
+            .join(format!("gear-draft-{}-{nanos}.md", std::process::id()));
         std::fs::write(&path, text).unwrap();
         path
     }
@@ -3393,10 +3129,7 @@ mod tests {
         // The lane has a task it can start now: nothing to tell the captain.
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
-        assert_eq!(
-            tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
-            vec!["T-1"]
-        );
+        assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
     }
 
     /// A task that passed and whose merge failed: the captain retries it with
@@ -3468,13 +3201,7 @@ mod tests {
                     created: T0,
                 })?;
                 tx.set_op_state("p", &op.id, gear_model::OpState::Executing, None, T0)?;
-                tx.set_op_state(
-                    "p",
-                    &op.id,
-                    gear_model::OpState::Failed,
-                    Some("conflict"),
-                    T0,
-                )
+                tx.set_op_state("p", &op.id, gear_model::OpState::Failed, Some("conflict"), T0)
             })
             .unwrap();
         (store, herdr)
@@ -3503,14 +3230,8 @@ mod tests {
 
         assert!(out.contains("plan version 1"), "{out}");
         let rewritten = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            !rewritten.contains("remerge"),
-            "the line is gone: {rewritten}"
-        );
-        assert!(
-            !rewritten.contains("# Staff"),
-            "the empty section is gone: {rewritten}"
-        );
+        assert!(!rewritten.contains("remerge"), "the line is gone: {rewritten}");
+        assert!(!rewritten.contains("# Staff"), "the empty section is gone: {rewritten}");
     }
 
     /// B5: the apply says which lanes the captain's own tail silences, so a
@@ -3546,25 +3267,11 @@ mod tests {
         let (mut store, mut herdr) = world();
         store
             .write(|tx| {
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "review-1",
-                    SeatRole::Temp,
-                    "w1:p5",
-                    "codex",
-                    T0,
-                )?;
-                tx.set_seat_state(
-                    "p:review-1",
-                    gear_model::SeatState::Standby,
-                    Some("review done"),
-                    T0 + 1,
-                )
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p5", "codex", T0)?;
+                tx.set_seat_state("p:review-1", gear_model::SeatState::Standby, Some("review done"), T0 + 1)
             })
             .unwrap();
-        let path =
-            write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- release review-1\n");
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- release review-1\n");
 
         let out = run_plan(
             &mut store,
@@ -3615,15 +3322,7 @@ mod tests {
                     handover_id: None,
                     created: T0,
                 })?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    LANE_PANE,
-                    "opencode",
-                    T0,
-                )
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
@@ -3655,11 +3354,7 @@ mod tests {
         let (mut store, mut herdr) = world_with_a_replaced_captain();
         park_heat_until_the_past(&mut store);
         let stale = gear_app::Env {
-            ctx: Some(GearCtx {
-                project: "p".into(),
-                seat: "captain".into(),
-                generation: 1,
-            }),
+            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         };
@@ -3701,11 +3396,7 @@ mod tests {
             "the park ended: {out:?}"
         );
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
-        assert_eq!(
-            seat.state,
-            gear_model::SeatState::Active,
-            "its agent continues"
-        );
+        assert_eq!(seat.state, gear_model::SeatState::Active, "its agent continues");
         assert_eq!(seat.state_reason.as_deref(), Some("park ended"));
     }
 
@@ -3722,8 +3413,7 @@ mod tests {
             })
             .unwrap();
         // An ordinary apply: the captain holds another lane.
-        let path =
-            write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold wire reason=wait\n");
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold wire reason=wait\n");
 
         let out = run_plan(
             &mut store,
@@ -3772,27 +3462,21 @@ mod tests {
 
         assert!(out.contains("created T-1"), "{out}");
         assert!(
-            out.contains(
-                "warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"
-            ),
+            out.contains("warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"),
             "{out}"
         );
         // The warning comes after the summary of the apply.
         let summary = out.find("plan version 1").unwrap();
         let warning = out.find("warning:").unwrap();
-        assert!(
-            summary < warning,
-            "the warning comes after the summary: {out}"
-        );
+        assert!(summary < warning, "the warning comes after the summary: {out}");
     }
 
     #[test]
     fn plan_apply_prints_the_tasks_a_rebind_is_waiting_for() {
         let (mut store, mut herdr) = world_with_task();
-        store
-            .write(|tx| {
-                let mut project = tx.get_project("p")?.unwrap();
-                project.config_toml = r#"
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = r#"
 [project]
 id="p"
 repo="/repo"
@@ -3813,24 +3497,11 @@ profile="opencode"
 [[repos]]
 name="api"
 path="api"
-"#
-                .into();
-                tx.update_project(&project)
-            })
-            .unwrap();
+"#.into();
+            tx.update_project(&project)
+        }).unwrap();
         let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind heat repo=api owns=[src/, tests/]\n");
-        let out = run_plan(
-            &mut store,
-            &env("captain", CAP_PANE),
-            &mut herdr,
-            Some(&path),
-            None,
-            None,
-            "rebind",
-            T0 + 1,
-            false,
-        )
-        .unwrap();
+        let out = run_plan(&mut store, &env("captain", CAP_PANE), &mut herdr, Some(&path), None, None, "rebind", T0+1, false).unwrap();
         assert!(out.contains("rebind heat: waits for T-1"), "{out}");
     }
 
@@ -3865,10 +3536,7 @@ path="api"
             .map(|warning| warning.as_str().unwrap_or_default().to_string())
             .collect();
         assert!(
-            warnings.contains(
-                &"warning: lane heat has nothing to start after now (1 queued behind deps: T-1)"
-                    .to_string()
-            ),
+            warnings.contains(&"warning: lane heat has nothing to start after now (1 queued behind deps: T-1)".to_string()),
             "{warnings:?}"
         );
         assert!(
@@ -3888,24 +3556,9 @@ path="api"
             .write(|tx| {
                 // The lane "heat" is working on T-5; the task queued behind it
                 // waits for T-7, which another lane is working on.
-                tx.insert_task(&lane_task(
-                    "T-5",
-                    "heat",
-                    gear_model::TaskState::Running,
-                    &[],
-                ))?;
-                tx.insert_task(&lane_task(
-                    "T-6",
-                    "heat",
-                    gear_model::TaskState::Ready,
-                    &["T-7"],
-                ))?;
-                tx.insert_task(&lane_task(
-                    "T-7",
-                    "wire",
-                    gear_model::TaskState::Running,
-                    &[],
-                ))
+                tx.insert_task(&lane_task("T-5", "heat", gear_model::TaskState::Running, &[]))?;
+                tx.insert_task(&lane_task("T-6", "heat", gear_model::TaskState::Ready, &["T-7"]))?;
+                tx.insert_task(&lane_task("T-7", "wire", gear_model::TaskState::Running, &[]))
             })
             .unwrap();
         // The draft gives another lane the work, not this one.
@@ -3926,9 +3579,7 @@ path="api"
         .unwrap();
 
         assert!(
-            out.contains(
-                "warning: lane heat has nothing to start after T-5 (1 queued behind deps: T-6)"
-            ),
+            out.contains("warning: lane heat has nothing to start after T-5 (1 queued behind deps: T-6)"),
             "{out}"
         );
     }
@@ -3955,8 +3606,7 @@ path="api"
             wait_cond: None,
             rework_note: None,
             estimate_min: None,
-            issue: None,
-            updated: T0,
+             issue: None,updated: T0,
         }
     }
 
@@ -3969,24 +3619,8 @@ path="api"
         store
             .write(|tx| {
                 // Two lanes beside the ones the world seeds.
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "hull",
-                    SeatRole::Lane,
-                    "w1:p5",
-                    "opencode",
-                    T0,
-                )?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "keel",
-                    SeatRole::Lane,
-                    "w1:p6",
-                    "opencode",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p5", "opencode", T0)?;
+                testing::seed_active_seat(tx, "p", "keel", SeatRole::Lane, "w1:p6", "opencode", T0)?;
                 // The hull lane works on T-1 and has two tasks left.
                 let mut working = lane_task("T-1", "hull", gear_model::TaskState::Running, &[]);
                 working.estimate_min = Some(60);
@@ -4047,10 +3681,7 @@ path="api"
         assert!(hull.contains("T-4 60m"), "{hull}");
         // The idle lane: why it is idle, through the board's own function.
         let keel = lines.iter().find(|line| line.starts_with("keel")).unwrap();
-        assert!(
-            keel.contains("idle: next T-9 waits for T-1 (hull, in progress)"),
-            "{keel}"
-        );
+        assert!(keel.contains("idle: next T-9 waits for T-1 (hull, in progress)"), "{keel}");
         assert!(keel.contains("· left 1 (40m)"), "{keel}");
         // The reviewers are on the last line.
         let last = lines.last().unwrap();
@@ -4067,10 +3698,7 @@ path="api"
         assert_eq!(heat["left"].as_array().unwrap().len(), 0);
         let hull = lanes.iter().find(|lane| lane["lane"] == "hull").unwrap();
         assert_eq!(hull["working"]["id"], "T-1");
-        assert_eq!(
-            hull["working"]["actual_min"], 38,
-            "the elapsed minutes of a running task"
-        );
+        assert_eq!(hull["working"]["actual_min"], 38, "the elapsed minutes of a running task");
         assert_eq!(hull["left"].as_array().unwrap().len(), 3);
         assert_eq!(hull["left_min"], 125);
         assert_eq!(parsed["reviewers"][0]["reviewing"], "T-2");
@@ -4107,10 +3735,7 @@ path="api"
         let heat = out.lines().find(|line| line.starts_with("heat")).unwrap();
         assert!(heat.contains("idle: held: the captain paused it"), "{heat}");
         assert!(!heat.contains("working"), "{heat}");
-        assert!(
-            heat.contains("left 1 (60m)"),
-            "the unfinished task is left: {heat}"
-        );
+        assert!(heat.contains("left 1 (60m)"), "the unfinished task is left: {heat}");
 
         // The JSON says the same.
         let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 38 * 60).unwrap();
@@ -4152,14 +3777,8 @@ path="api"
         let last = out.lines().last().unwrap();
         assert!(last.contains("r-1 reviewing T-1"), "{last}");
         assert!(last.contains("r-2 standby 3m"), "{last}");
-        assert!(
-            !last.contains("r-3"),
-            "a released reviewer is not available: {last}"
-        );
-        assert!(
-            !last.contains("r-4"),
-            "a retired reviewer is not available: {last}"
-        );
+        assert!(!last.contains("r-3"), "a released reviewer is not available: {last}");
+        assert!(!last.contains("r-4"), "a retired reviewer is not available: {last}");
 
         // The JSON says the same.
         let json = run_queue(&mut store, &env("captain", CAP_PANE), true, T0 + 180).unwrap();
@@ -4204,10 +3823,7 @@ path="api"
         let out = store
             .read(|tx| gear_app::plan::show(tx, "p", "T-7"))
             .unwrap();
-        assert!(
-            out.starts_with("## T-7 [must] lane=heat milestone=M2 required"),
-            "{out}"
-        );
+        assert!(out.starts_with("## T-7 [must] lane=heat milestone=M2 required"), "{out}");
         assert!(out.contains("goal: the goal of T-7"), "{out}");
         assert!(out.contains("accept: the acceptance of T-7"), "{out}");
         assert!(out.contains("evidence-files: ops/reports/T-7.md"), "{out}");
@@ -4279,10 +3895,7 @@ path="api"
         // The file is the current plan again: base= the applied version, the
         // NEW block carries its id, the Verdicts section is gone.
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.starts_with("<!-- gear-plan project=p base=1 -->"),
-            "{text}"
-        );
+        assert!(text.starts_with("<!-- gear-plan project=p base=1 -->"), "{text}");
         assert!(text.contains("## T-1 [must] lane=heat"), "{text}");
         assert!(!text.contains("NEW"), "{text}");
         assert!(!text.contains("# Verdicts"), "{text}");
@@ -4330,10 +3943,7 @@ path="api"
         assert_eq!(tasks.len(), 1, "{tasks:?}");
         assert_eq!(tasks[0].contract_version, 1);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            text.starts_with("<!-- gear-plan project=p base=2 -->"),
-            "{text}"
-        );
+        assert!(text.starts_with("<!-- gear-plan project=p base=2 -->"), "{text}");
         std::fs::remove_file(&path).ok();
     }
 
@@ -4358,11 +3968,7 @@ path="api"
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            draft,
-            "the file is untouched"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), draft, "the file is untouched");
         std::fs::remove_file(&path).ok();
     }
 
@@ -4412,8 +4018,7 @@ path="api"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: Some(60),
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
                     session_ref: None,
@@ -4505,10 +4110,7 @@ path="api"
                     project: "p".into(),
                     milestone: "M2".into(),
                     title: "the second station".into(),
-                    done: Some(
-                        "(1) v0.4.1: the board reads well; (2) v0.4.2: the user can review it"
-                            .into(),
-                    ),
+                    done: Some("(1) v0.4.1: the board reads well; (2) v0.4.2: the user can review it".into()),
                     bar: Some("STABLE".into()),
                     eta: Some("12h".into()),
                     departure: Some(T0),
@@ -4536,8 +4138,7 @@ path="api"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: Some(60),
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_attempt(&gear_store::AttemptRow {
                     session_ref: None,
@@ -4560,20 +4161,8 @@ path="api"
                     updated: T0,
                 })?;
                 tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::Started, T0)?;
-                tx.set_attempt_time(
-                    "p",
-                    "T-7",
-                    1,
-                    gear_store::AttemptStep::HandedIn,
-                    T0 + 10 * 60,
-                )?;
-                tx.set_attempt_time(
-                    "p",
-                    "T-7",
-                    1,
-                    gear_store::AttemptStep::Settled,
-                    T0 + 20 * 60,
-                )?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::HandedIn, T0 + 10 * 60)?;
+                tx.set_attempt_time("p", "T-7", 1, gear_store::AttemptStep::Settled, T0 + 20 * 60)?;
                 // A second round: the task took more than one round.
                 tx.insert_attempt(&gear_store::AttemptRow {
                     session_ref: None,
@@ -4595,27 +4184,9 @@ path="api"
                     started: T0 + 30 * 60,
                     updated: T0,
                 })?;
-                tx.set_attempt_time(
-                    "p",
-                    "T-7",
-                    2,
-                    gear_store::AttemptStep::Started,
-                    T0 + 30 * 60,
-                )?;
-                tx.set_attempt_time(
-                    "p",
-                    "T-7",
-                    2,
-                    gear_store::AttemptStep::HandedIn,
-                    T0 + 40 * 60,
-                )?;
-                tx.set_attempt_time(
-                    "p",
-                    "T-7",
-                    2,
-                    gear_store::AttemptStep::Settled,
-                    T0 + 45 * 60,
-                )?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::Started, T0 + 30 * 60)?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::HandedIn, T0 + 40 * 60)?;
+                tx.set_attempt_time("p", "T-7", 2, gear_store::AttemptStep::Settled, T0 + 45 * 60)?;
                 // The round of the lane, with its tokens and its cost.
                 let key = gear_store::RoundKey {
                     project: "p".into(),
@@ -4805,10 +4376,7 @@ path="api"
             T0 + 60,
         )
         .unwrap();
-        assert!(
-            out.contains("Done (M4)"),
-            "the voyage that departed last: {out}"
-        );
+        assert!(out.contains("Done (M4)"), "the voyage that departed last: {out}");
         assert!(!out.contains("Done (M1)"), "{out}");
     }
 
@@ -4883,14 +4451,8 @@ path="api"
             T0,
         )
         .unwrap();
-        assert!(
-            out.contains("T-7 attempt 1 dev · tokens 100 in / 10 out"),
-            "{out}"
-        );
-        assert!(
-            out.contains("T-7 attempt 1 review · tokens 200 in / 10 out"),
-            "{out}"
-        );
+        assert!(out.contains("T-7 attempt 1 dev · tokens 100 in / 10 out"), "{out}");
+        assert!(out.contains("T-7 attempt 1 review · tokens 200 in / 10 out"), "{out}");
     }
 
     /// A task of a voyage: a lane works on it and the plan knows its time.
@@ -4904,8 +4466,10 @@ path="api"
     /// A pi session log with one assistant record: the usage a report counts
     /// (T-207).
     fn pi_log(name: &str, at: i64) -> std::path::PathBuf {
-        let path =
-            std::env::temp_dir().join(format!("gear-t207-{name}-{}.jsonl", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "gear-t207-{name}-{}.jsonl",
+            std::process::id()
+        ));
         let record = serde_json::json!({
             "type": "message",
             "timestamp": at,
@@ -5000,10 +4564,7 @@ path="api"
         )
         .unwrap();
         // The round's own count: the open round is counted as the report reads.
-        assert!(
-            out.contains("T-7 attempt 1 dev · tokens 1200 in / 300 out"),
-            "{out}"
-        );
+        assert!(out.contains("T-7 attempt 1 dev · tokens 1200 in / 300 out"), "{out}");
         assert!(out.contains("cost $0.4200"), "{out}");
         // The task's sum and the voyage's sum carry the same numbers.
         assert!(out.contains("T-7 · estimate 60m"), "{out}");
@@ -5019,23 +4580,14 @@ path="api"
             T0 + 60,
         )
         .unwrap();
-        assert!(
-            voyage.contains("Time and tokens · tokens 1200 in / 300 out"),
-            "{voyage}"
-        );
-        assert!(
-            voyage.contains("lane heat · tokens 1200 in / 300 out"),
-            "{voyage}"
-        );
+        assert!(voyage.contains("Time and tokens · tokens 1200 in / 300 out"), "{voyage}");
+        assert!(voyage.contains("lane heat · tokens 1200 in / 300 out"), "{voyage}");
 
         // The store is not written: the open round keeps its empty columns.
         let stored = store.read(|tx| tx.rounds_of_project("p")).unwrap();
         let open = stored.iter().find(|row| row.task == "T-7").unwrap();
         assert_eq!(open.input, None, "the report writes no tokens");
-        assert_eq!(
-            open.counted_at, None,
-            "the report counts nothing into the store"
-        );
+        assert_eq!(open.counted_at, None, "the report counts nothing into the store");
         std::fs::remove_file(&log).ok();
     }
 
@@ -5093,10 +4645,7 @@ path="api"
             T0 + 60,
         )
         .unwrap();
-        assert!(
-            out.contains("T-8 attempt 1 dev · tokens ? / cost ?"),
-            "{out}"
-        );
+        assert!(out.contains("T-8 attempt 1 dev · tokens ? / cost ?"), "{out}");
         assert!(!out.contains("tokens 0 in / 0 out"), "{out}");
 
         let voyage = run_report_voyage(
@@ -5109,10 +4658,7 @@ path="api"
             T0 + 60,
         )
         .unwrap();
-        assert!(
-            voyage.contains("Time and tokens · tokens ? / cost ?"),
-            "{voyage}"
-        );
+        assert!(voyage.contains("Time and tokens · tokens ? / cost ?"), "{voyage}");
         assert!(voyage.contains("lane heat · tokens ? / cost ?"), "{voyage}");
         assert!(!voyage.contains("tokens 0 in / 0 out"), "{voyage}");
     }
@@ -5174,10 +4720,7 @@ path="api"
         )
         .unwrap();
         // The stored count, not a fresh one: the round is over.
-        assert!(
-            out.contains("T-9 attempt 1 dev · tokens 7 in / 8 out"),
-            "{out}"
-        );
+        assert!(out.contains("T-9 attempt 1 dev · tokens 7 in / 8 out"), "{out}");
         assert!(out.contains("cost $0.0100"), "{out}");
         let stored = store.read(|tx| tx.rounds_of_task("p", "T-9")).unwrap();
         assert_eq!(stored[0].input, Some(7), "the stored count is untouched");
@@ -5211,8 +4754,7 @@ path="api"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -5238,10 +4780,7 @@ path="api"
         .unwrap();
 
         assert!(out.contains("Delivered to p:captain"), "{out}");
-        let attempt = store
-            .read(|tx| tx.get_attempt("p", "T-7", 1))
-            .unwrap()
-            .unwrap();
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-7", 1)).unwrap().unwrap();
         assert_eq!(attempt.state, gear_model::AttemptState::Submitted);
     }
 
@@ -5275,8 +4814,7 @@ path="api"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-7", 1, T0)?;
@@ -5297,223 +4835,70 @@ path="api"
 
     #[test]
     fn direction_result_is_bound_to_the_reviewer_and_does_not_submit() {
-        let cli = Cli::try_parse_from([
-            "gear",
-            "send",
-            "--kind",
-            "result",
-            "--task",
-            "T-7",
-            "--attempt",
-            "1",
-            "--direction",
-            "ok",
-        ])
-        .unwrap();
+        let cli=Cli::try_parse_from(["gear","send","--kind","result","--task","T-7","--attempt","1","--direction","ok"]).unwrap();
         assert!(matches!(cli.cmd,Some(Cmd::Send(ref c)) if c.direction.as_deref()==Some("ok")));
         let (mut store, mut herdr) = review_world();
-        store
-            .write(|tx| {
-                tx.set_meta(
-                    "engine.direction.p.T-7.1",
-                    &serde_json::json!({
-                        "seat":"p:r-1", "generation":1, "state":"running", "sha":"abc123"
-                    })
-                    .to_string(),
-                )
-            })
-            .unwrap();
-        let task_before = store
-            .read(|tx| tx.get_task("p", "T-7"))
-            .unwrap()
-            .unwrap()
-            .state;
-        let mut c = send_cmd("result");
-        c.task = Some("T-7".into());
-        c.attempt = Some(1);
-        c.direction = Some("ok".into());
-        let out = run_send(
-            &mut store,
-            &env("r-1", TEMP_PANE),
-            &mut herdr,
-            &c,
-            "ok".into(),
-            None,
-            T0 + 1,
-            false,
-        )
-        .unwrap();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"abc123"
+        }).to_string())).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        let mut c=send_cmd("result");
+        c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        let out=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap();
         assert!(!out.contains("Handed in"), "{out}");
-        let history = store.read(|tx| tx.thread_messages("p", "T-7:1")).unwrap();
-        assert_eq!(history.len(), 1);
+        let history=store.read(|tx|tx.thread_messages("p","T-7:1")).unwrap();
+        assert_eq!(history.len(),1);
         assert_eq!(history[0].kind, gear_model::MsgKind::Result);
-        assert_eq!(history[0].body, "ok");
-        let meta: serde_json::Value =
-            serde_json::from_str(history[0].meta.as_deref().unwrap()).unwrap();
-        assert_eq!(meta, serde_json::json!({"direction":true,"sha":"abc123"}));
-        assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-7", 1))
-                .unwrap()
-                .unwrap()
-                .state,
-            gear_model::AttemptState::Started
-        );
-        assert_eq!(
-            store
-                .read(|tx| tx.get_task("p", "T-7"))
-                .unwrap()
-                .unwrap()
-                .state,
-            task_before
-        );
-        assert!(store
-            .read(|tx| tx.get_review_verdict("p", "T-7", 1))
-            .unwrap()
-            .is_none());
-        let replay = run_send(
-            &mut store,
-            &env("r-1", TEMP_PANE),
-            &mut herdr,
-            &c,
-            "ok".into(),
-            None,
-            T0 + 2,
-            false,
-        )
-        .unwrap();
+        assert_eq!(history[0].body,"ok");
+        let meta:serde_json::Value=serde_json::from_str(history[0].meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta,serde_json::json!({"direction":true,"sha":"abc123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Started);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
+        let replay=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+2,false).unwrap();
         assert!(replay.contains("replayed"));
     }
 
     #[test]
     fn direction_result_rejects_lane_and_other_reviewer() {
-        let (mut store, mut herdr) = review_world();
+        let (mut store,mut herdr)=review_world();
         store.write(|tx| {
             testing::seed_temp_seat(tx,"p","r-2","T-7","w1:p4","opencode",T0)?;
             tx.set_meta("engine.direction.p.T-7.1",&serde_json::json!({"seat":"p:r-1","generation":1,"state":"running","sha":"abc123"}).to_string())
         }).unwrap();
-        herdr.add_agent("w1:p4", "opencode", AgentStatus::Idle);
-        let mut c = send_cmd("result");
-        c.task = Some("T-7".into());
-        c.attempt = Some(1);
-        c.direction = Some("ok".into());
-        for (name, pane) in [("heat", LANE_PANE), ("r-2", "w1:p4")] {
-            let err = run_send(
-                &mut store,
-                &env(name, pane),
-                &mut herdr,
-                &c,
-                "ok".into(),
-                None,
-                T0 + 1,
-                false,
-            )
-            .unwrap_err();
-            assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+        herdr.add_agent("w1:p4","opencode",AgentStatus::Idle);
+        let mut c=send_cmd("result"); c.task=Some("T-7".into()); c.attempt=Some(1); c.direction=Some("ok".into());
+        for (name,pane) in [("heat",LANE_PANE),("r-2","w1:p4")] {
+            let err=run_send(&mut store,&env(name,pane),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+            assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
         }
-        c.direction = None;
-        c.contract = Some(1);
-        c.candidate = Some("abc123".into());
-        let err = run_send(
-            &mut store,
-            &env("r-1", TEMP_PANE),
-            &mut herdr,
-            &c,
-            "ok".into(),
-            None,
-            T0 + 1,
-            false,
-        )
-        .unwrap_err();
-        assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
+        c.direction=None; c.contract=Some(1); c.candidate=Some("abc123".into());
+        let err=run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&c,"ok".into(),None,T0+1,false).unwrap_err();
+        assert_eq!(err.code,gear_model::ErrorCode::Forbidden);
     }
 
     #[test]
     fn direction_result_after_lane_submission_preserves_submitted_state() {
         let (mut store, mut herdr) = review_world();
-        store
-            .write(|tx| {
-                tx.set_meta(
-                    "engine.direction.p.T-7.1",
-                    &serde_json::json!({
-                        "seat":"p:r-1", "generation":1, "state":"running", "sha":"checked123"
-                    })
-                    .to_string(),
-                )
-            })
-            .unwrap();
+        store.write(|tx| tx.set_meta("engine.direction.p.T-7.1", &serde_json::json!({
+            "seat":"p:r-1", "generation":1, "state":"running", "sha":"checked123"
+        }).to_string())).unwrap();
         let mut lane = send_cmd("result");
-        lane.task = Some("T-7".into());
-        lane.attempt = Some(1);
-        lane.contract = Some(1);
-        lane.candidate = Some("candidate123".into());
-        lane.request_id = Some("lane-result".into());
-        run_send(
-            &mut store,
-            &env("heat", LANE_PANE),
-            &mut herdr,
-            &lane,
-            "done".into(),
-            None,
-            T0 + 1,
-            false,
-        )
-        .unwrap();
-        let task_before = store
-            .read(|tx| tx.get_task("p", "T-7"))
-            .unwrap()
-            .unwrap()
-            .state;
-        assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-7", 1))
-                .unwrap()
-                .unwrap()
-                .state,
-            gear_model::AttemptState::Submitted
-        );
-        assert_eq!(task_before, gear_model::TaskState::Verifying);
-        let mut direction = send_cmd("result");
-        direction.task = Some("T-7".into());
-        direction.attempt = Some(1);
-        direction.direction = Some("ok".into());
-        run_send(
-            &mut store,
-            &env("r-1", TEMP_PANE),
-            &mut herdr,
-            &direction,
-            "ok".into(),
-            None,
-            T0 + 2,
-            false,
-        )
-        .unwrap();
-        let history = store.read(|tx| tx.thread_messages("p", "T-7:2")).unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(history[0].meta.as_deref().unwrap()).unwrap(),
-            serde_json::json!({"direction":true,"sha":"checked123"})
-        );
-        assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-7", 1))
-                .unwrap()
-                .unwrap()
-                .state,
-            gear_model::AttemptState::Submitted
-        );
-        assert_eq!(
-            store
-                .read(|tx| tx.get_task("p", "T-7"))
-                .unwrap()
-                .unwrap()
-                .state,
-            task_before
-        );
-        assert!(store
-            .read(|tx| tx.get_review_verdict("p", "T-7", 1))
-            .unwrap()
-            .is_none());
+        lane.task=Some("T-7".into()); lane.attempt=Some(1); lane.contract=Some(1);
+        lane.candidate=Some("candidate123".into()); lane.request_id=Some("lane-result".into());
+        run_send(&mut store,&env("heat",LANE_PANE),&mut herdr,&lane,"done".into(),None,T0+1,false).unwrap();
+        let task_before=store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state;
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(task_before,gear_model::TaskState::Verifying);
+        let mut direction=send_cmd("result");
+        direction.task=Some("T-7".into()); direction.attempt=Some(1); direction.direction=Some("ok".into());
+        run_send(&mut store,&env("r-1",TEMP_PANE),&mut herdr,&direction,"ok".into(),None,T0+2,false).unwrap();
+        let history=store.read(|tx|tx.thread_messages("p","T-7:2")).unwrap();
+        assert_eq!(history.len(),1);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(history[0].meta.as_deref().unwrap()).unwrap(),serde_json::json!({"direction":true,"sha":"checked123"}));
+        assert_eq!(store.read(|tx|tx.get_attempt("p","T-7",1)).unwrap().unwrap().state,gear_model::AttemptState::Submitted);
+        assert_eq!(store.read(|tx|tx.get_task("p","T-7")).unwrap().unwrap().state,task_before);
+        assert!(store.read(|tx|tx.get_review_verdict("p","T-7",1)).unwrap().is_none());
     }
 
     #[test]
@@ -5533,18 +4918,12 @@ path="api"
         .unwrap();
 
         assert!(out.contains("Delivered to p:captain"), "{out}");
-        let record = store
-            .read(|tx| tx.get_review_verdict("p", "T-7", 1))
-            .unwrap()
-            .unwrap();
+        let record = store.read(|tx| tx.get_review_verdict("p", "T-7", 1)).unwrap().unwrap();
         assert!(record.passed);
         assert_eq!(record.findings, "P1: the header count is stale");
         assert_eq!(record.by_seat, "p:r-1");
         // A passing verdict is information; the engine handles settlement.
-        assert!(store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 2))
-            .unwrap()
-            .is_empty());
+        assert!(store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 2)).unwrap().is_empty());
         let history = store.read(|tx| tx.thread_messages("p", "T-7:1")).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].state, MsgState::Info);
@@ -5584,10 +4963,7 @@ path="api"
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
-        assert!(store
-            .read(|tx| tx.get_review_verdict("p", "T-7", 1))
-            .unwrap()
-            .is_none());
+        assert!(store.read(|tx| tx.get_review_verdict("p", "T-7", 1)).unwrap().is_none());
     }
 
     #[test]
@@ -5619,24 +4995,8 @@ path="api"
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "captain",
-                    SeatRole::Captain,
-                    CAP_PANE,
-                    "codex",
-                    T0,
-                )?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    LANE_PANE,
-                    lane_kind,
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, lane_kind, T0)?;
                 Ok(())
             })
             .unwrap();
@@ -5684,10 +5044,7 @@ path="api"
 
         let said = herdr.prompts_to(LANE_PANE);
         assert_eq!(said.len(), 1, "typed inside gear send: {said:?}");
-        assert!(
-            said[0].contains("M-1"),
-            "the doorbell names the message: {said:?}"
-        );
+        assert!(said[0].contains("M-1"), "the doorbell names the message: {said:?}");
         // T-150 (design §10.4): the lane has no open attempt, so the doorbell
         // says so and tells it to stop working on earlier things.
         assert!(said[0].contains("You have no task now"), "{said:?}");
@@ -5695,11 +5052,7 @@ path="api"
 
         // The next tick sees the message covered: no second doorbell.
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
-        assert_eq!(
-            herdr.prompts_to(LANE_PANE).len(),
-            1,
-            "one doorbell per message"
-        );
+        assert_eq!(herdr.prompts_to(LANE_PANE).len(), 1, "one doorbell per message");
     }
 
     #[test]
@@ -5736,10 +5089,7 @@ path="api"
             false,
         )
         .unwrap();
-        assert!(
-            herdr.prompts_to(LANE_PANE).is_empty(),
-            "codex does not queue input"
-        );
+        assert!(herdr.prompts_to(LANE_PANE).is_empty(), "codex does not queue input");
 
         // Still working: the engine keeps it for idle.
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
@@ -5761,9 +5111,7 @@ path="api"
         // refused prompt and its recovery, so the lane is idle here: no Escape
         // is sent, and the refusal lands on the prompt itself.
         let (mut store, mut herdr) = working_world("codex", AgentStatus::Idle);
-        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
-            code: "agent_blocked".into(),
-        });
+        herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "agent_blocked".into() });
         run_send(
             &mut store,
             &env("captain", CAP_PANE),
@@ -5782,14 +5130,8 @@ path="api"
             "the send tried and Herdr refused: {:?}",
             herdr.prompts_to(LANE_PANE)
         );
-        let stored = store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            stored.body, "stop and read this",
-            "the message is stored all the same"
-        );
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert_eq!(stored.body, "stop and read this", "the message is stored all the same");
         // The claim is recorded, and it waits: design §10.1 recovers a refused
         // prompt by naming the agent of the seat again and typing it on the
         // next tick (nothing is lost).
@@ -5801,11 +5143,7 @@ path="api"
 
         gear_engine::tick(&mut store, &mut herdr, &tick_cfg(), T0 + 40).unwrap();
         let said = herdr.prompts_to(LANE_PANE);
-        assert_eq!(
-            said.len(),
-            2,
-            "the engine rings it on its next tick: {said:?}"
-        );
+        assert_eq!(said.len(), 2, "the engine rings it on its next tick: {said:?}");
         assert!(said[1].contains("M-1"), "{said:?}");
     }
 
@@ -5837,16 +5175,10 @@ path="api"
 
         assert!(out.contains("M-1"), "{out}");
         assert!(out.contains("resolved"), "{out}");
-        let stored = store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .unwrap();
+        let stored = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(stored.state, MsgState::Resolved);
         // The answer went back to the lane's inbox.
-        let reply = store
-            .read(|tx| tx.get_message("p", "M-2"))
-            .unwrap()
-            .unwrap();
+        let reply = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
         assert_eq!(reply.kind, MsgKind::Reply);
         assert_eq!(reply.recipient, "p:heat");
     }
@@ -5877,11 +5209,7 @@ path="api"
         )
         .unwrap();
         assert_eq!(
-            store
-                .read(|tx| tx.get_message("p", "M-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
             MsgState::Resolved
         );
 
@@ -5900,17 +5228,11 @@ path="api"
 
         assert!(out.contains("M-1: open"), "{out}");
         assert_eq!(
-            store
-                .read(|tx| tx.get_message("p", "M-1"))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap().state,
             MsgState::Open
         );
         // The item is back in the captain's inbox.
-        let inbox = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 4))
-            .unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 4)).unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
     }
 
@@ -6033,10 +5355,7 @@ path="api"
         )
         .unwrap();
 
-        let message = store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .unwrap();
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         let meta: serde_json::Value =
             serde_json::from_str(message.meta.as_deref().expect("the answer has a meta")).unwrap();
         assert_eq!(meta["left"], serde_json::json!(30));
@@ -6071,18 +5390,11 @@ path="api"
         assert_eq!(task.wait_cond.as_deref(), Some("merged"));
         // The attempt goes on: a wait is not a hand-in.
         assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-1", 1))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
             gear_model::AttemptState::Started
         );
         // The captain has the info item.
-        let message = store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .unwrap();
+        let message = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
         assert_eq!(message.recipient, "p:captain");
         assert_eq!(message.kind, MsgKind::Blocked);
         assert_eq!(message.state, MsgState::Info);
@@ -6117,12 +5429,7 @@ path="api"
         )
         .unwrap_err();
 
-        assert_eq!(
-            error.code,
-            gear_model::ErrorCode::BadFormat,
-            "{}",
-            error.detail
-        );
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
         assert!(error.detail.contains("T-2 is done"), "{}", error.detail);
         // Nothing was written: the task waits for nothing.
         let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
@@ -6162,24 +5469,12 @@ path="api"
         )
         .unwrap_err();
 
-        assert_eq!(
-            error.code,
-            gear_model::ErrorCode::BadFormat,
-            "{}",
-            error.detail
-        );
-        assert!(
-            error.detail.contains("is on contract v2"),
-            "{}",
-            error.detail
-        );
+        assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{}", error.detail);
+        assert!(error.detail.contains("is on contract v2"), "{}", error.detail);
         // Nothing was written: no wait and no message.
         let task = store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
         assert_eq!(task.wait_on, None);
-        assert!(store
-            .read(|tx| tx.get_message("p", "M-1"))
-            .unwrap()
-            .is_none());
+        assert!(store.read(|tx| tx.get_message("p", "M-1")).unwrap().is_none());
     }
 
     /// The request fingerprint carries the answer's fields: a request id
@@ -6279,11 +5574,7 @@ path="api"
         assert!(error.detail.contains("--friction"), "{}", error.detail);
         // Nothing was written: the attempt is not handed in.
         assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-1", 1))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
             gear_model::AttemptState::Started
         );
         assert!(store
@@ -6417,11 +5708,7 @@ path="api"
         .unwrap();
 
         assert_eq!(
-            store
-                .read(|tx| tx.get_attempt("p", "T-1", 1))
-                .unwrap()
-                .unwrap()
-                .state,
+            store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
             gear_model::AttemptState::Submitted
         );
         assert!(store
@@ -6459,15 +5746,7 @@ path="api"
         // A reviewer seat, bound to the task.
         store
             .write(|tx| {
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "review-1",
-                    SeatRole::Temp,
-                    "w1:p9",
-                    "codex",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
                 tx.set_seat_task("p:review-1", "T-1")
             })
             .unwrap();
@@ -6518,10 +5797,7 @@ path="api"
             "the reviewer was inside its own budget"
         );
         // The writer's attempt still carries the writer's times only.
-        let attempt = store
-            .read(|tx| tx.get_attempt("p", "T-1", 1))
-            .unwrap()
-            .unwrap();
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
         assert_eq!(attempt.sent_at, Some(T0 + 10), "{attempt:?}");
         assert_eq!(attempt.started, T0, "{attempt:?}");
     }
@@ -6551,15 +5827,7 @@ path="api"
             .unwrap();
         store
             .write(|tx| {
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "review-1",
-                    SeatRole::Temp,
-                    "w1:p9",
-                    "codex",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
                 tx.set_seat_task("p:review-1", "T-1")
             })
             .unwrap();
@@ -6744,10 +6012,7 @@ path="api"
 
     fn friction_close(id: &str, message: &str) -> FrictionCmd {
         FrictionCmd {
-            op: Some(FrictionOp::Close {
-                id: id.into(),
-                message: message.into(),
-            }),
+            op: Some(FrictionOp::Close { id: id.into(), message: message.into() }),
             all: false,
         }
     }
@@ -6769,12 +6034,10 @@ path="api"
 
     // --- T-28: environment, store, request id ---
 
-    /// A variable lookup over a fixed map (production reads the process env).
+/// A variable lookup over a fixed map (production reads the process env).
     fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: BTreeMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+        let map: BTreeMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         move |name: &str| map.get(name).cloned()
     }
 
@@ -6797,14 +6060,8 @@ path="api"
         register_store(&path, "/s/orch.sock", "/state/a.db").unwrap();
         register_store(&path, "/s/other.sock", "/state/b.db").unwrap();
         register_store(&path, "/s/orch.sock", "/state/c.db").unwrap();
-        assert_eq!(
-            registered_store(&path, "/s/orch.sock").as_deref(),
-            Some("/state/c.db")
-        );
-        assert_eq!(
-            registered_store(&path, "/s/other.sock").as_deref(),
-            Some("/state/b.db")
-        );
+        assert_eq!(registered_store(&path, "/s/orch.sock").as_deref(), Some("/state/c.db"));
+        assert_eq!(registered_store(&path, "/s/other.sock").as_deref(), Some("/state/b.db"));
     }
 
     #[test]
@@ -6819,11 +6076,7 @@ path="api"
         let first = take_engine_lock(&dir).unwrap();
         let err = take_engine_lock(&dir).unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::Forbidden);
-        assert!(
-            err.detail.contains("engine already running"),
-            "{}",
-            err.detail
-        );
+        assert!(err.detail.contains("engine already running"), "{}", err.detail);
         drop(first);
     }
 
@@ -6832,10 +6085,7 @@ path="api"
         let dir = lock_dir("drop");
         {
             let lock = take_engine_lock(&dir).unwrap();
-            assert!(
-                take_engine_lock(&dir).is_err(),
-                "held while the first handle lives"
-            );
+            assert!(take_engine_lock(&dir).is_err(), "held while the first handle lives");
             drop(lock);
         }
         // The lock went away with the handle.
@@ -6875,10 +6125,7 @@ path="api"
         assert!(opencode.verified);
         assert_eq!(opencode.unattended_args, vec!["--auto".to_string()]);
         // A kind without a verified SOP stays out, so its seats fail closed.
-        assert!(
-            cfg.profiles.contains_key("claude"),
-            "the captain gets a doorbell"
-        );
+        assert!(cfg.profiles.contains_key("claude"), "the captain gets a doorbell");
         // The reviewers run on Codex (T-5): its SOP is verified, so the
         // engine knows how to start and observe one.
         let codex = cfg.profiles.get("codex").expect("codex is built in");
@@ -6919,19 +6166,11 @@ path="api"
         .unwrap();
 
         // One clock call for the recovery, then one per tick.
-        assert_eq!(
-            clock_calls.get(),
-            3,
-            "recovery once, then exactly two ticks"
-        );
+        assert_eq!(clock_calls.get(), 3, "recovery once, then exactly two ticks");
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&id), "{text}");
         let op = store.read(|tx| tx.get_op("p", &id)).unwrap().unwrap();
-        assert_eq!(
-            op.state,
-            OpState::Unknown,
-            "recovered before the first tick"
-        );
+        assert_eq!(op.state, OpState::Unknown, "recovered before the first tick");
     }
 
     #[test]
@@ -7004,16 +6243,9 @@ path="api"
         )
         .unwrap();
 
-        assert_eq!(
-            tick_calls.get(),
-            1,
-            "the tick that saw the stop finishes, then the loop leaves"
-        );
+        assert_eq!(tick_calls.get(), 1, "the tick that saw the stop finishes, then the loop leaves");
         let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.contains("p:T-1/1"),
-            "the running tick's report is written: {text}"
-        );
+        assert!(text.contains("p:T-1/1"), "the running tick's report is written: {text}");
     }
 
     #[test]
@@ -7041,11 +6273,7 @@ path="api"
         )
         .unwrap();
 
-        assert_eq!(
-            tick_calls.get(),
-            0,
-            "a stop before the first tick runs none"
-        );
+        assert_eq!(tick_calls.get(), 0, "a stop before the first tick runs none");
     }
 
     #[test]
@@ -7079,14 +6307,7 @@ path="api"
     #[test]
     fn env_without_ctx_is_anonymous() {
         let env = env_from(vars(&[])).unwrap();
-        assert_eq!(
-            env,
-            gear_app::Env {
-                ctx: None,
-                pane_id: None,
-                admin: false
-            }
-        );
+        assert_eq!(env, gear_app::Env { ctx: None, pane_id: None, admin: false });
     }
 
     #[test]
@@ -7099,11 +6320,7 @@ path="api"
         .unwrap();
         assert_eq!(
             env.ctx,
-            Some(gear_model::GearCtx {
-                project: "harbor".into(),
-                seat: "heat".into(),
-                generation: 7
-            })
+            Some(gear_model::GearCtx { project: "harbor".into(), seat: "heat".into(), generation: 7 })
         );
         assert_eq!(env.pane_id.as_deref(), Some("w1:p2"));
         assert!(env.admin);
@@ -7142,10 +6359,7 @@ path="api"
 
     impl std::io::Write for FailingWriter {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "broken pipe",
-            ))
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"))
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
@@ -7158,24 +6372,8 @@ path="api"
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", T0)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "captain",
-                    SeatRole::Captain,
-                    CAP_PANE,
-                    "codex",
-                    T0,
-                )?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "heat",
-                    SeatRole::Lane,
-                    LANE_PANE,
-                    "opencode",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
                 Ok(())
             })
             .unwrap();
@@ -7187,11 +6385,7 @@ path="api"
 
     fn home_env(seat: &str, pane: &str) -> gear_app::Env {
         gear_app::Env {
-            ctx: Some(GearCtx {
-                project: "p".into(),
-                seat: seat.into(),
-                generation: 1,
-            }),
+            ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
             pane_id: Some(pane.into()),
             admin: false,
         }
@@ -7229,25 +6423,13 @@ path="api"
         unshown_reply(&mut store);
 
         let mut out: Vec<u8> = Vec::new();
-        run_home(
-            &mut store,
-            &home_env("heat", LANE_PANE),
-            &mut herdr,
-            T0 + 2,
-            false,
-            &mut out,
-        )
-        .unwrap();
+        run_home(&mut store, &home_env("heat", LANE_PANE), &mut herdr, T0 + 2, false, &mut out).unwrap();
 
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("seat p:heat"), "{text}");
         assert!(text.contains("Use v2"), "{text}");
         let views = store.read(|tx| tx.views_since("p:heat", 1, 0)).unwrap();
-        assert_eq!(
-            views.len(),
-            1,
-            "the page was printed, so the view is recorded"
-        );
+        assert_eq!(views.len(), 1, "the page was printed, so the view is recorded");
         assert_eq!(views[0].shown_msgs, vec!["M-1".to_string()]);
     }
 
@@ -7256,21 +6438,12 @@ path="api"
         let (mut store, mut herdr) = home_world();
         unshown_reply(&mut store);
 
-        let result = run_home(
-            &mut store,
-            &home_env("heat", LANE_PANE),
-            &mut herdr,
-            T0 + 2,
-            false,
-            &mut FailingWriter,
-        );
+        let result =
+            run_home(&mut store, &home_env("heat", LANE_PANE), &mut herdr, T0 + 2, false, &mut FailingWriter);
 
         assert!(result.is_err(), "a failed write is reported");
         let views = store.read(|tx| tx.views_since("p:heat", 1, 0)).unwrap();
-        assert!(
-            views.is_empty(),
-            "a page that was not printed is not a view"
-        );
+        assert!(views.is_empty(), "a page that was not printed is not a view");
     }
 
     /// A task with contract v1 in project `p`.
@@ -7297,8 +6470,7 @@ path="api"
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),
@@ -7322,20 +6494,10 @@ path="api"
         let (mut store, mut herdr) = world();
         seed_task(&mut store, "T-1", Some("heat"));
 
-        let out = run_show(
-            &mut store,
-            &env("heat", LANE_PANE),
-            &mut herdr,
-            "T-1",
-            false,
-        )
-        .unwrap();
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", false).unwrap();
 
         assert!(out.contains("# T-1 — Ship the thing"), "{out}");
-        assert!(
-            out.contains("Lane: heat · Contract: v1 · State: ready"),
-            "{out}"
-        );
+        assert!(out.contains("Lane: heat · Contract: v1 · State: ready"), "{out}");
         assert!(out.contains("## Goal"), "{out}");
         assert!(out.contains("## Acceptance"), "{out}");
         assert!(out.contains("gear send --kind result --task T-1"), "{out}");
@@ -7367,19 +6529,9 @@ path="api"
             })
             .unwrap();
 
-        let out = run_show(
-            &mut store,
-            &env("heat", LANE_PANE),
-            &mut herdr,
-            "T-1",
-            false,
-        )
-        .unwrap();
+        let out = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-1", false).unwrap();
         assert!(out.contains("# T-1 — Ship the thing"), "{out}");
-        assert!(
-            out.contains("## Project standard (`gear/standard.md`)"),
-            "{out}"
-        );
+        assert!(out.contains("## Project standard (`gear/standard.md`)"), "{out}");
         assert!(
             out.contains("New code meets the standard even if its neighbours do not."),
             "{out}"
@@ -7406,14 +6558,7 @@ path="api"
     #[test]
     fn show_unknown_task_is_no_target() {
         let (mut store, mut herdr) = world();
-        let err = run_show(
-            &mut store,
-            &env("heat", LANE_PANE),
-            &mut herdr,
-            "T-9",
-            false,
-        )
-        .unwrap_err();
+        let err = run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, "T-9", false).unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::NoTarget);
         assert!(err.detail.contains("T-9"), "{}", err.detail);
     }
@@ -7422,14 +6567,8 @@ path="api"
     fn show_other_target_is_bad_format() {
         let (mut store, mut herdr) = world();
         for target in ["queue", "draft", "M-1"] {
-            let err = run_show(
-                &mut store,
-                &env("heat", LANE_PANE),
-                &mut herdr,
-                target,
-                false,
-            )
-            .unwrap_err();
+            let err =
+                run_show(&mut store, &env("heat", LANE_PANE), &mut herdr, target, false).unwrap_err();
             assert_eq!(err.code, gear_model::ErrorCode::BadFormat, "{target}");
             assert!(err.detail.contains(target), "{target}: {}", err.detail);
         }
@@ -7455,11 +6594,7 @@ path="api"
     #[test]
     fn a_release_asks_the_session_and_refuses_an_unreadable_one() {
         fn lane_state(store: &mut Store) -> gear_model::SeatState {
-            store
-                .read(|tx| tx.get_seat("p:heat"))
-                .unwrap()
-                .unwrap()
-                .state
+            store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap().state
         }
 
         let (mut store, mut herdr) = world();
@@ -7501,16 +6636,8 @@ path="api"
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
-        assert!(
-            err.detail.contains("cannot read the session's agents"),
-            "{}",
-            err.detail
-        );
-        assert_eq!(
-            lane_state(&mut store),
-            gear_model::SeatState::Held,
-            "nothing applied, still held"
-        );
+        assert!(err.detail.contains("cannot read the session's agents"), "{}", err.detail);
+        assert_eq!(lane_state(&mut store), gear_model::SeatState::Held, "nothing applied, still held");
 
         // Read again: no agent in the binding's pane, so the lane goes back to
         // the queue and the engine onboards it again.
@@ -7530,6 +6657,7 @@ path="api"
         assert_eq!(lane_state(&mut store), gear_model::SeatState::Queued);
         std::fs::remove_file(&path).ok();
     }
+
 }
 
 #[cfg(test)]
@@ -7540,39 +6668,18 @@ mod default_store_tests {
     fn each_herdr_session_gets_its_own_store_unless_one_is_registered() {
         let home = std::env::temp_dir().join(format!("gear-default-store-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let sock = |name: &str| {
-            home.join(".config/herdr/sessions")
-                .join(name)
-                .join("herdr.sock")
-                .to_string_lossy()
-                .to_string()
-        };
+        let sock = |name: &str| home.join(".config/herdr/sessions").join(name).join("herdr.sock").to_string_lossy().to_string();
         let shared = home.join(".local/state/gear/gear.db");
-        assert_eq!(
-            default_store_in(&home, None),
-            shared,
-            "no Herdr: the shared store"
-        );
-        let plain = home
-            .join(".config/herdr/herdr.sock")
-            .to_string_lossy()
-            .to_string();
-        assert_eq!(
-            default_store_in(&home, Some(&plain)),
-            shared,
-            "the default session: the shared store"
-        );
+        assert_eq!(default_store_in(&home, None), shared, "no Herdr: the shared store");
+        let plain = home.join(".config/herdr/herdr.sock").to_string_lossy().to_string();
+        assert_eq!(default_store_in(&home, Some(&plain)), shared, "the default session: the shared store");
         assert_eq!(
             default_store_in(&home, Some(&sock("b"))),
             home.join(".local/state/gear/b/gear.db"),
             "a named session: its own store"
         );
         register_store(&targets_path_in(&home), &sock("a"), "/x/a.db").expect("registry");
-        assert_eq!(
-            default_store_in(&home, Some(&sock("a"))),
-            std::path::PathBuf::from("/x/a.db"),
-            "a registered store wins"
-        );
+        assert_eq!(default_store_in(&home, Some(&sock("a"))), std::path::PathBuf::from("/x/a.db"), "a registered store wins");
         let _ = std::fs::remove_dir_all(&home);
     }
 }

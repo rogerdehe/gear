@@ -9,9 +9,9 @@
 //! drawn over the view (as the prototype draws its window over the board).
 
 use crate::graph;
+use crate::voyage::LaneProjection;
 use crate::idle::IdleReason;
 use crate::style::{lane_color, lane_width, Color, Line, Style};
-use crate::voyage::LaneProjection;
 use crate::{Board, LaneBoard, ProjectBoard, TaskBoard};
 
 /// The five views of the board: the tabs.
@@ -93,13 +93,7 @@ impl Tab {
 
     /// Every tab, in the order of the row.
     pub fn all() -> [Tab; 5] {
-        [
-            Tab::Now,
-            Tab::Graph,
-            Tab::Workload,
-            Tab::Decisions,
-            Tab::Tokens,
-        ]
+        [Tab::Now, Tab::Graph, Tab::Workload, Tab::Decisions, Tab::Tokens]
     }
 }
 
@@ -198,10 +192,7 @@ impl Canvas {
     /// The screen as plain text: the rows, each cut at the edge, without a
     /// terminal code.
     pub fn text(&self) -> String {
-        (0..self.height)
-            .map(|row| self.row_text(row, None))
-            .collect::<Vec<_>>()
-            .join("\n")
+        (0..self.height).map(|row| self.row_text(row, None)).collect::<Vec<_>>().join("\n")
     }
 
     /// The screen as the terminal shows it: the styles as SGR codes. Without
@@ -223,10 +214,7 @@ impl Canvas {
             match codes {
                 None => Style::PLAIN,
                 Some(true) => styles[column],
-                Some(false) => Style {
-                    fg: None,
-                    ..styles[column]
-                },
+                Some(false) => Style { fg: None, ..styles[column] },
             }
         };
         // The plain spaces at the end of the row are not drawn.
@@ -378,10 +366,7 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
     let time = match (elapsed, eta_minutes) {
         (Some(elapsed), Some(eta)) => Line::plain("time   ")
             .push(bar(elapsed, eta, 24), pace)
-            .push(
-                format!(" {} of {}", hours(elapsed), hours(eta)),
-                Style::PLAIN,
-            ),
+            .push(format!(" {} of {}", hours(elapsed), hours(eta)), Style::PLAIN),
         _ => Line::plain("time   the voyage's time is unknown"),
     };
     canvas.put_line(0, 1, &time);
@@ -481,11 +466,7 @@ fn mark(selected: bool) -> Line {
 
 /// The lanes of the project, in seat order: the order of the lane colours.
 fn lane_order(project: &ProjectBoard) -> Vec<&str> {
-    project
-        .lanes
-        .iter()
-        .map(|lane| lane.lane.as_str())
-        .collect()
+    project.lanes.iter().map(|lane| lane.lane.as_str()).collect()
 }
 
 /// The colour of a lane on this board.
@@ -505,22 +486,16 @@ pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
     match tab {
         Tab::Now => view_now(project, selected),
         Tab::Graph => {
-            let lines = graph::styled_lines(&project.graph, &project.graph_lanes, Some(selected));
+            let lines =
+                graph::styled_lines(&project.graph, &project.graph_lanes, Some(selected));
             let count = project.graph.len();
             let heading = lines.first().cloned().unwrap_or_default();
             let rows = lines
                 .get(1..=count)
                 .map(|rows| rows.to_vec())
                 .unwrap_or_default();
-            let rest = lines
-                .get(count + 1..)
-                .map(|rest| rest.to_vec())
-                .unwrap_or_default();
-            ViewRows {
-                heading,
-                rows,
-                rest,
-            }
+            let rest = lines.get(count + 1..).map(|rest| rest.to_vec()).unwrap_or_default();
+            ViewRows { heading, rows, rest }
         }
         Tab::Workload => view_workload(project, selected),
         Tab::Decisions => view_decisions(project, selected),
@@ -534,11 +509,8 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
     let mut rows = Vec::new();
     // The starred decisions are the ones the user reads in full (F1): the
     // others are counted by kind below.
-    let starred: Vec<&crate::DecisionBoard> = project
-        .decisions
-        .iter()
-        .filter(|decision| decision.star)
-        .collect();
+    let starred: Vec<&crate::DecisionBoard> =
+        project.decisions.iter().filter(|decision| decision.star).collect();
     for (index, decision) in starred.iter().enumerate() {
         let picked = index == selected;
         rows.push(
@@ -570,20 +542,10 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
     // The friction reports the agents left (§6.1): an open one is unread.
     rows.push(Line::new());
     rows.push(Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
-    let width = lane_width(
-        project
-            .frictions
-            .iter()
-            .map(|friction| friction.lane.as_str()),
-        6,
-        1,
-    );
+    let width = lane_width(project.frictions.iter().map(|friction| friction.lane.as_str()), 6, 1);
     for friction in &project.frictions {
-        let (status, color) = if friction.closed {
-            ("closed", Color::Dim)
-        } else {
-            ("open", Color::Warn)
-        };
+        let (status, color) =
+            if friction.closed { ("closed", Color::Dim) } else { ("open", Color::Warn) };
         rows.push(
             Line::plain("  ")
                 .push(
@@ -595,10 +557,7 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
         );
     }
     ViewRows {
-        heading: Line::styled(
-            "DECISIONS MADE  (★ = worth a look at landing)",
-            Style::bold(),
-        ),
+        heading: Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
         rows,
         rest: Vec::new(),
     }
@@ -714,11 +673,7 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
         "so far: {:.1}M tokens, {:.1}M cache reads, {}",
         tokens_total as f64 / 1_000_000.0,
         cache_total as f64 / 1_000_000.0,
-        if priced {
-            format!("${cost_total:.2}")
-        } else {
-            "no prices set".to_string()
-        }
+        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
     );
     if unknown > 0 {
         // The total is what is known: the unknown parts are named (F5).
@@ -770,7 +725,8 @@ fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
     let width = lane_width(lane_order(project), 5, 0);
     for (index, lane) in project.lanes.iter().enumerate() {
         // The lane's own measurements (the voyage report).
-        let measured = voyage.and_then(|voyage| voyage.lanes.iter().find(|l| l.lane == lane.lane));
+        let measured = voyage
+            .and_then(|voyage| voyage.lanes.iter().find(|l| l.lane == lane.lane));
         let empty = LaneProjection {
             lane: lane.lane.clone(),
             done_min: 0,
@@ -795,9 +751,7 @@ fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{:<width$}", lane.lane),
-                    lane_style(project, &lane.lane)
-                        .and_bold()
-                        .reversed_if(picked),
+                    lane_style(project, &lane.lane).and_bold().reversed_if(picked),
                 )
                 .push(" ", Style::PLAIN)
                 .push("█".repeat(done_cells), Style::fg(Color::Ok))
@@ -806,7 +760,10 @@ fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(
                     format!(
                         "done {} ({}m) · left {} ({}m)",
-                        lane.done_count, lane.done_estimate_min, lane.left_count, lane.left_min
+                        lane.done_count,
+                        lane.done_estimate_min,
+                        lane.left_count,
+                        lane.left_min
                     ),
                     Style::PLAIN,
                 ),
@@ -828,16 +785,9 @@ fn view_workload(project: &ProjectBoard, selected: usize) -> ViewRows {
         "BURN-UP  (minutes of estimate merged, per voyage hour)",
         Style::bold(),
     ));
-    let burn = voyage
-        .map(|voyage| voyage.burn_up.clone())
-        .unwrap_or_default();
+    let burn = voyage.map(|voyage| voyage.burn_up.clone()).unwrap_or_default();
     if !burn.is_empty() {
-        let top = burn
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .max(done_total + left_total);
+        let top = burn.iter().copied().max().unwrap_or(0).max(done_total + left_total);
         for row in (1..=8).rev() {
             let level = top as f64 * row as f64 / 8.0;
             let line: String = burn
@@ -891,11 +841,7 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
         let (middle, middle_style) = match (&lane.idle_text, current) {
             (Some(reason), _) => (format!("idle: {reason}"), Style::fg(Color::Bad)),
             (None, Some(task)) => (
-                format!(
-                    "{} {}",
-                    task.id,
-                    task.title.chars().take(32).collect::<String>()
-                ),
+                format!("{} {}", task.id, task.title.chars().take(32).collect::<String>()),
                 Style::PLAIN,
             ),
             (None, None) => ("no current task".to_string(), Style::fg(Color::Dim)),
@@ -906,11 +852,7 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
             Some(task) => match (task.actual_min, task.est_min) {
                 (Some(actual), Some(estimate)) if estimate > 0 => (
                     format!("{} {actual}/{estimate}m", bar(actual, estimate, 10)),
-                    if actual > estimate {
-                        Style::fg(Color::Warn)
-                    } else {
-                        Style::PLAIN
-                    },
+                    if actual > estimate { Style::fg(Color::Warn) } else { Style::PLAIN },
                 ),
                 _ => (String::new(), Style::PLAIN),
             },
@@ -921,9 +863,7 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{:<width$}", lane.lane),
-                    lane_style(project, &lane.lane)
-                        .and_bold()
-                        .reversed_if(picked),
+                    lane_style(project, &lane.lane).and_bold().reversed_if(picked),
                 )
                 .push(" ", Style::PLAIN)
                 .push(format!("{middle:<44}"), middle_style.reversed_if(picked))
@@ -954,11 +894,8 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
     ));
     for (task, lane, kind, why) in &looks {
         rest.push(
-            Line::styled(
-                format!("  {task} {lane:<width$} {kind:<14} "),
-                Style::fg(Color::Warn),
-            )
-            .push(why.clone(), Style::PLAIN),
+            Line::styled(format!("  {task} {lane:<width$} {kind:<14} "), Style::fg(Color::Warn))
+                .push(why.clone(), Style::PLAIN),
         );
     }
     rest.push(Line::new());
@@ -989,10 +926,7 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
         rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
     }
     ViewRows {
-        heading: Line::styled(
-            "LANES  (Enter: what this lane did and has left)",
-            Style::bold(),
-        ),
+        heading: Line::styled("LANES  (Enter: what this lane did and has left)", Style::bold()),
         rows,
         rest,
     }
@@ -1003,11 +937,7 @@ fn current_task(lane: &LaneBoard) -> Option<&TaskBoard> {
     lane.tasks
         .iter()
         .find(|task| task.state == gear_model::TaskState::Running)
-        .or_else(|| {
-            lane.tasks
-                .iter()
-                .find(|task| task.state == gear_model::TaskState::Waiting)
-        })
+        .or_else(|| lane.tasks.iter().find(|task| task.state == gear_model::TaskState::Waiting))
         .or_else(|| {
             lane.tasks
                 .iter()
@@ -1140,10 +1070,7 @@ fn row_cut(row: &Line, width: usize) -> Line {
 
 /// The lane's panel: what it did, what it does now and what it has left.
 pub fn lane_panel(lane: &LaneBoard) -> Vec<String> {
-    styled_lane_panel(lane, Color::Dim)
-        .into_iter()
-        .map(|line| line.text)
-        .collect()
+    styled_lane_panel(lane, Color::Dim).into_iter().map(|line| line.text).collect()
 }
 
 /// The lane's panel in the prototype's colours; `color` is the lane's own.

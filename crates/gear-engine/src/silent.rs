@@ -67,10 +67,7 @@ pub fn tick(
             continue;
         }
         let key = mark(&seat.id, &round.task, round.attempt, &round.role);
-        if store
-            .read(|tx| tx.get_meta(&key))?
-            .is_some_and(|value| !value.is_empty())
-        {
+        if store.read(|tx| tx.get_meta(&key))?.is_some_and(|value| !value.is_empty()) {
             continue; // this round was already reported
         }
         if !silent(store, project, &seat, &round, profiles, now)? {
@@ -130,8 +127,7 @@ fn silent(
     let log = usage_log(store, seat, profiles)?;
     if let Some(log) = log.filter(|_| !round.sessions.is_empty()) {
         let produced = round.sessions.iter().any(|session| {
-            gear_usage::usage(log, session, round.start_at, now)
-                .is_some_and(|usage| usage.records > 0)
+            gear_usage::usage(log, session, round.start_at, now).is_some_and(|usage| usage.records > 0)
         });
         return Ok(!produced);
     }
@@ -151,12 +147,7 @@ fn usage_log(
             let kind = store
                 .read(|tx| tx.get_binding(&seat.id, seat.generation))?
                 .map(|binding| binding.kind);
-            kind.and_then(|kind| {
-                profiles
-                    .values()
-                    .find(|profile| profile.kind == kind)
-                    .cloned()
-            })
+            kind.and_then(|kind| profiles.values().find(|profile| profile.kind == kind).cloned())
         }
     };
     Ok(profile
@@ -204,24 +195,8 @@ mod tests {
         store
             .write(|tx| {
                 testing::seed_project(tx, "p", "sess", NOW)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "captain",
-                    SeatRole::Captain,
-                    "w1:p9",
-                    "pi",
-                    NOW,
-                )?;
-                let seat = testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "review-1",
-                    SeatRole::Temp,
-                    "w1:p2",
-                    "pi",
-                    NOW,
-                )?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p9", "pi", NOW)?;
+                let seat = testing::seed_active_seat(tx, "p", "review-1", SeatRole::Temp, "w1:p2", "pi", NOW)?;
                 tx.set_seat_task(&seat.id, "T-1")?;
                 tx.insert_task(&gear_store::TaskRow {
                     project: "p".into(),
@@ -382,12 +357,8 @@ mod tests {
         assert!(messages[0].urgent);
         assert_eq!(messages[0].task.as_deref(), Some("T-1"));
         assert_eq!(messages[0].attempt, Some(1));
-        assert!(messages[0]
-            .body
-            .contains("review-1 has produced nothing for 11 min"));
-        assert!(messages[0]
-            .body
-            .contains("(review round, model minimax-m3)"));
+        assert!(messages[0].body.contains("review-1 has produced nothing for 11 min"));
+        assert!(messages[0].body.contains("(review round, model minimax-m3)"));
 
         // The second tick says nothing new: the round was already reported.
         let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
@@ -514,10 +485,7 @@ mod tests {
             .store
             .read(|tx| tx.thread_messages("p", &format!("stall:{SEAT}")))
             .unwrap();
-        assert!(
-            stall.is_empty(),
-            "no second, generic stall alert: {stall:?}"
-        );
+        assert!(stall.is_empty(), "no second, generic stall alert: {stall:?}");
 
         // The second tick says nothing new.
         crate::tick(&mut world.store, &mut herdr, &cfg, NOW).unwrap();

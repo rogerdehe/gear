@@ -35,11 +35,7 @@ fn whoami_starts_no_engine_and_prints_the_store() {
         .output()
         .expect("run gear");
 
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("pane:"), "the whoami printed: {text}");
     assert!(text.contains("seat:"), "the whoami printed: {text}");

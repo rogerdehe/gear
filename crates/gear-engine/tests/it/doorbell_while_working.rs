@@ -32,15 +32,7 @@ fn world(pi: AgentStatus, other: AgentStatus) -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(
-                tx,
-                "p",
-                "captain",
-                SeatRole::Captain,
-                CAP_PANE,
-                "codex",
-                T0,
-            )?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PI_PANE, "pi", T0)?;
             testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, LANE_PANE, "codex", T0)?;
             Ok(())
@@ -104,10 +96,7 @@ fn a_working_pi_lane_gets_the_captains_instruction_in_the_same_tick() {
 
     let said = w.herdr.prompts_to(PI_PANE);
     assert_eq!(said.len(), 1, "typed while the agent works: {said:?}");
-    assert!(
-        said[0].contains(&id),
-        "the doorbell names the message: {said:?}"
-    );
+    assert!(said[0].contains(&id), "the doorbell names the message: {said:?}");
     // T-150 (design §10.4): the lane has no open attempt, so the text says so
     // and tells it to stop working on earlier things.
     assert!(said[0].contains("You have no task now"), "{said:?}");
@@ -131,9 +120,7 @@ fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
     w.herdr.set_agent_name(LANE_PANE, Some("p-wire"));
     w.herdr.set_status(CAP_PANE, AgentStatus::Working);
     let id = w.captain_message("p:heat", MsgKind::Instruction, false, T0 + 10);
-    w.herdr.inject_next = Some(Inject::Refuse {
-        code: "agent_not_ready".into(),
-    });
+    w.herdr.inject_next = Some(Inject::Refuse { code: "agent_not_ready".into() });
 
     let first = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
     let ops = w.doorbell_ops();
@@ -142,20 +129,13 @@ fn a_refused_doorbell_is_rung_again_on_the_next_tick() {
     // is there, so it is named again and the same op types the doorbell on the
     // next tick.
     assert_eq!(ops[0].state, OpState::Intended, "the op waits: {ops:?}");
-    assert!(
-        first.executed.iter().any(|(_, state)| state == "intended"),
-        "{first:?}"
-    );
+    assert!(first.executed.iter().any(|(_, state)| state == "intended"), "{first:?}");
 
     // Herdr is healthy again; the message was never typed, so it is rung now.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 21).unwrap();
 
     let said = w.herdr.prompts_to(PI_PANE);
-    assert_eq!(
-        said.len(),
-        2,
-        "the refused attempt, then the real doorbell: {said:?}"
-    );
+    assert_eq!(said.len(), 2, "the refused attempt, then the real doorbell: {said:?}");
     assert!(said[1].contains(&id), "{said:?}");
     let ops = w.doorbell_ops();
     assert_eq!(ops.len(), 1, "the same op, typed again: {ops:?}");
@@ -184,11 +164,7 @@ fn a_working_codex_lane_gets_an_urgent_message_at_once() {
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
 
     let said = w.herdr.prompts_to(LANE_PANE);
-    assert_eq!(
-        said.len(),
-        1,
-        "an urgent message reaches a running turn: {said:?}"
-    );
+    assert_eq!(said.len(), 1, "an urgent message reaches a running turn: {said:?}");
     assert!(said[0].contains(&id), "{said:?}");
 }
 

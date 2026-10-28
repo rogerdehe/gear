@@ -79,9 +79,7 @@ pub fn apply_quota_policy(
     observed: &[SeatObs],
     now: Ts,
 ) -> GearResult<QuotaReport> {
-    apply_quota_policy_with(
-        store, herdr, cfg, profiles, project, observed, now, &LiveQuota,
-    )
+    apply_quota_policy_with(store, herdr, cfg, profiles, project, observed, now, &LiveQuota)
 }
 
 /// The quota policy with the readers of §9.1 as a parameter: the live ones
@@ -111,13 +109,9 @@ pub fn apply_quota_policy_with(
     let sources = sources_of(&config);
     // The codex reader reads the rollout of the reviewer's session (§9.1).
     let codex_session = codex_session(store, project)?;
-    report.events.extend(refresh_readings(
-        store,
-        api,
-        &sources,
-        now,
-        codex_session.as_deref(),
-    )?);
+    report
+        .events
+        .extend(refresh_readings(store, api, &sources, now, codex_session.as_deref())?);
 
     for obs in observed {
         let seat = &obs.seat;
@@ -148,16 +142,9 @@ pub fn apply_quota_policy_with(
         // plan is durable, so it resumes whatever the screen says now — the
         // quota line may have cleared, the engine may have restarted mid-switch.
         if crate::switch::pending(store, &seat.id)?.is_some() {
-            if let Some(line) = resume_switch(
-                store,
-                herdr,
-                project,
-                &config,
-                seat,
-                profile,
-                Some(obs),
-                now,
-            )? {
+            if let Some(line) =
+                resume_switch(store, herdr, project, &config, seat, profile, Some(obs), now)?
+            {
                 report.events.push(line);
             }
             continue;
@@ -180,17 +167,8 @@ pub fn apply_quota_policy_with(
                 match chain.first().copied() {
                     Some(entry) => {
                         if let Some(line) = change_model(
-                            store,
-                            herdr,
-                            cfg,
-                            profiles,
-                            project,
-                            &config,
-                            seat,
-                            profile,
-                            Some(obs),
-                            entry,
-                            now,
+                            store, herdr, cfg, profiles, project, &config, seat, profile, Some(obs),
+                            entry, now,
                         )? {
                             report.events.push(line);
                         }
@@ -338,16 +316,7 @@ pub fn apply_quota_policy_with(
                 // T-35: the next model needs another CLI — the agent is
                 // closed and the other CLI starts in the same pane.
                 if let Some(line) = change_model(
-                    store,
-                    herdr,
-                    cfg,
-                    profiles,
-                    project,
-                    &config,
-                    seat,
-                    profile,
-                    Some(obs),
-                    next,
+                    store, herdr, cfg, profiles, project, &config, seat, profile, Some(obs), next,
                     now,
                 )? {
                     report.events.push(line);
@@ -444,16 +413,9 @@ fn change_model(
     let current_cli = crate::restart::current_cli(store, seat)?;
     // The entry names the CLI that runs the model; without one the seat's own
     // CLI runs it.
-    let default_cli = config
-        .lanes
-        .iter()
-        .find(|lane| lane.name == seat.name)
+    let default_cli = config.lanes.iter().find(|lane| lane.name == seat.name)
         .map(|lane| lane.kind.as_str());
-    let target_cli = entry
-        .cli()
-        .or(default_cli)
-        .map(str::to_string)
-        .or(current_cli.clone());
+    let target_cli = entry.cli().or(default_cli).map(str::to_string).or(current_cli.clone());
     let same_cli = match (&target_cli, &current_cli) {
         (Some(target), Some(current)) => target == current,
         _ => true,
@@ -468,17 +430,7 @@ fn change_model(
         Some(cli) => same_cli && crate::switch::switches_in_place(cli),
     };
     if in_place {
-        return start_switch(
-            store,
-            herdr,
-            project,
-            config,
-            seat,
-            profile,
-            obs,
-            entry.model(),
-            now,
-        );
+        return start_switch(store, herdr, project, config, seat, profile, obs, entry.model(), now);
     }
     let target = ModelEntry::Entry(gear_app::config::ModelSpec {
         model: entry.model().to_string(),
@@ -486,16 +438,7 @@ fn change_model(
         args: entry.args().to_vec(),
         context_window_k: entry.context_window_k(),
     });
-    crate::restart::advance(
-        store,
-        herdr,
-        cfg,
-        profiles,
-        project,
-        seat,
-        Some(&target),
-        now,
-    )
+    crate::restart::advance(store, herdr, cfg, profiles, project, seat, Some(&target), now)
 }
 
 // ------------------------------------------------------------- the in-place switch
@@ -524,8 +467,7 @@ fn start_switch(
         flag_and_alert(store, project, seat, &line, now)?;
         return Ok(Some(line));
     };
-    let outcome =
-        crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
+    let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, labels, model, now)?;
     settle_switch(store, project, seat, model, outcome, now)
 }
 
@@ -557,8 +499,7 @@ fn resume_switch(
         flag_and_alert(store, project, seat, &line, now)?;
         return Ok(Some(line));
     };
-    let outcome =
-        crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
+    let outcome = crate::switch::switch_model(store, herdr, &seat.id, profile, obs, &labels, &model, now)?;
     settle_switch(store, project, seat, &model, outcome, now)
 }
 
@@ -625,9 +566,9 @@ fn finish_switch(
                 created: now,
             })?;
         }
-        let row = tx
-            .get_seat(&seat.id)?
-            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
         if row.state == SeatState::Parked {
             gear_model::state::require_transition(
                 SeatState::can_transition(row.role, row.state, SeatState::Active),
@@ -656,8 +597,7 @@ fn retire_unconfirmed_deliveries(
 ) -> GearResult<()> {
     for state in [OpState::Submitted, OpState::Unknown] {
         for op in tx.ops_in_state(project, state)? {
-            if op.kind != OpKind::Deliver || op.seat != seat.id || op.generation != seat.generation
-            {
+            if op.kind != OpKind::Deliver || op.seat != seat.id || op.generation != seat.generation {
                 continue;
             }
             tx.set_op_state(
@@ -705,10 +645,7 @@ pub(crate) fn resume_delivery(
             )),
         };
     }
-    Ok((
-        continue_text(store, &seat.id)?,
-        open_attempt(store, &seat.id)?,
-    ))
+    Ok((continue_text(store, &seat.id)?, open_attempt(store, &seat.id)?))
 }
 
 /// The seat's open attempt: (task, attempt).
@@ -760,9 +697,9 @@ pub(crate) fn flag_and_alert(
     now: Ts,
 ) -> GearResult<()> {
     store.write(|tx| {
-        let row = tx
-            .get_seat(&seat.id)?
-            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
         if row.state == SeatState::NeedsCheck {
             return Ok(());
         }
@@ -779,20 +716,16 @@ pub(crate) fn flag_and_alert(
 
 /// The reset deadline of a parked lane, if it was parked on quota.
 fn parked_until(store: &mut Store, seat: &str) -> GearResult<Option<Ts>> {
-    Ok(meta_get(store, &meta_key("resume", seat))?.and_then(|value| value.parse::<Ts>().ok()))
+    Ok(meta_get(store, &meta_key("resume", seat))?
+        .and_then(|value| value.parse::<Ts>().ok()))
 }
 
 /// The seats of `project` whose screen shows a provider limit right now: the
 /// consecutive-quota counter is above zero. Read outside any transaction (the
 /// tick counts first, then confirms).
 pub fn seats_on_quota(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
-    let seats: Vec<String> = store.read(|tx| {
-        Ok(tx
-            .seats_of_project(project)?
-            .into_iter()
-            .map(|seat| seat.id)
-            .collect())
-    })?;
+    let seats: Vec<String> = store
+        .read(|tx| Ok(tx.seats_of_project(project)?.into_iter().map(|seat| seat.id).collect()))?;
     let mut on_quota = Vec::new();
     for seat in seats {
         let ticks = meta_get(store, &meta_key("quota", &seat))?
@@ -817,10 +750,7 @@ fn count_quota_tick(store: &mut Store, seat: &str, quota: bool, now: Ts) -> Gear
         .unwrap_or(0);
     let ticks = if quota { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok((
-        ticks,
-        signal_start(store, seat, "quota_signal", quota, previous == 0, now)?,
-    ))
+    Ok((ticks, signal_start(store, seat, "quota_signal", quota, previous == 0, now)?))
 }
 
 /// The time the signal episode of a seat began: `now` when the signal is new,
@@ -845,8 +775,7 @@ fn signal_start(
     }
     if let Some(start) = meta_get(store, &key)?
         .and_then(|value| value.trim().parse::<Ts>().ok())
-        .filter(|start| *start > 0)
-    {
+        .filter(|start| *start > 0) {
         return Ok(start);
     }
     // A restart or upgrade can preserve the counter without its new episode
@@ -886,10 +815,7 @@ pub(crate) fn tell_captain(
 ) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
-            GearError::new(
-                ErrorCode::NoTarget,
-                format!("project {project} has no captain"),
-            )
+            GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
         // The seat's current generation: a restart on another CLI (T-35) gave
         // the seat a new one.
@@ -942,10 +868,7 @@ fn insert_alert(
     now: Ts,
 ) -> GearResult<()> {
     let captain = tx.captain_of(project)?.ok_or_else(|| {
-        GearError::new(
-            ErrorCode::NoTarget,
-            format!("project {project} has no captain"),
-        )
+        GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
     })?;
     // The seat's current generation: a restart on another CLI (T-35) gave
     // the seat a new one.
@@ -973,9 +896,7 @@ fn insert_alert(
         recipient: captain.id,
         kind: MsgKind::System,
         urgent: true,
-        body: format!(
-            "{body} — the lane is stopped: switch it to another model by hand, or let it wait"
-        ),
+        body: format!("{body} — the lane is stopped: switch it to another model by hand, or let it wait"),
         reply_to: None,
         needs_ack: false,
         state: MsgState::Open,
@@ -1067,15 +988,15 @@ fn sources_of(config: &ProjectConfig) -> Vec<Source> {
 /// The key of a source: the file it is in, then the dotted path in it (§9.1).
 fn key_of(source: &Source) -> Result<String, String> {
     let path = expand_home(&source.key_file);
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let mut cursor = &value;
     for part in source.key_path.split('.').filter(|part| !part.is_empty()) {
-        cursor = cursor
-            .get(part)
-            .ok_or_else(|| format!("{}: {} is not in the file", path.display(), source.key_path))?;
+        cursor = cursor.get(part).ok_or_else(|| {
+            format!("{}: {} is not in the file", path.display(), source.key_path)
+        })?;
     }
     cursor
         .as_str()
@@ -1174,21 +1095,12 @@ fn load_attempt(store: &mut Store, provider: &str) -> GearResult<Option<Ts>> {
 fn codex_session(store: &mut Store, project: &str) -> GearResult<Option<String>> {
     store.read(|tx| {
         let mut seats = tx.seats_of_project(project)?;
-        seats.retain(|seat| {
-            seat.role == SeatRole::Temp
-                && matches!(seat.state, SeatState::Active | SeatState::Standby)
-        });
+        seats.retain(|seat| seat.role == SeatRole::Temp && matches!(seat.state, SeatState::Active | SeatState::Standby));
         seats.sort_by_key(|seat| (seat.state != SeatState::Active, seat.id.clone()));
         for seat in seats {
-            let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
-                continue;
-            };
-            if binding.status != gear_store::BindingStatus::Active || binding.kind != "codex" {
-                continue;
-            }
-            if let Some(session) = binding.session_ref.filter(|s| !s.trim().is_empty()) {
-                return Ok(Some(session));
-            }
+            let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else { continue };
+            if binding.status != gear_store::BindingStatus::Active || binding.kind != "codex" { continue }
+            if let Some(session) = binding.session_ref.filter(|s| !s.trim().is_empty()) { return Ok(Some(session)) }
         }
         Ok(None)
     })
@@ -1254,11 +1166,7 @@ fn store_reading(store: &mut Store, reading: &StoredReading) -> GearResult<()> {
         "windows": windows,
         "stale": reading.stale,
     });
-    meta_set(
-        store,
-        &reading_meta_key(&reading.provider),
-        &value.to_string(),
-    )
+    meta_set(store, &reading_meta_key(&reading.provider), &value.to_string())
 }
 
 /// Read the quota of a source (§9.1): the key out of its file, then the
@@ -1278,9 +1186,7 @@ fn read_source(
     since: Ts,
     codex_session: Option<&str>,
 ) -> Result<Reading, String> {
-    if let Some(stored) =
-        load_reading(store, &source.provider).map_err(|error| error.to_string())?
-    {
+    if let Some(stored) = load_reading(store, &source.provider).map_err(|error| error.to_string())? {
         if !stored.windows.is_empty() && stored.read_at >= since {
             return Ok(Reading {
                 provider: stored.provider,
@@ -1511,14 +1417,8 @@ fn load_wait(store: &mut Store, seat: &str) -> GearResult<Option<Wait>> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
-        task: value
-            .get("task")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        pause: value
-            .get("pause")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        task: value.get("task").and_then(|v| v.as_str()).map(str::to_string),
+        pause: value.get("pause").and_then(|v| v.as_bool()).unwrap_or(false),
     }))
 }
 
@@ -1549,10 +1449,7 @@ fn count_error_tick(store: &mut Store, seat: &str, error: bool, now: Ts) -> Gear
         .unwrap_or(0);
     let ticks = if error { previous + 1 } else { 0 };
     meta_set(store, &key, &ticks.to_string())?;
-    Ok((
-        ticks,
-        signal_start(store, seat, "quota_error_signal", error, previous == 0, now)?,
-    ))
+    Ok((ticks, signal_start(store, seat, "quota_error_signal", error, previous == 0, now)?))
 }
 
 /// Count the provider errors of a seat in a row (§9.2): the second one is a
@@ -1588,9 +1485,9 @@ fn park_seat(
     now: Ts,
 ) -> GearResult<bool> {
     let parked = store.write(|tx| {
-        let row = tx
-            .get_seat(&seat.id)?
-            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
         if !SeatState::can_transition(row.role, row.state, SeatState::Parked) {
             return Ok(false);
         }
@@ -1769,9 +1666,10 @@ fn wake_from_source(
         // whole wait (§5.1): the round clocks take their pauses from these
         // rows.
         if wait.pause {
-            let open_pause = tx.pauses_of_project(project)?.into_iter().any(|pause| {
-                pause.seat == seat.id && pause.kind == "quota" && pause.end_at.is_none()
-            });
+            let open_pause = tx
+                .pauses_of_project(project)?
+                .into_iter()
+                .any(|pause| pause.seat == seat.id && pause.kind == "quota" && pause.end_at.is_none());
             if open_pause {
                 tx.close_pause(project, &seat.id, "quota", now)?;
             }
@@ -1787,9 +1685,9 @@ fn wake_from_source(
             }
         }
         // The seat works again.
-        let row = tx
-            .get_seat(&seat.id)?
-            .ok_or_else(|| GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id)))?;
+        let row = tx.get_seat(&seat.id)?.ok_or_else(|| {
+            GearError::new(ErrorCode::NoTarget, format!("no seat {}", seat.id))
+        })?;
         if row.state == SeatState::Parked {
             gear_model::state::require_transition(
                 SeatState::can_transition(row.role, row.state, SeatState::Active),
@@ -1875,10 +1773,7 @@ fn alert_body(
 ) -> GearResult<()> {
     store.write(|tx| {
         let captain = tx.captain_of(project)?.ok_or_else(|| {
-            GearError::new(
-                ErrorCode::NoTarget,
-                format!("project {project} has no captain"),
-            )
+            GearError::new(ErrorCode::NoTarget, format!("project {project} has no captain"))
         })?;
         let generation = tx
             .get_seat(&seat.id)?
@@ -1972,15 +1867,7 @@ quota_reset_h = 5
                     created: T0,
                 })?;
                 testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, PANE, "opencode", T0)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "captain",
-                    SeatRole::Captain,
-                    "w9:p1",
-                    "claude",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w9:p1", "claude", T0)?;
                 tx.set_binding_session_ref("p:heat", 1, "ses_lane")?;
                 tx.insert_task(&TaskRow {
                     repo: None,
@@ -2002,8 +1889,7 @@ quota_reset_h = 5
                     wait_cond: None,
                     rework_note: None,
                     estimate_min: None,
-                    issue: None,
-                    updated: T0,
+                     issue: None,updated: T0,
                 })?;
                 tx.insert_contract(&ContractRow {
                     project: "p".into(),
@@ -2026,16 +1912,9 @@ quota_reset_h = 5
     }
 
     fn cfg() -> EngineCfg {
-        let mut cfg = EngineCfg {
-            db_path: std::env::temp_dir()
-                .join(format!("gear-engine-tests-{}/gear.db", std::process::id()))
-                .to_string_lossy()
-                .into_owned(),
-            ..Default::default()
-        };
+        let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
         for kind in ["opencode", "claude", "codex"] {
-            cfg.profiles
-                .insert(kind.into(), gear_herdr::builtin(kind).unwrap());
+            cfg.profiles.insert(kind.into(), gear_herdr::builtin(kind).unwrap());
         }
         cfg
     }
@@ -2105,9 +1984,9 @@ quota_reset_h = 5
             .calls
             .iter()
             .filter_map(|call| match call {
-                Call::AgentStart {
-                    kind, pane, args, ..
-                } => Some((kind.clone(), pane.clone(), args.clone())),
+                Call::AgentStart { kind, pane, args, .. } => {
+                    Some((kind.clone(), pane.clone(), args.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -2137,26 +2016,16 @@ quota_reset_h = 5
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
 
         assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert!(
-            report.events[0].contains("chain exhausted"),
-            "{:?}",
-            report.events
-        );
+        assert!(report.events[0].contains("chain exhausted"), "{:?}", report.events);
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Parked);
         let until = T0 + 20 + 5 * 3600;
-        assert!(seat
-            .state_reason
-            .unwrap_or_default()
-            .contains(&until.to_string()));
+        assert!(seat.state_reason.unwrap_or_default().contains(&until.to_string()));
         assert!(exits(&herdr).is_empty(), "nothing is restarted");
         // L-74: the captain gets an urgent action item that rings, not an info line.
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 30))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 30)).unwrap();
         assert!(
-            open.iter()
-                .any(|m| m.urgent && m.body.contains("parked until")),
+            open.iter().any(|m| m.urgent && m.body.contains("parked until")),
             "an urgent captain item: {open:?}"
         );
 
@@ -2169,11 +2038,7 @@ quota_reset_h = 5
         // lane is flagged for a human — never closed and restarted (T-33, F4).
         let report = tick_quota(&mut store, &mut herdr, false, until);
         assert_eq!(report.events.len(), 1, "{:?}", report.events);
-        assert!(
-            report.events[0].contains("models.switch"),
-            "{:?}",
-            report.events
-        );
+        assert!(report.events[0].contains("models.switch"), "{:?}", report.events);
         assert!(exits(&herdr).is_empty(), "no exit keys: {:?}", herdr.calls);
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::NeedsCheck);
@@ -2181,20 +2046,13 @@ quota_reset_h = 5
 
     #[test]
     fn the_wait_policy_parks_even_with_a_longer_chain() {
-        let mut store = world(&config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "wait",
-        ));
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "wait"));
         let mut herdr = herdr_with_quota();
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
 
-        assert!(
-            report.events[0].contains("policy wait"),
-            "{:?}",
-            report.events
-        );
+        assert!(report.events[0].contains("policy wait"), "{:?}", report.events);
         let seat = store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
         assert_eq!(seat.state, SeatState::Parked);
         assert!(exits(&herdr).is_empty(), "waited, not restarted");
@@ -2202,10 +2060,7 @@ quota_reset_h = 5
 
     #[test]
     fn a_quota_turn_does_not_flag_the_seat() {
-        let mut store = world(&config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        ));
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
         let mut herdr = herdr_with_quota();
         // A delivery the agent cannot answer while it is on quota.
         store
@@ -2234,8 +2089,7 @@ quota_reset_h = 5
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         // … so the delivery's budget is not spent and the seat is not flagged.
         for tick in 0..5 {
-            let (_, flagged) =
-                crate::ops::confirm_pending(&mut store, "p", 1, T0 + 20 + tick).unwrap();
+            let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 1, T0 + 20 + tick).unwrap();
             assert!(flagged.is_empty(), "a quota turn is not 'no progress'");
         }
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
@@ -2266,10 +2120,7 @@ quota_reset_h = 5
                 "/model".into(),
                 "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
             ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
         ];
 
         // Tick 1: one quota screen is not enough (`confirm_rounds` is 2).
@@ -2279,10 +2130,7 @@ quota_reset_h = 5
         let report = tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert!(report.events.is_empty(), "{:?}", report.events);
         assert!(texts(&herdr).is_empty(), "only the escape so far");
-        assert!(
-            deliveries(&mut store).is_empty(),
-            "no continue before the bar confirms"
-        );
+        assert!(deliveries(&mut store).is_empty(), "no continue before the bar confirms");
 
         // Ticks 3..6: /model, the filter, then the bar check.
         for tick in 0..4 {
@@ -2303,30 +2151,13 @@ quota_reset_h = 5
             sent.iter().flatten().all(|key| !exit_keys.contains(key)),
             "no exit keys: {sent:?}"
         );
-        assert!(
-            starts(&herdr).is_empty(),
-            "no restart: {:?}",
-            starts(&herdr)
-        );
-        assert!(
-            texts(&herdr).iter().any(|t| t == "/model"),
-            "{:?}",
-            texts(&herdr)
-        );
-        assert!(
-            texts(&herdr).iter().any(|t| t == "DeepSeek V4.1 Flash"),
-            "{:?}",
-            texts(&herdr)
-        );
+        assert!(starts(&herdr).is_empty(), "no restart: {:?}", starts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "/model"), "{:?}", texts(&herdr));
+        assert!(texts(&herdr).iter().any(|t| t == "DeepSeek V4.1 Flash"), "{:?}", texts(&herdr));
         // Exactly one Continue, on the new model.
         let delivered = deliveries(&mut store);
         assert_eq!(delivered.len(), 1, "{delivered:?}");
-        assert_eq!(
-            meta_get(&mut store, &meta_key("model", "p:heat"))
-                .unwrap()
-                .as_deref(),
-            Some("deepseek/deepseek-flash")
-        );
+        assert_eq!(meta_get(&mut store, &meta_key("model", "p:heat")).unwrap().as_deref(), Some("deepseek/deepseek-flash"));
         // More quota ticks add no second Continue.
         tick_quota(&mut store, &mut herdr, true, T0 + 60);
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
@@ -2376,10 +2207,7 @@ quota_reset_h = 5
                 "/model".into(),
                 "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
             ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
         ];
 
         // Two quota ticks start the switch; the rest confirm it.
@@ -2399,9 +2227,7 @@ quota_reset_h = 5
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert!(delivered[0].contains("Continue T-1"), "{delivered:?}");
         // No stall item: the policy handled the seat.
-        let items = store
-            .read(|tx| tx.thread_messages("p", "stall:p:heat"))
-            .unwrap();
+        let items = store.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
         assert!(items.is_empty(), "no stall item: {items:?}");
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
     }
@@ -2430,10 +2256,7 @@ quota_reset_h = 5
             herdr.calls
         );
         assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
-        assert!(
-            deliveries(&mut store).is_empty(),
-            "no continue before the agent is up"
-        );
+        assert!(deliveries(&mut store).is_empty(), "no continue before the agent is up");
 
         // The agent leaves: the pane is a shell again.
         herdr.exit_agent(PANE);
@@ -2469,16 +2292,7 @@ quota_reset_h = 5
                 "-c".to_string(),
                 "projects={\"/repo\"={trust_level=\"trusted\"}}".to_string(),
                 "-c".to_string(),
-                gear_herdr::profile::render_rules(
-                    &[gear_herdr::profile::CODEX_RULES_ARG.to_string()],
-                    &std::path::Path::new(&cfg().db_path)
-                        .parent()
-                        .unwrap()
-                        .join("rules/lane.md")
-                        .to_string_lossy(),
-                    ""
-                )[0]
-                .clone(),
+                gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/lane.md").to_string_lossy(), "")[0].clone(),
                 "-m".to_string(),
                 "gpt-6.1-sol".to_string(),
                 "-c".to_string(),
@@ -2491,9 +2305,7 @@ quota_reset_h = 5
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert!(delivered[0].starts_with("Continue T-1"), "{delivered:?}");
         assert_eq!(
-            meta_get(&mut store, &model_meta_key("p:heat"))
-                .unwrap()
-                .as_deref(),
+            meta_get(&mut store, &model_meta_key("p:heat")).unwrap().as_deref(),
             Some("gpt-6.1-sol")
         );
         // The seat is back: it runs the new CLI, in a new generation, in the
@@ -2502,16 +2314,10 @@ quota_reset_h = 5
         assert_eq!(seat.state, SeatState::Active, "{:?}", seat.state_reason);
         assert_eq!(seat.generation, 2);
         assert_eq!(seat.profile, "codex");
-        let binding = store
-            .read(|tx| tx.get_binding("p:heat", 2))
-            .unwrap()
-            .unwrap();
+        let binding = store.read(|tx| tx.get_binding("p:heat", 2)).unwrap().unwrap();
         assert_eq!(binding.kind, "codex");
         assert_eq!(binding.pane_id, PANE);
-        let old = store
-            .read(|tx| tx.get_binding("p:heat", 1))
-            .unwrap()
-            .unwrap();
+        let old = store.read(|tx| tx.get_binding("p:heat", 1)).unwrap().unwrap();
         assert_eq!(old.status, gear_store::BindingStatus::Void);
 
         // More quota ticks add no second Continue.
@@ -2519,11 +2325,7 @@ quota_reset_h = 5
         assert_eq!(deliveries(&mut store).len(), 1, "one continue only");
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "one info item: {told:?}");
-        assert!(
-            told[0].state == MsgState::Info
-                && !told[0].urgent
-                && told[0].body.contains("restarted on")
-        );
+        assert!(told[0].state == MsgState::Info && !told[0].urgent && told[0].body.contains("restarted on"));
     }
 
     #[test]
@@ -2539,9 +2341,7 @@ quota_reset_h = 5
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
         assert!(exits(&herdr).is_empty());
         assert!(agent_starts(&herdr).is_empty());
-        assert!(crate::restart::pending(&mut store, "p:heat")
-            .unwrap()
-            .is_some());
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_some());
         herdr.set_status(PANE, gear_herdr::AgentStatus::Idle);
         tick_quota(&mut store, &mut herdr, false, T0 + 30);
         assert_eq!(exits(&herdr).len(), 1);
@@ -2553,24 +2353,17 @@ quota_reset_h = 5
             r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
             "fallback",
         ));
-        store
-            .write(|tx| {
-                let op = tx.insert_op(&NewOp {
-                    project: "p".into(),
-                    seat: "p:heat".into(),
-                    generation: 1,
-                    kind: OpKind::Doorbell,
-                    task: None,
-                    attempt: None,
-                    ref_msg: None,
-                    plan_version: None,
-                    payload: serde_json::json!({ "text": "gear", "covers": ["M-404"] }),
-                    created: T0,
-                })?;
-                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
-                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)
-            })
-            .unwrap();
+        store.write(|tx| {
+            let op = tx.insert_op(&NewOp {
+                project: "p".into(), seat: "p:heat".into(), generation: 1,
+                kind: OpKind::Doorbell, task: None, attempt: None,
+                ref_msg: None, plan_version: None,
+                payload: serde_json::json!({ "text": "gear", "covers": ["M-404"] }),
+                created: T0,
+            })?;
+            tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+            tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)
+        }).unwrap();
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
@@ -2585,19 +2378,9 @@ quota_reset_h = 5
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
         assert_eq!(deliveries(&mut store).len(), 1);
         assert_eq!(exits(&herdr).len(), 1);
-        assert_eq!(
-            store
-                .read(|tx| tx.get_op("p", "O-1"))
-                .unwrap()
-                .unwrap()
-                .state,
-            OpState::Confirmed
-        );
+        assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Confirmed);
         let (_, flagged) = crate::ops::confirm_pending(&mut store, "p", 1, T0 + 50).unwrap();
-        assert!(
-            flagged.is_empty(),
-            "the departed generation cannot flag the replacement"
-        );
+        assert!(flagged.is_empty(), "the departed generation cannot flag the replacement");
     }
 
     #[test]
@@ -2623,25 +2406,14 @@ quota_reset_h = 5
         herdr.start_screen = Some("Build auto · wrong-model · high".into());
         tick_quota(&mut store, &mut herdr, false, reset + 10);
         assert_eq!(agent_starts(&herdr).last().unwrap().0, "opencode");
-        assert!(
-            deliveries(&mut store).is_empty(),
-            "no Continue before model confirmation"
-        );
+        assert!(deliveries(&mut store).is_empty(), "no Continue before model confirmation");
         // Onboarding must not take over this pending restart's model switch.
-        assert!(
-            crate::onboard::onboard_queued(&mut store, &mut herdr, &cfg(), reset + 11)
-                .unwrap()
-                .is_empty()
-        );
+        assert!(crate::onboard::onboard_queued(&mut store, &mut herdr, &cfg(), reset + 11).unwrap().is_empty());
         herdr.set_screen(PANE, "Build auto · MiniMax-M3.1-Flash MiniMax · high");
         tick_quota(&mut store, &mut herdr, false, reset + 20);
         assert_eq!(lane_seat(&mut store).state, SeatState::Active);
         assert_eq!(lane_seat(&mut store).generation, 3);
-        assert_eq!(
-            deliveries(&mut store).len(),
-            1,
-            "one Continue for the new generation"
-        );
+        assert_eq!(deliveries(&mut store).len(), 1, "one Continue for the new generation");
         assert_eq!(agent_starts(&herdr).len(), 2);
     }
 
@@ -2667,10 +2439,7 @@ quota_reset_h = 5
                 "/model".into(),
                 "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
             ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
         ];
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
@@ -2678,11 +2447,7 @@ quota_reset_h = 5
             tick_quota(&mut store, &mut herdr, true, T0 + 20 + tick);
         }
 
-        assert!(
-            agent_starts(&herdr).is_empty(),
-            "no restart: {:?}",
-            agent_starts(&herdr)
-        );
+        assert!(agent_starts(&herdr).is_empty(), "no restart: {:?}", agent_starts(&herdr));
         assert!(
             exits(&herdr).iter().flatten().all(|key| key != "ctrl+c"),
             "the agent was not closed: {:?}",
@@ -2713,17 +2478,12 @@ quota_reset_h = 5
                 "/model".into(),
                 "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
             ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
         ];
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert!(crate::switch::pending(&mut store, "p:heat")
-            .unwrap()
-            .is_some());
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_some());
 
         // The marker is gone from the screen from now on: the switch goes on.
         for tick in 0..4 {
@@ -2731,39 +2491,21 @@ quota_reset_h = 5
         }
 
         let sent = texts(&herdr);
-        assert_eq!(
-            sent.iter().filter(|t| *t == "/model").count(),
-            1,
-            "typed once: {sent:?}"
-        );
+        assert_eq!(sent.iter().filter(|t| *t == "/model").count(), 1, "typed once: {sent:?}");
         assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
         assert_eq!(
-            meta_get(&mut store, &meta_key("model", "p:heat"))
-                .unwrap()
-                .as_deref(),
+            meta_get(&mut store, &meta_key("model", "p:heat")).unwrap().as_deref(),
             Some("deepseek/deepseek-flash")
         );
-        assert!(
-            crate::switch::pending(&mut store, "p:heat")
-                .unwrap()
-                .is_none(),
-            "the plan is cleared"
-        );
-        assert!(
-            starts(&herdr).is_empty(),
-            "no restart: {:?}",
-            starts(&herdr)
-        );
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_none(), "the plan is cleared");
+        assert!(starts(&herdr).is_empty(), "no restart: {:?}", starts(&herdr));
     }
 
     /// T-33 (F4): no labels for the next model — the seat is flagged, never
     /// closed: zero exit keys, zero starts.
     #[test]
     fn a_missing_switch_label_flags_the_seat_without_closing_it() {
-        let mut store = world(&config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        ));
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
         let mut herdr = herdr_with_quota();
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
@@ -2771,18 +2513,9 @@ quota_reset_h = 5
 
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", report.events);
-        assert!(
-            seat.state_reason
-                .unwrap_or_default()
-                .contains("models.switch"),
-            "{report:?}"
-        );
+        assert!(seat.state_reason.unwrap_or_default().contains("models.switch"), "{report:?}");
         assert!(exits(&herdr).is_empty(), "no exit keys: {:?}", herdr.calls);
-        assert!(
-            starts(&herdr).is_empty(),
-            "no agent start: {:?}",
-            herdr.calls
-        );
+        assert!(starts(&herdr).is_empty(), "no agent start: {:?}", herdr.calls);
         assert!(texts(&herdr).is_empty(), "nothing typed");
     }
 
@@ -2791,10 +2524,7 @@ quota_reset_h = 5
     /// later tick says nothing new.
     #[test]
     fn a_failed_switch_rings_the_captain_once() {
-        let mut store = world(&config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        ));
+        let mut store = world(&config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback"));
         let mut herdr = herdr_with_quota();
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
@@ -2802,64 +2532,41 @@ quota_reset_h = 5
 
         // The seat is flagged: no [models.switch] labels for the next model.
         assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 30))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 30)).unwrap();
         assert_eq!(open.len(), 1, "one urgent item: {open:?}");
         assert!(open[0].urgent, "{open:?}");
-        assert!(
-            open[0].body.contains("p:heat"),
-            "it names the seat: {open:?}"
-        );
-        assert!(
-            open[0].body.contains("models.switch"),
-            "it names the reason: {open:?}"
-        );
+        assert!(open[0].body.contains("p:heat"), "it names the seat: {open:?}");
+        assert!(open[0].body.contains("models.switch"), "it names the reason: {open:?}");
 
         // A later tick does not ring again.
         tick_quota(&mut store, &mut herdr, true, T0 + 40);
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 50))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 50)).unwrap();
         assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
     }
 
     #[test]
     fn removing_labels_during_a_switch_rings_once_and_clears_the_plan() {
-        let mut text = config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        );
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
         let without_labels = text.clone();
         text.push_str("\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n");
         let mut store = world(&text);
         let mut herdr = herdr_with_quota();
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
         tick_quota(&mut store, &mut herdr, true, T0 + 20);
-        assert!(crate::switch::pending(&mut store, "p:heat")
-            .unwrap()
-            .is_some());
-        store
-            .write(|tx| {
-                let mut project = tx.get_project("p")?.unwrap();
-                project.config_toml = without_labels;
-                tx.update_project(&project)
-            })
-            .unwrap();
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_some());
+        store.write(|tx| {
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = without_labels;
+            tx.update_project(&project)
+        }).unwrap();
         for tick in 0..4 {
             tick_quota(&mut store, &mut herdr, false, T0 + 30 + tick);
         }
         assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
-        assert!(crate::switch::pending(&mut store, "p:heat")
-            .unwrap()
-            .is_none());
+        assert!(crate::switch::pending(&mut store, "p:heat").unwrap().is_none());
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "{told:?}");
-        assert!(
-            told[0].urgent
-                && told[0].body.contains("p:heat")
-                && told[0].body.contains("no [models.switch] labels any more")
-        );
+        assert!(told[0].urgent && told[0].body.contains("p:heat") && told[0].body.contains("no [models.switch] labels any more"));
     }
 
     #[test]
@@ -2874,16 +2581,10 @@ quota_reset_h = 5
             tick_quota(&mut store, &mut herdr, true, T0 + 10 + tick);
         }
         assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
-        assert!(crate::restart::pending(&mut store, "p:heat")
-            .unwrap()
-            .is_none());
+        assert!(crate::restart::pending(&mut store, "p:heat").unwrap().is_none());
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "{told:?}");
-        assert!(
-            told[0].urgent
-                && told[0].body.contains("p:heat")
-                && told[0].body.contains("did not finish")
-        );
+        assert!(told[0].urgent && told[0].body.contains("p:heat") && told[0].body.contains("did not finish"));
     }
 
     #[test]
@@ -2895,9 +2596,7 @@ quota_reset_h = 5
         }
         assert_eq!(captain_messages(&mut store).len(), 1);
         // After recovery, another failure must create its own item.
-        store
-            .write(|tx| tx.set_seat_state(&seat.id, SeatState::Active, None, T0 + 4))
-            .unwrap();
+        store.write(|tx| tx.set_seat_state(&seat.id, SeatState::Active, None, T0 + 4)).unwrap();
         flag_and_alert(&mut store, "p", &seat, "another switch failed", T0 + 5).unwrap();
         assert_eq!(captain_messages(&mut store).len(), 2);
     }
@@ -2906,10 +2605,7 @@ quota_reset_h = 5
     /// lane too, and rings the captain once.
     #[test]
     fn a_switch_that_never_confirms_rings_the_captain_once() {
-        let mut text = config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        );
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
         text.push_str(
             "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
         );
@@ -2927,9 +2623,7 @@ quota_reset_h = 5
 
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 40))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
         assert_eq!(open.len(), 1, "one urgent item: {open:?}");
         assert!(
             open[0].urgent && open[0].body.contains("did not confirm twice"),
@@ -2940,9 +2634,7 @@ quota_reset_h = 5
         for tick in 0..5 {
             tick_quota(&mut store, &mut herdr, true, T0 + 60 + tick);
         }
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 80))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 80)).unwrap();
         assert_eq!(open.len(), 1, "the failure was told once: {open:?}");
     }
 
@@ -2950,10 +2642,7 @@ quota_reset_h = 5
     /// does not ring.
     #[test]
     fn a_successful_switch_does_not_ring_the_captain() {
-        let mut text = config(
-            r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#,
-            "fallback",
-        );
+        let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash", "deepseek/deepseek-flash""#, "fallback");
         text.push_str(
             "\n[models.switch.\"deepseek/deepseek-flash\"]\npicker = \"DeepSeek V4.1 Flash\"\nbar = \"DeepSeek V4.1 Flash\"\n",
         );
@@ -2967,10 +2656,7 @@ quota_reset_h = 5
                 "/model".into(),
                 "  Search\n  Recent\n  DeepSeek V4.1 Flash  OpenCode Go".into(),
             ),
-            (
-                "DeepSeek V4.1 Flash".into(),
-                "Build auto · DeepSeek V4.1 Flash · high".into(),
-            ),
+            ("DeepSeek V4.1 Flash".into(), "Build auto · DeepSeek V4.1 Flash · high".into()),
         ];
 
         tick_quota(&mut store, &mut herdr, true, T0 + 10);
@@ -2984,18 +2670,12 @@ quota_reset_h = 5
         // The switch worked: the lane runs on the new model.
         assert_eq!(deliveries(&mut store).len(), 1, "one Continue");
         // No urgent item: a successful switch is an information line.
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", T0 + 40))
-            .unwrap();
-        assert!(
-            open.is_empty(),
-            "a successful switch does not ring: {open:?}"
-        );
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", T0 + 40)).unwrap();
+        assert!(open.is_empty(), "a successful switch does not ring: {open:?}");
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "one info item: {told:?}");
         assert!(
-            told.iter()
-                .all(|m| m.state == MsgState::Info && !m.urgent && m.body.contains("switched to")),
+            told.iter().all(|m| m.state == MsgState::Info && !m.urgent && m.body.contains("switched to")),
             "the captain is told in an info line: {told:?}"
         );
     }
@@ -3028,26 +2708,15 @@ quota_reset_h = 5
 
         let seat = lane_seat(&mut store);
         assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", reset + 20))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", reset + 20)).unwrap();
         // The park before it is an urgent item of its own; the failed model
         // switch is the one that names the missing labels.
         assert!(
-            open.iter()
-                .any(|m| m.urgent && m.body.contains("models.switch")),
+            open.iter().any(|m| m.urgent && m.body.contains("models.switch")),
             "{open:?}"
         );
-        assert_eq!(
-            open.iter()
-                .filter(|m| m.body.contains("models.switch"))
-                .count(),
-            1
-        );
-        let failure = open
-            .iter()
-            .find(|m| m.body.contains("models.switch"))
-            .unwrap();
+        assert_eq!(open.iter().filter(|m| m.body.contains("models.switch")).count(), 1);
+        let failure = open.iter().find(|m| m.body.contains("models.switch")).unwrap();
         assert_eq!(failure.sender_gen, seat.generation);
         assert!(failure.body.contains("p:heat"));
         let told = open.len();
@@ -3056,9 +2725,7 @@ quota_reset_h = 5
         for tick in 0..5 {
             tick_quota(&mut store, &mut herdr, false, reset + 30 + tick);
         }
-        let open = store
-            .read(|tx| tx.actionable_for("p", "p:captain", reset + 60))
-            .unwrap();
+        let open = store.read(|tx| tx.actionable_for("p", "p:captain", reset + 60)).unwrap();
         assert_eq!(open.len(), told, "the failure was told once: {open:?}");
     }
 
@@ -3078,11 +2745,7 @@ quota_reset_h = 5
             {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}
         ]})));
         let target = crate::switch::plan_target(
-            &mut store,
-            &mut herdr,
-            &cfg,
-            "p:heat",
-            "MiniMax-M3.1-Flash MiniMax (minimax.cn)",
+            &mut store, &mut herdr, &cfg, "p:heat", "MiniMax-M3.1-Flash MiniMax (minimax.cn)",
         )
         .unwrap();
         let (model, labels) = target.expect("the catalogue gives the plan's target");
@@ -3090,18 +2753,10 @@ quota_reset_h = 5
         assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
 
         // A target no chain model renders as is still unknown.
-        herdr
-            .api_replies
-            .push_back(Ok(serde_json::json!({"data": []})));
-        assert!(crate::switch::plan_target(
-            &mut store,
-            &mut herdr,
-            &cfg,
-            "p:heat",
-            "Other Model X"
-        )
-        .unwrap()
-        .is_none());
+        herdr.api_replies.push_back(Ok(serde_json::json!({"data": []})));
+        assert!(crate::switch::plan_target(&mut store, &mut herdr, &cfg, "p:heat", "Other Model X")
+            .unwrap()
+            .is_none());
     }
 
     /// Every message the engine sent the captain about the lane, in thread
@@ -3109,11 +2764,7 @@ quota_reset_h = 5
     fn captain_messages(store: &mut Store) -> Vec<gear_store::MessageRow> {
         let mut all = Vec::new();
         for seq in 1..=20 {
-            all.extend(
-                store
-                    .read(|tx| tx.thread_messages("p", &format!("heat:{seq}")))
-                    .unwrap(),
-            );
+            all.extend(store.read(|tx| tx.thread_messages("p", &format!("heat:{seq}"))).unwrap());
         }
         all
     }
@@ -3145,9 +2796,7 @@ quota_reset_h = 5
         }
         let after: Vec<&Call> = herdr.calls[calls_before..].iter().collect();
         assert!(
-            after
-                .iter()
-                .all(|call| !matches!(call, Call::AgentStart { .. })),
+            after.iter().all(|call| !matches!(call, Call::AgentStart { .. })),
             "no restart: {after:?}"
         );
         assert!(
@@ -3155,11 +2804,7 @@ quota_reset_h = 5
             "no exit keys: {after:?}"
         );
         let seat = lane_seat(&mut store);
-        assert_eq!(
-            seat.state,
-            SeatState::Active,
-            "the lane is back: {events:?}"
-        );
+        assert_eq!(seat.state, SeatState::Active, "the lane is back: {events:?}");
     }
 
     /// M-266: a stale limit line on a **working** agent is not a quota turn: it
@@ -3177,23 +2822,10 @@ quota_reset_h = 5
         busy[0].status = Some(gear_herdr::AgentStatus::Working);
 
         for tick in 0..5 {
-            apply_quota_policy(
-                &mut store,
-                &mut herdr,
-                &cfg(),
-                &cfg().profiles,
-                "p",
-                &busy,
-                T0 + 10 + tick,
-            )
-            .unwrap();
+            apply_quota_policy(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", &busy, T0 + 10 + tick).unwrap();
         }
         let seat = lane_seat(&mut store);
-        assert_eq!(
-            seat.state,
-            SeatState::Active,
-            "a working lane is not parked"
-        );
+        assert_eq!(seat.state, SeatState::Active, "a working lane is not parked");
         assert!(exits(&herdr).is_empty(), "and not taken off its model");
     }
 
@@ -3379,20 +3011,14 @@ quota_reset_h = 5
         // The first tick reads the source at once (§9.2) and stores the
         // reading (§9.1); the signal is not confirmed yet.
         tick_source(&mut store, &mut herdr, &api, true, false, T0 + 10);
-        let raw = meta_get(&mut store, "quota.reading.minimax-cn")
-            .unwrap()
-            .unwrap();
+        let raw = meta_get(&mut store, "quota.reading.minimax-cn").unwrap().unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["provider"], "minimax-cn");
         assert_eq!(value["read_at"], T0 + 10);
         assert_eq!(value["windows"][0]["name"], "MiniMax-M3.1-Flash 5h");
         assert_eq!(value["windows"][0]["used_percent"], 100.0);
         assert_eq!(value["windows"][0]["resets_at"], T0 + 1800);
-        assert_eq!(
-            lane_seat(&mut store).state,
-            SeatState::Active,
-            "one tick is no fact"
-        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active, "one tick is no fact");
 
         // The second tick confirms the signal: the lane parks until the reset
         // of the window plus a minute.
@@ -3411,10 +3037,7 @@ quota_reset_h = 5
         let pauses = store.read(|tx| tx.pauses_of_project("p")).unwrap();
         assert_eq!(pauses.len(), 1, "{pauses:?}");
         assert_eq!(pauses[0].kind, "quota");
-        assert_eq!(
-            pauses[0].reason.as_deref(),
-            Some("minimax-cn MiniMax-M3.1-Flash 5h")
-        );
+        assert_eq!(pauses[0].reason.as_deref(), Some("minimax-cn MiniMax-M3.1-Flash 5h"));
         assert_eq!(pauses[0].end_at, None);
         // The park and its deadline are one fact (F3): a parked lane always
         // has the time it wakes up.
@@ -3442,11 +3065,7 @@ quota_reset_h = 5
             .read(|tx| tx.open_round_of_seat("p:heat"))
             .unwrap()
             .unwrap();
-        assert_eq!(
-            round.paused_s,
-            until - (T0 + 20),
-            "the clock paused for the park"
-        );
+        assert_eq!(round.paused_s, until - (T0 + 20), "the clock paused for the park");
     }
 
     /// §9.2: quota is left — a rate limit or an error, not a quota stop. The
@@ -3463,11 +3082,7 @@ quota_reset_h = 5
 
         // The signal is a provider error this time (§9.2).
         tick_source(&mut store, &mut herdr, &api, false, true, T0 + 10);
-        assert_eq!(
-            lane_seat(&mut store).state,
-            SeatState::Active,
-            "one tick is no fact"
-        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::Active, "one tick is no fact");
         tick_source(&mut store, &mut herdr, &api, false, true, T0 + 20);
 
         let seat = lane_seat(&mut store);
@@ -3480,10 +3095,7 @@ quota_reset_h = 5
             "{seat:?}"
         );
         // It is not quota wait time: no pause row (§5.4).
-        assert!(store
-            .read(|tx| tx.pauses_of_project("p"))
-            .unwrap()
-            .is_empty());
+        assert!(store.read(|tx| tx.pauses_of_project("p")).unwrap().is_empty());
 
         // Five minutes later the lane continues.
         tick_source(&mut store, &mut herdr, &api, false, false, T0 + 20 + 300);
@@ -3560,9 +3172,7 @@ quota_reset_h = 5
 
         tick_source(&mut store, &mut herdr, &api, false, false, T0);
 
-        let raw = meta_get(&mut store, "quota.reading.minimax-cn")
-            .unwrap()
-            .unwrap();
+        let raw = meta_get(&mut store, "quota.reading.minimax-cn").unwrap().unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["stale"], true, "{value}");
         assert_eq!(value["read_at"], T0 - 1200, "the old reading is kept");
@@ -3608,79 +3218,39 @@ quota_reset_h = 5
 
     #[test]
     fn active_episode_with_missing_or_zero_start_is_seeded_and_retained() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = key_file(dir.path());
-        let mut store = source_world(&key);
-        meta_set(&mut store, &meta_key("quota", "p:heat"), "1").unwrap();
-        meta_set(&mut store, &meta_key("quota_signal", "p:heat"), "0").unwrap();
-        assert_eq!(
-            count_quota_tick(&mut store, "p:heat", true, T0 + 4)
-                .unwrap()
-                .1,
-            T0 + 4
-        );
-        assert_eq!(
-            count_quota_tick(&mut store, "p:heat", true, T0 + 8)
-                .unwrap()
-                .1,
-            T0 + 4
-        );
-        meta_set(&mut store, &meta_key("quota_error_ticks", "p:heat"), "1").unwrap();
-        assert_eq!(
-            count_error_tick(&mut store, "p:heat", true, T0 + 12)
-                .unwrap()
-                .1,
-            T0 + 12
-        );
-        assert_eq!(
-            count_error_tick(&mut store, "p:heat", true, T0 + 16)
-                .unwrap()
-                .1,
-            T0 + 12
-        );
+        let dir=tempfile::tempdir().unwrap(); let key=key_file(dir.path());
+        let mut store=source_world(&key);
+        meta_set(&mut store,&meta_key("quota","p:heat"),"1").unwrap();
+        meta_set(&mut store,&meta_key("quota_signal","p:heat"),"0").unwrap();
+        assert_eq!(count_quota_tick(&mut store,"p:heat",true,T0+4).unwrap().1,T0+4);
+        assert_eq!(count_quota_tick(&mut store,"p:heat",true,T0+8).unwrap().1,T0+4);
+        meta_set(&mut store,&meta_key("quota_error_ticks","p:heat"),"1").unwrap();
+        assert_eq!(count_error_tick(&mut store,"p:heat",true,T0+12).unwrap().1,T0+12);
+        assert_eq!(count_error_tick(&mut store,"p:heat",true,T0+16).unwrap().1,T0+12);
     }
 
     #[test]
     fn failed_signal_reads_never_reuse_a_pre_episode_reading() {
-        for (quota, error) in [(true, false), (false, true)] {
-            for cached_percent in [30.0, 100.0] {
-                let dir = tempfile::tempdir().unwrap();
-                let key = key_file(dir.path());
-                let mut store = source_world(&key);
-                let mut herdr = FakeHerdr::new();
-                herdr.add_agent(PANE, "opencode", gear_herdr::AgentStatus::Idle);
-                let api = FakeQuota::reading(reading_with(cached_percent, Some(T0 + 1800)));
-                tick_source(&mut store, &mut herdr, &api, false, false, T0);
-                assert_eq!(api.calls(), 1);
-                *api.answer.borrow_mut() = Err("signal read failed".into());
-                tick_source(&mut store, &mut herdr, &api, quota, error, T0 + 4);
-                let episode = if quota {
-                    "engine.quota_signal.p:heat"
-                } else {
-                    "engine.quota_error_signal.p:heat"
-                };
-                assert_eq!(
-                    meta_get(&mut store, episode).unwrap().as_deref(),
-                    Some((T0 + 4).to_string().as_str())
-                );
-                tick_source(&mut store, &mut herdr, &api, quota, error, T0 + 8);
-                assert_eq!(
-                    api.calls(),
-                    3,
-                    "the old reading must not satisfy either signal read"
-                );
-                let seat = lane_seat(&mut store);
-                assert_eq!(seat.state, SeatState::Parked);
-                let reason = seat.state_reason.unwrap();
-                assert!(reason.contains("cannot be read"), "{reason}");
-                assert!(
-                    reason.contains(&(T0 + 8 + 5 * 3600).to_string()),
-                    "{reason}"
-                );
-                assert_eq!(
-                    meta_get(&mut store, episode).unwrap().as_deref(),
-                    Some((T0 + 4).to_string().as_str())
-                );
+        for (quota,error) in [(true,false),(false,true)] {
+            for cached_percent in [30.0,100.0] {
+                let dir=tempfile::tempdir().unwrap(); let key=key_file(dir.path());
+                let mut store=source_world(&key);
+                let mut herdr=FakeHerdr::new(); herdr.add_agent(PANE,"opencode",gear_herdr::AgentStatus::Idle);
+                let api=FakeQuota::reading(reading_with(cached_percent,Some(T0+1800)));
+                tick_source(&mut store,&mut herdr,&api,false,false,T0);
+                assert_eq!(api.calls(),1);
+                *api.answer.borrow_mut()=Err("signal read failed".into());
+                tick_source(&mut store,&mut herdr,&api,quota,error,T0+4);
+                let episode = if quota { "engine.quota_signal.p:heat" } else { "engine.quota_error_signal.p:heat" };
+                assert_eq!(meta_get(&mut store,episode).unwrap().as_deref(),Some((T0+4).to_string().as_str()));
+                tick_source(&mut store,&mut herdr,&api,quota,error,T0+8);
+                assert_eq!(api.calls(),3,"the old reading must not satisfy either signal read");
+                let seat=lane_seat(&mut store);
+                assert_eq!(seat.state,SeatState::Parked);
+                let reason=seat.state_reason.unwrap();
+                assert!(reason.contains("cannot be read"),"{reason}");
+                assert!(reason.contains(&(T0+8+5*3600).to_string()),"{reason}");
+                assert_eq!(meta_get(&mut store,episode).unwrap().as_deref(),Some((T0+4).to_string().as_str()));
             }
         }
     }
@@ -3714,10 +3284,7 @@ quota_reset_h = 5
             Some("minimax-cn")
         );
         assert_eq!(provider_of("gpt-6.1-terra", "pi"), None);
-        assert_eq!(
-            provider_of("minimax-cn/model", "codex").as_deref(),
-            Some("minimax-cn")
-        );
+        assert_eq!(provider_of("minimax-cn/model", "codex").as_deref(), Some("minimax-cn"));
     }
 
     #[test]
@@ -3766,74 +3333,39 @@ quota_reset_h = 5
 
     #[test]
     fn codex_source_uses_live_reviewer_instead_of_released_or_void_bindings() {
-        let mut store = codex_world();
-        store
-            .write(|tx| {
-                tx.set_seat_state("p:codex-1", SeatState::Released, None, T0 + 1)?;
-                tx.set_binding_status("p:codex-1", 1, gear_store::BindingStatus::Void)?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "codex-0",
-                    SeatRole::Temp,
-                    "w1:p8",
-                    "codex",
-                    T0,
-                )?;
-                tx.set_seat_state("p:codex-0", SeatState::Standby, None, T0 + 1)?;
-                tx.set_binding_session_ref("p:codex-0", 1, "standby-session")?;
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "codex-2",
-                    SeatRole::Temp,
-                    "w1:p10",
-                    "codex",
-                    T0,
-                )?;
-                tx.set_seat_profile("p:codex-2", "custom-codex-profile")?;
-                tx.set_binding_session_ref("p:codex-2", 1, "current-reviewer-session")
-            })
-            .unwrap();
-        let mut herdr = FakeHerdr::new();
-        let api = FakeQuota::reading(reading_with(10.0, None));
-        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 10);
-        assert_eq!(
-            api.sessions(),
-            vec![Some("current-reviewer-session".into())]
-        );
-        store
-            .write(|tx| tx.set_binding_status("p:codex-2", 1, gear_store::BindingStatus::Void))
-            .unwrap();
-        assert_eq!(
-            codex_session(&mut store, "p").unwrap().as_deref(),
-            Some("standby-session")
-        );
-        store
-            .write(|tx| tx.set_binding_status("p:codex-0", 1, gear_store::BindingStatus::Void))
-            .unwrap();
-        assert_eq!(codex_session(&mut store, "p").unwrap(), None);
-        tick_source(&mut store, &mut herdr, &api, false, false, T0 + 400);
-        assert_eq!(api.sessions().last(), Some(&None));
+        let mut store=codex_world();
+        store.write(|tx| {
+            tx.set_seat_state("p:codex-1",SeatState::Released,None,T0+1)?;
+            tx.set_binding_status("p:codex-1",1,gear_store::BindingStatus::Void)?;
+            testing::seed_active_seat(tx,"p","codex-0",SeatRole::Temp,"w1:p8","codex",T0)?;
+            tx.set_seat_state("p:codex-0",SeatState::Standby,None,T0+1)?;
+            tx.set_binding_session_ref("p:codex-0",1,"standby-session")?;
+            testing::seed_active_seat(tx,"p","codex-2",SeatRole::Temp,"w1:p10","codex",T0)?;
+            tx.set_seat_profile("p:codex-2","custom-codex-profile")?;
+            tx.set_binding_session_ref("p:codex-2",1,"current-reviewer-session")
+        }).unwrap();
+        let mut herdr=FakeHerdr::new(); let api=FakeQuota::reading(reading_with(10.0,None));
+        tick_source(&mut store,&mut herdr,&api,false,false,T0+10);
+        assert_eq!(api.sessions(),vec![Some("current-reviewer-session".into())]);
+        store.write(|tx|tx.set_binding_status("p:codex-2",1,gear_store::BindingStatus::Void)).unwrap();
+        assert_eq!(codex_session(&mut store,"p").unwrap().as_deref(),Some("standby-session"));
+        store.write(|tx|tx.set_binding_status("p:codex-0",1,gear_store::BindingStatus::Void)).unwrap();
+        assert_eq!(codex_session(&mut store,"p").unwrap(),None);
+        tick_source(&mut store,&mut herdr,&api,false,false,T0+400);
+        assert_eq!(api.sessions().last(),Some(&None));
     }
 
     /// A project with a codex reviewer and a codex source without a key file
     /// (§9.1, F4).
     fn codex_world() -> Store {
         let mut text = config(r#""minimax-cn/MiniMax-M3.1-Flash""#, "fallback");
-        text.push_str("\n[[quota.sources]]\nprovider = \"codex\"\nreader = \"codex\"\n");
+        text.push_str(
+            "\n[[quota.sources]]\nprovider = \"codex\"\nreader = \"codex\"\n",
+        );
         let mut store = world(&text);
         store
             .write(|tx| {
-                testing::seed_active_seat(
-                    tx,
-                    "p",
-                    "codex-1",
-                    SeatRole::Temp,
-                    "w1:p9",
-                    "codex",
-                    T0,
-                )?;
+                testing::seed_active_seat(tx, "p", "codex-1", SeatRole::Temp, "w1:p9", "codex", T0)?;
                 tx.set_binding_session_ref("p:codex-1", 1, "ses_codex")
             })
             .unwrap();

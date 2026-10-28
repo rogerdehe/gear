@@ -12,14 +12,10 @@
 //! Such a task is not an open change: it is skipped, so a merged task raises
 //! no item and an open task is not paired with work that already landed.
 
+use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, process::Command};
 use gear_app::config::Repo;
 use gear_model::{GearResult, MsgKind, MsgState, TaskState, Ts};
 use gear_store::{NewMessage, Store, TaskRow, Tx};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
-    process::Command,
-};
 
 const PERIOD: i64 = 600;
 
@@ -97,11 +93,7 @@ fn is_test_file(path: &str) -> bool {
 
 /// The shared files that count: the ones that are not test files.
 fn real_files(files: &[String]) -> Vec<String> {
-    files
-        .iter()
-        .filter(|file| !is_test_file(file))
-        .cloned()
-        .collect()
+    files.iter().filter(|file| !is_test_file(file)).cloned().collect()
 }
 
 pub fn check(store: &mut Store, project: &str, now: Ts) -> GearResult<Check> {
@@ -250,22 +242,14 @@ impl Input {
     /// The repo's name, when it is a child repo: the project root has none,
     /// and its messages read as they always did.
     fn name(&self) -> Option<&str> {
-        if self.key == ROOT {
-            None
-        } else {
-            Some(&self.key)
-        }
+        if self.key == ROOT { None } else { Some(&self.key) }
     }
 }
 
 /// The prefix of the meta of a repo's scan.
 fn prefix_of(project: &str, key: &str) -> String {
     // Keep the pre-multi-repo root namespace and its existing alert IDs.
-    if key == ROOT {
-        format!("parallel:{project}")
-    } else {
-        format!("parallel:{project}:{key}")
-    }
+    if key == ROOT { format!("parallel:{project}") } else { format!("parallel:{project}:{key}") }
 }
 
 /// The scans of one project: one per repo that has tasks (T-53). A task
@@ -273,19 +257,13 @@ fn prefix_of(project: &str, key: &str) -> String {
 /// compared with each other.
 fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
     store.read(|tx| {
-        let Some(row) = tx.get_project(project)? else {
-            return Ok(Vec::new());
-        };
-        let Ok(config) = gear_app::config::parse(&row.config_toml) else {
-            return Ok(Vec::new());
-        };
+        let Some(row) = tx.get_project(project)? else { return Ok(Vec::new()); };
+        let Ok(config) = gear_app::config::parse(&row.config_toml) else { return Ok(Vec::new()); };
         let tasks = tx.tasks_of_project(project)?;
         // The tasks of the project, grouped by the repo of their lane.
         let mut groups: BTreeMap<String, (Repo, Vec<TaskRow>)> = BTreeMap::new();
         for task in &tasks {
-            let Some(lane) = task.lane.as_deref() else {
-                continue;
-            };
+            let Some(lane) = task.lane.as_deref() else { continue };
             let repo = config.repo_of_lane(lane);
             groups
                 .entry(repo_key(&repo))
@@ -314,29 +292,17 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
             // The back-off of this repo: nothing changed and the last scan
             // was recent, so this repo waits for the next period.
             let prefix = prefix_of(project, &key);
-            let last = tx
-                .get_meta(&format!("{prefix}:at"))?
-                .and_then(|s| s.parse::<Ts>().ok());
+            let last = tx.get_meta(&format!("{prefix}:at"))?.and_then(|s| s.parse::<Ts>().ok());
             let unchanged = tx.get_meta(&format!("{prefix}:handins"))?.as_deref() == Some(&handins);
             if unchanged && last.is_some_and(|last| now >= last && now - last < PERIOD) {
                 continue;
             }
-            let tasks = tasks
-                .into_iter()
-                .filter(|t| {
-                    !matches!(
-                        t.state,
-                        TaskState::Draft | TaskState::Cancelled | TaskState::Failed
-                    )
-                })
+            let tasks = tasks.into_iter()
+                .filter(|t| !matches!(t.state, TaskState::Draft | TaskState::Cancelled | TaskState::Failed))
                 .filter_map(|t| {
                     let lane = t.lane?;
                     let candidate = candidates.get(&t.id).cloned();
-                    Some(TaskIn {
-                        task: t.id,
-                        lane,
-                        candidate,
-                    })
+                    Some(TaskIn { task: t.id, lane, candidate })
                 })
                 .collect();
             inputs.push(Input {
@@ -357,26 +323,14 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
 /// The key of a repo in the meta: its name, or "-" for the project root (a
 /// repo name never starts with a dash).
 fn repo_key(repo: &Repo) -> String {
-    if repo.name.is_empty() {
-        ROOT.to_string()
-    } else {
-        repo.name.clone()
-    }
+    if repo.name.is_empty() { ROOT.to_string() } else { repo.name.clone() }
 }
 
 fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearResult<()> {
     if let Some(id) = tx.get_meta(&format!("{key}:item"))? {
         if let Some(message) = tx.get_message(project, &id)? {
             if matches!(message.state, MsgState::Open | MsgState::Waiting) {
-                tx.update_message_state(
-                    project,
-                    &id,
-                    MsgState::Resolved,
-                    Some(reason),
-                    None,
-                    None,
-                    now,
-                )?;
+                tx.update_message_state(project, &id, MsgState::Resolved, Some(reason), None, None, now)?;
             }
         }
     }
@@ -386,22 +340,14 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
-    let remote = revision(
-        &input.repo,
-        &format!("refs/remotes/{}/{}", input.remote, input.integration),
-    )?;
+    let remote = revision(&input.repo, &format!("refs/remotes/{}/{}", input.remote, input.integration))?;
     // Use the containing tip when one is ahead; the remote is authoritative
     // when the local integration ref diverged. No network operation is needed.
     let integration = match (local, remote) {
         (Some(local), Some(remote)) if ancestor(&input.repo, &remote, &local)? => local,
         (_, Some(remote)) => remote,
         (Some(local), None) => local,
-        _ => {
-            return Err(format!(
-                "integration branch {} is unavailable",
-                input.integration
-            ))
-        }
+        _ => return Err(format!("integration branch {} is unavailable", input.integration)),
     };
     let mut branches = Vec::new();
     let mut findings = Findings::default();
@@ -416,64 +362,35 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 continue;
             }
         }
-        let name = crate::dispatch::task_branch(
-            &input.task_branch,
-            &input.project,
-            &task.lane,
-            &task.task,
-        );
+        let name = crate::dispatch::task_branch(&input.task_branch, &input.project, &task.lane, &task.task);
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),
-            None => revision(
-                &input.repo,
-                &format!("refs/remotes/{}/{name}", input.remote),
-            )?,
+            None => revision(&input.repo, &format!("refs/remotes/{}/{name}", input.remote))?,
         };
-        let Some(head) = head else {
-            continue;
-        };
+        let Some(head) = head else { continue; };
         let files = changed(&input.repo, &integration, &head)?;
-        if files.is_empty() {
-            continue;
-        } // includes already integrated Done branches
+        if files.is_empty() { continue; } // includes already integrated Done branches
         let integration_files = changed(&input.repo, &head, &integration)?;
         let shared: Vec<_> = files.intersection(&integration_files).cloned().collect();
         let shared = real_files(&shared);
         if !shared.is_empty() {
-            findings.integration.insert(
-                format!("integration:{}", task.task),
-                Conflict {
-                    left: format!("{} ({})", task.task, task.lane),
-                    right: format!("integration {}", input.integration),
-                    files: shared,
-                },
-            );
+            findings.integration.insert(format!("integration:{}", task.task), Conflict {
+                left: format!("{} ({})", task.task, task.lane), right: format!("integration {}", input.integration), files: shared,
+            });
         }
-        branches.push(Branch {
-            task: task.task.clone(),
-            lane: task.lane.clone(),
-            files,
-        });
+        branches.push(Branch { task: task.task.clone(), lane: task.lane.clone(), files });
     }
     branches.sort_by(|a, b| a.task.cmp(&b.task));
     for (index, left) in branches.iter().enumerate() {
-        for right in branches
-            .iter()
-            .skip(index + 1)
-            .filter(|b| b.lane != left.lane)
-        {
+        for right in branches.iter().skip(index + 1).filter(|b| b.lane != left.lane) {
             let files: Vec<_> = left.files.intersection(&right.files).cloned().collect();
             let files = real_files(&files);
             if !files.is_empty() {
-                findings.pairs.insert(
-                    format!("tasks:{}:{}", left.task, right.task),
-                    Conflict {
-                        left: format!("{} ({})", left.task, left.lane),
-                        right: format!("{} ({})", right.task, right.lane),
-                        files,
-                    },
-                );
+                findings.pairs.insert(format!("tasks:{}:{}", left.task, right.task), Conflict {
+                    left: format!("{} ({})", left.task, left.lane),
+                    right: format!("{} ({})", right.task, right.lane), files,
+                });
             }
         }
     }
@@ -481,80 +398,38 @@ fn scan(input: &Input) -> Result<Findings, String> {
 }
 
 fn revision(repo: &Path, reference: &str) -> Result<Option<String>, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{reference}^{{commit}}"),
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = Command::new("git").arg("-C").arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+        .output().map_err(|e| e.to_string())?;
     if output.status.success() {
-        Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        ))
+        Ok(Some(String::from_utf8_lossy(&output.stdout).trim().to_string()))
     } else if output.status.code() == Some(1) && output.stderr.is_empty() {
         Ok(None)
     } else {
-        Err(format!(
-            "cannot read {reference}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        Err(format!("cannot read {reference}: {}", String::from_utf8_lossy(&output.stderr).trim()))
     }
 }
 
 fn ancestor(repo: &Path, from: &str, to: &str) -> Result<bool, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-base", "--is-ancestor", from, to])
-        .output()
-        .map_err(|e| e.to_string())?;
+    let output = Command::new("git").arg("-C").arg(repo)
+        .args(["merge-base", "--is-ancestor", from, to]).output().map_err(|e| e.to_string())?;
     match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
+        Some(0) => Ok(true), Some(1) => Ok(false),
         _ => Err(String::from_utf8_lossy(&output.stderr).into_owned()),
     }
 }
 
 fn changed(repo: &Path, from: &str, to: &str) -> Result<BTreeSet<String>, String> {
-    let output = git(
-        repo,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--no-renames",
-            "--name-only",
-            "-z",
-            &format!("{from}...{to}"),
-            "--",
-        ],
-    )?;
-    Ok(output
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
-        .collect())
+    let output = git(repo, &["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z",
+        &format!("{from}...{to}"), "--"])?;
+    Ok(output.split(|b| *b == 0).filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned()).collect())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+    let output = Command::new("git").arg("-C").arg(repo).args(args)
+        .output().map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if output.status.success() { Ok(output.stdout) } else {
+        Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&output.stderr).trim()))
     }
 }

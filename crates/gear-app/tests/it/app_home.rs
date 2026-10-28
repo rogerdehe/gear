@@ -22,15 +22,7 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(
-            tx,
-            "p",
-            "captain",
-            SeatRole::Captain,
-            CAP_PANE,
-            "codex",
-            NOW,
-        )?;
+        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         Ok(())
     })
@@ -40,22 +32,14 @@ fn world() -> Store {
 
 fn seat_env(seat: &str, pane: &str) -> Env {
     Env {
-        ctx: Some(GearCtx {
-            project: "p".into(),
-            seat: seat.into(),
-            generation: 1,
-        }),
+        ctx: Some(GearCtx { project: "p".into(), seat: seat.into(), generation: 1 }),
         pane_id: Some(pane.into()),
         admin: false,
     }
 }
 
 fn fp(pane: &str, kind: &str) -> Fingerprint {
-    Fingerprint {
-        pane_id: pane.into(),
-        kind: Some(kind.into()),
-        session_ref: None,
-    }
+    Fingerprint { pane_id: pane.into(), kind: Some(kind.into()), session_ref: None }
 }
 
 /// Write one message into the store and return its id.
@@ -94,30 +78,12 @@ fn insert(
 
 /// A lane asks the captain.
 fn ask(s: &mut Store, body: &str, created: Ts) -> String {
-    insert(
-        s,
-        "heat:1",
-        "p:heat",
-        "p:captain",
-        MsgKind::Question,
-        MsgState::Open,
-        body,
-        created,
-    )
+    insert(s, "heat:1", "p:heat", "p:captain", MsgKind::Question, MsgState::Open, body, created)
 }
 
 /// The captain answers a lane.
 fn answer(s: &mut Store, body: &str, created: Ts) -> String {
-    insert(
-        s,
-        "heat:1",
-        "p:captain",
-        "p:heat",
-        MsgKind::Reply,
-        MsgState::Info,
-        body,
-        created,
-    )
+    insert(s, "heat:1", "p:captain", "p:heat", MsgKind::Reply, MsgState::Info, body, created)
 }
 
 /// Apply a plan whose `# Decisions` carries the one given line.
@@ -150,28 +116,12 @@ fn captain_sees_batch_with_ids_and_bodies() {
     )
     .unwrap();
 
-    assert!(
-        home.text.contains("p:captain"),
-        "identity line: {}",
-        home.text
-    );
-    assert!(
-        home.text.contains("generation 1"),
-        "identity line: {}",
-        home.text
-    );
+    assert!(home.text.contains("p:captain"), "identity line: {}", home.text);
+    assert!(home.text.contains("generation 1"), "identity line: {}", home.text);
     assert!(home.text.contains("M-1"), "the message id: {}", home.text);
-    assert!(
-        home.text.contains("Schema v1 or v2?"),
-        "the body: {}",
-        home.text
-    );
+    assert!(home.text.contains("Schema v1 or v2?"), "the body: {}", home.text);
     assert!(home.text.contains("heat:1"), "the thread id: {}", home.text);
-    assert!(
-        home.text.contains("next:"),
-        "a suggested command: {}",
-        home.text
-    );
+    assert!(home.text.contains("next:"), "a suggested command: {}", home.text);
 }
 
 #[test]
@@ -191,15 +141,8 @@ fn more_count_shown() {
 
     assert!(home.text.contains("M-1"), "the first message is shown");
     assert!(home.text.contains("M-3"), "three messages are shown");
-    assert!(
-        !home.text.contains("M-4"),
-        "the fourth message is only counted"
-    );
-    assert!(
-        home.text.contains("+2 more"),
-        "the rest is counted: {}",
-        home.text
-    );
+    assert!(!home.text.contains("M-4"), "the fourth message is only counted");
+    assert!(home.text.contains("+2 more"), "the rest is counted: {}", home.text);
 }
 
 #[test]
@@ -242,11 +185,7 @@ fn recorded_view_hides_it_next_time() {
         NOW + 3,
     )
     .unwrap();
-    assert!(
-        !second.text.contains("Use v2"),
-        "the answer was shown already: {}",
-        second.text
-    );
+    assert!(!second.text.contains("Use v2"), "the answer was shown already: {}", second.text);
 }
 
 #[test]
@@ -272,11 +211,7 @@ fn message_in_the_same_second_as_the_view_is_not_lost() {
         NOW + 1,
     )
     .unwrap();
-    assert!(
-        home.text.contains("Use v2"),
-        "the answer must not be lost: {}",
-        home.text
-    );
+    assert!(home.text.contains("Use v2"), "the answer must not be lost: {}", home.text);
     assert_eq!(home.view.shown_msgs, vec!["M-1".to_string()]);
 }
 
@@ -308,11 +243,7 @@ fn instruction_to_the_captain_is_printed_once() {
         "printed once: {}",
         home.text
     );
-    assert_eq!(
-        home.view.shown_msgs,
-        vec!["M-1".to_string()],
-        "the id is listed once"
-    );
+    assert_eq!(home.view.shown_msgs, vec!["M-1".to_string()], "the id is listed once");
 }
 
 #[test]
@@ -329,18 +260,12 @@ fn view_lists_exactly_what_was_shown() {
         NOW + 3,
     )
     .unwrap();
-    assert_eq!(
-        captain.view.shown_msgs,
-        vec!["M-1".to_string(), "M-2".to_string()]
-    );
+    assert_eq!(captain.view.shown_msgs, vec!["M-1".to_string(), "M-2".to_string()]);
     assert_eq!(captain.view.seat, "p:captain");
     assert_eq!(captain.view.generation, 1);
     assert_eq!(captain.view.project, "p");
     assert_eq!(captain.view.ts, NOW + 3);
-    assert!(
-        captain.view.shown_ops.is_empty(),
-        "no operation is shown in slice 1"
-    );
+    assert!(captain.view.shown_ops.is_empty(), "no operation is shown in slice 1");
 
     let lane = home::build(
         &mut s,
@@ -357,9 +282,7 @@ fn build_is_read_only() {
     let mut s = world();
     ask(&mut s, "Schema v1 or v2?", NOW);
 
-    let before = s
-        .read(|tx| tx.actionable_for("p", "p:captain", NOW + 1))
-        .unwrap();
+    let before = s.read(|tx| tx.actionable_for("p", "p:captain", NOW + 1)).unwrap();
     let home = home::build(
         &mut s,
         &seat_env("captain", CAP_PANE),
@@ -367,17 +290,12 @@ fn build_is_read_only() {
         NOW + 1,
     )
     .unwrap();
-    let after = s
-        .read(|tx| tx.actionable_for("p", "p:captain", NOW + 1))
-        .unwrap();
+    let after = s.read(|tx| tx.actionable_for("p", "p:captain", NOW + 1)).unwrap();
     assert_eq!(before, after, "building the home page changes no message");
 
     let views = s.read(|tx| tx.views_since("p:captain", 1, 0)).unwrap();
     assert!(views.is_empty(), "building the home page records no view");
-    assert!(
-        !home.view.shown_msgs.is_empty(),
-        "the view still names what was shown"
-    );
+    assert!(!home.view.shown_msgs.is_empty(), "the view still names what was shown");
 }
 
 #[test]
@@ -431,8 +349,7 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                issue: None,
-                updated: NOW,
+                 issue: None,updated: NOW,
             })?;
         }
         Ok(())
@@ -456,27 +373,14 @@ fn the_captain_home_starts_with_the_snapshot_before_the_inbox() {
     // The snapshot: totals, both lanes with their current task and queue,
     // the deliveries in flight and the temp slots.
     assert!(
-        home.text
-            .contains("SNAPSHOT 4 tasks · 0 done · 1 in progress · 0 waiting"),
+        home.text.contains("SNAPSHOT 4 tasks · 0 done · 1 in progress · 0 waiting"),
         "{}",
         home.text
     );
+    assert!(home.text.contains("heat · agent working · T-1 in progress · 1 queued"), "{}", home.text);
+    assert!(home.text.contains("runtime · agent idle · no current task · 2 queued"), "{}", home.text);
     assert!(
-        home.text
-            .contains("heat · agent working · T-1 in progress · 1 queued"),
-        "{}",
-        home.text
-    );
-    assert!(
-        home.text
-            .contains("runtime · agent idle · no current task · 2 queued"),
-        "{}",
-        home.text
-    );
-    assert!(
-        home.text.contains(
-            "deliveries not confirmed: 0 · temps 0 running · 0 starting · 0 blocked (0 of 2)"
-        ),
+        home.text.contains("deliveries not confirmed: 0 · temps 0 running · 0 starting · 0 blocked (0 of 2)"),
         "{}",
         home.text
     );
@@ -505,18 +409,8 @@ fn a_lane_with_nothing_queued_is_still_in_the_snapshot() {
     )
     .unwrap();
 
-    assert!(
-        home.text
-            .contains("runtime · agent unknown · no current task · 0 queued"),
-        "{}",
-        home.text
-    );
-    assert!(
-        home.text
-            .contains("heat · agent unknown · no current task · 0 queued"),
-        "{}",
-        home.text
-    );
+    assert!(home.text.contains("runtime · agent unknown · no current task · 0 queued"), "{}", home.text);
+    assert!(home.text.contains("heat · agent unknown · no current task · 0 queued"), "{}", home.text);
 }
 
 #[test]
@@ -530,57 +424,27 @@ fn the_lane_home_has_no_snapshot() {
     )
     .unwrap();
 
-    assert!(
-        !home.text.contains("SNAPSHOT"),
-        "the snapshot is the captain's: {}",
-        home.text
-    );
+    assert!(!home.text.contains("SNAPSHOT"), "the snapshot is the captain's: {}", home.text);
 }
 
 #[test]
 fn unregistered_caller_rejected() {
     let mut s = world();
-    let env = Env {
-        ctx: None,
-        pane_id: Some(CAP_PANE.into()),
-        admin: false,
-    };
+    let env = Env { ctx: None, pane_id: Some(CAP_PANE.into()), admin: false };
     let err = home::build(&mut s, &env, None, NOW).unwrap_err();
     assert_eq!(err.code, ErrorCode::NotRegistered);
 
-    let env = Env {
-        ctx: None,
-        pane_id: None,
-        admin: true,
-    };
+    let env = Env { ctx: None, pane_id: None, admin: true };
     let err = home::build(&mut s, &env, None, NOW).unwrap_err();
-    assert_eq!(
-        err.code,
-        ErrorCode::NotRegistered,
-        "the admin flag is not an identity"
-    );
+    assert_eq!(err.code, ErrorCode::NotRegistered, "the admin flag is not an identity");
 }
 
 #[test]
 fn the_snapshot_omits_retired_lanes() {
     let mut s = world();
-    s.write(|tx| tx.set_seat_state("p:heat", gear_model::SeatState::Retired, None, NOW))
-        .unwrap();
-    let home = home::build(
-        &mut s,
-        &seat_env("captain", CAP_PANE),
-        Some(&fp(CAP_PANE, "codex")),
-        NOW + 1,
-    )
-    .unwrap();
-    assert!(
-        !home
-            .text
-            .lines()
-            .any(|line| line.trim_start().starts_with("heat ·")),
-        "{}",
-        home.text
-    );
+    s.write(|tx| tx.set_seat_state("p:heat", gear_model::SeatState::Retired, None, NOW)).unwrap();
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert!(!home.text.lines().any(|line| line.trim_start().starts_with("heat ·")), "{}", home.text);
 }
 
 /// The snapshot line of the named lane.
@@ -603,39 +467,15 @@ fn the_snapshot_marks_a_tailed_lane() {
     .unwrap();
     apply_decision(&mut s, "tail: hull", "r1");
 
-    let home = home::build(
-        &mut s,
-        &seat_env("captain", CAP_PANE),
-        Some(&fp(CAP_PANE, "codex")),
-        NOW + 1,
-    )
-    .unwrap();
-    assert!(
-        lane_line(&home.text, "hull").ends_with(" · tail: warnings off"),
-        "{}",
-        home.text
-    );
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert!(lane_line(&home.text, "hull").ends_with(" · tail: warnings off"), "{}", home.text);
     // The lane the tail does not name reads as before.
-    assert_eq!(
-        lane_line(&home.text, "mast"),
-        "  mast · agent unknown · no current task · 0 queued"
-    );
+    assert_eq!(lane_line(&home.text, "mast"), "  mast · agent unknown · no current task · 0 queued");
 
     // The tail is cleared: the mark goes.
     apply_decision(&mut s, "tail: -", "r2");
-    let home = home::build(
-        &mut s,
-        &seat_env("captain", CAP_PANE),
-        Some(&fp(CAP_PANE, "codex")),
-        NOW + 1,
-    )
-    .unwrap();
-    assert_eq!(
-        lane_line(&home.text, "hull"),
-        "  hull · agent unknown · no current task · 0 queued",
-        "{}",
-        home.text
-    );
+    let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
+    assert_eq!(lane_line(&home.text, "hull"), "  hull · agent unknown · no current task · 0 queued", "{}", home.text);
     assert!(!home.text.contains("tail: warnings off"), "{}", home.text);
 }
 
@@ -669,13 +509,9 @@ fn the_snapshot_names_the_unconfirmed_deliveries() {
     for age in [240, 180, 120, 60] {
         deliver(&mut s, NOW - age);
     }
-    let home = home::build(
-        &mut s,
-        &seat_env("captain", CAP_PANE),
-        Some(&fp(CAP_PANE, "codex")),
-        NOW + 1,
-    )
-    .unwrap();
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
     let lines: Vec<&str> = home.text.lines().collect();
     let at = lines
         .iter()
@@ -691,23 +527,12 @@ fn the_snapshot_names_the_unconfirmed_deliveries() {
 #[test]
 fn the_snapshot_names_no_delivery_when_there_is_none() {
     let mut s = world();
-    let home = home::build(
-        &mut s,
-        &seat_env("captain", CAP_PANE),
-        Some(&fp(CAP_PANE, "codex")),
-        NOW + 1,
-    )
-    .unwrap();
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
+    assert!(home.text.contains("deliveries not confirmed: 0"), "{}", home.text);
     assert!(
-        home.text.contains("deliveries not confirmed: 0"),
-        "{}",
-        home.text
-    );
-    assert!(
-        !home
-            .text
-            .lines()
-            .any(|line| line.trim_start().starts_with("O-")),
+        !home.text.lines().any(|line| line.trim_start().starts_with("O-")),
         "{}",
         home.text
     );
