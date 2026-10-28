@@ -21,6 +21,7 @@ fn input(seat: &str) -> DoorbellInput {
         last_settled_at: None,
         no_task: false,
         waiting: vec![item("M-1")],
+        goal: None,
     }
 }
 
@@ -152,4 +153,13 @@ fn the_text_names_every_id_and_the_command_to_run() {
     assert!(said.contains("M-12") && said.contains("M-13"), "{said}");
     assert!(said.contains("Run the command `gear` (no arguments) in your own shell; it shows only your items."), "{said}");
     assert!(!said.contains('\n'), "one line: {said}");
+}
+
+#[test]
+fn a_captain_doorbell_repeats_the_voyage_goal() {
+    let mut captain = input("captain");
+    captain.goal = Some("Your goal, voyage M1: done: no red test on dev · bar: FASTEST. Judge every decision against it.".into());
+    let out = decide(&[captain, input("hull")], 90, NOW);
+    assert!(out[0].text.ends_with("\nYour goal, voyage M1: done: no red test on dev · bar: FASTEST. Judge every decision against it."), "{}", out[0].text);
+    assert!(!out[1].text.contains("Your goal"), "{}", out[1].text);
 }

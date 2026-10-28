@@ -47,7 +47,7 @@ The engine rings you for each of these. Answer each the same hour.
 
 | Signal | What it means | Your move |
 |---|---|---|
-| Station report (25/50/75 % of eta, every 3 tasks done) | pace and projected finish against the eta | `station M-<n>: keep course` / `time-box` / `cut` / `move` in `# Decisions` |
+| Station report (25/50/75 % of eta, every 3 tasks done) | the distance to the `done:` sentence, then pace and projected finish against the eta | `station M-<n>: keep course` / `time-box` / `cut` / `move` in `# Decisions` |
 | A lane runs dry in ~N min | its queue ends soon | add valuable work, or declare the tail |
 | A lane is busy with no task while work waits | a deadlock: it never idles, so it never gets work | look at its screen; end the turn |
 | Two lanes change the same files | a merge will fail | order the two tasks, or merge one first |
@@ -69,4 +69,4 @@ Lanes only execute; when a task comes back, ask what the task did not say. Write
 
 ## 9. Land the voyage
 
-When every task is done, run `gear report voyage` and write the voyage report in `# Decisions`. Review the report, ★ decisions and friction reports that led to change with the user first; record corrections as `- <date> user: <text>`. Then ask about reclaiming the lanes and release, close the item with `station <id>: land`, and freeze the voyage file. Close its backlog too: every item is done (the task), dropped (why), or moved to the next voyage's backlog as "postponed from <voyage> (date, why)". The next voyage starts with its own kickoff.
+When every task is done, run `gear report voyage` and write the voyage report in `# Decisions`. It opens with the goal: quote the voyage's `done:` sentence and judge each of its clauses against what the user asked for — met or not met, with the measured evidence (the number the sentence names, never the count of tasks merged). Review the report, ★ decisions and friction reports that led to change with the user first; record corrections as `- <date> user: <text>`. Then ask about reclaiming the lanes and release, close the item with `station <id>: land`, and freeze the voyage file. Close its backlog too: every item is done (the task), dropped (why), or moved to the next voyage's backlog as "postponed from <voyage> (date, why)". The next voyage starts with its own kickoff.

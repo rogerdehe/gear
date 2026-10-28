@@ -977,6 +977,7 @@ fn doorbell_inputs(
             // tells it to stop working on earlier things.
             no_task: no_task_of(tx, seat)?,
             waiting,
+            goal: if seat.role == gear_model::SeatRole::Captain { doorbell::goal_line(tx, project)? } else { None },
         });
     }
     Ok(inputs)

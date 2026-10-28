@@ -42,6 +42,10 @@ pub struct DoorbellInput {
     /// is the caller's filter: an id covered by an earlier doorbell op is not
     /// in here.
     pub waiting: Vec<DoorbellItem>,
+    /// The captain's voyage goal (user, 2026-10-28: the captain must never
+    /// lose the destination): every captain doorbell repeats it. None for
+    /// lanes and reviewers, and for a project with no departed voyage.
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,7 +87,7 @@ pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<Doorbel
                 seat: input.seat.clone(),
                 generation: input.generation,
                 pane_id: input.pane_id.clone(),
-                text: text(&named, input.no_task),
+                text: with_goal(text(&named, input.no_task), input.goal.as_deref()),
                 covers: named.into_iter().map(|item| item.id).collect(),
             }
         })
@@ -152,6 +156,32 @@ pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
         items.len(),
         ids.join(" ")
     )
+}
+
+/// The doorbell text with the captain's goal after it, when there is one.
+pub fn with_goal(text: String, goal: Option<&str>) -> String {
+    match goal {
+        Some(goal) => format!("{text}\n{goal}"),
+        None => text,
+    }
+}
+
+/// The line that reminds the captain of the voyage it sails (user,
+/// 2026-10-28): the current voyage's done sentence and bar, as the user agreed
+/// them. None when the project has no departed voyage or it is not described.
+pub fn goal_line(tx: &gear_store::Tx<'_>, project: &str) -> gear_model::GearResult<Option<String>> {
+    let milestone = gear_app::plan::current_voyage(tx, project)?;
+    if milestone.is_empty() {
+        return Ok(None);
+    }
+    let Some(voyage) = tx.get_voyage(project, &milestone)? else { return Ok(None) };
+    let Some(done) = voyage.done.filter(|d| !d.trim().is_empty()) else { return Ok(None) };
+    let bar = voyage.bar.unwrap_or_default();
+    Ok(Some(format!(
+        "Your goal, voyage {milestone}: done: {} · bar: {}. Judge every decision against it.",
+        done.trim(),
+        bar.trim()
+    )))
 }
 
 /// Whether this seat may be rung right now.
