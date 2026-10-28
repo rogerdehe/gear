@@ -87,6 +87,9 @@ pub struct FakeHerdr {
     /// runs `gear` as itself needs; `set_pane_processes` makes a pane claim
     /// someone else.
     processes: BTreeMap<String, PaneProcessInfo>,
+    /// The Herdr socket this fake stands in for, named in an identity refusal
+    /// (T-314). `None` by default: an unnamed Herdr.
+    pub socket: Option<String>,
 }
 
 impl FakeHerdr {
@@ -314,6 +317,10 @@ impl FakeHerdr {
 }
 
 impl HerdrRead for FakeHerdr {
+    fn socket(&self) -> Option<String> {
+        self.socket.clone()
+    }
+
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
         if self.observe_fails || self.agents_fail {
             return Err(ObserveError("injected".into()));
