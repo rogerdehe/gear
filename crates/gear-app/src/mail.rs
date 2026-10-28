@@ -96,6 +96,11 @@ pub struct SendResult {
 /// - A hand-in is answered (design §10.7, row B03-04/10): the lane is told
 ///   that its work is in and that the next task comes by itself. The line is
 ///   printed by `gear send` — the CLI owns the reply a hand-in gets.
+/// - An instruction the captain needs confirmed is sent with `--ack` (design
+///   §10.7, row B7): it is stored with `needs_ack`, its body ends with the
+///   `--kind ack` line the lane runs to confirm it, and the captain gets an
+///   item that stays `waiting` for ten minutes, so an
+///   unacknowledged instruction comes back into the captain's inbox.
 pub fn send(
     store: &mut Store,
     env: &Env,
@@ -103,22 +108,35 @@ pub fn send(
     args: &SendArgs,
     now: Ts,
 ) -> GearResult<SendResult> {
-    send_inner(store, env, fp, args, now, false)
+    send_inner(store, env, fp, args, now, false, false)
+}
+
+/// Send an instruction the captain needs confirmed (design §10.7, row B7):
+/// the stored message asks for an ack, the lane is told how to give it, and
+/// the captain gets an item that returns if the ack does not come.
+pub fn send_with_ack(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+    now: Ts,
+) -> GearResult<SendResult> {
+    send_inner(store, env, fp, args, now, false, true)
 }
 
 /// Hand in a direction check without submitting the lane's attempt.
 pub fn send_direction(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts) -> GearResult<SendResult> {
-    send_inner(store, env, fp, args, now, true)
+    send_inner(store, env, fp, args, now, true, false)
 }
 
-fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts, direction: bool) -> GearResult<SendResult> {
+fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts, direction: bool, ack: bool) -> GearResult<SendResult> {
     // A request that already committed replays its receipt before the hand-in
     // gate: the hand-in happened, only the receipt was lost, and an outage
     // must not report it as failed (T-19 review F2). The caller is the live
     // seat — identity is checked in the same read transaction as the receipt
     // (review round 2, F6), so a stale generation or another occupant cannot
     // replay it.
-    if let Some(receipt) = stored_receipt(store, env, fp, args, direction)? {
+    if let Some(receipt) = stored_receipt(store, env, fp, args, direction, ack)? {
         return Ok(receipt);
     }
     // The hand-in gate (T-19) runs before the transaction: a candidate that
@@ -193,10 +211,20 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
 
         // Slice 1 kinds, plus `result` (T-45): a result names the exact
         // attempt/contract/candidate and submits it in this transaction.
-        // Ack/blocked still belong to later tasks and a reply is written by
-        // `gear reply`.
+        // An ack answers an instruction that asks for one (T-320); a reply is
+        // written by `gear reply`.
         match args.kind {
             MsgKind::Progress | MsgKind::Question | MsgKind::Instruction => {}
+            MsgKind::Ack => {
+                // An ack answers an instruction that asks for one: without
+                // `--reply-to` there is nothing to answer.
+                if args.reply_to.is_none() {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        "an ack answers an instruction that asks for one: --reply-to M-<n>",
+                    ));
+                }
+            }
             MsgKind::Result => {
                 if args.task.is_none() || args.attempt.is_none() || (!direction && (
                     args.contract.is_none() || args.candidate.is_none()))
@@ -237,6 +265,18 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     format!("kind {} is not available yet", other.as_str()),
                 ))
             }
+        }
+        // `--ack` is the captain's way of keeping an instruction open until
+        // the lane confirms it (design §10.7, row B7): only an instruction it
+        // addresses to a seat can ask for that.
+        if ack && (args.kind != MsgKind::Instruction
+            || args.to.is_none()
+            || seat.role != SeatRole::Captain)
+        {
+            return Err(GearError::new(
+                ErrorCode::BadFormat,
+                "`--ack` belongs to a captain's instruction with `--to`",
+            ));
         }
         if direction && (args.kind != MsgKind::Result || args.body.trim().is_empty() || args.to.is_some() || args.reply_to.is_some() || args.candidate.is_some() || args.contract.is_some() || args.verdict.is_some()) {
             return Err(GearError::new(ErrorCode::BadFormat, "a direction result needs `--kind result`, `--task`, `--attempt`, and nonempty `--direction` text"));
@@ -323,6 +363,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
 
         // Recipient: the sender of the answered message, a seat the captain
         // addresses, or the project captain.
+        let mut acked: Option<String> = None;
         let (recipient, inherited_thread) = if let Some(reply_to) = &args.reply_to {
             let original = tx.get_message(&ctx.project, reply_to)?.ok_or_else(|| {
                 GearError::new(
@@ -330,6 +371,22 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                     format!("no message {reply_to} in project {}", ctx.project),
                 )
             })?;
+            // An ack answers an instruction that asks for one, addressed to
+            // the seat that gives it (T-320).
+            if args.kind == MsgKind::Ack {
+                if original.kind != MsgKind::Instruction
+                    || !original.needs_ack
+                    || original.recipient != seat.id
+                {
+                    return Err(GearError::new(
+                        ErrorCode::BadFormat,
+                        format!(
+                            "an ack answers an instruction that asks for one: --reply-to {reply_to}"
+                        ),
+                    ));
+                }
+                acked = Some(original.id.clone());
+            }
             (original.sender, Some(original.thread))
         } else if let Some(to) = &args.to {
             if seat.role != SeatRole::Captain {
@@ -370,7 +427,9 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
         };
 
         let state = match args.kind {
-            MsgKind::Progress | MsgKind::Result | MsgKind::Blocked => MsgState::Info,
+            MsgKind::Progress | MsgKind::Result | MsgKind::Blocked | MsgKind::Ack => {
+                MsgState::Info
+            }
             MsgKind::Review if args.verdict == Some(crate::review::Outcome::Pass) => MsgState::Info,
             _ => MsgState::Open,
         };
@@ -380,7 +439,7 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
         // request closure, after the replay check: a repeated request id
         // replays the stored result and never touches the reviewer's file
         // again (T-21, review F2). The key keeps the original argument.
-        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction);
+        let args_key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction, ack);
 
         let outcome = tx.run_request(&args.request_id, &args_key, now, |tx| {
             // The review the verdict belongs to: the findings are resolved
@@ -568,11 +627,73 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
                 urgent: args.urgent,
                 body: body.clone(),
                 reply_to: args.reply_to.clone(),
-                needs_ack: false,
+                needs_ack: ack,
                 state,
                 created: now,
             };
             let stored = tx.insert_message(&message)?;
+
+            // An instruction the captain needs confirmed (design §10.7, row
+            // B7): the lane is told how to acknowledge it, and the captain
+            // gets an item that waits ten minutes for that ack, so an
+            // instruction nobody read comes back into the inbox.
+            if ack {
+                let body = format!(
+                    "{}\nAcknowledge it: gear send --kind ack --reply-to {} \"<what you will do>\"",
+                    stored.body, stored.id
+                );
+                tx.update_message_body(&ctx.project, &stored.id, &body)?;
+                let seat_name = args.to.clone().unwrap_or_default();
+                let preview: String = stored.body.chars().take(60).collect();
+                let item = NewMessage {
+                    meta: None,
+                    project: ctx.project.clone(),
+                    thread: format!("ack:{}", stored.id),
+                    task: stored.task.clone(),
+                    attempt: stored.attempt,
+                    sender: seat.id.clone(),
+                    sender_gen: ctx.generation,
+                    recipient: seat.id.clone(),
+                    kind: MsgKind::System,
+                    urgent: false,
+                    body: format!(
+                        "{seat_name} has not acknowledged {} yet: {preview}",
+                        stored.id
+                    ),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Open,
+                    created: now,
+                };
+                let item = tx.insert_message(&item)?;
+                tx.update_message_state(
+                    &ctx.project,
+                    &item.id,
+                    MsgState::Waiting,
+                    None,
+                    None,
+                    Some(now + 600),
+                    now,
+                )?;
+            }
+
+            // The ack closes the captain's reminder for the instruction it
+            // answers: the item stays as the record, resolved with the ack.
+            if let Some(original) = &acked {
+                for item in tx.thread_messages(&ctx.project, &format!("ack:{original}"))? {
+                    if matches!(item.state, MsgState::Open | MsgState::Waiting) {
+                        tx.update_message_state(
+                            &ctx.project,
+                            &item.id,
+                            MsgState::Resolved,
+                            Some(&format!("acknowledged in {}", stored.id)),
+                            None,
+                            None,
+                            now,
+                        )?;
+                    }
+                }
+            }
             Ok(serde_json::json!({
                 "project": stored.project,
                 "msg_id": stored.id,
@@ -605,6 +726,7 @@ fn stored_receipt(
     fp: Option<&Fingerprint>,
     args: &SendArgs,
     direction: bool,
+    ack: bool,
 ) -> GearResult<Option<SendResult>> {
     if env.ctx.is_none() {
         return Ok(None);
@@ -620,7 +742,7 @@ fn stored_receipt(
             Some(&[SeatRole::Lane, SeatRole::Temp, SeatRole::Captain]),
             Some(&[SeatState::Active, SeatState::Standby, SeatState::Retiring]),
         )?;
-        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction);
+        let key = request_key(&ctx.project, &ctx.seat, ctx.generation, args, direction, ack);
         if stored_hash != gear_store::args_hash(&key) {
             return Ok(None);
         }
@@ -643,7 +765,14 @@ fn stored_receipt(
 /// The args key of a send: the same seat and generation with the same
 /// arguments is the same request (design/13), whether it is checked before the
 /// transaction (to replay a committed receipt) or inside it.
-fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs, direction: bool) -> String {
+fn request_key(
+    project: &str,
+    seat: &str,
+    generation: i64,
+    args: &SendArgs,
+    direction: bool,
+    ack: bool,
+) -> String {
     let key = format!(
         "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}|friction={:?}",
         args.kind.as_str(),
@@ -662,7 +791,8 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs, dire
         args.on,
         args.friction
     );
-    if direction { format!("{key}|direction=true") } else { key }
+    let key = if direction { format!("{key}|direction=true") } else { key };
+    if ack { format!("{key}|ack=true") } else { key }
 }
 
 /// The next unused sequence number of a thread with this prefix.

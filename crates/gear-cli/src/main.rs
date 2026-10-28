@@ -142,6 +142,10 @@ struct SendCmd {
     /// could fix.
     #[arg(long, value_name = "TEXT")]
     friction: Option<String>,
+    /// Captain only: the instruction is confirmed by an ack, and the item
+    /// comes back if it is not (design §10.7, row B7).
+    #[arg(long)]
+    ack: bool,
     #[arg(long)]
     preempted: Option<String>,
     #[arg(long)]
@@ -2273,7 +2277,9 @@ fn run_send(
         request_id: require_request_id(&c.request_id)?,
     };
     let fp = observe_identity(store, env, herdr)?;
-    let result = if c.direction.is_some() {
+    let result = if c.ack {
+        gear_app::mail::send_with_ack(store, env, fp.as_ref(), &args, now)?
+    } else if c.direction.is_some() {
         gear_app::mail::send_direction(store, env, fp.as_ref(), &args, now)?
     } else { gear_app::mail::send(store, env, fp.as_ref(), &args, now)? };
     // T-130: an urgent message, and every captain instruction to a lane whose
@@ -2459,11 +2465,12 @@ fn parse_kind(text: &str) -> GearResult<gear_model::MsgKind> {
         | gear_model::MsgKind::Result
         | gear_model::MsgKind::Instruction
         | gear_model::MsgKind::Review
-        | gear_model::MsgKind::Blocked => Ok(kind),
+        | gear_model::MsgKind::Blocked
+        | gear_model::MsgKind::Ack => Ok(kind),
         _ => Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
             format!(
-                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review or blocked"
+                "--kind {text} is not a `gear send` kind: progress, question, result, instruction, review, blocked or ack"
             ),
         )),
     }
@@ -3283,6 +3290,7 @@ mod tests {
             direction: None,
             verdict: None,
             blocking: None,
+            ack: false,
             preempted: None,
             saved: None,
             request_id: Some("r-1".into()),
@@ -3342,6 +3350,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
+    }
+
+    #[test]
+    fn ack_flag_sends_the_instruction_with_the_ack_line() {
+        // `--ack` wires to `send_with_ack` (T-320): the lane gets the line to
+        // acknowledge with, and the captain gets the item that waits.
+        let (mut store, mut herdr) = world();
+        let mut c = send_cmd("instruction");
+        c.to = Some("heat".into());
+        c.ack = true;
+        let out = run_send(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            &c,
+            "check the queue".into(),
+            None,
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(out.contains("Delivered to p:heat"), "{out}");
+
+        let sent = store.read(|tx| tx.get_message("p", "M-1")).unwrap().unwrap();
+        assert!(sent.needs_ack);
+        assert!(
+            sent.body.ends_with(
+                "Acknowledge it: gear send --kind ack --reply-to M-1 \"<what you will do>\""
+            ),
+            "{}",
+            sent.body
+        );
+        let item = store.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+        assert_eq!(item.thread, "ack:M-1");
+        assert_eq!(item.state, gear_model::MsgState::Waiting);
+        assert_eq!(item.wait_until, Some(T0 + 1 + 600));
     }
 
     #[test]
