@@ -134,6 +134,13 @@ fn start_hand_in_reviews(
 ) -> GearResult<()> {
     let Some(temps) = config.temps.as_ref() else { return Ok(()) };
     for task in tasks {
+        // T-273: a mechanical task is not reviewed. The attempt is settled as
+        // a pass in this tick, and the merge gate decides; a task without
+        // `mechanical` is reviewed as before.
+        if let Some(reason) = mechanical_reason(store, project, &task.task, task.attempt)? {
+            settle_mechanical(store, project, task, &reason, now)?;
+            continue;
+        }
         // T-69 / B02-04: an attempt whose checkout already failed three times
         // is not tried again. A recovered seat (the park's slot freed) must
         // not restart the loop with a fresh generation and a fresh budget; a
@@ -237,6 +244,80 @@ fn start_hand_in_reviews(
     Ok(())
 }
 
+/// T-273: the reason the attempt's **adopted** contract is mechanical, if it
+/// is. A mechanical task is not reviewed at all: it merges on its gate alone.
+fn mechanical_reason(
+    store: &mut Store,
+    project: &str,
+    task: &str,
+    attempt: i64,
+) -> GearResult<Option<String>> {
+    store.read(|tx| {
+        let Some(attempt) = tx.get_attempt(project, task, attempt)? else { return Ok(None) };
+        Ok(tx
+            .get_contract(project, task, attempt.adopted_version)?
+            .and_then(|contract| contract.mechanical))
+    })
+}
+
+/// T-273: settle a mechanical hand-in as a pass without a reviewer. The
+/// verdict is the same one a captain's pass writes, so the merge follows
+/// exactly as for a captain's pass (the merge step queues the op from it), and
+/// the captain is told once, on the thread `mechanical:<task>`.
+fn settle_mechanical(
+    store: &mut Store,
+    project: &str,
+    task: &ReviewTask,
+    reason: &str,
+    now: Ts,
+) -> GearResult<()> {
+    store.write(|tx| {
+        let Some(attempt) = tx.get_attempt(project, &task.task, task.attempt)? else { return Ok(()) };
+        let verdict = gear_app::tasks::Verdict {
+            project: project.to_string(),
+            task: task.task.clone(),
+            attempt: task.attempt,
+            contract_version: attempt.adopted_version,
+            candidate: task.candidate.clone(),
+            pass: true,
+            evidence: Some(format!("mechanical: {reason}")),
+            rework: None,
+            integrated_by: None,
+            by_seat: "engine".into(),
+        };
+        gear_app::tasks::settle(tx, &verdict, now)?;
+        // One message, not one per tick.
+        let told_key = format!("engine.mechanical_told.{project}.{}", task.task);
+        if tx.get_meta(&told_key)?.is_some() {
+            return Ok(());
+        }
+        if let Some(captain) = tx.captain_of(project)? {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("mechanical:{}", task.task),
+                task: Some(task.task.clone()),
+                attempt: Some(task.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: format!(
+                    "{} settled without review: mechanical ({reason}); the merge gate decides",
+                    task.task
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Info,
+                created: now,
+            })?;
+            tx.set_meta(&told_key, "1")?;
+        }
+        Ok(())
+    })
+}
+
 fn yield_starting_direction_jobs(store: &mut Store, project: &str) -> GearResult<()> {
     store.write(|tx| {
         for task in tx.tasks_of_project(project)? {
@@ -336,6 +417,10 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
     for row in store.read(|tx| tx.tasks_of_project(project))? {
         let Some(attempt) = store.read(|tx| tx.attempts_of_task(project, &row.id))?.into_iter().last() else { continue };
         if attempt.state != AttemptState::Started { continue }
+        // T-273: a mechanical task's push starts no direction check — no
+        // reviewer judges it, the merge gate alone decides.
+        let mechanical = store.read(|tx| tx.get_contract(project, &row.id, row.contract_version))?;
+        if mechanical.is_some_and(|contract| contract.mechanical.is_some()) { continue }
         let Some(lane) = row.lane.clone() else { continue };
         let key = direction_key(project, &row.id, attempt.n);
         let existing = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
@@ -2115,6 +2200,12 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     /// A project with one lane whose task T-1 was handed in (the attempt is
     /// Submitted with a candidate, the task is Verifying).
     fn world(config_toml: &str) -> Store {
+        world_mechanical(config_toml, None)
+    }
+
+    /// The same world with the contract carrying `mechanical` (T-273): the
+    /// reason the task is judged by its merge gate alone.
+    fn world_mechanical(config_toml: &str, mechanical: Option<&str>) -> Store {
         REVIEW_GIT_FAKE.with(|fake| fake.set(true));
         REVIEW_GIT_CALLS.with(|calls| calls.borrow_mut().clear());
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
@@ -2166,7 +2257,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
-                    mechanical: None,
+                    mechanical: mechanical.map(str::to_string),
                 })?;
                 // The lane hands the result in.
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -2288,6 +2379,147 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
 
         assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 0);
         assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_none());
+    }
+
+    /// T-273: a mechanical hand-in gets no reviewer. It is settled as a pass
+    /// in the same tick — accepted with the engine's evidence, the merge op
+    /// queued exactly as for a captain's pass — and the captain gets one Info
+    /// line on `mechanical:<task>`.
+    #[test]
+    fn a_mechanical_hand_in_is_settled_without_review() {
+        let mut store = world_mechanical(CONFIG, Some("delete three dead fns"));
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        // No reviewer: no seat, no worktree, no agent.
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
+        assert!(worktrees(&herdr).is_empty());
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 0, "no review seat starts");
+
+        // The attempt is accepted and the task done.
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Accepted);
+        assert_eq!(
+            store.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().state,
+            TaskState::Done
+        );
+        let verdict = store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(verdict.passed);
+        assert_eq!(verdict.evidence.as_deref(), Some("mechanical: delete three dead fns"));
+        assert_eq!(verdict.by_seat, "engine");
+        assert_eq!(verdict.candidate, "abc1234");
+        assert_eq!(verdict.attempt, 1);
+        assert_eq!(verdict.contract_version, 1);
+
+        // The merge follows as for a captain's pass: the merge step queues the
+        // op for the accepted attempt (the same path a captain's pass takes).
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let mut merges: Vec<_> = Vec::new();
+        for state in [OpState::Intended, OpState::Executing] {
+            merges.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        assert_eq!(merges.len(), 1, "{merges:?}");
+        assert_eq!(merges[0].task.as_deref(), Some("T-1"));
+        assert_eq!(merges[0].attempt, Some(1));
+
+        // One Info line for the captain.
+        let told = thread(&mut store, "mechanical:T-1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Info);
+        assert!(!told[0].urgent);
+        assert_eq!(
+            told[0].body,
+            "T-1 settled without review: mechanical (delete three dead fns); the merge gate decides"
+        );
+
+        // A second tick adds nothing.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
+        assert_eq!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(), 1);
+        assert!(starts(&herdr).is_empty());
+    }
+
+    /// T-273: a task without `mechanical` is reviewed as today.
+    #[test]
+    fn a_hand_in_without_mechanical_still_starts_a_review() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
+        assert!(thread(&mut store, "mechanical:T-1").is_empty(), "no mechanical line");
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer starts as before");
+    }
+
+    /// T-273: a push of a mechanical task starts no direction check.
+    #[test]
+    fn a_push_of_a_mechanical_task_starts_no_direction_check() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world_mechanical(&text, Some("delete three dead fns"));
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Running;
+                task.milestone = Some("M5".into());
+                tx.update_task(&task)?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Started;
+                attempt.candidate = None;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg();
+        config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&direction_key("p", "T-1", 1))).unwrap(),
+            None,
+            "a mechanical task's push starts no direction check"
+        );
+        let rounds = store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap();
+        assert_eq!(rounds.iter().filter(|round| round.role == "direction").count(), 0);
+        assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
     }
 
     /// T-63: the reviewer is sent the contract the hand-in was made against —
