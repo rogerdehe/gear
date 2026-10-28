@@ -407,11 +407,24 @@ fn a_forged_captain_claim_cannot_re_init() {
 /// The contract's config with another project id and repository (T-256), plus
 /// `branches` lines in its `[conventions]` section.
 fn project_on(id: &str, repo: &std::path::Path, branches: &str) -> String {
+    project_on_with(id, repo, branches, "")
+}
+
+/// The contract's config with another project id and repository (T-302), plus
+/// `conventions` lines in its `[conventions]` section and whole `tail` sections
+/// after it.
+fn project_on_with(
+    id: &str,
+    repo: &std::path::Path,
+    conventions: &str,
+    tail: &str,
+) -> String {
     let path = serde_json::json!(repo.to_string_lossy()).to_string();
-    CONFIG
+    let text = CONFIG
         .replace("id = \"harbor\"", &format!("id = {id:?}"))
         .replace("repo = \"/repo\"", &format!("repo = {path}"))
-        .replace("[conventions]\n", &format!("[conventions]\n{branches}"))
+        .replace("[conventions]\n", &format!("[conventions]\n{conventions}"));
+    format!("{text}\n{tail}\n")
 }
 
 /// T-256: two projects on one repository cannot cut the same branch names. A
@@ -446,11 +459,12 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     );
     assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
 
-    // With `{project}` in all three templates it registers.
+    // With `{project}` in all three templates and in the voyage folder (T-302)
+    // it registers.
     let templated = project_on(
         "beta",
         &repo,
-        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\n",
+        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
     );
     let r = init_with_home(&mut s, &admin(), &templated, Some(home.path()), T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
@@ -469,4 +483,113 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let row = s.read(|tx| tx.get_project("gamma")).unwrap().unwrap();
     assert_eq!(row.config_version, 1, "a refused re-registration writes nothing");
     assert!(row.config_toml.contains("elsewhere"), "{}", row.config_toml);
+}
+
+/// The templates that let two projects share a repository (T-256).
+const TEMPLATED: &str = "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\n";
+
+/// T-302: two projects on one repository keep their voyages apart. With
+/// `{project}` in all three branch templates but the default voyage folder
+/// (`gear/voyages/{milestone}`, no project) they would overwrite each other's
+/// plan, reports and reviews, so the second is refused; a `voyage_dir` naming
+/// `{project}` lets it in.
+#[test]
+fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let shown = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let alpha = project_on("alpha", &repo, TEMPLATED);
+    init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
+
+    // The branches are kept apart, the voyages are not: refused.
+    let beta = project_on("beta", &repo, TEMPLATED);
+    let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        format!(
+            "project alpha also works in {shown} and keeps its voyages in the same folder gear/voyages/{{milestone}}: put {{project}} in conventions.voyage_dir so the two projects' plans, reports and reviews cannot overwrite each other"
+        )
+    );
+    assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
+
+    // A voyage folder that names the project registers.
+    let kept_apart = format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
+    let beta = project_on("beta", &repo, &kept_apart);
+    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 2).unwrap();
+    assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
+}
+
+/// T-302: two projects on one GitHub repository take the same issues unless
+/// each selects them with labels of its own — whatever their local paths. The
+/// repository is compared ASCII case-insensitively, an empty label list takes
+/// every open issue, and one shared label puts the issue in both queues.
+#[test]
+fn two_projects_on_one_github_repo_need_their_own_issue_labels() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let github = |repo: &str, labels: &str| {
+        format!("[github]\nrepo = {repo:?}\n\n[github.issues]\nlabels = [{labels}]\n")
+    };
+    let alpha = project_on_with("alpha", &first, "", &github("o/r", "\"a\""));
+    init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
+
+    // Another local repository, the same GitHub one in another case, and
+    // labels of its own: it registers.
+    let beta = project_on_with("beta", &second, "", &github("O/R", "\"b\""));
+    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap();
+    assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
+
+    // A shared label would make one issue a task of both projects: refused,
+    // naming the label and alpha.
+    let gamma = project_on_with("gamma", &first, "", &github("o/r", "\"a\", \"c\""));
+    let e = init_with_home(&mut s, &admin(), &gamma, Some(home.path()), T0 + 2).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "project alpha also takes issues labelled a from GitHub o/r: give each project labels of its own"
+    );
+    assert!(s.read(|tx| tx.get_project("gamma")).unwrap().is_none(), "nothing written");
+
+    // No labels at all takes every open issue, alpha's too: refused.
+    let delta = project_on_with("delta", &second, "", &github("o/r", ""));
+    let e = init_with_home(&mut s, &admin(), &delta, Some(home.path()), T0 + 3).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "project alpha also takes issues from GitHub o/r: each project needs its own non-empty [github.issues] labels"
+    );
+    assert!(s.read(|tx| tx.get_project("delta")).unwrap().is_none(), "nothing written");
+}
+
+/// T-302: every shared label is named in the refusal, in this config's order.
+#[test]
+fn shared_issue_labels_are_named_together() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let github = |labels: &str| {
+        format!("[github]\nrepo = \"o/r\"\n\n[github.issues]\nlabels = [{labels}]\n")
+    };
+    let alpha = project_on_with("alpha", &first, "", &github("\"a\", \"z\""));
+    init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
+    let beta = project_on_with("beta", &second, "", &github("\"z\", \"a\", \"q\""));
+    let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "project alpha also takes issues labelled z, a from GitHub o/r: give each project labels of its own"
+    );
 }
