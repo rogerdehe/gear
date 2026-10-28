@@ -25,3 +25,4 @@ Things that exist only because GEAR cannot run this project itself yet. Each has
 - 2026-10-23 `start-reviewer.sh`, `models.conf`, warm seats `home-review-<k>`: the engine starts reviewers (T-5) on the config's `[models].review`; warm seats return with T-18.
 - 2026-10-25 `[profiles.codex]` override in `gear/gear.toml` (update check off): T-57 put the flag in the built-in codex profile.
 - 2026-10-28 machine share: cargo `jobs = 2` in /Volumes/Data/cargo/config.toml and `go env -w GOFLAGS=-p=2`: two projects' fleets (GEAR 2+2, acme 4+4) on 10 cores / 16 GB drove load to 175. Remove when GEAR's machine watch (M5) holds new builds while the machine is busy.
+- 2026-10-28 think-watch (captain's scratchpad script): wakes the captain when a lane is working but its worktree has not changed for 12 min, the M4.1 failure that GEAR does not catch. Remove when the M4.2 item "a lane that thinks instead of coding is caught" is live.
