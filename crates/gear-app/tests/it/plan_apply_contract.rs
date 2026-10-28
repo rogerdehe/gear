@@ -5,8 +5,8 @@ use gear_app::draft::{parse, Draft};
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
-use gear_store::{testing, Store};
+use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState};
+use gear_store::{testing, NewMessage, Store};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -207,6 +207,36 @@ fn a_lane_with_a_startable_task_behind_its_current_one_is_not_told() {
     s.write(|tx| {
         tx.insert_task(&task("T-2", "heat", TaskState::Running, &[]))?;
         tx.insert_task(&task("T-3", "heat", TaskState::Ready, &[]))
+    })
+    .unwrap();
+
+    assert_eq!(idle(&mut s), vec![]);
+}
+
+/// A lane that helps on an unanswered instruction of the captain is busy,
+/// not idle: it is not told it stands idle (T-323).
+#[test]
+fn a_helping_lane_is_not_told() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: "p".into(),
+            thread: "p:c".into(),
+            task: None,
+            attempt: None,
+            sender: "p:captain".into(),
+            sender_gen: 1,
+            recipient: "p:heat".into(),
+            kind: MsgKind::Instruction,
+            urgent: false,
+            body: "Check the quota line".into(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: NOW - 60,
+        })
+        .map(|_| ())
     })
     .unwrap();
 

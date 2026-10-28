@@ -2315,6 +2315,11 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLan
         if lane_in_tail_at(tx, project, &seat.name, now)? {
             continue;
         }
+        // A lane that helps on an unanswered instruction of the captain is
+        // busy, not idle (T-323).
+        if gear_board::idle::helping(tx, project, &seat, now)?.is_some() {
+            continue;
+        }
         let lane_tasks: Vec<&TaskRow> = tasks
             .iter()
             .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
