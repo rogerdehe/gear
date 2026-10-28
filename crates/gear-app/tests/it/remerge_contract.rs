@@ -117,6 +117,26 @@ fn failed_merge(s: &mut Store, created: i64) -> String {
     .unwrap()
 }
 
+/// Any 998 ops, so the next two the test inserts are `O-999` and `O-1000`:
+/// the ids where a string sort and an op-number sort disagree.
+fn ops_up_to_998(tx: &gear_store::Tx<'_>, created: i64) -> gear_model::GearResult<()> {
+    for _ in 0..998 {
+        tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Doorbell,
+            task: None,
+            attempt: None,
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created,
+        })?;
+    }
+    Ok(())
+}
+
 /// The merge op the remerge queues: the only Intended merge op of T-1.
 fn queued_merge(s: &mut Store) -> OpRow {
     s.read(|tx| Ok(tx.ops_in_state("p", OpState::Intended)?))
@@ -158,21 +178,7 @@ fn the_last_merge_is_the_higher_op_number_not_the_larger_string() {
     accepted_task(&mut s);
     const CREATED: i64 = T0 + 10;
     s.write(|tx| {
-        // Ops O-1 … O-998: any op, so the two merges get four-digit ids.
-        for _ in 0..998 {
-            tx.insert_op(&NewOp {
-                project: "p".into(),
-                seat: "p:heat".into(),
-                generation: 1,
-                kind: OpKind::Doorbell,
-                task: None,
-                attempt: None,
-                ref_msg: None,
-                plan_version: None,
-                payload: serde_json::json!({}),
-                created: CREATED,
-            })?;
-        }
+        ops_up_to_998(tx, CREATED)?;
         // O-999 merged, O-1000 failed; both created in the same second.
         let confirmed = tx.insert_op(&NewOp {
             project: "p".into(),
@@ -212,4 +218,55 @@ fn the_last_merge_is_the_higher_op_number_not_the_larger_string() {
     let op = queued_merge(&mut s);
     assert_eq!(op.attempt, Some(1), "the accepted attempt is retried");
     assert_eq!(op.payload["candidate"], "c1");
+}
+
+/// The same two ids the other way round: `O-1000` is the confirmed one, so the
+/// remerge is refused and the refusal names it. The old string sort read
+/// `O-999` as later, saw the failed op there and queued a retry of a task that
+/// is already merged.
+#[test]
+fn a_confirmed_four_digit_merge_is_named_in_the_refusal() {
+    let mut s = world(None);
+    accepted_task(&mut s);
+    const CREATED: i64 = T0 + 10;
+    s.write(|tx| {
+        ops_up_to_998(tx, CREATED)?;
+        // O-999 failed, O-1000 merged; both created in the same second.
+        let failed = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Merge,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created: CREATED,
+        })?;
+        assert_eq!(failed.id, "O-999");
+        tx.set_op_state("p", &failed.id, OpState::Executing, None, CREATED)?;
+        tx.set_op_state("p", &failed.id, OpState::Failed, Some("the gate failed"), CREATED)?;
+        let confirmed = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Merge,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created: CREATED,
+        })?;
+        assert_eq!(confirmed.id, "O-1000");
+        tx.set_op_state("p", &confirmed.id, OpState::Executing, None, CREATED)?;
+        tx.set_op_state("p", &confirmed.id, OpState::Submitted, None, CREATED)?;
+        tx.set_op_state("p", &confirmed.id, OpState::Confirmed, Some("merged T-1"), CREATED)
+    })
+    .unwrap();
+
+    let error = run(&mut s, "# Staff\n- remerge T-1\n", "v3", T0 + 20).unwrap_err();
+    assert_eq!(error.code, gear_model::ErrorCode::BadFormat, "{error:?}");
+    assert!(error.detail.contains("already merged (O-1000)"), "{error:?}");
 }
