@@ -2316,6 +2316,21 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Empty a voyage's departure: a milestone that lost every task no longer
+    /// has one, so a reused milestone id starts its clock when its new tasks
+    /// come (T-239). `upsert_voyage` cannot do this: it COALESCEs the columns.
+    pub fn clear_voyage_departure(
+        &self, project: &str, milestone: &str,
+    ) -> GearResult<()> {
+        self.tx.execute(
+            "UPDATE voyages
+             SET departure=NULL, departure_tasks=NULL, departure_estimate_min=NULL
+             WHERE project=?1 AND milestone=?2",
+            params![project, milestone],
+        ).map_err(map_sqlite)?;
+        Ok(())
+    }
+
     /// One milestone's voyage, if it has one.
     pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
         let row: Option<VoyageRow> = self
