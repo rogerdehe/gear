@@ -1,5 +1,3 @@
-> Retired (2026-10-28): history only. Open items live in ops/plan/backlog.md (one pool, not bound to a voyage); each voyage's scope is in gear/voyages/<id>.md.
-
 # M3 backlog (ideas, not yet tasks)
 
 ## Moved out of M2.1 (user, 2026-10-25)
