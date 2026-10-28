@@ -13,7 +13,7 @@ fn action(project: &str, seat: &str, generation: i64, covers: &[&str]) -> Doorbe
         seat: seat.into(),
         generation,
         pane_id: "w1:p1".into(),
-        text: "GEAR: 1 item(s) waiting for you. Run `gear` to see them.".into(),
+        text: "GEAR: 1 item(s) waiting for you: M-1. Run the command `gear` (no arguments) in your own shell; it shows only your items.".into(),
         covers: covers.iter().map(|c| c.to_string()).collect(),
     }
 }
@@ -120,7 +120,7 @@ fn payload_has_text_and_covers() {
 
     assert_eq!(
         ops[0].payload["text"],
-        "GEAR: 1 item(s) waiting for you. Run `gear` to see them."
+        "GEAR: 1 item(s) waiting for you: M-1. Run the command `gear` (no arguments) in your own shell; it shows only your items."
     );
     assert_eq!(ops[0].payload["covers"], serde_json::json!(["M-3", "M-1"]));
 }
