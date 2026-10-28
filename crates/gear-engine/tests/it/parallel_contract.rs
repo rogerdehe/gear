@@ -15,25 +15,57 @@ const TEST_FILE: &str = "tests/lib_test.rs";
 /// A contract file: a test file by another name (T-188).
 const CONTRACT_FILE: &str = "src/thing_contract.rs";
 
+/// The base repo every test starts from: `dev` with the fixture files,
+/// built once per test process and copied per test (conventions "Test time":
+/// a git fixture is built once and a copy costs a copy, not ten git calls).
+fn template() -> &'static Path {
+    static TEMPLATE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    TEMPLATE
+        .get_or_init(|| {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("repo");
+            fs::create_dir(&path).unwrap();
+            git(&path, &["init", "-q", "-b", "dev"]);
+            git(&path, &["config", "user.name", "test"]);
+            git(&path, &["config", "user.email", "a@b"]);
+            git(&path, &["config", "commit.gpgsign", "false"]);
+            git(&path, &["config", "core.hooksPath", "/dev/null"]);
+            for file in [SHARED, "other.rs", "third.rs", SRC, TEST_FILE, CONTRACT_FILE] {
+                let full = path.join(file);
+                if let Some(dir) = full.parent() { fs::create_dir_all(dir).unwrap(); }
+                fs::write(full, "base\n").unwrap();
+            }
+            git(&path, &["add", "."]);
+            git(&path, &["commit", "-qm", "base"]);
+            root
+        })
+        .path()
+        .join("repo")
+        .leak()
+}
+
+/// Copy a tree in this process: a copied fixture costs a copy, not a shell
+/// and a `cp` on the test's budget.
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).unwrap();
+        }
+    }
+}
+
 struct Repo { root: tempfile::TempDir, path: PathBuf, base: String }
 impl Repo {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("repo");
-        fs::create_dir(&path).unwrap();
-        git(&path, &["init", "-q", "-b", "dev"]);
-        git(&path, &["config", "user.name", "test"]);
-        git(&path, &["config", "user.email", "a@b"]);
-        git(&path, &["config", "commit.gpgsign", "false"]);
-        git(&path, &["config", "core.hooksPath", "/dev/null"]);
-        for file in [SHARED, "other.rs", "third.rs", SRC, TEST_FILE, CONTRACT_FILE] {
-            let full = path.join(file);
-            if let Some(dir) = full.parent() { fs::create_dir_all(dir).unwrap(); }
-            fs::write(full, "base\n").unwrap();
-        }
-        git(&path, &["add", "."]);
-        git(&path, &["commit", "-qm", "base"]);
-        let base = git(&path, &["rev-parse", "HEAD"]);
+        copy_tree(template(), &path);
+        let base = git(&path, &["rev-parse", "dev"]);
         Self { root, path, base }
     }
     fn branch(&self, name: &str, file: &str) {

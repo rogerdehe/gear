@@ -365,6 +365,34 @@ fn a_caller_outside_the_bound_pane_is_refused_and_the_captain_hears_it() {
     assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
 }
 
+/// T-314: a refusal has to be traceable afterwards. It names the Herdr door it
+/// asked and the ancestry it matched against that door's panes.
+#[test]
+fn the_refusal_names_the_herdr_socket_and_the_ancestry() {
+    let mut herdr = FakeHerdr::new();
+    // A kind whose tools run in the pane: no daemon exception can accept it.
+    herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    herdr.socket = Some("/s/herdr.sock".into());
+    let claimed = env(Some("captain"), 1, Some(CAP_PANE), false);
+    let ancestors = [30, 20, 10];
+
+    let error = observe(&claimed, &mut herdr, &ancestors).unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(
+        error
+            .detail
+            .contains("asked Herdr at /s/herdr.sock; this process's ancestry: 30 < 20 < 10"),
+        "names the socket it asked and the ancestry it saw: {}",
+        error.detail
+    );
+
+    // A door that cannot name its socket says so, rather than leaving a blank.
+    herdr.socket = None;
+    let error = observe(&claimed, &mut herdr, &ancestors).unwrap_err();
+    assert!(error.detail.contains("an unnamed Herdr"), "{}", error.detail);
+}
+
 /// The caller in its own pane is the seat it says it is.
 #[test]
 fn a_caller_in_the_bound_pane_is_accepted() {

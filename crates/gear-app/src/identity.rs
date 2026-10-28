@@ -89,10 +89,14 @@ pub fn observe(
             Some(_) => "the pane does not list this process".to_string(),
             None => "no pane of this session runs this process (its tools run outside every pane, and the pane's agent is not one GEAR knows to do that)".to_string(),
         };
+        // T-314: a refusal has to be traceable afterwards — which Herdr door
+        // was asked, and the ancestry that was matched against its panes.
+        let asked = herdr.socket().unwrap_or_else(|| "an unnamed Herdr".to_string());
+        let ancestry = ancestors.iter().map(|pid| pid.to_string()).collect::<Vec<_>>().join(" < ");
         return Err(GearError::new(
             ErrorCode::NotRegistered,
             format!(
-                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot"
+                "pane {pane} is claimed as a seat, but {where_}: GEAR_CTX and HERDR_PANE_ID can be set by any shell; the caller's ancestry and the pane's processes cannot (asked Herdr at {asked}; this process's ancestry: {ancestry})"
             ),
         ));
     }

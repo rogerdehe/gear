@@ -186,6 +186,11 @@ pub trait HerdrRead {
     /// client does not carry the name, so this reads `agent.list` itself.
     /// `None` = Herdr shows the agent with no name.
     fn agent_names(&mut self) -> Result<BTreeMap<String, Option<String>>, ObserveError>;
+    /// The Herdr socket this door asked, for an error a reader can trace
+    /// (T-314). `None` = a fake or a door that does not know its socket.
+    fn socket(&self) -> Option<String> {
+        None
+    }
 }
 
 pub trait HerdrAct: HerdrRead {
@@ -247,6 +252,8 @@ pub const TYPE_SETTLE_MS: u64 = 300;
 /// Real Herdr over its unix socket. Holds one blocking client connection.
 pub struct SocketHerdr {
     client: board_herdr::HerdrClient,
+    /// The path `connect` was given (T-314): an error names the Herdr it asked.
+    socket: std::path::PathBuf,
 }
 
 impl SocketHerdr {
@@ -258,11 +265,15 @@ impl SocketHerdr {
         client
             .require_supported_protocol()
             .map_err(|e| ObserveError(format!("herdr protocol check failed: {e}")))?;
-        Ok(SocketHerdr { client })
+        Ok(SocketHerdr { client, socket: socket_path.to_path_buf() })
     }
 }
 
 impl HerdrRead for SocketHerdr {
+    fn socket(&self) -> Option<String> {
+        Some(self.socket.to_string_lossy().into_owned())
+    }
+
     fn agents(&mut self) -> Result<Vec<AgentInfo>, ObserveError> {
         let snapshot = self
             .client
