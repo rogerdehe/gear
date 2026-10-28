@@ -1,0 +1,48 @@
+ GEAR · gear M5 ⛵   M4.2 ⚓   M4.1 ⚓   [ older   ] newer                                                                                                 14:32   
+ M5: small tasks, the board, the goal rule · ⛵  sailing                                                                                                         
+ ╔═ GOAL ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗  
+ ║ A small task lands without review in under 10 min; the board shows every voyage and uses the full width; a departed goal changes only with the user's     ║  
+ ║ yes.                                                                                                                                                      ║  
+ ║ Quality bar: DELIVERABLE — errors in normal use block a task; edge cases are logged                                                                       ║  
+ ╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝  
+ Goal check    1 of 3 met     next: small task under 10 min: now 14 min (T-262)           Milestone  ▶ S2 board views to the prototype (1 of 3 reached)         
+ Time          ██████████████████░░░░░░░░░░░░░░░░░░░◆░│ expected 7h35m of 8h00m, 0h25m aheTasks      ████████████████▓▓▓▓▓▓▓▓▓▓▓▓▓░░░░░░░░░░░ 5/12 merged · 4 g 
+ d: unfold the goal check, milestones, time and tasks                                                                                                           
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ 
+ │  1 Now  │  2 Tasks  │  3 Cost  │  4 Log  │                                                                                                                 │ 
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯ 
+                                                                                                                                                                
+   lane / task              est    act  ratio  rounds  dev tokens   dev $  review tokens  review $  total $                                                     
+ › ▸ hull                   75m   108m   1.4x       5       2167k    1.02           723k      0.34     1.36                                                     
+   ▸ mast                  125m   118m   0.9x       3       2077k    0.93           693k      0.31     1.24                                                     
+   ▸ keel                   85m    74m   0.9x       3       1274k    0.55           426k      0.18     0.74                                                     
+                                                                                                                                                                
+   this voyage: 7.4M tokens (development 5.5M, review 1.8M), $3.34                                                                                              
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+                                                                                                                                                                
+ ←→ / Tab / 1-4 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's t 

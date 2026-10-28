@@ -29,3 +29,36 @@ Views: **Now** (what happens and what needs a hand), **Tasks** (the dependency g
 Now is one table, one row per lane: LANE, NOW DOING, STAGE, TIME (actual/estimate, ⚠ over), LANE DONE (bar, n of m, minutes of estimate left), ENDS. Under it one line: balanced, or which lane ends how long after which. Then **TO HANDLE**: needs a look, waiting on someone, and every lane that will sit idle 20 minutes or more ("hull will sit idle ~1h31m: its next task T-267 waits for T-266 (mast) — captain: give hull work it can start now, or move T-266 to hull"). Quota on one line.
 
 ENDS and the idle time come from each lane's queue played forward (the engine's run-dry forecast in feed.rs does the same; the board reuses it): a lane is free again when it hands a task in; its next task starts when the lane is free and every task it depends on has merged (hand-in plus the voyage's measured review-and-merge time); durations are the estimate left times the lane's measured pace (actual / estimate of its merged tasks); the gap between free and start is idle time. The board does not print this explanation.
+
+## Golden frames
+
+`python3 gear/voyages/M5/board/prototype.py --golden <dir>` draws the frames without a terminal and writes them to
+`<dir>`; `gear/voyages/M5/board/golden/` holds the committed ones. The real board is checked against them cell by
+cell, so a missing colour, a wrong width or a moved column fails the gate.
+
+How they are made (export mode only; the prototype's drawing is frozen and the interactive mode, no flag, is
+unchanged): the frame is drawn into a `FakeWin` of 48 rows × 160 columns — a window that keeps its cells instead of
+opening a curses screen, with the calls the prototype makes (`getmaxyx`, `erase`, `addnstr`, `chgat` setting a run of
+cells' attribute, `refresh`, `keypad`). `n` in `addnstr` counts characters as in curses, and a character that does not
+fit in the line's remaining cells is not drawn (the prototype keeps every write inside its row). A cell is a terminal
+cell, not a codepoint: a wide character (East Asian wide or fullwidth, here ⛵ ⚓ ⏳) is one glyph in two cells — the
+first holds it, the second is its continuation, a space with the same attribute — and a combining character joins the
+one before it. Overwriting one half of a wide character blanks the other half. `C` then holds marker bits instead of
+colour pairs (`curses.A_BOLD` and `curses.A_REVERSE` are two more markers), so every cell's attribute is a set of
+markers the export can name again. It draws the first voyage (`pick(0)`) with `sel = 0`, each view — 1 Now, 2 Tasks,
+3 Cost, 4 Log — once with `DETAIL[0] = False` and once with `True`, header and footer included, exactly as `main`
+draws a frame. Running it twice gives identical files.
+
+Each frame is three files of 48 lines of 160 cells (UTF-8, one character per cell, a trailing newline per line):
+
+- `<view>-<folded|open>.txt` — the characters, a blank cell as a space; the second cell of a wide character is a
+  space too, so a line is 160 characters whether it holds wide glyphs or not;
+- `<view>-<folded|open>.col` — one letter per cell for the colour: `.` no colour, `o` ok, `w` warn, `b` bad, `d`
+  dim, `a` acc, `m` mag, `u` blu; the letter is uppercase when the cell is bold, and a bold cell with no colour is
+  `*` (the header titles, the picked voyage and the picked tab); the cells a `chgat` of a selected row lights carry
+  reverse and no colour, so they read `.`;
+- `<view>-<folded|open>.rev` — `R` where reverse is on, else `.`.
+
+The views are named as their tabs are: `now`, `tasks`, `cost`, `log`. Eight frames, 24 files. A change to the
+prototype's drawing is a change to the golden files: regenerate them, commit them with the change, and only with the
+user's yes (the prototype is frozen once agreed).
