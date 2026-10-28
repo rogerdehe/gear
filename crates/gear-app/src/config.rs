@@ -381,6 +381,10 @@ pub struct Conventions {
     /// The branch a task is reviewed on (T-252), expanded like
     /// `task_branch`. Default `review/t{n}`.
     pub review_branch: String,
+    /// The branch of a seat's own worktree (T-252), with `{project}` and
+    /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
+    /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
+    pub seat_branch: String,
 }
 
 impl Default for Conventions {
@@ -393,6 +397,7 @@ impl Default for Conventions {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
+            seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
         }
     }
 }
@@ -1113,16 +1118,40 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     }
 
     // ---- the branch templates (T-252): the branch names GEAR cuts and
-    // checks. A template is expanded with `{project}`, `{lane}` and `{n}`;
-    // anything else stays a literal brace and git refuses the branch, so both
-    // are checked here — on a sample — rather than when a lane cannot push.
-    let templates = [
-        ("conventions.task_branch", &conventions.task_branch),
-        ("conventions.review_branch", &conventions.review_branch),
+    // checks. A template is expanded with its placeholders; anything else stays
+    // a literal brace and git refuses the branch, so each is checked here — on
+    // a sample — rather than when a lane cannot push.
+    let templates: [(&str, &str, &str, &[&str]); 3] = [
+        // the field, the template, the placeholder it must name, the ones it
+        // may name
+        (
+            "conventions.task_branch",
+            &conventions.task_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.review_branch",
+            &conventions.review_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.seat_branch",
+            &conventions.seat_branch,
+            "seat",
+            &["project", "seat"],
+        ),
     ];
-    let mut usable = [false; 2];
-    for (index, (field, template)) in templates.iter().enumerate() {
-        usable[index] = branch_template_issues(field, template, &mut issues);
+    let mut usable = [false; 3];
+    for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
+        let sample = if *required == "seat" {
+            gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
+        } else {
+            gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
+        };
+        usable[index] =
+            branch_template_issues(field, template, required, allowed, &sample, &mut issues);
     }
     if usable[0] && usable[1] {
         let task = gear_model::branch::expand(
@@ -1303,9 +1332,10 @@ fn issue(field: &str, problem: String) -> ConfigIssue {
 }
 
 /// The sample a branch template is expanded with to check it (T-252): one
-/// project, one lane, one task.
+/// project, one lane, one seat, one task.
 const SAMPLE_PROJECT: &str = "p";
 const SAMPLE_LANE: &str = "l";
+const SAMPLE_SEAT: &str = "s";
 const SAMPLE_TASK: &str = "T-1";
 
 /// The placeholders `template` names, filled in or not.
@@ -1321,32 +1351,39 @@ fn placeholders(template: &str) -> Vec<&str> {
     names
 }
 
-/// Check one branch template (T-252): it must name `{n}`, it may name only
-/// `{project}`, `{lane}` and `{n}`, and its sample expansion must be a branch
-/// name git takes. Returns whether the template is usable.
-fn branch_template_issues(field: &str, template: &str, issues: &mut Vec<ConfigIssue>) -> bool {
+/// Check one branch template (T-252): it must name `required`, it may name only
+/// `allowed`, and its sample expansion must be a branch name git takes. Returns
+/// whether the template is usable.
+fn branch_template_issues(
+    field: &str,
+    template: &str,
+    required: &str,
+    allowed: &[&str],
+    sample: &str,
+    issues: &mut Vec<ConfigIssue>,
+) -> bool {
+    let filled: Vec<String> = allowed.iter().map(|name| format!("{{{name}}}")).collect();
     let names = placeholders(template);
-    if let Some(unknown) = names
-        .iter()
-        .find(|name| !matches!(**name, "project" | "lane" | "n"))
-    {
+    if let Some(unknown) = names.iter().find(|name| !allowed.contains(name)) {
         issues.push(issue(
             field,
             format!(
-                "the template {template:?} names {{{unknown}}}: GEAR fills in {{project}}, {{lane}} and {{n}}"
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {}",
+                filled.join(", ")
             ),
         ));
         return false;
     }
-    if !names.contains(&"n") {
+    if !names.contains(&required) {
         issues.push(issue(
             field,
-            format!("the template {template:?} has no {{n}}: every task needs its own branch"),
+            format!(
+                "the template {template:?} has no {{{required}}}: each one needs its own branch"
+            ),
         ));
         return false;
     }
-    let sample = gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK);
-    if let Some(problem) = branch_name_problem(&sample) {
+    if let Some(problem) = branch_name_problem(sample) {
         issues.push(issue(
             field,
             format!("the template {template:?} names the branch {sample:?}: {problem}"),

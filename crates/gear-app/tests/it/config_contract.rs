@@ -59,6 +59,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             gate: "cargo build --workspace --all-targets && cargo test --workspace".into(),
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
+            seat_branch: "{project}/{seat}".into(),
         }
     );
     assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180, handin_base_window_min: 30 });
@@ -733,4 +734,35 @@ fn a_branch_template_must_be_expandable_and_usable() {
         fields(&validate(&with("review_branch", "{lane}/t{n}"))),
         vec!["conventions.review_branch"]
     );
+}
+
+#[test]
+fn a_seat_branch_names_the_project_and_the_seat() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.seat_branch, gear_model::branch::SEAT_BRANCH);
+    assert_eq!(validate(&cfg), vec![], "the default seat branch is valid");
+
+    let with = |value: &str| {
+        parse(&format!("{MINIMAL}\n[conventions]\nseat_branch = \"{value}\"\n")).unwrap()
+    };
+    // No `{seat}`: every seat would share one worktree branch.
+    assert_eq!(
+        fields(&validate(&with("{project}/work"))),
+        vec!["conventions.seat_branch"]
+    );
+    // The task placeholders belong to the task branches, not to a seat's.
+    for bad in ["{project}/{lane}", "{project}/t{n}", "{project}/{team}"] {
+        assert_eq!(
+            fields(&validate(&with(bad))),
+            vec!["conventions.seat_branch"],
+            "{bad:?}"
+        );
+    }
+    // A name git would refuse.
+    assert_eq!(
+        fields(&validate(&with("{project}//{seat}"))),
+        vec!["conventions.seat_branch"]
+    );
+    // A seat branch is free to be any name git takes.
+    assert_eq!(validate(&with("{project}-{seat}")), vec![]);
 }

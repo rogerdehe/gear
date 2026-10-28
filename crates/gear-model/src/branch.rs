@@ -1,10 +1,10 @@
 //! Branch names are configuration (T-252).
 //!
-//! A project names the branch a task's work goes on and the branch it is
-//! reviewed on in its `[conventions]`, as templates: `{project}`, `{lane}` and
-//! `{n}` are filled in. The constants here are the names GEAR itself uses, and
-//! the defaults of a project that says nothing — never the only way (naming is
-//! a team's own habit).
+//! A project names the branch a task's work goes on, the branch it is reviewed
+//! on and the branch of each seat's own worktree in its `[conventions]`, as
+//! templates: `{project}`, `{lane}`, `{seat}` and `{n}` are filled in. The
+//! constants here are the names GEAR itself uses, and the defaults of a project
+//! that says nothing — never the only way (naming is a team's own habit).
 //!
 //! Pure: no I/O, no store, so the engine, the app and the forge all expand the
 //! same templates the same way.
@@ -15,6 +15,10 @@ pub const TASK_BRANCH: &str = "{lane}/t{n}";
 /// The default review branch of a task.
 pub const REVIEW_BRANCH: &str = "review/t{n}";
 
+/// The default branch of a seat's own worktree (T-252): the name says whose
+/// worktree it is, so Herdr names the worktree `<project>-<seat>`.
+pub const SEAT_BRANCH: &str = "{project}/{seat}";
+
 /// `template` with `{project}`, `{lane}` and `{n}` filled in. `project` is the
 /// project id, `lane` the lane name and `task` the task id (`T-40` → `{n}` is
 /// `40`).
@@ -23,6 +27,12 @@ pub fn expand(template: &str, project: &str, lane: &str, task: &str) -> String {
         .replace("{project}", project)
         .replace("{lane}", lane)
         .replace("{n}", &number(task))
+}
+
+/// `template` with `{project}`, `{seat}` filled in: the branch of a seat's own
+/// worktree (T-252). The merge worktree is seat `merge`.
+pub fn expand_seat(template: &str, project: &str, seat: &str) -> String {
+    template.replace("{project}", project).replace("{seat}", seat)
 }
 
 /// The number in a task id: the id's trailing run of digits (`T-40` → `40`).
@@ -57,6 +67,15 @@ mod tests {
             "acme/pay/t40"
         );
         assert_eq!(expand("task/{project}-{n}", "gear", "mast", "T-7"), "task/gear-7");
+    }
+
+    #[test]
+    fn a_seat_branch_names_the_project_and_the_seat() {
+        assert_eq!(expand_seat(SEAT_BRANCH, "p", "hull"), "p/hull");
+        assert_eq!(
+            expand_seat("{project}-{seat}", "acme", "pay"),
+            "acme-pay"
+        );
     }
 
     #[test]
