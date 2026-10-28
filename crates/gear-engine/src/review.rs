@@ -268,7 +268,16 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     let branch = format!("{}/{}", task.lane, task.task.to_lowercase().replace('-', ""));
-    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"<ok, or up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+}
+
+/// A direction check passed when the first word of its body is `ok`, in any
+/// case and without a trailing `.`, `,`, `;`, `:` or `!`: the lane often writes
+/// `ok. Candidate follows contract v4 …` and that is a pass, not a problem
+/// list (T-230).
+fn direction_passed(body: &str) -> bool {
+    let first = body.trim().split_whitespace().next().unwrap_or("");
+    first.trim_end_matches(['.', ',', ';', ':', '!']).to_lowercase() == "ok"
 }
 
 fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
@@ -283,7 +292,7 @@ fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearRe
                     m.sender == seat_id && m.sender_gen == generation && m.meta.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["direction"] == true && v["sha"] == sha)
                 });
                 let Some(result) = result else { continue };
-                if result.body.trim().to_lowercase() != "ok" {
+                if !direction_passed(&result.body) {
                     let captain = tx.captain_of(project)?;
                     for (recipient, kind, urgent, state) in [(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)] {
                         if let Some(recipient) = recipient {
@@ -2245,6 +2254,16 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     }
 
     #[test]
+    fn direction_passed_reads_only_the_first_word() {
+        for body in ["ok", "OK.", "ok. Candidate follows contract v4"] {
+            assert!(direction_passed(body), "{body:?} passes");
+        }
+        for body in ["okay", "F1: misread the contract sentence", ""] {
+            assert!(!direction_passed(body), "{body:?} does not pass");
+        }
+    }
+
+    #[test]
     fn direction_checks_follow_pushes_and_report_results() {
         let root = tempfile::tempdir().unwrap();
         sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
@@ -2299,9 +2318,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 11).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], first);
         let result = |tx: &Tx<'_>, sha: &str, body: &str, time| tx.insert_message(&NewMessage { meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()), project:"p".into(), thread:format!("result:{time}"), task:Some("T-1".into()), attempt:Some(1), sender:"p:review-1".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Result, urgent:false, body:body.into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:time }).map(|_| ());
-        store.write(|tx| result(tx, &first, "ok", T0 + 12)).unwrap();
+        store.write(|tx| result(tx, &first, "ok. Candidate follows contract v4; src/base is the right place", T0 + 12)).unwrap();
         finish_direction_results(&mut store, "p", T0 + 13).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], first);
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 0, "a passing direction check sends the lane nothing");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], second);
         store.write(|tx| result(tx, &second, "use the required approach", T0 + 15)).unwrap();
