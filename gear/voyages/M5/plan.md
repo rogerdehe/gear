@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=574 -->
+<!-- gear-plan project=gear base=575 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -18,6 +18,8 @@ eta: 16h
 
 - 2026-10-28 23:00 scope: the captain writes no code (user: "舰长不许自己写代码"): every code change, however small, is a lane's task; a hand fix is only operational (a store state, a restart, a seat freed) to keep the voyage moving, and its root fix is a task. S2 writes this into the captain's place in the skill (skills/gear/references/captain.md), where today no such rule stands | why: user | else: the captain patches code itself and the lanes' contracts and reviews are bypassed
 - station M-4338: keep course 19 min in, 3 tasks done, pace ahead of estimates; the next waves are written before a lane runs dry
+
+- 2026-10-28 23:55 override: T-263 passes over its review fail; the only finding is the test in crates/gear-board/tests/it/decisions_contract.rs, outside "lib.rs only", but the accept asked for a board test and that file is where the board's tests live: the contract's wording was the captain's error | why: the work is right, the scope line was wrong | else: a rework that moves a test to a worse place
 
 # Queue
 
@@ -86,3 +88,8 @@ estimate: 15
 goal: [v0.5.0 S1] init refuses a project whose Herdr session is not the one it is registered from (M4.2 #2: one store per Herdr session since v0.4.5, so a config naming another session lands in the wrong store, and that store's engine never reaches the panes). Change crates/gear-cli/src/main.rs fn cmd_admin_init only, no other design: before `--check` prints "config ok" and before a real init writes anything, when the caller's socket (`HERDR_SOCKET_PATH`) belongs to a named session (`session_name_of(home, socket)` returns `Some(name)`) and the parsed `project.herdr_session` is not `name`, fail with `GearError::new(ErrorCode::BadFormat, format!("project {id} names herdr_session {configured}, but this shell runs in session {name}: its store and engine are this session's; run init from a pane of session {configured}, or fix herdr_session"))`. With no socket, the default socket or GEAR_DB set, nothing is checked.
 accept: CLI tests over injected HOME and HERDR_SOCKET_PATH (the existing default_store_in fixtures): a socket under sessions/alpha with herdr_session = "beta" is refused by --check and by init with that text; herdr_session = "alpha" passes; the default socket passes either way; GEAR_DB set passes. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 estimate: 20
+
+## T-270 [must] lane=hull milestone=M5 required
+goal: [v0.5.0 S1] No "name is held by another pane" item for a name that frees in the same tick (M5, M-4365): review-9 finished the direction check of T-264 and went Standby, still named gear-review-t264, while review-11 started T-264's review; crates/gear-engine/src/names.rs fn restore walks the seats in id order, so review-11 asked for gear-review-t264 before review-9 was renamed back to gear-review-9 later in the same loop, and the captain got an item that the next tick resolved by itself. Change fn restore only, no other design: walk the seats in two passes, first every seat whose desired name is its own seat name (`names::desired` returns `agent_name(project, seat.name)`), then the seats named after a task, so a name a finished reviewer holds is given back before another seat asks for it; within a pass the order stays as today.
+accept: names.rs tests with the fake Herdr: seat review-11 (Active, task T-1) and seat review-9 (Standby, no task) whose pane holds gear-review-t1: one restore pass renames review-9 to its seat name and then names review-11 gear-review-t1, and writes no captain item; a name held by a pane of no seat is still reported once. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+estimate: 15
