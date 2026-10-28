@@ -2128,10 +2128,32 @@ fn run_plan(
         let until = gear_app::plan::tail_until(tx, &draft.project)?;
         Ok((lanes, until))
     })?;
+    // T-299: the captain's plan commit follows the project's own form. The
+    // message is the project's `plan_message`, filled with the draft's project
+    // and the id of its last milestone block; `{what}` is left for the captain
+    // to say. A draft without a milestone block has no plan commit named.
+    let commit = match draft.milestones.last() {
+        Some((header, _)) => {
+            let (milestone, _) = gear_app::draft::milestone_parts(header);
+            let conventions =
+                gear_app::config::conventions_or_default(store, &draft.project)?;
+            Some(format!(
+                "commit the plan as: {}",
+                gear_model::commit::fill(
+                    &conventions.plan_message,
+                    &[("project", draft.project.as_str()), ("milestone", milestone)],
+                )
+            ))
+        }
+        None => None,
+    };
     if json {
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
         value["tailed"] = serde_json::json!(tailed);
+        if let Some(commit) = &commit {
+            value["commit"] = serde_json::json!(commit);
+        }
         return serde_json::to_string(&value).map_err(json_error);
     }
     let mut lines = render_apply(&result);
@@ -2149,6 +2171,11 @@ fn run_plan(
         lines.push_str(&format!(
             "tail: lane {lane} is silenced{until} (it may stand idle)"
         ));
+    }
+    // The plan commit comes last: it is the captain's next step after an apply.
+    if let Some(commit) = &commit {
+        lines.push('\n');
+        lines.push_str(commit);
     }
     Ok(lines)
 }
@@ -3356,6 +3383,25 @@ mod tests {
             .to_string()
     }
 
+    /// A draft with a milestone block: the plan commit is named for it (T-299).
+    fn plan_draft_with_milestone() -> String {
+        "<!-- gear-plan project=p base=0 -->\n# Milestone M2: two\ndone: both ship\nbar: fast\neta: 1h\n\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"
+            .to_string()
+    }
+
+    /// Give the project `p` a `[conventions]` in its stored config.
+    fn set_conventions(store: &mut Store, lines: &str) {
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.expect("the project");
+                project.config_toml = format!(
+                    "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = \"/repo\"\n\n[quota]\nlanes = 1\ntemps = 0\n\n[captain]\npane = \"{CAP_PANE}\"\nkind = \"codex\"\nprofile = \"codex\"\n\n[conventions]\n{lines}\n"
+                );
+                tx.update_project(&project)
+            })
+            .unwrap();
+    }
+
     #[test]
     fn plan_apply_creates_tasks() {
         let (mut store, mut herdr) = world();
@@ -3380,6 +3426,98 @@ mod tests {
         assert!(!out.contains("warning:"), "{out}");
         let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
         assert_eq!(tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["T-1"]);
+    }
+
+    // T-299: after an apply the captain is told how to commit the plan, in the
+    // project's own form: the `plan_message` template, filled with the project
+    // and the id of the draft's last milestone block; `{what}` is his to say.
+    #[test]
+    fn plan_apply_names_the_plan_commit() {
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(out.ends_with("commit the plan as: M2: {what}"), "{out}");
+
+        // A project with its own form (ticket key) gets that one.
+        let (mut store, mut herdr) = world();
+        set_conventions(&mut store, "plan_message = \"PROJ-1 {milestone} {what}\"");
+        let path = write_draft(&plan_draft_with_milestone());
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            false,
+        )
+        .unwrap();
+        assert!(out.ends_with("commit the plan as: PROJ-1 M2 {what}"), "{out}");
+
+        // The JSON carries the same line.
+        let (mut store, mut herdr) = world();
+        let path = write_draft(&plan_draft_with_milestone());
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["commit"], serde_json::json!("commit the plan as: M2: {what}"));
+
+        // A staff-only plan has no milestone block: no commit line.
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=test\n");
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit",
+            T0 + 1,
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert!(value.get("commit").is_none(), "{out}");
+        let (mut store, mut herdr) = world();
+        let path = write_draft("<!-- gear-plan project=p base=0 -->\n# Staff\n- hold heat reason=test\n");
+        let out = run_plan(
+            &mut store,
+            &env("captain", CAP_PANE),
+            &mut herdr,
+            Some(&path),
+            None,
+            None,
+            "plan-commit-2",
+            T0 + 2,
+            false,
+        )
+        .unwrap();
+        assert!(!out.contains("commit the plan as:"), "{out}");
     }
 
     /// A task that passed and whose merge failed: the captain retries it with
