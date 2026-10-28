@@ -34,6 +34,13 @@ pub struct ReviewReport {
     /// The tasks whose review still waits: no free temp slot, or a reviewer
     /// that is not up yet.
     pub waiting: Vec<String>,
+    /// `project:task/attempt` of the mechanical hand-ins settled this tick
+    /// (T-273) — settled without a reviewer.
+    pub settled: Vec<String>,
+    /// `project:task/attempt: CODE: detail` of the mechanical hand-ins whose
+    /// settlement failed this tick: reported, never fatal; the hand-in is
+    /// reviewed as today (contract v2 of T-273).
+    pub settle_failed: Vec<String>,
 }
 
 /// Start the reviewers the project needs.
@@ -138,8 +145,23 @@ fn start_hand_in_reviews(
         // a pass in this tick, and the merge gate decides; a task without
         // `mechanical` is reviewed as before.
         if let Some(reason) = mechanical_reason(store, project, &task.task, task.attempt)? {
-            settle_mechanical(store, project, task, &reason, now)?;
-            continue;
+            match settle_mechanical(store, project, task, &reason, now) {
+                Ok(()) => {
+                    report.settled.push(format!("{project}:{}/{}", task.task, task.attempt));
+                    continue;
+                }
+                // Contract v2 (hull's question M-4507): no error of this step
+                // stops the tick. The failure is reported like a review's own
+                // settle failure (R-67), and the hand-in is then reviewed as
+                // today.
+                Err(err) => report.settle_failed.push(format!(
+                    "{project}:{}/{}: {}: {}",
+                    task.task,
+                    task.attempt,
+                    err.code,
+                    err.detail
+                )),
+            }
         }
         // T-69 / B02-04: an attempt whose checkout already failed three times
         // is not tried again. A recovered seat (the park's slot freed) must
@@ -246,6 +268,12 @@ fn start_hand_in_reviews(
 
 /// T-273: the reason the attempt's **adopted** contract is mechanical, if it
 /// is. A mechanical task is not reviewed at all: it merges on its gate alone.
+///
+/// Contract v2 (hull's question M-4507): only a hand-in that works to the
+/// contract the task carries **now** is mechanical. A task whose contract
+/// changed during the attempt is reviewed as today — its pass could not be
+/// written anyway (a pass needs the task's current contract), and the reviewer
+/// judges what the change asks for.
 fn mechanical_reason(
     store: &mut Store,
     project: &str,
@@ -254,8 +282,12 @@ fn mechanical_reason(
 ) -> GearResult<Option<String>> {
     store.read(|tx| {
         let Some(attempt) = tx.get_attempt(project, task, attempt)? else { return Ok(None) };
+        let Some(row) = tx.get_task(project, task)? else { return Ok(None) };
+        if attempt.adopted_version != row.contract_version {
+            return Ok(None);
+        }
         Ok(tx
-            .get_contract(project, task, attempt.adopted_version)?
+            .get_contract(project, task, row.contract_version)?
             .and_then(|contract| contract.mechanical))
     })
 }
@@ -2390,7 +2422,12 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let mut store = world_mechanical(CONFIG, Some("delete three dead fns"));
         let mut herdr = FakeHerdr::new();
 
-        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        // The tick report says a task settled without a reviewer.
+        assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
 
         // No reviewer: no seat, no worktree, no agent.
         assert!(starts(&herdr).is_empty(), "{:?}", starts(&herdr));
@@ -2456,6 +2493,54 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
         assert_eq!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(), 1);
         assert!(starts(&herdr).is_empty());
+    }
+
+    /// T-273 contract v2 (hull's question M-4507): a mechanical task whose
+    /// attempt works to an older contract than the task carries now is
+    /// reviewed as today — its pass could not be written, and the reviewer
+    /// judges what the change asks for.
+    #[test]
+    fn a_mechanical_hand_in_on_an_older_contract_is_reviewed() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                // The task moved to v2, which is where the reason lives; the
+                // hand-in still works to v1.
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 2,
+                    goal: "the goal".into(),
+                    accept: "the accept criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 1,
+                    mechanical: Some("delete three dead fns".into()),
+                })?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.adopted_version, 1);
+        assert_eq!(attempt.state, AttemptState::Submitted, "nothing settles it");
+        assert!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().is_empty());
+        assert!(thread(&mut store, "mechanical:T-1").is_empty(), "no mechanical line");
+        assert!(report.settled.is_empty(), "{report:?}");
+        let temps = store
+            .read(|tx| tx.seats_of_project("p"))
+            .unwrap()
+            .into_iter()
+            .filter(|seat| seat.role == SeatRole::Temp)
+            .count();
+        assert_eq!(temps, 1, "the reviewer judges the change");
     }
 
     /// T-273: a task without `mechanical` is reviewed as today.
