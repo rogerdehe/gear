@@ -612,15 +612,24 @@ fn read_config(config: &std::path::Path) -> GearResult<String> {
     })
 }
 
-/// The other projects of the store at `GEAR_DB` — `(id, config_toml)` — for
-/// the branch check of `admin init --check` (T-256), or `None` when there is no
-/// store to read: no `GEAR_DB`, or no file there yet. Only an existing store is
-/// opened, and read-only — a check creates no file, applies no schema and
-/// migrates nothing (T-228).
+/// The other projects of the store this `gear` call would use — `(id,
+/// config_toml)` — for the branch check of `admin init --check` (T-256), or
+/// `None` when there is no store to read: none at the path, or no `HOME` to
+/// find the default one under. The path is `GEAR_DB` when the caller names
+/// one, else the default store of this session — resolved with
+/// [`default_store_in`], never with [`default_store_path`], which creates the
+/// directory. Only an existing store is opened, and read-only: a check creates
+/// no file, applies no schema and migrates nothing (T-228).
 fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
-    let Some(path) = std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from)
-    else {
-        return Ok(None);
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
     };
     if !path.exists() {
         return Ok(None);

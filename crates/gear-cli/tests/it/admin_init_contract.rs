@@ -551,3 +551,56 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(stdout(&o).trim(), "config ok: project q, 0 lanes, 0 reviewers");
 }
+
+/// `gear admin init <config>` as the user's own shell with no `GEAR_DB`: the
+/// default store of `home` (T-256 F1).
+fn init_without_db(home: &Path, config: &Path) -> Output {
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home).expect("install the skill");
+    }
+    Command::new(env!("CARGO_BIN_EXE_gear"))
+        .args(["admin", "init", config.to_str().expect("a utf-8 path")])
+        .env("HOME", home)
+        .env("GEAR_ADMIN", "1")
+        .env_remove("GEAR_DB")
+        .env_remove("GEAR_CTX")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .expect("run gear")
+}
+
+/// T-256 (review F1): with no `GEAR_DB`, `--check` reads the default store the
+/// registration would use, so a second project on one repository is refused in
+/// the user's own shell too.
+#[test]
+fn check_reads_the_default_store_when_gear_db_is_unset() {
+    let dir = scratch("check-default");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("the other repo");
+
+    // `p` is registered into the default store of the temporary HOME.
+    let o = init_without_db(&home, &config_for(&dir, "p", &repo));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let db = home.join(".local/state/gear/gear.db");
+    assert!(db.exists(), "the registration made the default store");
+
+    // With no GEAR_DB, `--check` of `q` on the same repository still sees `p`.
+    let o = check_cmd_without_db(&home, &config_for(&dir, "q", &repo));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let err = stderr(&o);
+    assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
+    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
+    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
+    assert!(!err.contains("skipped"), "the check read the default store: {err}");
+
+    // On another repository the same config passes, and still says nothing of a
+    // skipped check.
+    let o = check_cmd_without_db(&home, &config_for(&dir, "q", &elsewhere));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stderr(&o).is_empty(), "{}", stderr(&o));
+}
