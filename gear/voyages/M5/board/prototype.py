@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GEAR board prototype v3 for M5 (fake data, curses, no dependencies).
 
-Keys: 0-5 or Tab / <- -> views · [ ] older / newer voyage · up/down select ·
+Keys: 1-5 or Tab / <- -> views · [ ] older / newer voyage · up/down select ·
 Enter open or close · q quit.
 """
 import curses
@@ -104,7 +104,7 @@ DECISIONS = {
                counts="210 decisions · 31 reworks · 58 friction reports"),
 }
 QUOTA = [("tokenrhythm", "lanes", 41, "22:00"), ("codex", "review", 63, "Oct 30")]
-VIEWS = ["Voyages", "Now", "Graph", "Workload", "Decisions", "Time & tokens"]
+VIEWS = ["Now", "Graph", "Workload", "Decisions", "Time & tokens"]
 
 # ---------------------------------------------------------------- helpers
 def hm(m):
@@ -195,41 +195,24 @@ class Board:
             self.put(y, x, label, a)
             x += len(label) + 3
         y += 1
-        self.put(y, 1, "Distance: " + " · ".join(v["distance"]), curses.A_DIM)
+        # each clause of the goal: met (✓) or how far it still is (✗)
+        x = 1
+        for part in v["distance"]:
+            bad = "NOT" in part or "not started" in part or "measured" in part
+            label = ("✗ " if bad else "✓ ") + part
+            if x + len(label) > w - 2:
+                y += 1
+                x = 1
+            self.put(y, x, label, curses.color_pair(10) if bad else curses.color_pair(11))
+            x += len(label) + 3
         y += 1
         x = 1
         for i, name in enumerate(VIEWS):
-            label = f" {i} {name} "
+            label = f" {i + 1} {name} "
             self.put(y, x, label, curses.A_REVERSE if i == self.view else 0)
             x += len(label) + 1
         self.put(y + 1, 0, "─" * (w - 1), curses.A_DIM)
         return y + 2
-
-    # -- 0 Voyages: every voyage of the project, its goal and how it ended
-    def voyages(self, top, w, h):
-        y = top
-        self.put(y, 1, "Every voyage, newest first. ↑↓ or [ ] picks one; the other views show the one picked.", curses.A_DIM)
-        y += 2
-        for i, v in enumerate(VOYAGES):
-            a = curses.A_REVERSE if i == self.vi else 0
-            state = "sailing" if v["state"] == "sailing" else "landed"
-            self.put(y, 1, f"{v['id']:<6}{state:<9}{hm(v['used']):>7} of {hm(v['eta']):<7} bar {v['bar']:<12}{v['title']}",
-                     curses.A_BOLD | a)
-            y += 1
-            for line in wrap("Goal: " + v["done"], w - 12):
-                self.put(y, 8, line)
-                y += 1
-            if v["goal_changed"]:
-                at, before, after = v["goal_changed"]
-                self.put(y, 8, f"goal changed {at}: {before} -> {after}", curses.color_pair(10))
-                y += 1
-            for part in v["distance"]:
-                bad = "NOT" in part or "not started" in part or "measured" in part
-                self.put(y, 8, ("✗ " if bad else "✓ ") + part, curses.color_pair(10) if bad else curses.color_pair(11))
-                y += 1
-            y += 1
-            if y >= h - 3:
-                break
 
     # -- 1 Now: lanes on the left, needs a look + quota on the right
     def now(self, top, w, h):
@@ -430,8 +413,8 @@ class Board:
         self.scr.erase()
         h, w = self.scr.getmaxyx()
         top = self.header(w)
-        [self.voyages, self.now, self.graph, self.workload, self.decisions, self.tokens][self.view](top, w, h)
-        self.put(h - 1, 1, "0-5 / Tab views · [ ] voyage · ↑↓ select · Enter open · q quit · "
+        [self.now, self.graph, self.workload, self.decisions, self.tokens][self.view](top, w, h)
+        self.put(h - 1, 1, "1-5 / Tab views · [ ] voyage · ↑↓ select · Enter open · q quit · "
                            f"terminal {w}×{h}: the layout follows the width", curses.A_DIM)
         self.scr.refresh()
 
@@ -445,18 +428,14 @@ class Board:
                 self.view = (self.view + 1) % len(VIEWS)
             elif k == curses.KEY_LEFT:
                 self.view = (self.view - 1) % len(VIEWS)
-            elif ord("0") <= k <= ord("5"):
-                self.view = k - ord("0")
+            elif ord("1") <= k <= ord("5"):
+                self.view = k - ord("1")
             elif k == ord("["):
                 self.vi = min(len(VOYAGES) - 1, self.vi + 1)
                 self.sel = 0
             elif k == ord("]"):
                 self.vi = max(0, self.vi - 1)
                 self.sel = 0
-            elif k == curses.KEY_DOWN and self.view == 0:
-                self.vi = min(len(VOYAGES) - 1, self.vi + 1)
-            elif k == curses.KEY_UP and self.view == 0:
-                self.vi = max(0, self.vi - 1)
             elif k == curses.KEY_DOWN:
                 self.sel = min(len(LANES[self.v["id"]]) - 1, self.sel + 1)
             elif k == curses.KEY_UP:
