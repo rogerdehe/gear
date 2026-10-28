@@ -5,7 +5,7 @@ The one default way of working every GEAR project shares. The captain and every 
 ## 1. A project, a voyage, a lane
 
 - A **project** is one piece of work with a goal: a new product, or one requirement inside an existing repo (then the project gets a short name, e.g. `billing-v2`, and its own integration branch cut from the mainline). Its code may be one git repository or a folder of several (§9).
-- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own plan file `gear/voyages/<milestone>.md`.
+- A **voyage** is one milestone: a `done:` sentence, a `bar:`, an `eta:` style, and its own folder `gear/voyages/<milestone>/` holding its plan (`plan.md`), its `reports/` and its `reviews/`. The folder is a convention too (`voyage_dir`, §3).
 - A **lane** is a long-lived agent with a declared **duty** (one sentence) and **owned paths**; lanes never own the same path. A lane whose duty cannot be stated is not opened. A changed duty is a new lane, not a rename.
 - A **temp worker** (today: a reviewer) starts clean for one job and ends with one deliverable. Clean context always comes from a new session, never from clearing an old one.
 
@@ -33,6 +33,17 @@ Names are derived, never invented (`lane-a`, `agent-3`, `bot` are not allowed).
 
 Lanes create, switch and push their own task branches only. They never merge, rebase shared branches, push `dev`/`main`, force-push or delete branches.
 
+The branch names, the remote and the voyage folder are configuration: a project names its own in `[conventions]`, as templates with the placeholders filled in. These are the defaults (the names GEAR itself uses):
+
+| `[conventions]` | Default | Filled in |
+|---|---|---|
+| `integration` / `release` / `staging` | `dev` / `main` / none | — |
+| `task_branch` | `{lane}/t{n}` | `{project}`, `{lane}`, `{n}` |
+| `review_branch` | `review/t{n}` | `{project}`, `{lane}`, `{n}` |
+| `seat_branch` | `{project}/{seat}` | `{project}`, `{seat}` |
+| `remote` | `origin` | — (the git remote a hand-in is checked against) |
+| `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
+
 ## 4. Worktrees — always through Herdr
 
 Herdr creates and removes every worktree; its config decides the path. A lane keeps one worktree for life (its build cache persists); a reviewer seat keeps one between jobs. One agent, one worktree. Nobody edits in the main checkout. Removing a worktree, closing a session and deleting a branch are separate acts; nothing uncommitted or unmerged is ever thrown away.
@@ -41,7 +52,7 @@ A lane's worktree holds only its repo (§9).
 
 ## 5. The lane's task loop
 
-0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework).
+0. **Start.** The delivery names the task, its branch and its packet: run `gear` first, then in the lane's repo (§9) `git fetch origin && git switch -c <branch> origin/<integration>` (or switch back to it for a rework). The delivery names `origin`; a project whose remote is called otherwise (`[conventions].remote`) fetches from that name.
 1. **Orient.** Read the packet completely (goal, acceptance, the voyage's `done:`/`bar:`), the files it names, the recent history of the area.
    **You implement; you never design.** When the packet is unclear, contradicts the design or a message, or you catch yourself weighing two readings, stop at once and ask (§6) with your default, then go on with the default. A design question is the captain's work, not yours.
 2. **Reproduce before fixing** a bug. If you cannot observe it, your model is wrong: ask.
