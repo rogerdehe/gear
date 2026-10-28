@@ -44,6 +44,7 @@ pub mod rounds;
 mod rules;
 pub mod session;
 mod session_runner;
+pub mod silent;
 pub mod review;
 pub mod start;
 pub mod switch;
@@ -326,6 +327,10 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         let restarted = restart_missing_jobs(store, herdr, cfg, &profiles, &project, &observed, now)?;
         missing_seats.retain(|seat| !restarted.contains(seat));
         report.flagged.retain(|seat| !restarted.contains(seat));
+
+        // A seat that holds work and has produced nothing for ten minutes
+        // reaches the captain (T-227): one alert per round.
+        report.flagged.extend(silent::tick(store, &project, &observed, &profiles, now)?);
 
         // 1a. a lane or reviewer whose agent is gone from its pane (it exited,
         //     the pane was closed) reaches the captain at once (L-56): the

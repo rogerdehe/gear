@@ -1440,6 +1440,32 @@ impl<'s> Tx<'s> {
         Ok(messages)
     }
 
+    /// The messages `sender` sent since `since` (T-227), in their recorded
+    /// order. Every kind counts: a progress answer, a question, a blocked
+    /// report — anything the seat said is the seat's own word.
+    pub fn messages_from_since(
+        &self,
+        project: &str,
+        sender: &str,
+        since: Ts,
+    ) -> GearResult<Vec<MessageRow>> {
+        let mut stmt = self
+            .tx
+            .prepare(&message_select(
+                " WHERE project=?1 AND sender=?2 AND created>=?3
+                 ORDER BY created, id",
+            ))
+            .map_err(map_sqlite)?;
+        let rows = stmt
+            .query_map(params![project, sender, since], message_from_row)
+            .map_err(map_sqlite)?;
+        let mut messages = Vec::new();
+        for row in rows {
+            messages.push(row.map_err(map_sqlite)?);
+        }
+        Ok(messages)
+    }
+
     pub fn thread_messages(&self, project: &str, thread: &str) -> GearResult<Vec<MessageRow>> {
         let mut stmt = self
             .tx
