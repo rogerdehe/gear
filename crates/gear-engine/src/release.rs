@@ -472,9 +472,20 @@ pub fn release_dead_temps(
     let mut released = Vec::new();
     let seats = store.read(|tx| tx.seats_of_project(project))?;
     for seat in seats {
-        // Only a parked reviewer: a seat that is up, starting or on its way
-        // out runs (or is about to run) a review.
-        if seat.role != SeatRole::Temp || seat.state != SeatState::Unknown {
+        // Only a parked reviewer, or one parked in NeedsCheck with no job
+        // (T-259): a seat that is up, starting or on its way out runs (or is
+        // about to run) a review. A NeedsCheck seat is a human's to look at,
+        // but one that holds no task and whose agent is gone has no reviewer
+        // for a human to find — it keeps a temp slot for ever.
+        if seat.role != SeatRole::Temp {
+            continue;
+        }
+        let dead = match seat.state {
+            SeatState::Unknown => true,
+            SeatState::NeedsCheck => seat.task_id.is_none(),
+            _ => false,
+        };
+        if !dead {
             continue;
         }
         if runs_a_reviewer(store, herdr, &seat)? {
@@ -535,9 +546,9 @@ fn release_dead(
                 }
             }
             require_transition(
-                SeatState::can_transition(SeatRole::Temp, SeatState::Unknown, SeatState::Released),
+                SeatState::can_transition(SeatRole::Temp, seat.state, SeatState::Released),
                 "seat",
-                SeatState::Unknown.as_str(),
+                seat.state.as_str(),
                 SeatState::Released.as_str(),
             )?;
             tx.set_seat_state(
@@ -1789,6 +1800,66 @@ profile = "codex"
             assert_eq!(seat.state, SeatState::Released, "{name} is free");
         }
         assert_eq!(exits(&herdr), 2, "both panes are closed");
+    }
+
+    /// T-259: a reviewer parked in NeedsCheck with no task and no agent in its
+    /// pane is released by the engine — the captain is not asked to check an
+    /// agent that no longer exists. A NeedsCheck seat that still holds a task,
+    /// or whose pane holds an agent, is left as it was.
+    #[test]
+    fn a_needs_check_reviewer_without_a_task_and_an_agent_is_released() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        let mut herdr = FakeHerdr::new();
+        // The seat is parked in NeedsCheck with no job (its session resume ran
+        // out); its pane is an empty shell.
+        store
+            .write(|tx| {
+                tx.clear_seat_task("p:r-1")?;
+                tx.set_seat_state("p:r-1", SeatState::NeedsCheck, Some("resume timed out"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        herdr.add_shell("w2:p2");
+
+        let released = release_dead_temps(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        assert_eq!(released, vec!["p:r-1".to_string()]);
+        let seat = store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Released);
+        let binding = store.read(|tx| tx.get_binding("p:r-1", 1)).unwrap().unwrap();
+        assert_eq!(binding.status, BindingStatus::Void, "its binding ends with it");
+        assert_eq!(exits(&herdr), 1, "its pane is closed");
+
+        // A NeedsCheck reviewer that still holds a task waits for the captain
+        // (T-259: only one with no task is released).
+        store
+            .write(|tx| {
+                tx.set_seat_state("p:r-1", SeatState::NeedsCheck, Some("resume timed out"), T0)?;
+                tx.set_seat_task("p:r-1", "T-1")?;
+                tx.set_binding_status("p:r-1", 1, BindingStatus::Active)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 20).unwrap().is_empty());
+        assert_eq!(
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
+            SeatState::NeedsCheck
+        );
+
+        // A NeedsCheck reviewer with no task whose pane holds an agent is a
+        // reviewer a human has to look at: it keeps its slot.
+        store
+            .write(|tx| {
+                tx.clear_seat_task("p:r-1")?;
+                tx.set_seat_state("p:r-1", SeatState::NeedsCheck, Some("resume timed out"), T0)?;
+                Ok(())
+            })
+            .unwrap();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        assert!(release_dead_temps(&mut store, &mut herdr, "p", T0 + 30).unwrap().is_empty());
+        assert_eq!(
+            store.read(|tx| tx.get_seat("p:r-1")).unwrap().unwrap().state,
+            SeatState::NeedsCheck
+        );
     }
 
     /// B02-04: a parked reviewer that runs no reviewer is released — the slot
