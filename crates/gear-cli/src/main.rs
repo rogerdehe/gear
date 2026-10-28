@@ -2132,17 +2132,14 @@ fn run_plan(
     // message is the project's `plan_message`, filled with the draft's project
     // and the id of its last milestone block; `{what}` is left for the captain
     // to say. A draft without a milestone block has no plan commit named.
-    let commit = match draft.milestones.last() {
+    let plan_commit = match draft.milestones.last() {
         Some((header, _)) => {
             let (milestone, _) = gear_app::draft::milestone_parts(header);
             let conventions =
                 gear_app::config::conventions_or_default(store, &draft.project)?;
-            Some(format!(
-                "commit the plan as: {}",
-                gear_model::commit::fill(
-                    &conventions.plan_message,
-                    &[("project", draft.project.as_str()), ("milestone", milestone)],
-                )
+            Some(gear_model::commit::fill(
+                &conventions.plan_message,
+                &[("project", draft.project.as_str()), ("milestone", milestone)],
             ))
         }
         None => None,
@@ -2151,8 +2148,10 @@ fn run_plan(
         let mut value = serde_json::to_value(&result).map_err(json_error)?;
         value["warnings"] = serde_json::json!(warnings);
         value["tailed"] = serde_json::json!(tailed);
-        if let Some(commit) = &commit {
-            value["commit"] = serde_json::json!(commit);
+        // The JSON carries the message itself (a script uses it as the commit
+        // message); the text output wraps it in a sentence.
+        if let Some(plan_commit) = &plan_commit {
+            value["commit"] = serde_json::json!(plan_commit);
         }
         return serde_json::to_string(&value).map_err(json_error);
     }
@@ -2173,9 +2172,9 @@ fn run_plan(
         ));
     }
     // The plan commit comes last: it is the captain's next step after an apply.
-    if let Some(commit) = &commit {
+    if let Some(plan_commit) = &plan_commit {
         lines.push('\n');
-        lines.push_str(commit);
+        lines.push_str(&format!("commit the plan as: {plan_commit}"));
     }
     Ok(lines)
 }
@@ -3468,7 +3467,7 @@ mod tests {
         .unwrap();
         assert!(out.ends_with("commit the plan as: PROJ-1 M2 {what}"), "{out}");
 
-        // The JSON carries the same line.
+        // The JSON carries the message itself, not the sentence.
         let (mut store, mut herdr) = world();
         let path = write_draft(&plan_draft_with_milestone());
         let out = run_plan(
@@ -3484,7 +3483,7 @@ mod tests {
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(value["commit"], serde_json::json!("commit the plan as: M2: {what}"));
+        assert_eq!(value["commit"], serde_json::json!("M2: {what}"));
 
         // A staff-only plan has no milestone block: no commit line.
         let (mut store, mut herdr) = world();
