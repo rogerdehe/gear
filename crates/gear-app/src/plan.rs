@@ -715,7 +715,12 @@ fn apply_queue(
         if seat.state == target {
             // Staff is a target, not a command: already there, nothing to do.
             // The captain still made a decision (design §7.4), so it is
-            // logged — once.
+            // logged — once. The result says so too (T-303): a line that
+            // does nothing must not be silent.
+            warnings.push(format!(
+                "- {verb} {lane}: the lane is already {}, nothing to do",
+                seat.state.as_str()
+            ));
             record_gear_decision(
                 tx,
                 project,
@@ -1349,8 +1354,10 @@ fn retry_lane(
 ///
 /// A **reviewer** (design §3.6): a reviewer seat in Standby — its agent alive,
 /// its pane open, no job — goes to `Releasing`, and the engine closes the pane
-/// as for any release. A reviewer with a job is refused: the captain does not
-/// pull a reviewer out of the review it is doing.
+/// as for any release. A reviewer with a job is refused while its agent is
+/// there: the captain does not pull a live reviewer out of the review it is
+/// doing. When its agent is gone, the seat is let go (see
+/// [`release_reviewer`]).
 ///
 /// Whether a lane's agent is still there is the session's fact, not the
 /// store's (review F1): the store keeps the pane GEAR started an agent in, and
@@ -1373,7 +1380,7 @@ fn release_seat(
         .ok_or_else(|| bad(line, format!("no seat {seat_id} in this project")))?;
     match seat.role {
         SeatRole::Lane => release_lane(tx, &seat, name, line, agents, now),
-        SeatRole::Temp => release_reviewer(tx, &seat, name, now),
+        SeatRole::Temp => release_reviewer(tx, &seat, name, agents, now),
         role => Err(bad(
             line,
             format!("seat {seat_id} is a {role} seat, staff lines name lanes and reviewers"),
@@ -1568,8 +1575,17 @@ pub fn end_parked_lanes(
 /// its agent alive, its pane open, no job — is released: the seat goes to
 /// `Releasing` and the engine closes the pane as for any release.
 ///
-/// A reviewer **in a job** is refused: the captain does not pull a reviewer out
-/// of the review it is doing. The refusal names the task it is reviewing.
+/// A reviewer **in a job** is refused while its agent is there: the captain
+/// does not pull a live reviewer out of the review it is doing. The refusal
+/// names the task it is reviewing.
+///
+/// A reviewer in a job whose **agent is gone** is let go (T-303): the review
+/// cannot finish, and the captain's line is the way out. The seat's task is
+/// cleared and the seat goes to `Releasing`; the task stays `Verifying` with
+/// its attempt handed in, and the engine's normal `start_reviews` pass starts
+/// the review again. Whether the agent is gone is the session's fact, as for a
+/// lane (review F1): without the session's agents the release is refused, not
+/// guessed.
 ///
 /// A reviewer in any other state (queued, starting, already released) is
 /// refused with the reason: only a reviewer in Standby is idle enough to let
@@ -1578,15 +1594,55 @@ fn release_reviewer(
     tx: &Tx<'_>,
     seat: &gear_store::SeatRow,
     name: &str,
+    agents: Option<&[gear_herdr::AgentInfo]>,
     now: Ts,
 ) -> GearResult<()> {
     // A reviewer with a job binding is reviewing it (§3.6: the binding ends
     // when the seat goes to Standby).
     if let Some(task) = seat.task_id.as_deref() {
-        return Err(GearError::new(
-            ErrorCode::BadTransition,
-            format!("{name} is reviewing {task}"),
-        ));
+        // The seat's binding is GEAR's record of the pane it started an agent
+        // in; the session's agents say whether one is in that pane now.
+        let binding = tx
+            .get_binding(&seat.id, seat.generation)?
+            .filter(|binding| binding.status == BindingStatus::Active);
+        match (binding, agents) {
+            (Some(binding), Some(agents)) => {
+                let there = agents.iter().any(|agent| {
+                    agent.pane_id == binding.pane_id
+                        && agent.agent.as_deref() == Some(binding.kind.as_str())
+                });
+                if there {
+                    return Err(GearError::new(
+                        ErrorCode::BadTransition,
+                        format!("{name} is reviewing {task}"),
+                    ));
+                }
+                // The agent is gone mid-review: the seat is let go, the task
+                // stays Verifying and the engine starts the review again.
+                tx.clear_seat_task(&seat.id)?;
+                tx.set_seat_state(
+                    &seat.id,
+                    SeatState::Releasing,
+                    Some("released by the captain: its agent is gone mid-review"),
+                    now,
+                )?;
+                return Ok(());
+            }
+            (Some(_), None) => {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!(
+                        "{name} is reviewing {task} (the session's agents were not read, so GEAR cannot tell whether its agent is gone)"
+                    ),
+                ));
+            }
+            (None, _) => {
+                return Err(GearError::new(
+                    ErrorCode::BadTransition,
+                    format!("{name} is reviewing {task}"),
+                ));
+            }
+        }
     }
     if seat.state != SeatState::Standby {
         return Err(GearError::new(
