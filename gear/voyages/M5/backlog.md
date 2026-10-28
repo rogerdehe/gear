@@ -61,19 +61,12 @@ What is meant for M5, in two parts. **Decided**: what the user placed in M5, wit
 
 Each of these has already sat through two or more voyages: take it or drop it at this kickoff.
 
-- Queue order check: a later milestone's task ranked ahead of an open one of the current milestone (postponed from M2 #16; 7 voyages).
-- Drop the store's copy of a review after its task merges; git keeps the record (postponed from M2 #26; 7 voyages).
 - A live proof that a lane parked on a quota wait resumes its session at the reset (postponed from M2 #13; 7 voyages).
 - The home page shows lanes whose warnings a `- tail:` turned off (postponed from M3.1 #5 and M4 #23; 4 voyages).
 - The lane quota counts active seats, not configured lanes (config.rs); a rebind with preview and rollback; the guide's rule for rebinding an idle lane (postponed from M3.1 B02-01 and M4 #1; 4 voyages).
-- Live checks never recorded: T-69 ends the branch-held loop; a reused reviewer gets no earlier job's notices (B02-02) (postponed from M3.1 #2 and #8; 4 voyages).
-- "Acceptance runs on real work where it can" is written in no skill or convention (postponed from M3.1; 4 voyages).
-- A switch to another CLI hands the new agent the previous conversation (T-77; postponed from M3 #4 and M4 #8; 5 voyages; M4's design chose a fresh start instead — drop or take).
-- Quota markers for claude and grok, a status-bar reading for every kind (postponed from M3 #1 and M4 #2; 5 voyages; provider readings may make them unnecessary).
 - `remerge` refuses a candidate already on the integration branch; op ids compared as numbers (T-92 F1/F2; postponed from M4 #9; 4 voyages).
-- Kickoff prints each model's picker and bar labels; a catalogue failure is not "model absent" (T-94 F4/F6; postponed from M4 #12; 4 voyages).
+- A catalogue failure at kickoff is not reported as "model absent" (T-94 F6; postponed from M4 #12; 4 voyages). Its other half, the picker and bar labels (F4), went to M6.
 - Quota reset times for providers other than minimax, opencode-go and codex (postponed from M4 #20; 3 voyages).
-- The live Codex quota fallback, never observed (postponed from M4 #21; 3 voyages).
 - The board PTY test polls with 10/50 ms sleeps (T-128 F1/F2); the FIFO handshakes in merge.rs tests have no time bound (T-127 F4) (postponed from M4 #29 and #31; 3 voyages).
 - `gear admin stop` waits for in-flight merges (T-121, T-180; postponed from M3.1 #6, M4 #24, M4.2 #13; 4 voyages).
 - The engine reconnects when its Herdr server restarts (T-176's rest; postponed from M4 #28 and M4.2 #14; 3 voyages).
