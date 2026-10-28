@@ -825,6 +825,38 @@ fn apply_queue(
     // state the captain saw, and the parks that are left end here.
     end_parked_lanes(tx, project, agents, now)?;
 
+    // A retired lane comes back when a task names it again (T-247): a config
+    // re-apply alone never revives a lane, a Ready task on that lane does —
+    // and only while the lane is still in the project's config.
+    let lanes: Vec<String> = match project_config(tx, project)? {
+        Some(config) => config.lanes.into_iter().map(|lane| lane.name).collect(),
+        None => Vec::new(),
+    };
+    if !lanes.is_empty() {
+        let tasks = tx.tasks_of_project(project)?;
+        for seat in tx.seats_of_project(project)? {
+            if seat.role != SeatRole::Lane || seat.state != SeatState::Retired {
+                continue;
+            }
+            if !lanes.contains(&seat.name) {
+                continue;
+            }
+            if !tasks
+                .iter()
+                .any(|task| task.lane.as_deref() == Some(seat.name.as_str()) && task.state == TaskState::Ready)
+            {
+                continue;
+            }
+            tx.set_seat_state(
+                &seat.id,
+                SeatState::Queued,
+                Some("a task names it again"),
+                now,
+            )?;
+            staffed.push(format!("start {}", seat.name));
+        }
+    }
+
     tx.insert_plan(&PlanRow {
         project: project.to_string(),
         version,
