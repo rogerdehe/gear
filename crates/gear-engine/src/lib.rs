@@ -646,7 +646,21 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         if let Err(e) = store.write(|tx| {
             let missing = missing_seats.contains(&seat);
             tx.set_meta(&format!("stall-missing:{seat}"), if missing { "1" } else { "" })?;
-            let fact = if missing { "its agent is gone from its pane" } else { "a delivery was not confirmed or continuing it made no progress" };
+            // T-287: a seat the engine already restarted once on this config
+            // that is missing again ends the same way (M4.2 #17). Its item says
+            // so, and names the pane and the config as the place to look, so
+            // the captain does not spend a second restart on it.
+            let again = match (missing, tx.get_seat(&seat)?) {
+                (true, Some(row)) => restart_spent(tx, &row)?,
+                _ => false,
+            };
+            let fact = if again {
+                "its agent exited again after the engine restarted it once on the current config; the cause is in its pane or its config (a refused model id, a missing CLI, a login): fix that first, since another restart on the same config ends the same way"
+            } else if missing {
+                "its agent is gone from its pane"
+            } else {
+                "a delivery was not confirmed or continuing it made no progress"
+            };
             stall::alert_fact(tx, &seat, now, fact)
         }) {
             // One seat's alert failing never stops the tick.
@@ -654,6 +668,49 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         }
     }
     Ok(report)
+}
+
+/// Did the engine's one restart already come back to the same end for this
+/// seat's **current job** (T-287)?
+///
+/// The restart of a job writes `engine.restart.<seat>.<task>.<attempt>`
+/// (`fn restart_missing_jobs`): `"started"` means the restart was spent on that
+/// job, so a seat missing again after it cannot be helped by another restart on
+/// the same config. The current job is the attempts in progress for a lane, and
+/// the seat's own task with its last attempt for a temp seat.
+fn restart_spent(tx: &gear_store::Tx<'_>, seat: &gear_store::SeatRow) -> GearResult<bool> {
+    use gear_model::{AttemptState, SeatRole};
+    let jobs: Vec<(String, i64)> = match seat.role {
+        SeatRole::Lane => tx
+            .in_progress_attempts_of_seat(&seat.id)?
+            .into_iter()
+            .filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Delivered))
+            .map(|a| (a.task, a.n))
+            .collect(),
+        // A released reviewer has no `task_id` any more: the restart finds its
+        // job through the pending review, so this does the same.
+        SeatRole::Temp => match tx
+            .get_meta(&format!("engine.review_pending.{}", seat.id))?
+            .filter(|s| !s.is_empty())
+            .or_else(|| seat.task_id.clone())
+        {
+            Some(task) => tx
+                .attempts_of_task(&seat.project, &task)?
+                .last()
+                .map(|a| (a.task.clone(), a.n))
+                .into_iter()
+                .collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    for (task, attempt) in jobs {
+        let marker = format!("engine.restart.{}.{}.{}", seat.id, task, attempt);
+        if tx.get_meta(&marker)?.as_deref() == Some("started") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn restart_missing_jobs(
@@ -1075,6 +1132,26 @@ review=[{model="gpt-6.1-sol",cli="codex",args=["-c","model_reasoning_effort=high
             let lane_stall=store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap();
             assert_eq!(if role==SeatRole::Lane {lane_stall.len()} else {stall.len()},1);
             assert_eq!(if role==SeatRole::Lane {lane_stall[0].state} else {stall[0].state},MsgState::Open);
+            // T-287: the second exit after the engine's one restart says so.
+            let body=&if role==SeatRole::Lane {&lane_stall[0].body} else {&stall[0].body};
+            assert!(body.contains("exited again after the engine restarted it once"),"{role:?}: {body}");
+        }
+    }
+
+    /// T-287: a missing seat the engine never restarted keeps the plain fact:
+    /// nothing says another restart would end the same way.
+    #[test]
+    fn a_missing_seat_never_restarted_keeps_the_plain_fact() {
+        for role in [SeatRole::Lane,SeatRole::Temp] {
+            let (mut store,mut herdr,cfg,pane)=fixture(role);
+            // The pane itself is gone: there is nowhere to restart the agent.
+            let _ = herdr.pane_close(&pane);
+            tick(&mut store,&mut herdr,&cfg,NOW+1).unwrap();
+            assert_eq!(herdr.calls.iter().filter(|call|matches!(call,Call::AgentStart{..})).count(),0);
+            let items=if role==SeatRole::Lane {store.read(|tx|tx.thread_messages("p","stall:p:heat")).unwrap()} else {store.read(|tx|tx.thread_messages("p","stall:p:review-1")).unwrap()};
+            assert_eq!(items.len(),1,"{role:?}: {items:?}");
+            assert!(items[0].body.contains("its agent is gone from its pane"),"{role:?}: {}",items[0].body);
+            assert!(!items[0].body.contains("exited again after the engine restarted it once"),"{role:?}: {}",items[0].body);
         }
     }
 }
