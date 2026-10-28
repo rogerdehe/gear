@@ -107,6 +107,13 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - A config re-init brings retired lanes back (2026-10-28): after M4's lanes were retired, a re-init that only dropped a pi flag re-registered deck, hull, keel and mast and the engine started all four agents again (hull on Codex). A retired lane stays retired until a staff line or the user brings it back; init prints which lanes it would start.
 - Verification commands that build the whole repo, run by every lane, reviewer and gate at once, took the machine to load 175 (another project's Go voyage, 2026-10-28; `go test -list ./...` on a baseline checkout too). Accept commands are scoped to the packages a task touches; with the machine watch, the engine holds new suites while load is high.
 - An urgent instruction cannot reach a lane inside a long tool call (a captain on another project, 2026-10-28): the message waits in the agent's queue (pi "Steering") until a 3-minute `go test ./...` returns, and `gear send --urgent` does not interrupt. An urgent instruction interrupts the working turn first (the profile's interrupt key, as quiet.rs does for a stuck turn), then delivers, and says so to the captain.
+- The home page's `next: gear reply M-n --resolve` cannot be run as printed: `gear reply` requires `-m` (trial project feedback B04-02, v0.3.4; still so in v0.4.6, home.rs). Print `gear reply M-n --resolve -m "<what was done>"`.
+- "deliveries not confirmed: N" on the home page counts old operations: with no lane working it showed 3 on this project (v0.4.6), and a trial captain read it as lost messages (B04-01). Count only deliveries still waiting for their check-in, and name them.
+
+## Later fixes (not urgent; collected 2026-10-28)
+
+- A stuck or IDLE alert says what it is about (trial project feedback B04-01, v0.3.4): the operation and its age, the task or instruction it belongs to, the lane's last check-in or hand-in, and what it waits for. IDLE says it means "no next task to dispatch", not "the agent does nothing". Re-check against v0.4.x first: T-213 (a doorbell behind a working turn is not a stall), Herdr's agent state for busy/ready (v0.4.0) and the session-write check (v0.4.1) removed most of these false alerts.
+- The doorbell named an open urgent item the home page did not list (B04-01): check whether the home page caps or filters items a doorbell counts; both must list the same open items.
 
 ## For M5 (user, 2026-10-26; regrouped 2026-10-28)
 - **A captain that only relays (user, 2026-10-27, discuss at M5 kickoff).** Lanes think little so the captain must think: design, decide, write exact contracts, judge findings. Seen in another GEAR project: a captain that only splits messages into tasks, passes them on and acknowledges reports, deciding nothing. M5 settles how GEAR prevents and detects this.
@@ -126,5 +133,6 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
 - Cut from M4: T-181 acknowledged instructions and the config drift warning (goal in gear/voyages/M4.md).
 - A view across Herdr sessions (several stores) and shared quota scheduling, only when it is needed.
+- Work that is not a task (trial project feedback B04-01): lanes giving read-only evidence or environment support to another lane, on a captain's instruction. GEAR knows only tasks, so such lanes look stuck or idle. Discuss: a small tracked kind of work (an instruction with an expected receipt and a deadline) versus always making it a task.
 
 - Done in M4: a hand-in window for a moving dev (T-221) and the next branch from origin/dev (T-222).
