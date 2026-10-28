@@ -305,7 +305,11 @@ fn an_ordinary_question_is_answered_without_a_verdict() {
     // The page offers the reply, and the reply goes through.
     let page = home::build(&mut s, &cap_env(), Some(&fp()), T0 + 10).unwrap();
     assert!(!page.text.contains("# Verdicts:"), "{}", page.text);
-    assert!(page.text.contains(&format!("gear reply {question} --resolve")), "{}", page.text);
+    assert!(
+        page.text.contains(&format!("gear reply {question} --resolve -m \"<what was done>\"")),
+        "{}",
+        page.text
+    );
     resolve(&mut s, &question).unwrap();
 
     // Nothing was settled: the task still verifies, no verdict was written.
