@@ -75,32 +75,38 @@ pub fn task_branch(conventions: &crate::config::Conventions, project: &str, lane
     gear_model::branch::expand(&conventions.task_branch, project, lane, task)
 }
 
-/// Refuse unless `candidate` is on `origin/<branch>` (T-83): M2.1's T-60 was
+/// Refuse unless `candidate` is on `<remote>/<branch>` (T-83): M2.1's T-60 was
 /// reviewed from an unpushed branch and could not be merged, and the captain
 /// fixed it by hand. The branch is fetched first, so the check is about the
-/// remote as it is now.
-pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearResult<()> {
+/// remote as it is now. `remote` is the project's `[conventions].remote`
+/// (T-257): `origin` unless the project names its own.
+pub fn require_pushed(
+    worktree: &Path,
+    remote: &str,
+    branch: &str,
+    candidate: &str,
+) -> GearResult<()> {
     let where_ = worktree.display();
-    let reference = format!("refs/remotes/origin/{branch}");
+    let reference = format!("refs/remotes/{remote}/{branch}");
     // Fetch the branch itself: a branch pushed since the lane's last fetch
     // must be seen. A fetch that fails is a refusal, never a pass: the local
     // remote-tracking ref may be stale (the branch deleted on the remote), and
     // an unseen branch is one the merge worker could not fetch either.
     let fetched = Command::new("git")
-        .args(["fetch", "origin", &format!("{branch}:refs/remotes/origin/{branch}")])
+        .args(["fetch", remote, &format!("{branch}:refs/remotes/{remote}/{branch}")])
         .current_dir(worktree)
         .output()
         .map_err(|error| {
             GearError::new(
                 ErrorCode::BadFormat,
-                format!("cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: {error}"),
+                format!("cannot fetch {remote}/{branch} in {where_}, so the hand-in cannot be checked: {error}"),
             )
         })?;
     if !fetched.status.success() {
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "cannot fetch origin/{branch} in {where_}, so the hand-in cannot be checked: push the task branch first (`git push origin {branch}`): {}",
+                "cannot fetch {remote}/{branch} in {where_}, so the hand-in cannot be checked: push the task branch first (`git push {remote} {branch}`): {}",
                 String::from_utf8_lossy(&fetched.stderr).trim()
             ),
         ));
@@ -121,7 +127,7 @@ pub fn require_pushed(worktree: &Path, branch: &str, candidate: &str) -> GearRes
     Err(GearError::new(
         ErrorCode::BadFormat,
         format!(
-            "{candidate} is not on {reference}: push the task branch before handing in (`git push origin {branch}`)"
+            "{candidate} is not on {reference}: push the task branch before handing in (`git push {remote} {branch}`)"
         ),
     ))
 }
@@ -163,12 +169,12 @@ pub fn contains(worktree: &Path, base: &str, candidate: &str) -> GearResult<bool
 /// §10.7, row B03-01): the answer about a candidate must be about the remote
 /// as it is now, so the branch is fetched first — a local tracking ref may be
 /// stale.
-pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<String> {
-    let reference = format!("refs/remotes/origin/{integration}");
+pub fn fetch_integration(repo_path: &str, remote: &str, integration: &str) -> GearResult<String> {
+    let reference = format!("refs/remotes/{remote}/{integration}");
     let fetched = Command::new("git")
         .args([
             "fetch",
-            "origin",
+            remote,
             &format!("+refs/heads/{integration}:{reference}"),
         ])
         .current_dir(repo_path)
@@ -177,7 +183,7 @@ pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<Strin
             GearError::new(
                 ErrorCode::BadFormat,
                 format!(
-                    "cannot fetch origin/{integration} in {repo_path} to tell whether the work is merged: {error}"
+                    "cannot fetch {remote}/{integration} in {repo_path} to tell whether the work is merged: {error}"
                 ),
             )
         })?;
@@ -185,7 +191,7 @@ pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<Strin
         return Err(GearError::new(
             ErrorCode::BadFormat,
             format!(
-                "cannot fetch origin/{integration} in {repo_path} to tell whether the work is merged: {}",
+                "cannot fetch {remote}/{integration} in {repo_path} to tell whether the work is merged: {}",
                 excerpt(&fetched.stderr)
             ),
         ));
@@ -193,10 +199,12 @@ pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<Strin
     Ok(reference)
 }
 
-/// Refuse unless `candidate` contains the current `origin/<integration>`:
-/// `git fetch origin`, then `git merge-base --is-ancestor origin/<integration>
-/// <candidate>` in `worktree`. Nothing is written here; the caller runs this
-/// before its transaction, so a stale hand-in stores nothing at all.
+/// Refuse unless `candidate` contains the current `<remote>/<integration>`:
+/// `git fetch <remote>`, then `git merge-base --is-ancestor
+/// <remote>/<integration> <candidate>` in `worktree`. `remote` is the
+/// project's `[conventions].remote` (T-257). Nothing is written here; the
+/// caller runs this before its transaction, so a stale hand-in stores nothing
+/// at all.
 ///
 /// `window_min` is the window in which a base that moved during the lane's
 /// own work is still accepted (T-221): a candidate that does not contain the
@@ -206,22 +214,23 @@ pub fn fetch_integration(repo_path: &str, integration: &str) -> GearResult<Strin
 /// only a candidate that contains the current tip is accepted.
 pub fn require_current_base(
     worktree: &Path,
+    remote: &str,
     integration: &str,
     candidate: &str,
     window_min: u32,
 ) -> GearResult<()> {
     let where_ = worktree.display();
     // 1. the fetch: the configured source explicitly, into its own tracking ref.
-    //    A plain `git fetch origin` follows `remote.origin.fetch`, which a lane's
-    //    clone may restrict to another branch — the fetch would succeed and leave
-    //    `origin/<integration>` stale (review F1). A remote branch that does not
-    //    exist makes this fetch fail, and the hand-in is refused.
-    let reference = format!("refs/remotes/origin/{integration}");
+    //    A plain `git fetch <remote>` follows `remote.<remote>.fetch`, which a
+    //    lane's clone may restrict to another branch — the fetch would succeed
+    //    and leave `<remote>/<integration>` stale (review F1). A remote branch
+    //    that does not exist makes this fetch fail, and the hand-in is refused.
+    let reference = format!("refs/remotes/{remote}/{integration}");
     let refspec = format!("+refs/heads/{integration}:{reference}");
     let fetched = Command::new("git")
         .arg("-C")
         .arg(worktree)
-        .args(["fetch", "--quiet", "origin", &refspec])
+        .args(["fetch", "--quiet", remote, &refspec])
         .output();
     match fetched {
         Ok(out) if out.status.success() => {}
@@ -229,7 +238,7 @@ pub fn require_current_base(
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
-                    "cannot fetch origin/{integration} in {where_}, so the hand-in cannot be checked: {}",
+                    "cannot fetch {remote}/{integration} in {where_}, so the hand-in cannot be checked: {}",
                     excerpt(&out.stderr)
                 ),
             ))
@@ -243,7 +252,7 @@ pub fn require_current_base(
     }
 
     // 2. the candidate must contain the refreshed integration branch.
-    let short = format!("origin/{integration}");
+    let short = format!("{remote}/{integration}");
     let checked = Command::new("git")
         .arg("-C")
         .arg(worktree)

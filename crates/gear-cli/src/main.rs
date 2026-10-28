@@ -1622,7 +1622,7 @@ fn run_plan(
     let Some(path) = path else {
         return Err(GearError::new(
             gear_model::ErrorCode::BadFormat,
-            "give the voyage file, e.g. gear plan apply gear/voyages/M1.md".to_string(),
+            "give the voyage file, e.g. gear plan apply gear/voyages/M1/plan.md".to_string(),
         ));
     };
     let text = std::fs::read_to_string(path).map_err(|e| {
@@ -3537,7 +3537,7 @@ path="api"
         .unwrap_err();
         assert_eq!(err.code, gear_model::ErrorCode::BadFormat);
         assert!(
-            err.detail.contains("gear/voyages/M1.md"),
+            err.detail.contains("gear/voyages/M1/plan.md"),
             "the error names the voyage file: {}",
             err.detail
         );

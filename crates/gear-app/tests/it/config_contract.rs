@@ -69,6 +69,8 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             task_branch: "{lane}/t{n}".into(),
             review_branch: "review/t{n}".into(),
             seat_branch: "{project}/{seat}".into(),
+            remote: "origin".into(),
+            voyage_dir: "gear/voyages/{milestone}".into(),
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");
@@ -871,4 +873,63 @@ fn a_seat_branch_names_the_project_and_the_seat() {
     );
     // A seat branch is free to be any name git takes.
     assert_eq!(validate(&with("{project}-{seat}")), vec![]);
+}
+
+// T-257: the remote and the voyage folder are configuration too. The defaults
+// are the names GEAR itself uses; a project may name its own.
+
+#[test]
+fn the_remote_and_the_voyage_folder_default_to_the_names_gear_uses() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.remote, gear_model::layout::REMOTE);
+    assert_eq!(cfg.conventions.voyage_dir, gear_model::layout::VOYAGE_DIR);
+    assert_eq!(cfg.conventions.remote, "origin");
+    assert_eq!(cfg.conventions.voyage_dir, "gear/voyages/{milestone}");
+    assert_eq!(validate(&cfg), vec![], "the defaults are valid");
+}
+
+#[test]
+fn a_project_names_its_own_remote_and_voyage_folder() {
+    let text = MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nremote = \"upstream\"\nvoyage_dir = \"plans/{project}/{milestone}\"",
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.conventions.remote, "upstream");
+    assert_eq!(cfg.conventions.voyage_dir, "plans/{project}/{milestone}");
+    assert_eq!(validate(&cfg), vec![], "a project may name its own layout");
+}
+
+#[test]
+fn a_remote_and_a_voyage_folder_must_be_usable() {
+    let with = |field: &str, value: &str| {
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\n{field} = \"{value}\""),
+        ))
+        .unwrap()
+    };
+    // No remote to fetch from, and a name with a space in it is two arguments
+    // to git.
+    for bad in ["", "  ", "up stream", "up\tstream"] {
+        assert_eq!(
+            fields(&validate(&with("remote", bad))),
+            vec!["conventions.remote"],
+            "{bad:?}"
+        );
+    }
+    // Without `{milestone}` every voyage shares one folder.
+    for bad in ["", "gear/voyages", "gear/voyages/{project}"] {
+        assert_eq!(
+            fields(&validate(&with("voyage_dir", bad))),
+            vec!["conventions.voyage_dir"],
+            "{bad:?}"
+        );
+    }
+    // A remote name and a voyage folder that can be used.
+    assert_eq!(validate(&with("remote", "upstream")), vec![]);
+    assert_eq!(
+        validate(&with("voyage_dir", "plans/{project}/{milestone}")),
+        vec![]
+    );
 }

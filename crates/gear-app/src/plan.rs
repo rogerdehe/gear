@@ -930,7 +930,11 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
         // work is there because the candidate is (design §10.7, row B03-01,
         // contract v3 of T-165). A commit with the same tree but no ancestry
         // is not the work that landed.
-        let reference = crate::base::fetch_integration(&repo.path, &repo.integration)?;
+        let reference = crate::base::fetch_integration(
+            &repo.path,
+            &config.conventions.remote,
+            &repo.integration,
+        )?;
         if !crate::base::contains(
             std::path::Path::new(&repo.path),
             candidate,
@@ -1000,10 +1004,10 @@ fn cancellable_done_tasks(store: &mut Store, draft: &Draft) -> GearResult<BTreeS
     Ok(cancellable)
 }
 
-/// Whether `candidate` is on the repo's integration branch at origin (T-112).
-/// The branch is fetched first: a local tracking ref may be stale, and the
-/// answer must be about the remote as it is now. Anything git cannot answer is
-/// an error, never a pass.
+/// Whether `candidate` is on the repo's integration branch at the project's
+/// remote (T-112, T-257: `[conventions].remote`). The branch is fetched first:
+/// a local tracking ref may be stale, and the answer must be about the remote
+/// as it is now. Anything git cannot answer is an error, never a pass.
 fn on_integration(
     config: &crate::config::ProjectConfig,
     lane: Option<&str>,
@@ -1013,11 +1017,12 @@ fn on_integration(
         Some(lane) => config.repo_of_lane(lane),
         None => config.root_repo(),
     };
-    let reference = format!("refs/remotes/origin/{}", repo.integration);
+    let remote = &config.conventions.remote;
+    let reference = format!("refs/remotes/{remote}/{}", repo.integration);
     let fetched = Command::new("git")
         .args([
             "fetch",
-            "origin",
+            remote,
             &format!("{}:{}", repo.integration, reference),
         ])
         .current_dir(&repo.path)
@@ -2852,8 +2857,10 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
 /// `## Goal` goal / `## Acceptance` accept / `## Evidence` files and due (only
 /// when set) / `## Report` with the copyable commands
 /// `gear send --kind progress "…"` and
-/// `gear send --kind result --task <T> --attempt <n> --contract <v> --candidate <commit> "Report: <path>"`
-/// (attempt number of the open attempt; `<n>` literally when there is none).
+/// `gear send --kind result --task <T> --attempt <n> --contract <v> --candidate <commit> "Report: <reports_dir>/T-<n>.md"`
+/// (attempt number of the open attempt; `<n>` literally when there is none;
+/// the reports folder is the voyage's, T-257, and `<path>` stays for a task
+/// without milestone).
 /// A pending newer contract version is appended as `## Pending update: v<m>`.
 /// Missing task → `NoTarget`. Read-only.
 pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
@@ -2960,8 +2967,21 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
     }
     text.push_str("\n## Report\n");
     text.push_str("gear send --kind progress \"…\"\n");
+    // Where the report goes: the voyage's reports folder (T-257), one folder
+    // per voyage, unless the task has no milestone — then any path will do.
+    let report = match row.milestone.as_deref() {
+        Some(milestone) => format!(
+            "Report: {}/T-<n>.md",
+            gear_model::layout::reports_dir(
+                &crate::tasks::conventions_of(tx, project).voyage_dir,
+                project,
+                milestone
+            )
+        ),
+        None => "Report: <path>".to_string(),
+    };
     text.push_str(&format!(
-        "gear send --kind result --task {task} --attempt {attempt_arg} --contract {adopted} --candidate <commit> \"Report: <path>\"\n"
+        "gear send --kind result --task {task} --attempt {attempt_arg} --contract {adopted} --candidate <commit> \"{report}\"\n"
     ));
     // The review records of the task: what a temp reviewer already handed in
     // (T-2). The captain decides on them; they settle nothing by themselves.

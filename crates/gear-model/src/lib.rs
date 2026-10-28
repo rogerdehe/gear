@@ -11,6 +11,7 @@
 pub mod branch;
 pub mod ctx;
 pub mod error;
+pub mod layout;
 pub mod state;
 
 pub use ctx::GearCtx;
