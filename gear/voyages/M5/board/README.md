@@ -2,7 +2,7 @@
 
 `python3 gear/voyages/M5/board/prototype.py` runs it with fake data in any terminal (curses, no dependencies).
 
-**Which one is the standard:** the M4 prototype (`gear/voyages/M4/board/`) stays the contract for everything this list does not change. The M5 prototype is the M4 prototype with the changes below and nothing else: the same colours (ok green, warn yellow, bad red, dim grey, acc cyan; lanes cyan, magenta, yellow, blue), the same symbols, views, keys, mouse clicks and Enter panels. A lane builds the real board (`crates/gear-board`) to the M4 prototype plus these changes; where the real data differs, keep the layout and the meaning.
+**Which one is the standard:** the M4 prototype (`gear/voyages/M4/board/`) stays the contract for everything this list does not change. The M5 prototype is the M4 prototype with the changes below and nothing else: the same colours (ok green, warn yellow, bad red, dim grey, acc cyan; lanes cyan, magenta, yellow, blue), the same symbols, views, keys and Enter panels. A lane builds the real board (`crates/gear-board`) to the M4 prototype plus these changes; where the real data differs, keep the layout and the meaning.
 
 Changes against M4, each from the user's review of the real board (2026-10-28):
 
@@ -17,3 +17,4 @@ Changes against M4, each from the user's review of the real board (2026-10-28):
 9. **Workload says whether the work is balanced:** each lane's "ends about", and one line: balanced, or "not balanced: <lane> ends <time> after <lane> — move its next startable wave". M4's bars and burn-up stay.
 10. **Decisions starts with a summary:** what changed the course (★) and what waits on whom, then M4's full list and the friction reports.
 11. **Time & tokens grouped by lane:** one row per lane with estimate, actual, ratio, rounds, development tokens and cost, review tokens and cost, total; Enter on a lane opens its tasks (M4's per-task rows). The footer gives the voyage's tokens and cost, development and review apart.
+12. **No mouse capture: text can be selected and copied.** M4 took the mouse to switch views by a click, so the terminal could not select text (task ids, commands, errors). The board leaves the mouse to the terminal; views switch by 1-5, Tab and the arrows as before. The real board drops its SGR mouse mode (crates/gear-board screen.rs and lib.rs).

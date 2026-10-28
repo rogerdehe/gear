@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """GEAR board prototype, M5 (fake data). Built on the M4 prototype (gear/voyages/M4/board/prototype.py):
 same colours, symbols, views, keys and panels; README.md lists every change against M4.
-Keys: 1-5 / Tab / click views · [ ] older / newer voyage · j/k or arrows select · Enter opens · q quit."""
+Keys: 1-5 / Tab views · [ ] older / newer voyage · j/k or arrows select · Enter opens · q quit."""
 import curses
 
 NOW = "14:32"
@@ -462,19 +462,13 @@ def task_panel(w, t):
 
 def main(w):
     colors(); curses.curs_set(0); view, sel = 1, 0; pick(0)
-    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION); w.keypad(True)
+    w.keypad(True)   # change 12: no mouse capture, so the terminal can select and copy text
     views = {1: view_now, 2: view_graph, 3: view_workload, 4: view_decisions, 5: view_cost}
     while True:
         w.erase(); header(w, view); n = views[view](w, sel)
-        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5 / click: views · [ ] older / newer voyage · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
+        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5: views · [ ] older / newer voyage · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
         w.refresh(); k = w.getch()
         if k in (ord("q"), 27): break
-        if k == curses.KEY_MOUSE:
-            try: _, mx, my, _, bs = curses.getmouse()
-            except curses.error: continue
-            for x0, x1, i, ty in TABX:
-                if my == ty and x0 <= mx <= x1: view, sel = i, 0
-            continue
         if k == ord("["): pick(min(len(VOYS) - 1, G["i"] + 1)); sel = 0
         elif k == ord("]"): pick(max(0, G["i"] - 1)); sel = 0
         elif k in (curses.KEY_RIGHT, ord("l"), 9): view, sel = view % 5 + 1, 0
