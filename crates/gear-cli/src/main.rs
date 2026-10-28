@@ -273,6 +273,11 @@ enum AdminOp {
         /// engine (T-228).
         #[arg(long)]
         check: bool,
+        /// With `--check`: ask each CLI for its models and warn about a
+        /// configured model id its CLI does not list (T-315). Asking runs the
+        /// CLIs, so it never happens unless asked for.
+        #[arg(long, requires = "check")]
+        models: bool,
     },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
@@ -385,8 +390,8 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config, check } }) => {
-            cmd_admin_init(&config, check, cli.json)
+        Some(Cmd::Admin { op: AdminOp::Init { config, check, models } }) => {
+            cmd_admin_init(&config, check, models, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
@@ -505,7 +510,17 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// Both forms go on to name the seats the config starts and the model each
 /// one runs (T-261), so a captain sees a wrong model here rather than once the
 /// fleet runs.
-fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+///
+/// With `--models` (T-315) it also asks each seat's CLI for the models it
+/// lists and warns, on stderr, about a configured model id that is not among
+/// them — a warning, not a refusal, and never without `--models`, since asking
+/// runs the CLIs.
+fn cmd_admin_init(
+    config: &std::path::Path,
+    check_only: bool,
+    with_models: bool,
+    json: bool,
+) -> GearResult<()> {
     // T-261: the lane list — `(name, kind, model)` — with the model being the
     // lane's first `models` entry, else the role chain's first, else "-".
     let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
@@ -598,6 +613,45 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                 ),
             ))
         };
+    // T-316: a repository under the system temp directory is a fixture (M4.2
+    // #35: a leftover fixture project with empty tokens appeared in the
+    // user's board, its captain seat bound to the real captain's pane). A
+    // fixture registers only into a store the caller names itself with
+    // `GEAR_DB`, never into this session's store, where the user would see
+    // it. Like T-269, nothing is refused when the caller names its own store.
+    let refuse_a_fixture_into_this_store =
+        |parsed: &gear_app::config::ProjectConfig| -> GearResult<()> {
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let temp = canonical(&temp);
+            let repo = canonical(&parsed.project.repo);
+            if !std::path::Path::new(&repo).starts_with(&temp) {
+                return Ok(());
+            }
+            let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+                return Ok(());
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            // `default_store_path` fills `GEAR_DB` in with this session's own
+            // default store: a `GEAR_DB` that differs was named by the caller.
+            let db = match std::env::var_os(gear_model::ctx::ENV_DB) {
+                Some(db) => {
+                    let db = std::path::PathBuf::from(db);
+                    if db != default_store_in(&home, socket.as_deref()) {
+                        return Ok(());
+                    }
+                    db
+                }
+                None => default_store_in(&home, socket.as_deref()),
+            };
+            Err(GearError::new(
+                gear_model::ErrorCode::BadFormat,
+                format!(
+                    "project {} lives under the temp directory ({repo}): a fixture registers only into a store named with GEAR_DB, never into this session's store {}",
+                    parsed.project.id,
+                    db.display()
+                ),
+            ))
+        };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
@@ -617,6 +671,14 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
+        // T-315: only when asked for — this runs the CLIs.
+        let model_warnings: Vec<String> = if with_models {
+            gear_app::kickoff::model_warnings(&parsed, &mut |cli: &str| {
+                gear_app::kickoff::models_of(cli)
+            })
+        } else {
+            Vec::new()
+        };
         if json {
             let lane_list = lane_list(&parsed);
             println!(
@@ -628,6 +690,7 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                     "reviewers": reviewers,
                     "lane_list": lane_json(&lane_list),
                     "review_model": review_model(&parsed),
+                    "model_warnings": model_warnings,
                 })
             );
         } else {
@@ -637,6 +700,9 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
             );
             for line in seat_lines(&parsed) {
                 println!("{line}");
+            }
+            for line in &model_warnings {
+                eprintln!("warning: {line}");
             }
         }
         return Ok(());
@@ -652,6 +718,8 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
     // T-269: a config for another session never lands in this one's store.
     if let Ok(parsed) = gear_app::config::parse(&text) {
         refuse_a_foreign_session(&parsed)?;
+        // T-316: nor does a fixture, unless the caller named its store.
+        refuse_a_fixture_into_this_store(&parsed)?;
     }
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
