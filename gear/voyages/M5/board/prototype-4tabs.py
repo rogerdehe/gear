@@ -39,7 +39,7 @@ VOYS = [
         DECISIONS=[("11:05", "scope", "light procedure: a task marked small skips review", "user at kickoff", True),
                    ("12:40", "rework", "T-260 round 2: accept proof missing", "bug in normal use", False),
                    ("14:05", "contract", "T-262 v2: GOAL_LOCKED also covers milestone lines", "user agreed 13:58", True)],
-        WAITING=["T-263: the captain's rework scope (hull is past its budget)", "T-262: review by review-3, 12 min in"],
+        WAITING=["T-262 in review by review-3, 12 min in"],
         FRICTION=[("T-260", "hull", "unread", "accept proof needed a real plan file; wrote one by hand (8m)")],
         BURN=[0, 45, 160, 250],
     ),
@@ -280,52 +280,50 @@ def idle_reason(n):
     return f"next {nxt[0]} is ready but not delivered"
 
 def view_now(w, sel):
-    """Now: what happens and what needs me. Each lane: its task, then what it did and has left and when it ends;
-    a balance line; on the right: needs a look, waiting on someone, quota (Workload and the waiting list fold in here)."""
+    """Now: one table row per lane (what it does, its stage, its time, the lane's progress, when it ends), one line on
+    balance, then one list of what to handle (needs a look and waiting on someone, each with who acts), quota last."""
     T, LANES = G["T"], G["LANES"]
     wd = w.getmaxyx()[1]
-    left_w = wd if wd < 150 else wd * 3 // 5
-    tw = max(28, min(50, left_w // 3))
-    y = TOP[0]; put(w, y, 1, "LANES  (Enter: what this lane did and has left)", C["b"]); y += 1
+    tw = max(30, min(52, wd - 110))
+    cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 70 + tw)]
+    y = TOP[0]
+    for name, x in cols: put(w, y, x, name, C["b"])
+    put(w, y, 78 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
     ends = {}
-    scale = max(1, max(sum(t[4] for t in T if t[1] == n and t[2] != "moved") for n in LANES))
-    bw = max(16, min(40, left_w - 70))
     for i, n in enumerate(LANES):
         t = lane_now(n)
-        d = sum(t_[4] for t_ in T if t_[1] == n and t_[2] == "done")
-        l = sum(t_[4] for t_ in T if t_[1] == n and t_[2] not in ("done", "moved"))
-        nd = sum(1 for t_ in T if t_[1] == n and t_[2] == "done"); nl = sum(1 for t_ in T if t_[1] == n and t_[2] not in ("done", "moved"))
+        mine = [t_ for t_ in T if t_[1] == n and t_[2] != "moved"]
+        nd = sum(1 for t_ in mine if t_[2] == "done"); l = sum(t_[4] for t_ in mine if t_[2] != "done")
         ends[n] = G["V"]["used_m"] + l
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
         put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"])
         if t:
-            put(w, y, 9, f"{t[0]} {t[3][:tw]:<{tw}}")
-            put(w, y, 16 + tw, f"{bar(t[5]/t[4], 10)} {t[5]}/{t[4]}m", C["warn"] if t[5] > t[4] else 0)
-            put(w, y, 34 + tw, words(t) + (f" · {t[11]}" if t[11] else ""), C[STAGE_COL[t[2]]])
+            put(w, y, 9, f"{t[0]} {t[3]}"[:tw])
+            put(w, y, 11 + tw, words(t)[:22], C[STAGE_COL[t[2]]])
+            put(w, y, 34 + tw, f"{t[5]}/{t[4]}m" + (" ⚠" if t[5] > t[4] else ""), C["bad"] if t[5] > t[4] else 0)
         else:
-            put(w, y, 9, "idle: " + idle_reason(n), C["dim"] if G["V"]["state"] == "landed" else C["bad"])
+            put(w, y, 9, idle_reason(n)[:tw + 30], C["dim"] if G["V"]["state"] == "landed" else C["bad"])
+        k = nd * 10 // max(1, len(mine))
+        put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)}")
+        if G["V"]["state"] == "sailing": put(w, y, 70 + tw, f"~{hm(ends[n])}")
         if sel == i: hl(w, y)
         y += 1
-        k = d * bw // scale; r = l * bw // scale
-        put(w, y, 9, "█" * k, C["ok"]); put(w, y, 9 + k, "░" * r, C["dim"])
-        put(w, y, 11 + bw, f"done {nd} ({d}m) · left {nl} ({l}m)" + (f" · ends about {hm(ends[n])}" if G["V"]["state"] == "sailing" else ""), C["dim"])
-        y += 2
     if G["V"]["state"] == "sailing":
         first, last = min(ends, key=ends.get), max(ends, key=ends.get); gap = ends[last] - ends[first]
-        put(w, y, 3, f"balanced: every lane ends within {hm(gap)}" if gap <= 30 else
-            f"not balanced: {last} ends {hm(gap)} after {first} — move {last}'s next startable wave to {first}",
-            C["ok"] if gap <= 30 else C["bad"]); y += 2
-    rx, ry = (1, y) if wd < 150 else (left_w + 3, TOP[0])
-    put(w, ry, rx, f"NEEDS A LOOK ({len(G['EXC'])})", C["b"] | C["warn"]); ry += 1
-    for lane, tid, kind, why in G["EXC"] or [("", "", "", "nothing")]:
-        put(w, ry, rx + 2, f"{tid} {lane} {kind}: {why}" if tid else why, C["warn"] if tid else C["dim"]); ry += 1
-    ry += 1; put(w, ry, rx, "WAITING ON SOMEONE", C["b"]); ry += 1
-    for s_ in G["WAITING"] or ["nothing"]:
-        put(w, ry, rx + 2, s_, 0 if G["WAITING"] else C["dim"]); ry += 1
-    ry += 1; put(w, ry, rx, "QUOTA", C["b"]); ry += 1
+        put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}" if gap <= 30 else
+            f"✗ not balanced: {last} ends {hm(gap)} after {first} — move {last}'s next wave to {first}",
+            C["ok"] if gap <= 30 else C["bad"])
+    y += 2
+    items = [("⚠", f"{tid} {lane} {why}" if tid != "-" else f"{lane} {kind}: {why}", C["warn"]) for lane, tid, kind, why in G["EXC"]]
+    items += [("⏳", s_, 0) for s_ in G["WAITING"]]
+    put(w, y, 1, f"TO HANDLE ({len(items)})", C["b"] | (C["warn"] if items else 0)); y += 1
+    for mark, text, a in items or [("", "nothing", C["dim"])]:
+        put(w, y, 3, f"{mark} {text}".strip(), a); y += 1
+    y += 1
+    put(w, y, 1, "Quota", C["b"]); x = 9
     for p_, win, u, rs in [("tokenrhythm", "5h", 41, "22:00"), ("codex", "week", 63, "Oct 30")]:
-        put(w, ry, rx + 2, f"{p_:<13}{win:<6}{bar(u/100, 12)} {u:>3}% · resets {rs}",
-            C["bad"] if u >= 90 else C["warn"] if u >= 60 else C["ok"]); ry += 1
+        txt = f"{p_} {win} {u}% · resets {rs}"
+        put(w, y, x, txt, C["bad"] if u >= 90 else C["warn"] if u >= 60 else C["ok"]); x += len(txt) + 5
     return len(LANES)
 
 
