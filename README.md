@@ -51,6 +51,8 @@ GEAR runs a team of AI coding agents in [Herdr](https://github.com/herdrdev/herd
 
 **Upgrading from 0.2.x or 0.3.0?** The [v0.3.0 upgrade guide](docs/releases/v0.3.0.md#upgrading) has the three cases — a fresh install, an upgrade with no voyage running, an upgrade during a voyage — with the commands to copy.
 
+**From a source checkout?** A checkout has no `gear` on PATH. Run `make install`: it builds `gear-cli` in release mode and links `$PREFIX/bin/gear` to `target/release/gear`. It is a link, not a copy, so every later `cargo build --release` is the binary the agents run. `PREFIX` defaults to `~/.local`, and `$PREFIX/bin` must be on PATH.
+
 ## Start a project
 
 1. **Pick a short project name** (`[a-z][a-z0-9-]*`, e.g. `acme`). In a Herdr pane, in your project's repository, start the agent that will be your captain with GEAR's context and your consent:
