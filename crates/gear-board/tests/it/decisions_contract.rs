@@ -249,10 +249,18 @@ fn the_time_and_tokens_view_shows_the_work_of_every_task() {
     assert!(text.contains("40m"), "the estimate: {text}");
     assert!(text.contains("44m"), "the actual time: {text}");
     assert!(text.contains("1.1x"), "the ratio: {text}");
-    assert!(text.contains("812k"), "the tokens: {text}");
+    assert!(
+        !text.contains("812k"),
+        "the cache reads are not fresh tokens: {text}"
+    );
+    assert!(text.contains("512k"), "the fresh tokens: {text}");
+    assert!(text.contains("300k"), "the cache reads are shown apart: {text}");
     assert!(text.contains("$  0.31"), "the cost: {text}");
     // And the total of the voyage so far.
-    assert!(text.contains("so far: 0.8M tokens, $0.31"), "{text}");
+    assert!(
+        text.contains("so far: 0.5M tokens, 0.3M cache reads, $0.31"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -514,7 +522,9 @@ fn an_unmeasured_round_hides_no_part_of_the_sum() {
 }
 
 /// F5 of the T-166 review: a review round that counted its tokens but was
-/// never priced leaves the tokens whole and the cost unknown.
+/// never priced leaves the tokens whole and the cost unknown. No row of the
+/// view then has a cost, so the cost column says nothing and the total names
+/// the missing prices once (the user, 2026-10-28).
 #[test]
 fn an_unpriced_round_hides_no_part_of_the_sum() {
     let mut store = world();
@@ -558,14 +568,147 @@ fn an_unpriced_round_hides_no_part_of_the_sum() {
         .lines()
         .find(|line| line.contains("T-1"))
         .expect("the row of the task");
-    assert!(row.contains("834k"), "the tokens are whole: {row}");
-    assert!(row.contains("      ?"), "the cost is unknown: {row}");
+    assert!(row.contains("534k"), "the tokens are whole: {row}");
     assert!(
         !row.contains("0.31"),
         "a partial price is not shown as a total: {row}"
     );
+    // No row of the view has a cost: the cost column says nothing, and the
+    // total names the missing prices once instead of a dollar sum.
+    let total = text
+        .lines()
+        .find(|line| line.contains("so far:"))
+        .expect("the total line");
     assert!(
-        text.contains("known so far"),
-        "the total names what it does not know: {text}"
+        total.ends_with("no prices set"),
+        "the total names the missing prices: {total}"
     );
+}
+
+/// The user, 2026-10-28: a task that re-reads its context for twenty minutes
+/// shows millions of cache reads. They are counted apart from the fresh
+/// tokens, so the tokens say how much the work wrote, not how much it read.
+#[test]
+fn the_cache_reads_are_shown_apart_from_the_fresh_tokens() {
+    let mut store = world();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "dev".into(),
+            };
+            // The round of the work: fresh tokens and cache reads.
+            tx.set_round_tokens(
+                &key,
+                &RoundTokens {
+                    input: Some(1_000),
+                    output: Some(500),
+                    cache_read: Some(2_000_000),
+                    cache_write: Some(0),
+                    reasoning: None,
+                    cost_usd: Some(0.31),
+                    cost_source: "agent".into(),
+                },
+                departure + 44 * 60,
+            )
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(row.contains("1k"), "the fresh tokens: {row}");
+    assert!(
+        !row.contains("2001k"),
+        "the cache reads are not added to the fresh tokens: {row}"
+    );
+    assert!(row.contains("2000k"), "the cache reads: {row}");
+    assert!(
+        text.contains("so far: 0.0M tokens, 2.0M cache reads, $0.31"),
+        "the total names both and keeps the price: {text}"
+    );
+}
+
+/// The user, 2026-10-28: a project without `[prices]` priced no round, so
+/// every cost cell said `?` and the total summed a dollar that does not
+/// exist. The cost column now says nothing; the total says it once.
+#[test]
+fn a_view_without_prices_says_so_once_and_shows_no_cost_cell() {
+    let mut store = world();
+    let departure = now_seconds() - 3600;
+    store
+        .write(|tx| {
+            let key = RoundKey {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                role: "dev".into(),
+            };
+            // The round of the work: counted, but never priced.
+            tx.set_round_tokens(
+                &key,
+                &RoundTokens {
+                    input: Some(500_000),
+                    output: Some(12_000),
+                    cache_read: Some(300_000),
+                    cache_write: None,
+                    reasoning: None,
+                    cost_usd: None,
+                    cost_source: "none".into(),
+                },
+                departure + 44 * 60,
+            )
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+
+    let row = text
+        .lines()
+        .find(|line| line.contains("T-1"))
+        .expect("the row of the task");
+    assert!(
+        !row.contains('?'),
+        "nothing is unknown in the cost column without prices: {row}"
+    );
+    assert!(!row.contains('$'), "the cost column shows nothing: {row}");
+    let total = text
+        .lines()
+        .find(|line| line.contains("so far:"))
+        .expect("the total line");
+    assert!(
+        total.ends_with("no prices set"),
+        "the total ends with the missing prices: {total}"
+    );
+    assert_eq!(
+        total.matches("no prices set").count(),
+        1,
+        "said once: {total}"
+    );
+    assert!(!total.contains("unknown"), "nothing is unknown: {total}");
+}
+
+/// The machine-readable board carries the fresh tokens and the cache reads
+/// apart, next to each other, as the view shows them (T-251).
+#[test]
+fn the_json_carries_the_fresh_tokens_and_the_cache_reads_apart() {
+    let mut store = world();
+    let board = board(&mut store);
+    let doc: serde_json::Value =
+        serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
+    let task = doc["projects"][0]["lanes"]
+        .as_array()
+        .expect("the lanes")
+        .iter()
+        .flat_map(|lane| lane["tasks"].as_array().cloned().unwrap_or_default())
+        .find(|task| task["id"] == "T-1")
+        .expect("the task T-1");
+    assert_eq!(task["tokens"], 512_000, "the fresh tokens: {task}");
+    assert_eq!(task["cache_read"], 300_000, "the cache reads: {task}");
 }
