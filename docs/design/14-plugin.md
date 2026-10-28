@@ -12,8 +12,11 @@ board shortcuts are documented in [README](../../README.md).
 - Skills are embedded by [skill.rs](../../crates/gear-app/src/skill.rs).
   `gear admin install-skill` writes them to the selected CLI's skill directory.
 - Database location and session routing are implemented in
-  [main.rs](../../crates/gear-cli/src/main.rs); `GEAR_DB` overrides the default
-  `$HOME/.local/state/gear/gear.db`.
+  [main.rs](../../crates/gear-cli/src/main.rs). One store and one engine per
+  Herdr session: the store registered for the caller's session, else
+  `$HOME/.local/state/gear/<session>/gear.db` for a named session and
+  `$HOME/.local/state/gear/gear.db` for the default one. Projects in one
+  session share its store and engine; `GEAR_DB` overrides.
 
 ## Lifecycle boundaries
 
