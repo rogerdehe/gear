@@ -233,9 +233,6 @@ pub fn verdict_section(hint: &crate::tasks::VerdictHint) -> &'static str {
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
 
-/// The most voyages the snapshot lists (the rest is one line of count).
-const SNAPSHOT_VOYAGES: usize = 3;
-
 /// The captain's snapshot: the totals, one line per lane (the task it is on
 /// and how much is queued), the deliveries in flight and the temp slots.
 ///
@@ -263,25 +260,31 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         plan.temps.quota
     ));
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
-    // planned landing, so the captain sees the bar before the inbox. The
-    // voyages with open work come first — the bar that matters is the one the
-    // work is judged by — and the rest follow by id (review R3).
+    // planned landing, so the captain sees the bar before the inbox. Each
+    // voyage is independent: the snapshot lists the ones with open work, and
+    // when there is none, the one the board measures (T-246).
     let open: std::collections::BTreeSet<String> = tx
         .tasks_of_project(project)?
         .into_iter()
         .filter(|task| !task.state.is_terminal())
         .filter_map(|task| task.milestone)
         .collect();
-    let mut voyages = tx.voyages_of_project(project)?;
-    voyages.sort_by_key(|voyage| (!open.contains(&voyage.milestone), voyage.milestone.clone()));
-    for voyage in voyages.iter().take(SNAPSHOT_VOYAGES) {
+    let mut voyages: Vec<_> = tx
+        .voyages_of_project(project)?
+        .into_iter()
+        .filter(|voyage| {
+            if open.is_empty() {
+                // No open work: the voyage the board measures is the one that
+                // matters.
+                plan.workload.as_ref().is_some_and(|measured| measured.milestone == voyage.milestone)
+            } else {
+                open.contains(&voyage.milestone)
+            }
+        })
+        .collect();
+    voyages.sort_by(|left, right| left.milestone.cmp(&right.milestone));
+    for voyage in &voyages {
         lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
-    }
-    if voyages.len() > SNAPSHOT_VOYAGES {
-        lines.push(format!(
-            "+{} more voyages (a task's packet shows its own)",
-            voyages.len() - SNAPSHOT_VOYAGES
-        ));
     }
     Ok(lines)
 }

@@ -9,3 +9,4 @@ mod measures_contract;
 mod overlaps_contract;
 mod workload_contract;
 mod colour_contract;
+mod voyage_scope_contract;
