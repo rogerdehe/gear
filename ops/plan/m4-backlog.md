@@ -136,6 +136,8 @@ Problems found after M4's landing and in other projects' first voyages are colle
 
 - `make check CRATE=gear-engine` takes 2-4 min under load (F-115: 1m51s build + 252 s tests; F-117: 1m48s + 2m18s for a two-line text change): the engine crate alone is near the 300 s whole-suite red line. Find its slow tests (nextest --profile timing) and split or speed them; a lane's check of one engine file should not cost a full engine build and suite.
 
+- The board's graph shows a reworked task as "working 89/25m" (T-241, 2026-10-28) where the rework itself took 17 min: the minutes count from the first delivery through review, merge wait and the failed merge. Show the current round's active time against the current round's budget (the rework estimate), and the task's total apart.
+
 ## Later fixes (not urgent; collected 2026-10-28)
 
 - A stuck or IDLE alert says what it is about (trial project feedback B04-01, v0.3.4): the operation and its age, the task or instruction it belongs to, the lane's last check-in or hand-in, and what it waits for. IDLE says it means "no next task to dispatch", not "the agent does nothing". Re-check against v0.4.x first: T-213 (a doorbell behind a working turn is not a stall), Herdr's agent state for busy/ready (v0.4.0) and the session-write check (v0.4.1) removed most of these false alerts.
