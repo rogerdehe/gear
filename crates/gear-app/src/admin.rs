@@ -375,21 +375,33 @@ fn retired_lane_names(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
     Ok(names)
 }
 
-/// The problem of two projects cutting the same branch names on one repository
-/// (T-256), or `None` when they cannot collide.
+/// The problem of two projects sharing branches, voyage folders or GitHub
+/// issues (T-256, T-302), or `None` when they cannot collide.
 ///
 /// `others` are the store's projects as `(id, config_toml)`; one that does not
-/// parse is skipped, since it says nothing about the branches it cuts. A
-/// project of `others` that works in one of this config's repositories
-/// (canonicalized, the text when it does not exist) meets this config's
-/// branches, so this config's task, review and seat branch templates must name
-/// `{project}`: two fleets in one Herdr session then keep `hull/t12` and
-/// `review/t12` to themselves.
+/// parse is skipped, since it says nothing about what it cuts. Four checks, in
+/// this order:
+///
+/// - **GitHub issues** (T-302): whatever the local paths, two repos of the two
+///   configs that read and write the same `owner/name` (case-insensitively)
+///   take the same issues unless each project selects them with non-empty,
+///   disjoint `[github.issues] labels` — hence [`github_clash`], first.
+/// - **shared repository**: a project of `others` that works in none of this
+///   config's repositories (canonicalized, the text when it does not exist) is
+///   no partner of this config at all.
+/// - **branches** (T-256): on a shared repository this config's task, review
+///   and seat branch templates must name `{project}`, so two fleets in one
+///   Herdr session keep `hull/t12` and `review/t12` to themselves.
+/// - **voyage folder** (T-302): on a shared repository the two projects must
+///   not expand `conventions.voyage_dir` to the same folder, or their plans,
+///   reports and reviews overwrite each other. The default
+///   `gear/voyages/{milestone}` names no project.
 pub fn branch_clash(
     config: &config::ProjectConfig,
     others: &[(String, String)],
 ) -> Option<String> {
     let ours = repo_paths(config);
+    let our_repos = config.repos();
     for (other_id, other_text) in others {
         if *other_id == config.project.id {
             continue;
@@ -397,6 +409,11 @@ pub fn branch_clash(
         let Ok(other) = config::parse(other_text) else {
             continue;
         };
+        // (a) The GitHub check comes first: two projects need not share a
+        // local path to take the same `owner/name` issues.
+        if let Some(problem) = github_clash(other_id, &our_repos, &other) {
+            return Some(problem);
+        }
         let theirs = repo_paths(&other);
         let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
             continue;
@@ -409,12 +426,74 @@ pub fn branch_clash(
         ]
         .iter()
         .all(|template| template.contains("{project}"));
-        if templated {
-            continue;
+        if !templated {
+            return Some(format!(
+                "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
+            ));
         }
-        return Some(format!(
-            "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
-        ));
+        let our_voyages = gear_model::layout::voyage_dir(
+            &conventions.voyage_dir,
+            &config.project.id,
+            "{milestone}",
+        );
+        let their_voyages = gear_model::layout::voyage_dir(
+            &other.conventions.voyage_dir,
+            &other.project.id,
+            "{milestone}",
+        );
+        if our_voyages == their_voyages {
+            return Some(format!(
+                "project {other_id} also works in {path} and keeps its voyages in the same folder {our_voyages}: put {{project}} in conventions.voyage_dir so the two projects' plans, reports and reviews cannot overwrite each other"
+            ));
+        }
+    }
+    None
+}
+
+/// The GitHub issue clash of this config with `other` (T-302): a repo of each
+/// that reads and writes the same `owner/name` (ASCII case-insensitively) takes
+/// the same issues unless both select them with labels that do not overlap.
+///
+/// Two projects on one GitHub repository may share it only with non-empty,
+/// disjoint `[github.issues] labels`: an empty list takes every open issue, and
+/// one shared label puts an issue in both projects' queues.
+fn github_clash(
+    other_id: &str,
+    our_repos: &[config::Repo],
+    other: &config::ProjectConfig,
+) -> Option<String> {
+    let their_repos = other.repos();
+    for repo in our_repos {
+        let Some(ours) = &repo.github else {
+            continue;
+        };
+        for their_repo in &their_repos {
+            let Some(theirs) = &their_repo.github else {
+                continue;
+            };
+            if !ours.repo.eq_ignore_ascii_case(&theirs.repo) {
+                continue;
+            }
+            if ours.issues_labels.is_empty() || theirs.issues_labels.is_empty() {
+                return Some(format!(
+                    "project {other_id} also takes issues from GitHub {}: each project needs its own non-empty [github.issues] labels",
+                    theirs.repo
+                ));
+            }
+            let mut shared: Vec<&str> = Vec::new();
+            for label in &ours.issues_labels {
+                if theirs.issues_labels.contains(label) && !shared.iter().any(|seen| *seen == label) {
+                    shared.push(label);
+                }
+            }
+            if !shared.is_empty() {
+                return Some(format!(
+                    "project {other_id} also takes issues labelled {} from GitHub {}: give each project labels of its own",
+                    shared.join(", "),
+                    theirs.repo
+                ));
+            }
+        }
     }
     None
 }

@@ -974,6 +974,19 @@ pub fn settle_review(tx: &Tx<'_>, project: &str, task: &str, attempt: i64, now: 
             // (T-21 reads the reviewer's file), so the note is that text.
             blocking.join("\n")
         });
+        // A rework round's budget grows with the blocking findings it carries
+        // (T-312): 8 minutes per blocking finding, never below the old rule of
+        // half the estimate, at least 10. A stale pass has no findings to
+        // count and keeps the old rule; a captain's own `estimate=` still
+        // overrides this after its settle (plan.rs).
+        task_row.rework_estimate_min = if stale {
+            None
+        } else {
+            let estimate = task_row
+                .estimate_min
+                .unwrap_or(gear_store::DEFAULT_ROUND_BUDGET_MIN);
+            Some(((estimate + 1) / 2).max(10).max(8 * blocking.len() as i64))
+        };
         // Rework before new work: one place ahead of the lane's other ready
         // tasks (design/06).
         task_row.rank = rework_rank(tx, &task_row)?;

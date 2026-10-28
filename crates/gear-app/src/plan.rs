@@ -867,6 +867,13 @@ fn apply_queue(
             .map(|row| row.quota_lanes)
             .unwrap_or_default();
         let seats = tx.seats_of_project(project)?;
+        // The running lanes, counted once and advanced after every revival in
+        // this apply: a second revival must see the slot the first one took
+        // (T-304, review F1). `set_seat_state` writes the store, not `seats`.
+        let mut running = seats
+            .iter()
+            .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
+            .count();
         for seat in &seats {
             if seat.role != SeatRole::Lane || seat.state != SeatState::Retired {
                 continue;
@@ -883,10 +890,6 @@ fn apply_queue(
             // The quota counts the lane seats that are not Retired: a lane
             // that is already retired keeps its seat and takes no slot, so a
             // full quota leaves it retired (T-304).
-            let running = seats
-                .iter()
-                .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
-                .count();
             if running as i64 >= quota {
                 let warning = format!(
                     "lane {} stays retired: {running} lanes run and the quota allows {quota}; retire another lane or raise [quota] lanes",
@@ -903,6 +906,7 @@ fn apply_queue(
                 Some("a task names it again"),
                 now,
             )?;
+            running += 1;
             staffed.push(format!("start {}", seat.name));
         }
     }

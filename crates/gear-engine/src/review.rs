@@ -395,9 +395,22 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
+    // The contract the lane works to (T-282): the task's current version, read
+    // here so the direction reviewer judges this text and never has to guess
+    // which version `gear --show` names for its own view.
+    let (version, goal, accept) = match saved.as_ref() {
+        Some(row) => {
+            let version = row.contract_version;
+            match store.read(|tx| tx.get_contract(&config.project.id, &task.task, version))? {
+                Some(contract) => (version, contract.goal, contract.accept),
+                None => (version, String::new(), String::new()),
+            }
+        }
+        None => (1, String::new(), String::new()),
+    };
     // T-267: the reviewer's first `gear` is what confirms the delivery, so the
     // direction packet asks for it as the review packet does.
-    Ok(format!("Run `gear` first (it records that you got this). Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, config.conventions.remote, repo.integration, task.task, task.attempt))
+    Ok(format!("Run `gear` first (it records that you got this). Direction check of {} attempt {} at {} (branch {}). Read the contract below and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".\n\nContract v{version} (the task's current contract; the lane works to it — judge against this text, not an older version `gear --show` may name):\nGoal: {goal}\nAccept: {accept}", task.task, task.attempt, task.candidate, branch, config.conventions.remote, repo.integration, task.task, task.attempt))
 }
 
 /// A direction check passed when the first word of its body is `ok`, in any
@@ -1699,10 +1712,15 @@ fn review_packet_for(
     // (T-53): a child repo has its own branch.
     let saved = store.read(|tx| tx.get_task(&config.project.id, task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&lane));
+    // The task's current contract (T-282): when it moved past the version this
+    // hand-in was made against, the reviewer is told so and judges the hand-in
+    // against its own version.
+    let current = saved.as_ref().map(|row| row.contract_version).unwrap_or(version);
     let packet = review_packet(
         task,
         attempt,
         version,
+        current,
         &goal,
         &accept,
         &done,
@@ -1878,6 +1896,7 @@ fn review_packet(
     task: &str,
     attempt: i64,
     version: i64,
+    current: i64,
     goal: &str,
     accept: &str,
     done: &str,
@@ -1886,11 +1905,18 @@ fn review_packet(
     integration: &str,
     branch: &str,
 ) -> String {
+    // T-282: the task's contract moved past the one this hand-in was made
+    // against — the reviewer is told, and still judges the hand-in by its own.
+    let newer = if current > version {
+        format!("Newer contract: v{current} was written after this hand-in; judge against v{version} and log what v{current} changes.\n")
+    } else {
+        String::new()
+    };
     format!(
         "Review {task} attempt {attempt}. Run `gear` first (it records that you got this).\n\
          \n\
          Contract: v{version} (the version this hand-in was made against)\n\
-         Goal: {goal}\n\
+         {newer}Goal: {goal}\n\
          Accept: {accept}\n\
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
@@ -2774,6 +2800,105 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(packet.contains("Goal: the revised goal"), "{packet}");
         assert!(packet.contains("Accept: the revised criteria"), "{packet}");
         assert!(!packet.contains("the first goal"), "not the old contract: {packet}");
+    }
+
+    /// T-282 (M-3956): a direction reviewer judges the task's current contract,
+    /// which travels in its packet; it is never sent to `gear --show` for a
+    /// version that follows the reviewer's own view instead of the task.
+    #[test]
+    fn the_direction_packet_carries_the_tasks_current_contract() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 3;
+                tx.update_task(&task)?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 3,
+                    goal: "the third goal".into(),
+                    accept: "the third criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 30,
+                    mechanical: None,
+                })
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let task = ReviewTask {
+            task: "T-1".into(),
+            attempt: 1,
+            writer: "p:heat".into(),
+            lane: "heat".into(),
+            candidate: "abc1234".into(),
+        };
+        let packet = job_packet(&mut store, &config, &task, true).unwrap();
+
+        assert!(
+            packet.contains("Contract v3 (the task's current contract"),
+            "{packet}"
+        );
+        assert!(packet.contains("Goal: the third goal"), "{packet}");
+        assert!(packet.contains("Accept: the third criteria"), "{packet}");
+        assert!(
+            !packet.contains("Read the contract (gear --show"),
+            "the reviewer is not sent to a version that follows its own view: {packet}"
+        );
+    }
+
+    /// T-282: a hand-in whose task's contract moved past the version it was
+    /// made against says so; the reviewer still judges the hand-in by its own
+    /// version (T-63) and logs what the newer one changes.
+    #[test]
+    fn the_review_packet_says_when_the_task_moved_to_a_newer_contract() {
+        let mut store = world(CONFIG);
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 3;
+                tx.update_task(&task)?;
+                tx.insert_contract(&ContractRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    version: 3,
+                    goal: "the third goal".into(),
+                    accept: "the third criteria".into(),
+                    evidence_files: vec![],
+                    evidence_due_min: None,
+                    body: String::new(),
+                    created: T0 + 30,
+                    mechanical: None,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.adopted_version = 2;
+                tx.update_attempt(&attempt)
+            })
+            .unwrap();
+        let config = gear_app::config::parse(CONFIG).unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+
+        assert!(
+            packet.contains("Contract: v2 (the version this hand-in was made against)"),
+            "{packet}"
+        );
+        assert!(
+            packet.contains("Newer contract: v3 was written after this hand-in; judge against v2 and log what v3 changes."),
+            "{packet}"
+        );
+
+        // At v2 on a task at v2 there is no newer contract to name.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.contract_version = 2;
+                tx.update_task(&task)
+            })
+            .unwrap();
+        let packet = review_packet_for(&mut store, &config, "T-1", 1, "abc1234").unwrap();
+        assert!(!packet.contains("Newer contract:"), "{packet}");
     }
 
     /// T-168 (design §6.2): the reviewer's packet says the review's own
