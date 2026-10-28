@@ -3096,7 +3096,9 @@ impl<'s> Tx<'s> {
     ///   asked for, or `max(10, ceil(estimate_min / 2))`;
     /// - a review round: 1.5 × the median active time of the last 10
     ///   finished review rounds of the same model, at least 10 min; with
-    ///   fewer than 3 such rounds, 30 min.
+    ///   fewer than 3 such rounds, 30 min. Only rounds that measured
+    ///   activity count: a round with `active_s` 0 says nothing about how
+    ///   long a review takes, so it is not part of the sample.
     pub fn round_budget_min(
         &self,
         project: &str,
@@ -3139,12 +3141,19 @@ impl<'s> Tx<'s> {
     }
 
     /// The measured budget of a review round (§5.1).
+    ///
+    /// The median is taken over the last 10 ended review rounds that
+    /// measured some activity (`active_s > 0`). A round whose usage was
+    /// never read carries 0 and would drag the median to the floor; it says
+    /// nothing about how long a review takes, so it is left out of the
+    /// sample instead.
     fn review_budget_min(&self, project: &str, model: Option<&str>) -> GearResult<i64> {
         let mut stmt = self
             .tx
             .prepare(
                 "SELECT active_s FROM rounds
                  WHERE project=?1 AND role='review' AND end_at IS NOT NULL AND model IS ?2
+                   AND active_s > 0
                  ORDER BY end_at DESC LIMIT 10",
             )
             .map_err(map_sqlite)?;
