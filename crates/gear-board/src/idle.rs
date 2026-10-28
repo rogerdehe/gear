@@ -16,10 +16,40 @@
 //!
 //! A lane that works has no reason (`None`).
 
-use gear_model::{GearResult, SeatState, TaskState, Ts};
-use gear_store::{SeatRow, TaskRow, Tx};
+use gear_model::{GearResult, MsgKind, SeatRole, SeatState, TaskState, Ts};
+use gear_store::{MessageRow, SeatRow, TaskRow, Tx};
 
 use crate::state_word;
+
+/// How long an unanswered instruction of the captain keeps a lane busy (T-323):
+/// half an hour. A lane that never answers comes back to the idle and stall
+/// rules after it.
+pub const HELP_LIMIT_S: i64 = 1800;
+
+/// A lane that helps on an unanswered instruction of the captain (T-323, S2
+/// "work that is not a task"): the lane holds no attempt, but the captain
+/// asked it for something and it has not answered yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Helping {
+    /// The id of the instruction (`M-<n>`).
+    pub message: String,
+    /// The lane the instruction is about, when it is another lane's.
+    pub lane: Option<String>,
+    /// The first words of the instruction.
+    pub words: String,
+    /// When the instruction was sent.
+    pub since: Ts,
+}
+
+impl Helping {
+    /// The text of the help: `helping <lane>: <words>`.
+    pub fn text(&self) -> String {
+        match &self.lane {
+            Some(lane) => format!("helping {lane}: {}", self.words),
+            None => format!("helping the captain: {}", self.words),
+        }
+    }
+}
 
 /// Why a lane is idle (§8.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +150,14 @@ pub fn idle_reason(
         return Ok(None);
     }
 
+    // The lane helps on an unanswered instruction of the captain (T-323): it
+    // has no attempt, but it is not idle either.
+    if let Some(seat) = seat.as_ref() {
+        if helping(tx, project, seat, now)?.is_some() {
+            return Ok(None);
+        }
+    }
+
     // The next task of the queue: the first one that is queued. A task that
     // was handed in waits for its review in the background and does not hide
     // the work that is left (the engine gives the lane its next task while
@@ -144,6 +182,75 @@ pub fn idle_reason(
 
     // The task is queued and nobody gave it to the lane.
     Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+}
+
+/// The instruction of the captain the lane still has to answer, if any
+/// (T-323).
+///
+/// None unless the seat is a lane, holds no attempt in flight and the project
+/// has a captain; then the newest unanswered captain instruction to the seat
+/// within [`HELP_LIMIT_S`] is the help. A reply of the lane — any message of
+/// it with `reply_to` the instruction — ends it.
+pub fn helping(
+    tx: &Tx<'_>,
+    project: &str,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<Option<Helping>> {
+    if seat.role != SeatRole::Lane || !tx.in_progress_attempts_of_seat(&seat.id)?.is_empty() {
+        return Ok(None);
+    }
+    let Some(captain) = tx.captain_of(project)? else {
+        return Ok(None);
+    };
+    let mut instructions: Vec<MessageRow> = tx
+        .messages_to_since(project, &seat.id, now - HELP_LIMIT_S)?
+        .into_iter()
+        .filter(|message| message.kind == MsgKind::Instruction)
+        .filter(|message| message.sender == captain.id)
+        .collect();
+    instructions.sort_by(|a, b| (b.created, &b.id).cmp(&(a.created, &a.id)));
+    for instruction in instructions {
+        if has_reply(tx, project, &seat.id, &instruction)? {
+            continue;
+        }
+        let lane = match instruction.task.as_deref() {
+            Some(task) => tx.get_task(project, task)?.and_then(|task| task.lane),
+            None => None,
+        };
+        let lane = lane.filter(|lane| *lane != seat.name);
+        return Ok(Some(Helping {
+            message: instruction.id.clone(),
+            lane,
+            words: words_of(&instruction.body),
+            since: instruction.created,
+        }));
+    }
+    Ok(None)
+}
+
+/// Did the lane answer the instruction?
+fn has_reply(
+    tx: &Tx<'_>,
+    project: &str,
+    seat_id: &str,
+    instruction: &MessageRow,
+) -> GearResult<bool> {
+    Ok(tx
+        .messages_from_since(project, seat_id, instruction.created)?
+        .into_iter()
+        .any(|message| message.reply_to.as_deref() == Some(instruction.id.as_str())))
+}
+
+/// The first six words of the body, and "…" when there are more.
+fn words_of(body: &str) -> String {
+    let words: Vec<&str> = body.split_whitespace().collect();
+    let head: Vec<&str> = words.iter().take(6).copied().collect();
+    let mut text = head.join(" ");
+    if words.len() > head.len() {
+        text.push_str(" …");
+    }
+    text
 }
 
 /// The text of the reason (§8.2).

@@ -262,6 +262,9 @@ pub struct LaneBoard {
     pub idle: Option<IdleReason>,
     /// The text of the reason (§8.2).
     pub idle_text: Option<String>,
+    /// The help the lane gives on an unanswered instruction of the captain
+    /// (T-323), its text: `helping <lane>: …`.
+    pub helping: Option<String>,
     /// The tasks the lane has finished.
     pub done_count: usize,
     /// The tasks the lane still has.
@@ -456,6 +459,7 @@ pub fn project_with_agents(
             down: down_seat(seat),
             idle: None,
             idle_text: None,
+            helping: None,
             done_count: 0,
             left_count: 0,
             left_min: 0,
@@ -504,6 +508,7 @@ pub fn project_with_agents(
                 down: None,
                 idle: None,
                 idle_text: None,
+                helping: None,
                 done_count: 0,
                 left_count: 0,
                 left_min: 0,
@@ -569,11 +574,16 @@ pub fn project_with_agents(
     // The open tasks as a dependency tree (the other view of the plan).
     let deps = deps::tree(&tasks);
 
-    // Why each lane is idle (design §8.2) and what it has left.
+    // Why each lane is idle (design §8.2), what it helps on (T-323) and what
+    // it has left.
     for lane in &mut lanes {
         let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
         lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
         lane.idle = reason;
+        lane.helping = match tx.get_seat(&format!("{project}:{}", lane.lane))? {
+            Some(seat) => idle::helping(tx, project, &seat, now)?.map(|help| help.text()),
+            None => None,
+        };
         lane.done_count = lane
             .tasks
             .iter()
@@ -902,7 +912,11 @@ pub fn lane_line(lane: &LaneBoard) -> String {
         .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Waiting))
         .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Verifying));
     let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
-        .unwrap_or_else(|| "no current task".into());
+        .unwrap_or_else(|| match &lane.helping {
+            // A lane that helps says what it helps on (T-323).
+            Some(helping) => helping.clone(),
+            None => "no current task".into(),
+        });
     let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
     match &lane.down {
         // A seat that is not running says why, and how it gets back (T-82):
