@@ -49,6 +49,9 @@ struct Input {
     project: String,
     repo: PathBuf,
     integration: String,
+    /// The project's `[conventions].remote` (T-262): the remote the scan reads
+    /// the branches from.
+    remote: String,
     /// The project's `[conventions].task_branch` template (T-253): the scan
     /// reads the branch a task's work is on from its names.
     task_branch: String,
@@ -307,6 +310,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                 project: project.to_string(),
                 repo: repo.path.into(),
                 integration: repo.integration,
+                remote: config.conventions.remote.clone(),
                 task_branch: config.conventions.task_branch.clone(),
                 tasks,
                 handins,
@@ -336,9 +340,9 @@ fn close(tx: &Tx<'_>, project: &str, key: &str, reason: &str, now: Ts) -> GearRe
 fn scan(input: &Input) -> Result<Findings, String> {
     git(&input.repo, &["rev-parse", "--git-dir"])?;
     let local = revision(&input.repo, &format!("refs/heads/{}", input.integration))?;
-    let remote = revision(&input.repo, &format!("refs/remotes/origin/{}", input.integration))?;
-    // Use the containing tip when one is ahead; origin is authoritative when
-    // the local integration ref diverged. No network operation is needed.
+    let remote = revision(&input.repo, &format!("refs/remotes/{}/{}", input.remote, input.integration))?;
+    // Use the containing tip when one is ahead; the remote is authoritative
+    // when the local integration ref diverged. No network operation is needed.
     let integration = match (local, remote) {
         (Some(local), Some(remote)) if ancestor(&input.repo, &remote, &local)? => local,
         (_, Some(remote)) => remote,
@@ -362,7 +366,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),
-            None => revision(&input.repo, &format!("refs/remotes/origin/{name}"))?,
+            None => revision(&input.repo, &format!("refs/remotes/{}/{name}", input.remote))?,
         };
         let Some(head) = head else { continue; };
         let files = changed(&input.repo, &integration, &head)?;

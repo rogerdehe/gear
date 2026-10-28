@@ -271,7 +271,7 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
-    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, config.conventions.remote, repo.integration, task.task, task.attempt))
 }
 
 /// A direction check passed when the first word of its body is `ok`, in any
@@ -326,12 +326,23 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
         let repo = config.repo_of_task(&row);
         let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &row.id);
         let sha = if let Some(sha) = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["sha"].as_str()) { sha.to_string() } else {
-            let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")]) else { continue };
+            // The project's own remote (T-262): the branch is read from the
+            // ref its `[conventions].remote` names.
+            let remote = &config.conventions.remote;
+            let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/{remote}/{branch}")]) else { continue };
             let sha = sha.trim().to_string();
             if sha.is_empty() || existing.as_ref().and_then(|v| v["checked_sha"].as_str()) == Some(sha.as_str()) { continue }
-            let Ok(base) = review_git(cfg.review_git.as_ref(), &repo.path, &["merge-base", &format!("origin/{}", repo.integration), &sha]) else { continue };
+            let Ok(base) = review_git(cfg.review_git.as_ref(), &repo.path, &["merge-base", &format!("{remote}/{}", repo.integration), &sha]) else { continue };
             let Ok(diff) = review_git(cfg.review_git.as_ref(), &repo.path, &["diff", "--name-only", base.trim(), &sha]) else { continue };
-            if !diff.lines().any(|p| !p.is_empty() && !p.starts_with("ops/")) { continue }
+            // A push that only writes the voyage's reports or reviews starts no
+            // direction check (T-262): reporting is not the work the contract
+            // asks about. The folders are the project's own templates; a task
+            // with no milestone has neither, so only an empty diff is skipped.
+            let dirs: Vec<String> = row.milestone.as_deref().map(|milestone| vec![
+                format!("{}/", gear_model::layout::reports_dir(&config.conventions.voyage_dir, project, milestone)),
+                format!("{}/", gear_model::layout::reviews_dir(&config.conventions.voyage_dir, project, milestone)),
+            ]).unwrap_or_default();
+            if diff.lines().filter(|p| !p.is_empty()).all(|p| dirs.iter().any(|dir| p.starts_with(dir.as_str()))) { continue }
             sha
         };
         let writer = writer_current_model(store, config, &attempt.seat)?;
@@ -628,7 +639,7 @@ fn stash_review_tree(git: &dyn ReviewGit, store: &mut Store, project: &str, path
 }
 
 /// Prepare a checkout; a live reviewer on an unfinished job keeps its branch.
-fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, project: &str, repo: &str, path: &str, remote: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let git_error = |e| GearError::new(ErrorCode::BadFormat, format!("review checkout {path}: {e}"));
     let same_path = |a: &str, b: &str| a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
     stash_review_tree(git, store, project, path, &task.task, task.attempt, now)?;
@@ -666,16 +677,16 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
         stash_review_tree(git, store, project, holder, &task.task, task.attempt, now)?;
         review_git(git, holder, &["checkout", "--detach"]).map_err(git_error)?;
     }
-    review_git(git, path, &["fetch", "origin"]).map_err(git_error)?;
+    review_git(git, path, &["fetch", remote]).map_err(git_error)?;
     review_git(git, path, &["checkout", "-f", "-B", branch, &task.candidate]).map_err(git_error)?;
     Ok(true)
 }
 
-fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
+fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn HerdrAct, seat: &SeatRow, repo: &str, path: &str, remote: &str, branch: &str, task: &ReviewTask, now: Ts) -> GearResult<bool> {
     let key = format!("engine.review_tree.{}", seat.id);
     let job = format!("{}:{}:{}:{}:{}", task.task, task.attempt, task.candidate, repo, branch);
     if store.read(|tx| tx.get_meta(&key))?.as_deref() == Some(job.as_str()) { return Ok(true) }
-    match prepare_review_tree(git, store, herdr, &seat.project, repo, path, branch, task, now) {
+    match prepare_review_tree(git, store, herdr, &seat.project, repo, path, remote, branch, task, now) {
         Ok(true) => {},
         Ok(false) => return Ok(false),
         Err(error) => {
@@ -1005,7 +1016,7 @@ fn start_reviewer(
             return Ok(Started::NotYet);
         }
         let Some(path) = worktree_path(store, &seat.id)? else { return Ok(Started::NotYet) };
-        if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+        if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
         if prepare_job_session(store, herdr, cfg, seat, task, direction, now)? != crate::session::Prep::Ready {
             return Ok(Started::NotYet);
         }
@@ -1080,7 +1091,7 @@ fn start_reviewer(
         park(store, &seat.id, "the seat's worktree path is unknown", now)?;
         return Ok(Started::NotYet);
     };
-    if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &branch, task, now)? { return Ok(Started::NotYet) }
+    if !prepare_seat_tree(cfg.review_git.as_ref(), store, herdr, seat, &repo.path, &path, &config.conventions.remote, &branch, task, now)? { return Ok(Started::NotYet) }
 
     if occupant.is_none() {
         let mut env_command = format!("export GEAR_CTX={}:{}:{}; export GEAR_DB={}", config.project.id, seat.name, generation, cfg.db_path);
@@ -2454,8 +2465,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let first = sh(&work, "git rev-parse HEAD");
         let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
         let mut store = world(&text);
+        // The task is of a voyage (T-262): its reports live in
+        // `gear/voyages/M5/reports`.
         store.write(|tx| {
-            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; task.milestone = Some("M5".into()); tx.update_task(&task)?;
             let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
@@ -2477,7 +2490,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_ne!(replayed.id, failed.id);
         assert!(replayed.payload["text"].as_str().unwrap().contains("Direction check of T-1 attempt 1"));
         store.write(|tx| tx.set_op_state("p", &replayed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
-        store.write(|tx| gear_app::tasks::submit_result(tx,"p","T-1",1,1,&first,"ops/reports/T-1.md",T0+10)).unwrap();
+        store.write(|tx| gear_app::tasks::submit_result(tx,"p","T-1",1,1,&first,"gear/voyages/M5/reports/T-1.md",T0+10)).unwrap();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let after_handin = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
         assert_ne!(after_handin.id, replayed.id);
@@ -2506,10 +2519,57 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         finish_direction_results(&mut store, "p", T0 + 17).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 17)).unwrap();
         assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1);
-        sh(&work, "git checkout -q -B ops-only origin/dev && mkdir -p ops && echo report > ops/report && git add -A && git -c user.name=a -c user.email=a@b commit -qm ops");
+        // T-262: a push that only writes the voyage's reports starts no
+        // direction check (it used to be `ops/`, which this repo left on
+        // 2026-10-28).
+        sh(&work, "git checkout -q -B reports-only origin/dev && mkdir -p gear/voyages/M5/reports && echo report > gear/voyages/M5/reports/T-1.md && git add -A && git -c user.name=a -c user.email=a@b commit -qm report");
         publish(&work, "heat/t1");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 18).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], second);
+    }
+
+    /// T-262: a report alone starts no direction check, a report together with
+    /// a source file does — the report is a document, the source is the work.
+    #[test]
+    fn a_report_alone_starts_no_direction_check_but_a_report_and_a_source_file_do() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        // The lane's first push: its report only.
+        sh(&work, "git checkout -q -B heat/t1 dev && mkdir -p gear/voyages/M5/reports && echo 'T-1 report' > gear/voyages/M5/reports/T-1.md && git add -A && git -c user.name=a -c user.email=a@b commit -qm report");
+        publish(&work, "heat/t1");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Running;
+            task.milestone = Some("M5".into());
+            tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+            attempt.state = AttemptState::Started;
+            attempt.candidate = None;
+            tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let mut herdr = FakeHerdr::new();
+        let key = direction_key("p", "T-1", 1);
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        assert_eq!(store.read(|tx| tx.get_meta(&key)).unwrap(), None, "a report alone starts no direction check");
+        // The same push with one source file beside the report: the work the
+        // contract asks about is there, and the check starts.
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm work");
+        publish(&work, "heat/t1");
+        let work_sha = sh(&work, "git rev-parse HEAD");
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 11).unwrap();
+        let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().expect("a direction check starts")).unwrap();
+        assert_eq!(job["state"], "running");
+        assert_eq!(job["sha"], work_sha);
     }
 
     /// F1 of the T-199 review (round 2): a hand-in waits behind its own
@@ -2658,8 +2718,8 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         let mut herdr=FakeHerdr::new();
         let task=ReviewTask {task:"T-1".into(),attempt:1,writer:"p:heat".into(),lane:"heat".into(),candidate:"abc1234".into()};
-        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","direction/t-1",&task,T0).unwrap();
-        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","review/t1",&task,T0+1).unwrap();
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","origin","direction/t-1",&task,T0).unwrap();
+        prepare_seat_tree(&FakeReviewGit,&mut store,&mut herdr,&seat,"/repo","/fake-review-worktree","origin","review/t1",&task,T0+1).unwrap();
         let branches=REVIEW_GIT_CALLS.with(|calls|calls.borrow().iter().filter_map(|(_,args)| {
             (args.first().map(String::as_str)==Some("checkout") && args.get(2).map(String::as_str)==Some("-B")).then(||args.get(3).cloned()).flatten()
         }).collect::<Vec<_>>());
@@ -2693,10 +2753,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             tx.set_meta(&repo_path_key("p:review-9", work.to_str().unwrap()), old.to_str().unwrap())
         }).unwrap();
         herdr.add_agent("w9:p9", "codex", gear_herdr::AgentStatus::Working);
-        assert!(!prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert!(!prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         herdr = FakeHerdr::new();
-        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "review/t1", &task, T0).unwrap());
+        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), new.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&old, "git rev-parse --abbrev-ref HEAD"), "HEAD");
         assert_eq!(sh(&new, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         assert!(!old.join("old-evidence").exists());
@@ -2723,7 +2783,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         let mut herdr = FakeHerdr::new();
         let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate: candidate.clone() };
         let path = work.to_str().unwrap();
-        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", path, path, "review/t1", &task, T0).unwrap());
+        assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", path, path, "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&work, "git rev-parse HEAD"), candidate);
         assert_eq!(sh(&work, "git rev-parse --abbrev-ref HEAD"), "review/t1");
         std::fs::remove_dir_all(root).unwrap();

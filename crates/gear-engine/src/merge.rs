@@ -382,6 +382,9 @@ pub fn merge_passed(
         let output = finished.clone();
         let job = op.clone();
         let repo = repo.clone();
+        // The remote is the project's own (T-262), resolved from the config
+        // this tick already holds.
+        let remote_name = config.conventions.remote.clone();
         let remote = cfg.remote.clone();
         let job_wait = cfg.merge_retry_wait.clone();
         let progress = cfg.merges.progress.clone();
@@ -396,13 +399,14 @@ pub fn merge_passed(
                         Ok(None) => return Report::Busy,
                         Err(reason) => return Report::Failed(Failed::clear(reason)),
                     };
+                    let target = Target { name: &remote_name, runner: remote.as_ref() };
                     match merge_with_retries(
                         &worktree,
                         &repo,
                         &job,
                         &lock,
                         &others,
-                        remote.as_ref(),
+                        target,
                         &job_wait,
                         pr.as_ref(),
                         &fallback,
@@ -602,7 +606,7 @@ fn merge_with_retries(
     op: &OpRow,
     lock: &File,
     others: &[(String, String, bool)],
-    remote: &dyn Remote,
+    remote: Target<'_>,
     wait: &RetryWait,
     pr: Option<&PrTarget>,
     review_fallback: &str,
@@ -659,13 +663,38 @@ fn fail_merge(store: &mut Store, project: &str, op: &OpRow, reason: &str, now: T
 ///
 /// Production is [`GitRemote`]. The engine's tests replace it with
 /// [`FetchRemote`], which moves the refs from the remote's own side, so no test
-/// in this crate runs `git push`.
+/// in this crate runs `git push`. Every call names the remote (T-262): the
+/// project's `[conventions].remote`, which a team may call `upstream`.
 pub trait Remote: Send + Sync + std::fmt::Debug {
-    /// Push `dir`'s HEAD to `dst` on `dir`'s origin.
-    fn push(&self, dir: &Path, dst: &str) -> Result<(), String>;
-    /// Delete `branch` on `dir`'s origin; a branch already gone counts as
+    /// Push `dir`'s HEAD to `dst` on `dir`'s `remote`.
+    fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String>;
+    /// Delete `branch` on `dir`'s `remote`; a branch already gone counts as
     /// deleted.
-    fn delete(&self, dir: &Path, branch: &str) -> bool;
+    fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool;
+}
+
+/// The remote a merge talks to: the project's `[conventions].remote` and the
+/// runner that touches it (T-107, T-262). The name comes from the config, the
+/// runner from the engine's own config.
+#[derive(Debug, Clone, Copy)]
+struct Target<'a> {
+    name: &'a str,
+    runner: &'a dyn Remote,
+}
+
+impl<'a> Target<'a> {
+    /// The remote of `config`, touched by `runner`.
+    fn of(config: &'a ProjectConfig, runner: &'a dyn Remote) -> Target<'a> {
+        Target { name: &config.conventions.remote, runner }
+    }
+
+    fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
+        self.runner.push(dir, self.name, dst)
+    }
+
+    fn delete(&self, dir: &Path, branch: &str) -> bool {
+        self.runner.delete(dir, self.name, branch)
+    }
 }
 
 /// The wait between two attempts of a merge that failed for a reason that can
@@ -718,12 +747,12 @@ impl Default for RetryWait {
 pub struct GitRemote;
 
 impl Remote for GitRemote {
-    fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
-        git(dir, &["push", "origin", &format!("HEAD:{dst}")]).map(|_| ())
+    fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String> {
+        git(dir, &["push", remote, &format!("HEAD:{dst}")]).map(|_| ())
     }
 
-    fn delete(&self, dir: &Path, branch: &str) -> bool {
-        git(dir, &["push", "origin", "--delete", branch]).is_ok()
+    fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+        git(dir, &["push", remote, "--delete", branch]).is_ok()
     }
 }
 
@@ -736,8 +765,8 @@ impl Remote for GitRemote {
 pub struct FetchRemote;
 
 impl Remote for FetchRemote {
-    fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
-        let origin = origin_path(dir)?;
+    fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String> {
+        let origin = origin_path(dir, remote)?;
         let work = std::fs::canonicalize(dir)
             .map_err(|e| format!("fetch remote: {}: {e}", dir.display()))?;
         git(
@@ -753,8 +782,8 @@ impl Remote for FetchRemote {
         Ok(())
     }
 
-    fn delete(&self, dir: &Path, branch: &str) -> bool {
-        let Ok(origin) = origin_path(dir) else {
+    fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+        let Ok(origin) = origin_path(dir, remote) else {
             return false;
         };
         git(
@@ -771,23 +800,25 @@ impl Remote for FetchRemote {
     }
 }
 
-/// The origin of `dir` as a path: a local bare repo in the engine's tests.
-fn origin_path(dir: &Path) -> Result<std::path::PathBuf, String> {
-    // Remembered per checkout (T-127): a merge asks for the origin once per
-    // branch it pushes and closes, and a checkout's remote does not change
-    // while a test runs. Only the tests' runner asks this; the production
-    // runner lets `git push` resolve the same remote itself.
-    static KNOWN: std::sync::OnceLock<Mutex<BTreeMap<std::path::PathBuf, std::path::PathBuf>>> =
+/// The remote `remote` of `dir` as a path: a local bare repo in the engine's
+/// tests.
+fn origin_path(dir: &Path, remote: &str) -> Result<std::path::PathBuf, String> {
+    // Remembered per checkout and remote (T-127): a merge asks for the remote
+    // once per branch it pushes and closes, and a checkout's remote does not
+    // change while a test runs. Only the tests' runner asks this; the
+    // production runner lets `git push` resolve the same remote itself.
+    static KNOWN: std::sync::OnceLock<Mutex<BTreeMap<(std::path::PathBuf, String), std::path::PathBuf>>> =
         std::sync::OnceLock::new();
     let known = KNOWN.get_or_init(Default::default);
-    if let Some(path) = known.lock().unwrap().get(dir).cloned() {
+    let key = (dir.to_path_buf(), remote.to_string());
+    if let Some(path) = known.lock().unwrap().get(&key).cloned() {
         return Ok(path);
     }
-    let url = git(dir, &["remote", "get-url", "origin"])?;
+    let url = git(dir, &["remote", "get-url", remote])?;
     let url = url.trim();
     let path = Path::new(url);
     let path = if path.is_absolute() { path.to_path_buf() } else { dir.join(path) };
-    known.lock().unwrap().insert(dir.to_path_buf(), path.clone());
+    known.lock().unwrap().insert(key, path.clone());
     Ok(path)
 }
 
@@ -1173,7 +1204,8 @@ fn close_pr_branches(
         Err(_) => return Ok(()),
     };
     let dir = Path::new(&worktree.path);
-    let remote = cfg.remote.as_ref();
+    // The project's own remote (T-262).
+    let remote = Target::of(config, cfg.remote.as_ref());
     let task = op.task.clone().unwrap_or_default();
     let task_branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
     let review = op
@@ -1476,7 +1508,8 @@ fn merge_one(
         op,
         &lock_of(worktree)?,
         &[],
-        &FetchRemote,
+        // The fixtures name their remote `origin` (T-262).
+        Target { name: "origin", runner: &FetchRemote },
         None,
         &review,
     ))
@@ -1513,13 +1546,16 @@ fn merge_one_locked(
     op: &OpRow,
     lock: &File,
     others: &[(String, String, bool)],
-    remote: &dyn Remote,
+    remote: Target<'_>,
     pr: Option<&PrTarget>,
     review_fallback: &str,
 ) -> Step {
     let git = |dir: &Path, args: &[&str]| git_with_lock(dir, args, Some(lock));
     let dir = Path::new(&worktree.path);
     let integration = repo.integration.clone();
+    // The project's own remote (T-262): every fetch, ref and message of this
+    // merge names it.
+    let remote_name = remote.name;
     let branch = op.payload["branch"].as_str().unwrap_or_default().to_string();
     // The op may come from `tasks::settle_review`, which names the branch and
     // the candidate but not the review branch: derive it, and merge it only
@@ -1534,15 +1570,15 @@ fn merge_one_locked(
 
     // 1. a clean base: the remote integration branch, whatever an interrupted
     //    earlier run left behind.
-    //    The fetch names every branch of origin: the approved candidate may
-    //    sit on any of them (T-61), and a clone that restricts its refspec
+    //    The fetch names every branch of the remote: the approved candidate
+    //    may sit on any of them (T-61), and a clone that restricts its refspec
     //    would not bring it in. A fetch that fails may clear (the network,
     //    the remote): it is retried.
-    if let Err(reason) = git(dir, &["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"]) {
-        return Step::Failed(Failed::clear(format!("fetch origin: {reason}")));
+    if let Err(reason) = git(dir, &["fetch", "--prune", remote_name, &format!("+refs/heads/*:refs/remotes/{remote_name}/*")]) {
+        return Step::Failed(Failed::clear(format!("fetch {remote_name}: {reason}")));
     }
-    if let Err(reason) = git(dir, &["reset", "--hard", &format!("origin/{integration}")]) {
-        return Step::Failed(Failed::stuck(format!("reset to origin/{integration}: {reason}")));
+    if let Err(reason) = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]) {
+        return Step::Failed(Failed::stuck(format!("reset to {remote_name}/{integration}: {reason}")));
     }
 
     // 2. the approved candidate, by commit. P0: what merges is the commit the
@@ -1561,7 +1597,7 @@ fn merge_one_locked(
             Ok(out) => out.trim().to_string(),
             Err(reason) => {
                 return Step::Failed(Failed::clear(format!(
-                    "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
+                    "{task}: the approved candidate {candidate} is not fetchable from {remote_name} yet\n{reason}\n\
                      it may not be pushed yet: the merge retries and asks the captain if it stays"
                 )))
             }
@@ -1582,13 +1618,13 @@ fn merge_one_locked(
             "for-each-ref",
             "--format=%(refname:short) %(objectname)",
             &format!("--contains={sha}"),
-            "refs/remotes/origin/",
+            &format!("refs/remotes/{remote_name}/"),
         ],
     ) {
         Ok(pushed) => pushed,
         Err(reason) => {
             return Step::Failed(Failed::clear(format!(
-                "{task}: the approved candidate {candidate} is not fetchable from origin yet\n{reason}\n\
+            "{task}: the approved candidate {candidate} is not fetchable from {remote_name} yet\n{reason}\n\
                  it may not be pushed yet: the merge retries and asks the captain if it stays"
             )))
         }
@@ -1599,7 +1635,7 @@ fn merge_one_locked(
         // merge retries. Only the bounded retry decides whether it was never
         // pushed (F2 of the T-61 review).
         return Step::Failed(Failed::clear(format!(
-            "{task}: the approved candidate {sha} is on no pushed ref of origin\n\
+            "{task}: the approved candidate {sha} is on no pushed ref of {remote_name}\n\
              it was never pushed, or the branch that held it is gone"
         )));
     }
@@ -1616,7 +1652,7 @@ fn merge_one_locked(
     //    "carried and not landed" — and an empty list is step 5's answer too.
     let ahead = git(
         dir,
-        &["rev-list", &format!("origin/{integration}..{sha}")],
+        &["rev-list", &format!("{remote_name}/{integration}..{sha}")],
     )
     .ok();
     let carried = match &ahead {
@@ -1639,13 +1675,13 @@ fn merge_one_locked(
     //    integration branch is not touched: the merge fails before it, so
     //    dev stays where it was. A candidate that is already merged needs no
     //    merge commit; its review branch still merges with it.
-    let review_ref = format!("origin/{review}");
+    let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
     let has_review = review_found.is_ok();
     if !has_review && !already {
         let reason = review_found.unwrap_err();
         return Step::Failed(Failed::stuck(format!(
-            "{task}: the review branch {review_ref} is missing on origin\n{reason}\n\
+            "{task}: the review branch {review_ref} is missing on {remote_name}\n{reason}\n\
              a merge publishes the approved candidate and its review branch together"
         )));
     }
@@ -1660,7 +1696,7 @@ fn merge_one_locked(
         // The candidate is on the integration branch and its review branch is
         // gone: a restart after the push. Nothing to merge, nothing to push.
         return Step::Merged(format!(
-            "{task} was already merged: {sha} is on origin/{integration}"
+            "{task} was already merged: {sha} is on {remote_name}/{integration}"
         ));
     }
     for pinned in &pinned_refs {
@@ -1676,7 +1712,7 @@ fn merge_one_locked(
         ) {
             // Abort and leave the worktree exactly at the integration branch.
             let _ = git(dir, &["merge", "--abort"]);
-            let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
+            let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
             return Step::Failed(Failed::stuck(format!("conflict merging {pinned}: {reason}")));
         }
     }
@@ -1684,7 +1720,7 @@ fn merge_one_locked(
     // 7. conflict markers that a merge left behind without reporting a
     //    conflict (a file committed with markers in it).
     if git(dir, &["grep", "-n", "-e", "^<<<<<<<", "-e", "^>>>>>>>"]).is_ok() {
-        let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
+        let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
         return Step::Failed(Failed::stuck("conflict markers in the merged tree"));
     }
 
@@ -1717,7 +1753,7 @@ fn merge_one_locked(
         // T-219: the tail is often slow-test timings, and the captain cannot
         // see what failed in it. The lines that name a failure come first.
         let failures = failure_lines(&combined, 20);
-        let _ = git(dir, &["reset", "--hard", &format!("origin/{integration}")]);
+        let _ = git(dir, &["reset", "--hard", &format!("{remote_name}/{integration}")]);
         // 126 and 127 are the shell's own "cannot run that" (126: not
         // executable, 127: not found): the toolchain is missing or broken,
         // not the work. That can clear, so it is retried; every other exit
@@ -1760,11 +1796,11 @@ fn merge_one_locked(
     let head = git(dir, &["log", "-1", "--oneline"]).unwrap_or_default();
     let mut line = format!("merged {task} into {integration}: {head}");
     if !closed.is_empty() {
-        line.push_str(&format!("\nclosed on origin: {}", closed.join(", ")));
+        line.push_str(&format!("\nclosed on {remote_name}: {}", closed.join(", ")));
     }
     if !left.is_empty() {
         line.push_str(&format!(
-            "\nleft on origin (they still hold the approved commit): {}",
+            "\nleft on {remote_name} (they still hold the approved commit): {}",
             left.join(", ")
         ));
     }
@@ -1881,7 +1917,7 @@ fn pr_head(
     review_ref: &str,
     has_review: bool,
     pr: &PrTarget,
-    remote: &dyn Remote,
+    remote: Target<'_>,
 ) -> Step {
     // The candidate is the base of the head: the review's commits go on top
     // of it, and the push is a fast-forward of the branch the claim opened.
@@ -1924,7 +1960,7 @@ fn pr_head(
     // is reused, and nothing is pushed (a push would not be a fast-forward).
     // A head that is anything else is refused: the branch moved on, and the
     // engine never forces a push.
-    let branch_ref = format!("origin/{}", pr.branch);
+    let branch_ref = format!("{}/{branch}", remote.name, branch = pr.branch);
     if let Some(pushed) = git(dir, &["rev-parse", "--verify", &branch_ref]).ok() {
         let pushed = pushed.trim().to_string();
         if pushed != head && is_own_head(dir, &pushed, &head) {
@@ -2043,19 +2079,19 @@ fn close_branches(
     repo: &Repo,
     task_branch: &str,
     review: &str,
-    remote: &dyn Remote,
+    remote: Target<'_>,
     pushed: &Pushed,
 ) -> (Vec<String>, Vec<String>) {
     let mut closed = Vec::new();
     let mut left = Vec::new();
     // The review branch: it holds the review of this task and nothing else.
-    let review_ref = format!("origin/{review}");
+    let review_ref = format!("{}/{review}", remote.name);
     if pushed.refs.iter().any(|name| name == &review_ref) && delete_remote(dir, review, remote) {
         closed.push(review.to_string());
     }
     // The branches whose tip is the candidate: the work the review approved.
     for name in &pushed.tips {
-        let name = name.trim().trim_start_matches("origin/").to_string();
+        let name = name.trim().trim_start_matches(&format!("{}/", remote.name)).to_string();
         if name.is_empty() || name == "HEAD" {
             continue;
         }
@@ -2085,7 +2121,7 @@ fn is_task_branch(branch: &str, task_branch: &str) -> bool {
 }
 
 /// Close a branch on origin. A branch that is already gone is closed too.
-fn delete_remote(dir: &Path, branch: &str, remote: &dyn Remote) -> bool {
+fn delete_remote(dir: &Path, branch: &str, remote: Target<'_>) -> bool {
     remote.delete(dir, branch)
 }
 
@@ -4365,6 +4401,18 @@ gate = "{gate}"
         remote: &dyn Remote,
         wait: &RetryWait,
     ) -> Result<String, Failed> {
+        merge_retried_on("origin", worktree, repo, op, remote, wait)
+    }
+
+    /// The merge on a fixture whose remote is named `remote_name` (T-262).
+    fn merge_retried_on(
+        remote_name: &str,
+        worktree: &gear_herdr::Worktree,
+        repo: &Repo,
+        op: &OpRow,
+        remote: &dyn Remote,
+        wait: &RetryWait,
+    ) -> Result<String, Failed> {
         let review = {
             let task = op.task.clone().unwrap_or_default();
             gear_model::branch::expand(gear_model::branch::REVIEW_BRANCH, "", "", &task)
@@ -4375,7 +4423,7 @@ gate = "{gate}"
             op,
             &lock_of(worktree)?,
             &[],
-            remote,
+            Target { name: remote_name, runner: remote },
             wait,
             None,
             &review,
@@ -4400,15 +4448,15 @@ gate = "{gate}"
     }
 
     impl Remote for FailOnceRemote {
-        fn push(&self, dir: &Path, dst: &str) -> Result<(), String> {
+        fn push(&self, dir: &Path, remote: &str, dst: &str) -> Result<(), String> {
             if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return Err(self.reason.clone());
             }
-            FetchRemote.push(dir, dst)
+            FetchRemote.push(dir, remote, dst)
         }
 
-        fn delete(&self, dir: &Path, branch: &str) -> bool {
-            FetchRemote.delete(dir, branch)
+        fn delete(&self, dir: &Path, remote: &str, branch: &str) -> bool {
+            FetchRemote.delete(dir, remote, branch)
         }
     }
 
