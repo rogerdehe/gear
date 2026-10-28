@@ -25,7 +25,7 @@ use serde_json::Value;
 
 mod quota;
 
-pub use quota::{read_quota, read_quota_in, QuotaReader, Reading, Window};
+pub use quota::{read_quota, read_quota_in, reset_from_text, QuotaReader, Reading, Window};
 
 /// The kinds of log of §4.3, named by the profile's `usage_log` (§2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
