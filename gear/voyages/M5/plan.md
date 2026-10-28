@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=623 -->
+<!-- gear-plan project=gear base=624 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -52,6 +52,7 @@ eta: 16h
 - station M-4664: keep course 240 min (25 % of the 16 h eta), 41 done of 118; forecast 1440 min (24 h), lanes hull 1200, mast 976 after the move; the 24 h eta waits for the user
 - station M-4673: keep course 245 min in, 42 done; forecast 1477 min; the eta waits for the user
 - station M-4701: keep course 277 min in, 45 done; forecast 1498 min; the eta waits for the user
+- 2026-10-29 05:05 scope: a second-round review can loop for ever (another project's T-117 attempt 2, 70 min with three reviewers in standby; its review-2 session step stuck at wait_exit for round T-117:2): fn handed_a_verdict names the job by the seat's last Deliver op, which is still round 1's packet while round 2's session is being resumed, so round 1's verdict puts the seat back to Standby before round 2's packet goes, every tick; T-375 fixes it at the head of hull's queue, T-376 rings the captain for any hand-in that waits 20 min without a review packet | why: a normal-use error that parks every rework's review | else: the captain settles candidates unreviewed
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
@@ -710,3 +711,14 @@ goal: [v0.5.0 S1] The lane rules say the stash is shared (another project, 2026-
 accept: The texts read as above (`gear --skill conventions`, the lane rules and `gear --skill review` print them); the skill topic tests pass. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
 deps: T-275
 estimate: 10
+
+## T-375 [now] lane=hull milestone=M5 required
+goal: [v0.5.0 S1] A reviewer starting the review of a rework is not put back to Standby by its own earlier verdict (another project, 2026-10-29: T-117 attempt 2 sat Submitted for 70 minutes with three reviewers in Standby "review done"; the seat review-2 that had judged attempt 1 took attempt 2, its session step for round `T-117:2:review` stayed at `wait_exit`, and the captain settled the rework unreviewed). Cause, in crates/gear-engine/src/review.rs: fn handed_a_verdict names the job by the seat's last Deliver op; while round 2's session is being resumed (session_runner: `resume`, `wait_exit`), no round-2 packet exists yet, so the last op is round 1's packet, round 1's verdict by this seat exists, and fn standby_after_verdict sets the seat Standby and clears its task; the next tick takes a seat for the task again and the same thing happens. Change fn handed_a_verdict only, no other design: the job's attempt is the attempt of the seat's open review round (`tx.open_round_of_seat(&seat.id)?` with `role == "review"` and `task == task`) when there is one; else the last Deliver op's, as today; else the task's latest attempt, as today. The code change is in crates/gear-engine/src/review.rs only; tests go where the crate keeps them.
+accept: review.rs tests: a seat that gave the pass-or-fail verdict of T-1 attempt 1 (its last Deliver op is attempt 1's packet) and now holds T-1 again with an open review round of attempt 2 and no attempt-2 packet stays Active through `standby_after_verdict`; once attempt 2's verdict by that seat exists it goes Standby; the existing standby tests pass. An engine test through `start_reviews` and `standby_after_verdict` on two ticks: a rework hand-in reviewed by the seat that judged round 1 keeps that seat Active between the ticks. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+estimate: 25
+
+## T-376 [must] lane=hull milestone=M5 required
+goal: [v0.5.0 S1] A hand-in that waits 20 minutes without its review packet reaching a reviewer rings the captain (another project's T-117: 70 minutes Submitted while seats were free, and nothing said so; the "every temp seat is in use" notice covers only a full quota). Change crates/gear-engine/src/review.rs, after T-375 (same file), no other design: in fn start_reviews, after the hand-in pass, for every task of `tasks_to_review` whose attempt was handed in (`tx.attempt_times(project, task, n)?.handed_in`) at least 1200 s before `now` and that has no Confirmed Deliver op of a Temp seat for that task and attempt, write once per attempt (meta `engine.review_stall.<task>.<attempt>`) one urgent `MsgKind::System` Open message to the captain on thread `review-stall:<task>:<attempt>`: "<task> attempt <n> was handed in <m> min ago and no reviewer has its packet: the seats are <seat: state, task> joined by \"; \"; look at the reviewer panes, or settle it in # Verdicts after reading the candidate yourself". The code change is in crates/gear-engine/src/review.rs only; tests go where the crate keeps them.
+accept: review.rs tests: a hand-in 21 min old with no confirmed reviewer delivery gives one urgent captain item naming the seats; a second tick gives none; a hand-in whose packet was confirmed gives none; one 19 min old gives none. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+deps: T-375
+estimate: 20
