@@ -88,11 +88,12 @@ pub fn deliver_doorbell_now(
     }];
     // Design §10.4: a lane with no open attempt gets the text that tells it
     // to stop working on earlier things.
-    let no_task = store.read(|tx| {
-        let Some(row) = tx.get_seat(seat)? else { return Ok(false) };
-        crate::no_task_of(tx, &row)
+    let (no_task, goal) = store.read(|tx| {
+        let Some(row) = tx.get_seat(seat)? else { return Ok((false, None)) };
+        let goal = if row.role == gear_model::SeatRole::Captain { crate::doorbell::goal_line(tx, &row.project)? } else { None };
+        Ok((crate::no_task_of(tx, &row)?, goal))
     })?;
-    let text = crate::doorbell::text(&items, no_task);
+    let text = crate::doorbell::with_goal(crate::doorbell::text(&items, no_task), goal.as_deref());
     // One write transaction: check the seat, the binding and the coverage, and
     // claim the message with this path's own doorbell op before Herdr runs.
     let claimed = store.write(|tx| {
