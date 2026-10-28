@@ -98,6 +98,7 @@ TABX = []
 G = {}          # the picked voyage's data (M5 change 1)
 TOP = [5]       # first row of a view, below the header
 OPENED = {}     # lanes expanded in Time & tokens
+DETAIL = [False]  # change 14: the header is folded unless d unfolds it
 # minutes from departure when each task's work started and when it merged (the graph needs both)
 WHEN = {"T-257": (5, 31), "T-258": (5, 58), "T-259": (8, 46), "T-260": (32, 102), "T-261": (59, 128),
         "T-262": (47, None), "T-263": (103, None), "T-264": (129, None), "T-268": (70, None),
@@ -129,6 +130,13 @@ def put(w, y, x, s, a=0):
     h, wd = w.getmaxyx()
     if 0 <= y < h and 0 <= x < wd:
         try: w.addnstr(y, x, s, max(0, wd - x - 1), a)
+        except curses.error: pass
+
+def hl(w, y):
+    """change 13: the selected row is lit across the whole width, in one colour."""
+    h, wd = w.getmaxyx()
+    if 0 <= y < h:
+        try: w.chgat(y, 1, wd - 2, curses.A_REVERSE)
         except curses.error: pass
 
 def bar(f, n):
@@ -172,50 +180,86 @@ def header(w, view):
     if V["goal_changed"]:
         at, before, after = V["goal_changed"]
         put(w, y, 1, f"{'Goal changed':<14}{at}: {before} → {after} (the user agreed; Decisions shows both)", C["bad"] | C["b"]); y += 1
-    # change 3: every row says what it is
-    put(w, y, 1, "Goal check", C["dim"])
-    for ok, s_ in G["DONE"]:
-        put(w, y, 15, ("✔ " if ok else "✗ ") + s_, C["ok"] if ok else C["bad"]); y += 1
-    put(w, y, 1, "Milestones", C["dim"])
-    for sid, what, st, at in G["STATIONS"]:
-        txt, a = {"done": (f"✔ {sid} {what} — reached at {hm(at)}", C["ok"]),
-                  "now": (f"▶ {sid} {what} — now, planned by {hm(at)}", C["b"]),
-                  "next": (f"· {sid} {what} — planned by {hm(at)}", C["dim"])}[st]
-        put(w, y, 15, txt, a); y += 1
-    # change 4: time as a bar with ◆ expected finish and │ planned end, then the same in words
-    n = max(24, min(50, wd - 95))
+    # change 3: every row says what it is; the labels are titles (bold), not grey.
+    # change 14: folded by default — one row each for the goal check, the milestone, time and tasks; d unfolds.
+    L = C["b"]
+    n = max(20, min(40 if not DETAIL[0] else 50, (wd - 60) // 2 if not DETAIL[0] else wd - 95))
     span_ = max(V["eta_m"], V["projected_m"], V["used_m"])
     cells = list(bar(V["used_m"] / span_, n))
     cells[min(n - 1, V["eta_m"] * n // span_)] = "│"
     if V["state"] == "sailing": cells[min(n - 1, V["projected_m"] * n // span_)] = "◆"
     if V["state"] == "sailing":
         diff = V["eta_m"] - V["projected_m"]
+        short = f"expected {hm(V['projected_m'])} of {hm(V['eta_m'])}, " + (f"{hm(diff)} ahead" if diff >= 0 else f"{hm(-diff)} behind")
         when = (f"used {hm(V['used_m'])} · planned {hm(V['eta_m'])} · expected {hm(V['projected_m'])} "
                 f"(slowest lane: {V['slow_lane']}), " + (f"{hm(diff)} ahead of plan" if diff >= 0 else f"{hm(-diff)} behind plan"))
     else:
         diff = V["eta_m"] - V["used_m"]
+        short = f"took {hm(V['used_m'])} of {hm(V['eta_m'])}, " + (f"{hm(diff)} under" if diff >= 0 else f"{hm(-diff)} over")
         when = f"took {hm(V['used_m'])} · planned {hm(V['eta_m'])} · " + (f"{hm(diff)} under plan" if diff >= 0 else f"{hm(-diff)} over plan")
-    put(w, y, 1, "Time", C["dim"])
-    put(w, y, 15, "".join(cells), C["ok"] if diff >= 0 else C["bad"]); put(w, y, 17 + n, when, C["b"]); y += 1
-    put(w, y, 15, "█ used   ◆ expected finish   │ planned end", C["dim"]); y += 1
-    # tasks of this voyage only, in three parts (change 6)
     tasks = [t for t in T if t[2] != "moved"]
     merged = sum(1 for t in tasks if t[2] == "done"); waiting = sum(1 for t in tasks if t[2] in ("queued", "deps"))
     going = len(tasks) - merged - waiting; moved = [t[0] for t in T if t[2] == "moved"]
     k = max(1, len(tasks)); a_, b_ = merged * n // k, going * n // k
-    put(w, y, 1, "Tasks", C["dim"])
-    put(w, y, 15, "█" * a_, C["ok"]); put(w, y, 15 + a_, "▓" * b_, C["warn"]); put(w, y, 15 + a_ + b_, "░" * (n - a_ - b_), C["dim"])
-    put(w, y, 17 + n, f"{merged} of {len(tasks)} merged · {going} in progress · {waiting} not started"
-                      + (f" · moved out: {', '.join(moved)}" if moved else ""), C["b"]); y += 1
-    put(w, y, 15, "█ merged   ▓ in progress   ░ not started", C["dim"]); y += 1
-    bars = {"FASTEST": "only what breaks the chain or loses data blocks a task",
+    met = sum(d[0] for d in G["DONE"])
+    now = next((st for st in G["STATIONS"] if st[2] == "now"), G["STATIONS"][-1])
+    reached = sum(1 for st in G["STATIONS"] if st[2] == "done")
+
+    def taskbar(x, y):
+        put(w, y, x, "█" * a_, C["ok"]); put(w, y, x + a_, "▓" * b_, C["warn"]); put(w, y, x + a_ + b_, "░" * (n - a_ - b_), C["dim"])
+
+    if not DETAIL[0]:
+        first = next((s_ for ok, s_ in G["DONE"] if not ok), None)
+        put(w, y, 1, "Goal check", L)
+        put(w, y, 15, f"{met} of {len(G['DONE'])} met", C["ok"] if met == len(G["DONE"]) else C["bad"])
+        if first: put(w, y, 30, "next: " + first, C["bad"])
+        mx = max(90, wd // 2 + 10)
+        put(w, y, mx, "Milestone", L)
+        put(w, y, mx + 11, f"▶ {now[0]} {now[1]} ({reached} of {len(G['STATIONS'])} reached)" if now[2] == "now"
+            else f"✔ all {len(G['STATIONS'])} reached", C["b"])
+        y += 1
+        put(w, y, 1, "Time", L); put(w, y, 15, "".join(cells), C["ok"] if diff >= 0 else C["bad"])
+        put(w, y, 16 + n, short, C["ok"] if diff >= 0 else C["bad"])
+        put(w, y, mx, "Tasks", L); taskbar(mx + 11, y)
+        put(w, y, mx + 12 + n, f"{merged}/{len(tasks)} merged · {going} going · {waiting} waiting")
+        y += 1
+        put(w, y, 1, "Quality bar", L); put(w, y, 15, f"{V['bar']} — " + {"FASTEST": "only what breaks the chain or loses data blocks a task",
             "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
-            "STRICT": "severe issues block a task; medium ones are the captain's call"}
-    put(w, y, 1, "Quality bar", C["dim"]); put(w, y, 15, f"{V['bar']} — {bars[V['bar']]}"); y += 1
+            "STRICT": "severe issues block a task; medium ones are the captain's call"}[V["bar"]])
+        put(w, y, mx, "d: unfold the goal check, milestones, time and tasks", C["dim"]); y += 1
+    else:
+        put(w, y, 1, "Goal check", L)
+        for ok, s_ in G["DONE"]:
+            put(w, y, 15, ("✔ " if ok else "✗ ") + s_, C["ok"] if ok else C["bad"]); y += 1
+        put(w, y, 1, "Milestones", L)
+        for sid, what, st, at in G["STATIONS"]:
+            txt, a = {"done": (f"✔ {sid} {what} — reached at {hm(at)}", C["ok"]),
+                      "now": (f"▶ {sid} {what} — now, planned by {hm(at)}", C["b"]),
+                      "next": (f"· {sid} {what} — planned by {hm(at)}", C["dim"])}[st]
+            put(w, y, 15, txt, a); y += 1
+        put(w, y, 1, "Time", L)
+        put(w, y, 15, "".join(cells), C["ok"] if diff >= 0 else C["bad"]); put(w, y, 17 + n, when, C["b"]); y += 1
+        put(w, y, 15, "█ used   ◆ expected finish   │ planned end", C["dim"]); y += 1
+        put(w, y, 1, "Tasks", L); taskbar(15, y)
+        put(w, y, 17 + n, f"{merged} of {len(tasks)} merged · {going} in progress · {waiting} not started"
+                          + (f" · moved out: {', '.join(moved)}" if moved else ""), C["b"]); y += 1
+        put(w, y, 15, "█ merged   ▓ in progress   ░ not started", C["dim"]); y += 1
+        put(w, y, 1, "Quality bar", L); put(w, y, 15, f"{V['bar']} — " + {"FASTEST": "only what breaks the chain or loses data blocks a task",
+            "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
+            "STRICT": "severe issues block a task; medium ones are the captain's call"}[V["bar"]])
+        put(w, y, wd - 20, "d: fold", C["dim"]); y += 1
+    # change 15: the views are a tab bar that looks like one: framed tabs, the picked one lit, a rule under it
+    y += 1
     x = 1; TABX.clear()
+    put(w, y - 1, 1, "╭" + "─" * (wd - 4) + "╮", C["acc"])
     for i, t in enumerate(["1 Now", "2 Graph", "3 Workload", "4 Decisions", "5 Time & tokens"], 1):
-        put(w, y, x, f" {t} ", curses.A_REVERSE if i == view else C["dim"]); TABX.append((x, x + len(t) + 2, i, y)); x += len(t) + 3
-    TOP[0] = y + 2
+        label = f"  {t}  "
+        put(w, y, x, "│", C["acc"])
+        put(w, y, x + 1, label, (curses.A_REVERSE | C["acc"] | C["b"]) if i == view else C["b"])
+        TABX.append((x, x + len(label), i, y)); x += len(label) + 1
+    put(w, y, x, "│", C["acc"]); put(w, y, wd - 2, "│", C["acc"])
+    put(w, y + 1, 1, "╰" + "─" * (wd - 4) + "╯", C["acc"])
+    TOP[0] = y + 3
 
 
 def lane_now(lane):
@@ -238,7 +282,7 @@ def view_now(w, sel):
     tw = max(32, min(60, wd // 3))          # change 5: columns follow the width
     y = TOP[0]; put(w, y, 1, "LANES  (Enter: what this lane did and has left)", C["b"]); y += 1
     for i, n in enumerate(LANES):
-        t = lane_now(n); a = curses.A_REVERSE if sel == i else 0
+        t = lane_now(n); a = 0; sel_y = y if sel == i else None
         done = sum(1 for x in T if x[1] == n and x[2] == "done")
         left = sum(1 for x in T if x[1] == n and x[2] not in ("done", "moved"))
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
@@ -254,7 +298,9 @@ def view_now(w, sel):
         y += 1
         tot = max(1, done + left); k = done * 12 // tot
         put(w, y, 9, "█" * k + "░" * (12 - k), C[LANE_COL[n]])
-        put(w, y, 22, f"{done} of {done + left} tasks done · {left} left ({lm}m of estimates)", C["dim"]); y += 2
+        put(w, y, 22, f"{done} of {done + left} tasks done · {left} left ({lm}m of estimates)", C["dim"])
+        if sel_y is not None: hl(w, sel_y)
+        y += 2
     y += 1; put(w, y, 1, f"NEEDS A LOOK ({len(G['EXC'])})", C["b"] | C["warn"]); y += 1
     for lane, tid, kind, why in G["EXC"]:
         put(w, y, 3, f"{tid} {lane:<5} {kind:<14}", C["warn"]); put(w, y, 29, why); y += 1
@@ -324,8 +370,8 @@ def view_graph(w, sel):
         put(w, y, 3, "│", C["ok"])
         for x, ch, a in cells: put(w, y, x, ch, a)
         if text:
-            hl = curses.A_REVERSE if (t is not None and seltask is t and text.startswith(t[0])) else 0
-            put(w, y, info_x, text, attr | hl)
+            put(w, y, info_x, text, attr)
+            if t is not None and seltask is t and text.startswith(t[0]): hl(w, y)
             if t is not None and seltask and text.startswith(t[0]):
                 if t[0] in seltask[9]: put(w, y, wd - 22, "◂ needed by " + seltask[0], C["warn"] | C["b"])
                 elif seltask[0] in t[9]: put(w, y, wd - 22, "▸ waits for " + seltask[0], C["warn"] | C["b"])
@@ -345,10 +391,11 @@ def view_workload(w, sel):
         tot_d += d; tot_l += l; ends[n] = G["V"]["used_m"] + l
         k = int(round(d / 8)); r = int(round(l / 8))
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
-        put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"] | (curses.A_REVERSE if sel == i else 0))
+        put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"])
         put(w, y, 9, "█" * k, C["ok"]); put(w, y, 9 + k, "░" * r, C["dim"])
         put(w, y, 40, f"done {nd} ({d}m) · left {nl} ({l}m)")
         if G["V"]["state"] == "sailing": put(w, y, 72, f"ends about {hm(ends[n])}", C["dim"])
+        if sel == i: hl(w, y)
         y += 1
     y += 1; put(w, y, 3, f"all lanes: done {tot_d}m · left {tot_l}m · at the measured pace the last lane ends at {hm(G['V']['projected_m'])}", C["b"]); y += 1
     # change 9: say plainly whether the work is balanced
@@ -381,9 +428,11 @@ def view_decisions(w, sel):
         put(w, y, 3, s, 0 if G["WAITING"] else C["dim"]); y += 1
     y += 1; put(w, y, 1, f"ALL DECISIONS ({len(G['DECISIONS'])})", C["b"]); y += 1
     for i, (t, k, what, why, star) in enumerate(G["DECISIONS"]):
-        a = curses.A_REVERSE if sel == i else 0
+        a = 0
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
-        put(w, y, 3, f"{t} {'★' if star else ' '} {k:<9}", (C["warn"] if star else 0) | a); put(w, y, 22, what, a); y += 1
+        put(w, y, 3, f"{t} {'★' if star else ' '} {k:<9}", (C["warn"] if star else 0)); put(w, y, 22, what)
+        if sel == i: hl(w, y)
+        y += 1
         if why: put(w, y, 22, "why: " + why, C["dim"]); y += 1
     y += 1; put(w, y, 1, "FRICTION REPORTS FROM AGENTS", C["b"]); y += 1
     for tid, lane, st, s in G["FRICTION"]:
@@ -403,12 +452,13 @@ def view_cost(w, sel):
         dev_c = sum(t[8] * .75 for t in mine); rev_c = sum(t[8] * .25 for t in mine)
         tot = [tot[0] + dev_k, tot[1] + dev_c, tot[2] + rev_k, tot[3] + rev_c]
         est = sum(t[4] for t in mine); act = sum(t[5] for t in mine); r = act / est if est else 0
-        a = curses.A_REVERSE if sel == i else 0
+        a = 0
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
         put(w, y, 3, f"{'▾' if OPENED.get(n) else '▸'} {n:<19}", C[LANE_COL[n]] | C["b"] | a)
         put(w, y, 25, f"{est:>5}m{act:>6}m", a)
         put(w, y, 38, f"{r:>6.1f}x", C["bad"] if r > 1.5 else C["warn"] if r > 1 else C["ok"])
         put(w, y, 45, f"{sum(t[6] for t in mine):>8}{dev_k:>11}k{dev_c:>8.2f}{rev_k:>14}k{rev_c:>10.2f}{dev_c + rev_c:>9.2f}", C["b"])
+        if sel == i: hl(w, y)
         y += 1
         if OPENED.get(n):
             for t in mine:
@@ -466,10 +516,11 @@ def main(w):
     views = {1: view_now, 2: view_graph, 3: view_workload, 4: view_decisions, 5: view_cost}
     while True:
         w.erase(); header(w, view); n = views[view](w, sel)
-        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5: views · [ ] older / newer voyage · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
+        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5: views · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
         w.refresh(); k = w.getch()
         if k in (ord("q"), 27): break
-        if k == ord("["): pick(min(len(VOYS) - 1, G["i"] + 1)); sel = 0
+        if k == ord("d"): DETAIL[0] = not DETAIL[0]
+        elif k == ord("["): pick(min(len(VOYS) - 1, G["i"] + 1)); sel = 0
         elif k == ord("]"): pick(max(0, G["i"] - 1)); sel = 0
         elif k in (curses.KEY_RIGHT, ord("l"), 9): view, sel = view % 5 + 1, 0
         elif k in (curses.KEY_LEFT, ord("h"), curses.KEY_BTAB): view, sel = (view - 2) % 5 + 1, 0
