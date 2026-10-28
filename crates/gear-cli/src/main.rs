@@ -2273,10 +2273,34 @@ fn cmd_run() -> GearResult<()> {
     let mut herdr = open_herdr()?;
     // The agents get the same database as `GEAR_DB` (design/03).
     let cfg = engine_cfg(&db.to_string_lossy());
+    install_stop_handler();
     let mut clock = now_ts;
     let mut out = Stamped { inner: std::io::stdout(), at_line_start: true };
     let _ = std::io::Write::write_fmt(&mut out, format_args!("engine start pid={} db={}\n", std::process::id(), db.to_string_lossy()));
     run_engine(&mut store, &mut herdr, &cfg, &mut clock, None, &mut out)
+}
+
+/// Set by the SIGTERM handler: `gear admin stop` asks the loop to leave
+/// between ticks, never in the middle of one (T-265).
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The SIGTERM handler itself: async-signal-safe, it only stores the flag.
+/// The loop then finishes the tick it is in — a merge gate may be running —
+/// and leaves, so `gear admin stop` never cuts a merge in half.
+extern "C" fn on_sigterm(_signal: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Let SIGTERM ask the engine loop to stop between ticks.
+fn install_stop_handler() {
+    // SAFETY: `on_sigterm` only stores into an atomic, which is
+    // async-signal-safe; `libc::signal` only installs it.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            on_sigterm as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t,
+        );
+    }
 }
 
 /// Prefixes every engine log line with a UTC time, so `engine.log` can be
@@ -2439,8 +2463,56 @@ fn cmd_admin_stop() -> GearResult<()> {
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
         return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("cannot stop pid {pid}")));
     }
-    println!("engine stopped (pid {pid})");
-    Ok(())
+    // The engine leaves its loop only between ticks (see `install_stop_handler`),
+    // so wait for the lock it holds: a merge gate may still be running, and the
+    // merge must not be left Executing (T-265).
+    let mut held: Option<std::fs::File> = None;
+    let mut announced = false;
+    let mut try_lock = || match take_engine_lock(&dir) {
+        Ok(lock) => {
+            held = Some(lock);
+            true
+        }
+        Err(_) => {
+            if !announced {
+                println!("waiting for the engine to finish its tick (a merge gate may be running)");
+                announced = true;
+            }
+            false
+        }
+    };
+    let mut sleep = || std::thread::sleep(std::time::Duration::from_secs(1));
+    if wait_for_lock(&mut try_lock, &mut sleep, STOP_TRIES) {
+        // Released here: the engine is gone, and this process must not keep
+        // the next `gear` call from starting one.
+        drop(held);
+        println!("engine stopped (pid {pid})");
+        return Ok(());
+    }
+    Err(GearError::new(
+        gear_model::ErrorCode::Forbidden,
+        format!("the engine (pid {pid}) is still running after 20 min"),
+    ))
+}
+
+/// How often `gear admin stop` looks at the engine lock: once a second for 20
+/// minutes, the longest a merge gate may take before the user is told.
+const STOP_TRIES: u32 = 20 * 60;
+
+/// Try `try_lock` up to `tries` times, calling `sleep` between tries; true as
+/// soon as it succeeds. Both are injected so a test never sleeps on the wall
+/// clock.
+fn wait_for_lock(try_lock: &mut dyn FnMut() -> bool, sleep: &mut dyn FnMut(), tries: u32) -> bool {
+    for try_index in 0..tries {
+        if try_lock() {
+            return true;
+        }
+        // No sleep after the last try: the wait is over.
+        if try_index + 1 < tries {
+            sleep();
+        }
+    }
+    false
 }
 
 /// The engine's configuration: the defaults, every built-in agent profile and
@@ -2521,11 +2593,12 @@ fn run_engine(
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
 ) -> GearResult<()> {
-    run_engine_with(store, herdr, cfg, clock, ticks, out, &mut gear_engine::tick)
+    run_engine_with(store, herdr, cfg, clock, ticks, out, &|| STOP.load(std::sync::atomic::Ordering::SeqCst), &mut gear_engine::tick)
 }
 
 /// [`run_engine`] with the tick call injectable, so a test can drive the
-/// "a failing tick does not stop the loop" path.
+/// "a failing tick does not stop the loop" path — and `stop`, which the loop
+/// asks before each tick and once per second of the sleep between ticks.
 fn run_engine_with(
     store: &mut gear_store::Store,
     herdr: &mut dyn gear_herdr::HerdrAct,
@@ -2533,6 +2606,7 @@ fn run_engine_with(
     clock: &mut dyn FnMut() -> i64,
     ticks: Option<u64>,
     out: &mut dyn std::io::Write,
+    stop: &dyn Fn() -> bool,
     tick: &mut dyn FnMut(
         &mut gear_store::Store,
         &mut dyn gear_herdr::HerdrAct,
@@ -2550,6 +2624,12 @@ fn run_engine_with(
         if ticks.is_some_and(|limit| done >= limit) {
             break;
         }
+        // `gear admin stop` only asks the loop to leave between ticks, so the
+        // tick that is running — and a merge gate in it — always finishes
+        // (T-265).
+        if stop() {
+            break;
+        }
         match tick(store, herdr, cfg, clock()) {
             Ok(report) if report != gear_engine::TickReport::default() => {
                 // Verbose while GEAR is in development (PRD §15): every id.
@@ -2564,8 +2644,14 @@ fn run_engine_with(
         out.flush().map_err(write_error)?;
         done += 1;
         if ticks.is_none() {
+            // One second at a time, so a stop that arrives during the sleep is
+            // noticed within a second instead of after the whole tick.
             let seconds = u64::try_from(cfg.tick_s).unwrap_or(0);
-            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            let mut slept = 0;
+            while slept < seconds && !stop() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                slept += 1;
+            }
         }
     }
     Ok(())
@@ -5947,12 +6033,108 @@ path="api"
             &mut clock,
             Some(3),
             &mut out,
+            &|| false,
             &mut failing,
         )
         .unwrap();
 
         assert_eq!(tick_calls.get(), 3, "a failing tick does not stop the loop");
         assert!(String::from_utf8(out).unwrap().contains("boom"));
+    }
+
+    #[test]
+    fn stop_during_a_tick_leaves_the_loop_after_it() {
+        let (mut store, mut herdr) = world();
+        let mut clock = || T0;
+        // `gear admin stop` arrives while this tick (and the merge in it) runs.
+        let stop = std::cell::Cell::new(false);
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            stop.set(true);
+            Ok(gear_engine::TickReport {
+                settled: vec!["p:T-1/1".to_string()],
+                ..gear_engine::TickReport::default()
+            })
+        };
+        let mut out: Vec<u8> = Vec::new();
+        // No tick limit: only the stop ends the loop, and the tick's report is
+        // written before it leaves. (The sleep checks the flag first, so no
+        // test waits on the wall clock.)
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            None,
+            &mut out,
+            &|| stop.get(),
+            &mut tick,
+        )
+        .unwrap();
+
+        assert_eq!(tick_calls.get(), 1, "the tick that saw the stop finishes, then the loop leaves");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("p:T-1/1"), "the running tick's report is written: {text}");
+    }
+
+    #[test]
+    fn stop_already_set_runs_no_tick() {
+        let (mut store, mut herdr) = world();
+        let mut clock = || T0;
+        let tick_calls = std::cell::Cell::new(0);
+        let mut tick = |_: &mut Store,
+                        _: &mut dyn gear_herdr::HerdrAct,
+                        _: &gear_engine::EngineCfg,
+                        _: i64| {
+            tick_calls.set(tick_calls.get() + 1);
+            Ok(gear_engine::TickReport::default())
+        };
+        let mut out: Vec<u8> = Vec::new();
+        run_engine_with(
+            &mut store,
+            &mut herdr,
+            &gear_engine::EngineCfg::default(),
+            &mut clock,
+            None,
+            &mut out,
+            &|| true,
+            &mut tick,
+        )
+        .unwrap();
+
+        assert_eq!(tick_calls.get(), 0, "a stop before the first tick runs none");
+    }
+
+    #[test]
+    fn wait_for_lock_retries_until_the_engine_lets_go() {
+        let mut tries = 0;
+        let mut try_lock = || {
+            tries += 1;
+            tries == 3
+        };
+        let mut sleeps = 0;
+        let mut sleep = || sleeps += 1;
+        assert!(wait_for_lock(&mut try_lock, &mut sleep, 1200));
+        assert_eq!(tries, 3, "it keeps trying until the lock is free");
+        assert_eq!(sleeps, 2, "one second between tries, none after the last");
+    }
+
+    #[test]
+    fn wait_for_lock_gives_up_after_tries() {
+        let mut tries = 0;
+        let mut try_lock = || {
+            tries += 1;
+            false
+        };
+        let mut sleeps = 0;
+        let mut sleep = || sleeps += 1;
+        assert!(!wait_for_lock(&mut try_lock, &mut sleep, 1200));
+        assert_eq!(tries, 1200, "20 minutes, once a second");
+        assert_eq!(sleeps, 1199, "the last try is not followed by a sleep");
     }
 
     #[test]
