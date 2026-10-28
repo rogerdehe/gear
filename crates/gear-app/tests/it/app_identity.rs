@@ -3,7 +3,7 @@
 //! The doc comments in `crates/gear-app/src/identity.rs` are the spec; every
 //! row of the error table gets its own test.
 
-use gear_app::identity::{classify, observe, require_seat, Caller, Fingerprint};
+use gear_app::identity::{classify, observe, require_seat, Caller, DaemonSessions, Fingerprint};
 use gear_app::Env;
 use gear_herdr::fake::FakeHerdr;
 use gear_herdr::AgentStatus;
@@ -514,7 +514,7 @@ fn a_partial_claim_is_refused_with_one_item() {
     let claimed = env(Some("captain"), 1, Some(LANE_PANE), false);
 
     let error =
-        gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, NOW).unwrap_err();
+        gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, &DaemonSessions::default(), NOW).unwrap_err();
 
     assert_eq!(error.code, ErrorCode::NotRegistered);
     assert!(error.detail.contains(CAP_PANE), "the seat's own pane: {}", error.detail);
@@ -523,7 +523,7 @@ fn a_partial_claim_is_refused_with_one_item() {
     assert!(items[0].urgent);
     assert!(items[0].body.contains("w1:p2"), "{}", items[0].body);
     // A repeat is quiet.
-    let _ = gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, NOW + 1);
+    let _ = gear_app::identity::prove_seat(&mut s, &claimed, &mut herdr, &LANE_CALLER, &DaemonSessions::default(), NOW + 1);
     assert_eq!(s.read(|tx| tx.thread_messages("p", "identity:w1:p2")).unwrap().len(), 1);
 }
 
@@ -814,4 +814,117 @@ fn whoami_resolves_a_context_free_bound_pane() {
     assert_eq!(who.pane.as_deref(), Some(LANE_PANE));
     assert_eq!(who.seat.as_deref(), Some("p:heat"), "the seat of the pane");
     assert_eq!(who.reason, None, "the claim holds: {:?}", who.reason);
+}
+
+// --------------------------------- T-328: a daemon caller proves its session
+
+/// The daemon sessions a tool shell of the same `opencode serve` carries: the
+/// shell names the session it works for, and an empty value is no value.
+#[test]
+fn daemon_sessions_come_from_the_tool_shells_variables() {
+    let vars = |wanted: &str| match wanted {
+        "OPENCODE_SESSION_ID" => Some("ses_x".to_string()),
+        "CODEX_THREAD_ID" => Some(String::new()),
+        _ => None,
+    };
+    let sessions = DaemonSessions::from_vars(vars);
+    assert_eq!(sessions.opencode.as_deref(), Some("ses_x"));
+    assert_eq!(sessions.codex, None, "an empty value is no value");
+    assert_eq!(DaemonSessions::from_vars(|_| None), DaemonSessions::default());
+}
+
+/// T-328: an OpenCode tool shell in no pane proves it is the seat's **own**
+/// session by `OPENCODE_SESSION_ID` — the id GEAR records when it starts the
+/// seat. A seat with no recorded session has nothing to prove against (as
+/// before); once it has one, a missing or foreign session is a refusal.
+#[test]
+fn an_opencode_daemon_caller_proves_its_own_session() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Idle);
+    herdr.set_pane_processes(LANE_PANE, Some(LANE_CALLER[1]), &[]);
+    // The service's tool shell: its ancestry reaches no pane of the session.
+    let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
+    let lane = env(Some("heat"), 1, Some(LANE_PANE), false);
+
+    // Nothing recorded: the claim passes, as it did before T-328.
+    let fp = gear_app::identity::prove_seat(
+        &mut s,
+        &lane,
+        &mut herdr,
+        &service,
+        &DaemonSessions::default(),
+        NOW,
+    )
+    .unwrap()
+    .expect("the lane's pane");
+    assert_eq!(fp.kind.as_deref(), Some("opencode"));
+
+    // The seat's own session is what GEAR records in its binding.
+    s.write(|tx| tx.set_binding_session_ref("p:heat", 1, "ses_own")).unwrap();
+    let error = gear_app::identity::prove_seat(
+        &mut s,
+        &lane,
+        &mut herdr,
+        &service,
+        &DaemonSessions::default(),
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(error.detail.contains("OPENCODE_SESSION_ID"), "{}", error.detail);
+    assert!(error.detail.contains("not the seat's OpenCode session"), "{}", error.detail);
+
+    let foreign =
+        DaemonSessions { opencode: Some("ses_other".into()), codex: None };
+    let error = gear_app::identity::prove_seat(&mut s, &lane, &mut herdr, &service, &foreign, NOW)
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotRegistered);
+    assert!(error.detail.contains("ses_other"), "the caller's session: {}", error.detail);
+    assert!(error.detail.contains("ses_own"), "the seat's sessions: {}", error.detail);
+
+    // The seat's own session: the claim holds.
+    let own = DaemonSessions { opencode: Some("ses_own".into()), codex: None };
+    assert!(gear_app::identity::prove_seat(&mut s, &lane, &mut herdr, &service, &own, NOW)
+        .unwrap()
+        .is_some());
+}
+
+/// T-328: a Codex thread id that is not one of the seat's sessions passes — that
+/// the id equals the session GEAR records is not yet seen live, and this
+/// voyage's reviewers are Codex — but the captain is told once per seat and
+/// generation. A thread the seat does know says nothing.
+#[test]
+fn a_codex_daemon_caller_of_a_foreign_thread_owes_one_notice() {
+    let mut s = world();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.set_pane_processes(CAP_PANE, Some(CAP_CALLER[1]), &[]);
+    let service: Vec<u32> = vec![4_000_001, 4_000_000, 1];
+    let captain = env(Some("captain"), 1, Some(CAP_PANE), false);
+    s.write(|tx| tx.set_binding_session_ref("p:captain", 1, "thr_own")).unwrap();
+    let foreign = DaemonSessions { opencode: None, codex: Some("thr_other".into()) };
+
+    assert!(gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &foreign, NOW)
+        .unwrap()
+        .is_some());
+    let thread = "identity-codex:p:captain:1";
+    let items = s.read(|tx| tx.thread_messages("p", thread)).unwrap();
+    assert_eq!(items.len(), 1, "one notice: {items:?}");
+    assert_eq!(items[0].state, gear_model::MsgState::Info);
+    assert!(!items[0].urgent);
+    assert!(items[0].body.contains("thr_other"), "{}", items[0].body);
+    assert!(items[0].body.contains("thr_own"), "{}", items[0].body);
+
+    // A repeat is quiet.
+    gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &foreign, NOW + 1)
+        .unwrap();
+    assert_eq!(s.read(|tx| tx.thread_messages("p", thread)).unwrap().len(), 1);
+
+    // A Codex thread that is the seat's own session says nothing at all.
+    let own = DaemonSessions { opencode: None, codex: Some("thr_own".into()) };
+    assert!(gear_app::identity::prove_seat(&mut s, &captain, &mut herdr, &service, &own, NOW + 2)
+        .unwrap()
+        .is_some());
+    assert_eq!(s.read(|tx| tx.thread_messages("p", thread)).unwrap().len(), 1);
 }
