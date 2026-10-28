@@ -92,7 +92,7 @@ pub fn tick(
             round.task,
             round.role,
             round.model.as_deref().unwrap_or("unknown"),
-            round.generation,
+            seat.generation,
         );
         let Some(captain) = store.read(|tx| tx.captain_of(project))? else {
             continue;
@@ -430,7 +430,11 @@ mod tests {
 
         let flagged = tick(&mut world.store, "p", &[idle()], &world.profiles, NOW).unwrap();
         assert_eq!(flagged, vec![SEAT.to_string()]);
-        assert_eq!(alerts(&mut world).len(), 1);
+        let messages = alerts(&mut world);
+        assert_eq!(messages.len(), 1);
+        // The generation named is the seat's live one (contract v2), not the
+        // round's older one.
+        assert!(messages[0].body.contains("generation 2"), "{}", messages[0].body);
     }
 
     #[test]
