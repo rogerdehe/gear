@@ -441,6 +441,15 @@ release = "main"
 gate = "npm test"
 "#;
 
+/// The lane of [`MULTI`] that works in the project root.
+const PRICING_LANE: &str = r#"[[lanes]]
+name = "pricing"
+duty = "price engine"
+owns = ["lib/pricing/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+
 /// A config without `[[repos]]` is a single-repo project: it behaves exactly
 /// as before.
 #[test]
@@ -486,16 +495,32 @@ fn a_project_without_a_gate_is_told_to_name_one() {
 }
 
 /// T-255: a gate in `[conventions]` is enough, and so is a gate in every
-/// repo when `[conventions]` names none.
+/// repo the project runs work in when `[conventions]` names none (M-4220: the
+/// root repo counts only when it is the whole project or a lane works there).
 #[test]
 fn conventions_gate_or_every_repo_gate_satisfies_the_rule() {
     assert_eq!(validate(&parse(MINIMAL).unwrap()), vec![], "[conventions] gate");
 
+    // Every repo has its own gate, and no lane works in the root: the empty
+    // root gate never runs.
+    let text = format!(
+        "{}{REPOS_EACH_GATED}",
+        MULTI.replace("gate = \"make test\"\n", "")
+            .replace(PRICING_LANE, "")
+    );
+    assert_eq!(validate(&parse(&text).unwrap()), vec![], "every repo has its own gate");
+
+    // The `pricing` lane works in the root, so the root runs a gate too and
+    // `[conventions]` must name it.
     let text = format!(
         "{}{REPOS_EACH_GATED}",
         MULTI.replace("gate = \"make test\"\n", "")
     );
-    assert_eq!(validate(&parse(&text).unwrap()), vec![], "every repo has its own gate");
+    assert_eq!(
+        fields(&validate(&parse(&text).unwrap())),
+        vec!["conventions.gate"],
+        "a lane works in the root"
+    );
 }
 
 /// A repo without branches or a gate uses the project's `[conventions]`.

@@ -740,8 +740,9 @@ pub fn profile_table(
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
 ///   release: non-empty and different (its own, else `[conventions]`'s);
 /// - a gate: no default (T-255), so `conventions.gate` must be named unless
-///   every repo of the project has its own; `conventions.gate` is not left as
-///   a TODO either;
+///   every repo the project runs work in has its own — a repo without one (the
+///   root among them, when a lane works there or it is the whole project) runs
+///   `conventions.gate`; `conventions.gate` is not left as a TODO either;
 /// - a gate (`conventions.gate` or a repo's own) that pipes into another
 ///   command without `pipefail` (T-242): the pipeline's exit status is its last
 ///   command's, so a failure in an earlier stage can pass;
@@ -806,7 +807,10 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     // a default that fits one stack's build leaves another project with a
     // gate that cannot run. A `[[repos]]` entry may name its own gate; the
     // root repo, and every entry without one, run `conventions.gate`, so when
-    // that is empty the project must still name a gate for them.
+    // that is empty the project must still name a gate for them. The root
+    // counts only when it is the whole project, or when a lane works in it
+    // (a lane without `repo`, or naming a repo that is not there): with no
+    // work of its own it never runs a gate (M-4220).
     if cfg.conventions.gate.contains("TODO") {
         issues.push(issue(
             "conventions.gate",
@@ -818,7 +822,13 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         .repos
         .iter()
         .any(|repo| repo.gate.as_deref().is_none_or(|gate| gate.trim().is_empty()));
-    if gate_missing && (cfg.repos.is_empty() || repo_without_own_gate) {
+    let root_has_work = cfg.repos.is_empty()
+        || cfg.lanes.iter().any(|lane| {
+            lane.repo
+                .as_deref()
+                .is_none_or(|name| !cfg.repos.iter().any(|repo| repo.name == name))
+        });
+    if gate_missing && (root_has_work || repo_without_own_gate) {
         issues.push(issue("conventions.gate", GATE_MISSING.to_string()));
     }
     if gate_pipes_without_pipefail(&cfg.conventions.gate) {
