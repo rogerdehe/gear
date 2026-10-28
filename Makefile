@@ -3,7 +3,14 @@
 # targets, not in machine settings: no global config, no locks, no queues
 # (user, 2026-10-28).
 
-.PHONY: check gate full
+.PHONY: check gate full install
+
+PREFIX ?= $(HOME)/.local
+
+install: ## a source checkout's gear on PATH: release build, then a link in $(PREFIX)/bin
+	cargo build --release -p gear-cli
+	mkdir -p $(PREFIX)/bin
+	ln -sf $(CURDIR)/target/release/gear $(PREFIX)/bin/gear
 
 check: ## the light run for lanes and reviewers: one crate, 2 build jobs, 2 test threads
 	@test -n "$(CRATE)" || { echo "usage: make check CRATE=<crate>"; exit 1; }
