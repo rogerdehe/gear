@@ -646,7 +646,7 @@ fn onboard_seat(
         Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
             wait_for_shell(store, cfg, &seat.id, pending)
         }
-        other => Err(step_failure("agent_start", &other)),
+        other => Err(start_failure(herdr, &pane, &kind, &other)),
     }
 }
 
@@ -700,7 +700,7 @@ fn resume_busy_start(
         Outcome::Refused { code, .. } if code == "agent_pane_busy" => {
             wait_for_shell(store, cfg, &seat.id, pending)
         }
-        other => Err(step_failure("agent_start", &other)),
+        other => Err(start_failure(herdr, &pending.pane, &pending.kind, &other)),
     }
 }
 
@@ -889,6 +889,23 @@ fn park_queued_lanes(store: &mut Store, project: &str, reason: &str, now: Ts) ->
         park(store, &seat_id, reason, now)?;
     }
     Ok(())
+}
+
+/// Why a Herdr start did not succeed (T-286): the pane's last lines decide
+/// whether the CLI itself is missing. A shell that has no `codex` says so on
+/// its screen, and that is not a reason to walk the model chain: the seat is
+/// flagged for the install instead.
+fn start_failure<T>(
+    herdr: &mut dyn HerdrAct,
+    pane: &str,
+    kind: &str,
+    outcome: &Outcome<T>,
+) -> String {
+    let tail = herdr.read_tail(pane, 16).unwrap_or_default();
+    match crate::start::cli_missing(&tail, kind) {
+        Some(line) => crate::start::cli_missing_text(kind, &line),
+        None => step_failure("agent_start", outcome),
+    }
 }
 
 /// Why a Herdr step did not succeed; the step is named in the reason.
@@ -1479,6 +1496,58 @@ repo = "web"
             1,
             "the worktree is created once"
         );
+    }
+
+    /// A start refused because the CLI is not installed says so on the pane
+    /// (T-286): the lane parks with the install, not with a generic reason —
+    /// and the model chain is never walked for it.
+    #[test]
+    fn a_lane_whose_cli_is_missing_parks_with_the_install() {
+        let config = CONFIG
+            .replace("kind = \"opencode\"", "kind = \"codex\"")
+            .replace("profile = \"opencode\"", "profile = \"codex\"");
+        let mut store = world(&config);
+        store
+            .write(|tx| tx.set_seat_profile("toy:heat", "codex"))
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        let mut cfg = cfg();
+        cfg.profiles.insert("codex".into(), gear_herdr::builtin("codex").unwrap());
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+        // The shell of the fresh worktree could not find the CLI.
+        herdr.screen_after = vec![("GEAR_CTX".into(), "zsh: command not found: codex".into())];
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+
+        assert!(active.is_empty(), "the lane does not start");
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert_eq!(crate::start::pending(&mut store, "toy:heat").unwrap(), None);
+        assert!(herdr.started_agents.is_empty(), "no agent was started");
+    }
+
+    /// A refused start whose screen names no missing CLI keeps today's reason
+    /// (T-286).
+    #[test]
+    fn a_refused_start_without_a_missing_cli_keeps_its_reason() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+        herdr.screen_after = vec![("GEAR_CTX".into(), "error: provider timeout".into())];
+
+        let active = onboard_queued(&mut store, &mut herdr, &cfg(), T0 + 1).unwrap();
+
+        assert!(active.is_empty());
+        let seat = store.read(|tx| tx.get_seat("toy:heat")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::NeedsCheck);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(reason.contains("agent_start: refused (agent_start_timeout)"), "{reason}");
+        assert!(!reason.contains("CLI is not installed"), "{reason}");
     }
 
     /// Busy for three ticks, then free: the seat is Starting while the shell

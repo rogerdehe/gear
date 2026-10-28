@@ -3056,7 +3056,9 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
 /// (attempt number of the open attempt; `<n>` literally when there is none;
 /// the reports folder is the voyage's, T-257, and `<path>` stays for a task
 /// without milestone).
-/// A pending newer contract version is appended as `## Pending update: v<m>`.
+/// A pending newer contract version is appended as `## Pending update: v<m>`
+/// followed by that version's goal and acceptance and the line saying a bare
+/// `gear` adopts it (T-378).
 /// Missing task → `NoTarget`. Read-only.
 pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
     let row = tx.get_task(project, task)?.ok_or_else(|| {
@@ -3208,7 +3210,21 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         }
     }
     if row.contract_version > adopted {
-        text.push_str(&format!("\n## Pending update: v{}\n", row.contract_version));
+        // The bare header alone left the lane unable to read what the newer
+        // contract asks for without `gear plan show` (T-378, F-133), so the
+        // packet carries its wording too.
+        let pending = tx
+            .get_contract(project, task, row.contract_version)?
+            .ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("task {task} has no contract v{}", row.contract_version),
+                )
+            })?;
+        text.push_str(&format!(
+            "\n## Pending update: v{}\nGoal (v{}):\n{}\n\nAcceptance (v{}):\n{}\n\nRun `gear` (no arguments) to adopt it, then work and hand in to v{}.\n",
+            row.contract_version, row.contract_version, pending.goal, row.contract_version, pending.accept, row.contract_version
+        ));
     }
     text.push_str("\nYou implement; you never design. If anything here is unclear or contradicts the design or a message, stop and send gear send --kind question (Question / Options / Context / Default) at once, then go on with your default. Commit and push this branch at least every 15 minutes.\n");
     Ok(text)
