@@ -118,7 +118,7 @@ name = "api"                 # [a-z][a-z0-9-]*, unique
 path = "services/api"        # relative to project.repo
 integration = "dev"          # optional; defaults to [conventions]
 release = "main"             # optional
-gate = "make test"           # optional
+gate = "make test"           # optional; else [conventions].gate, which then must be named
 
 [[lanes]]
 name = "api"
