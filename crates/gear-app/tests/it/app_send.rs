@@ -13,6 +13,7 @@ use gear_store::{testing, Store};
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
 const LANE_PANE: &str = "w1:p2";
+const OTHER_PANE: &str = "w1:p3";
 
 fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
@@ -31,6 +32,23 @@ fn lane_env() -> Env {
     Env {
         ctx: Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 1 }),
         pane_id: Some(LANE_PANE.into()),
+        admin: false,
+    }
+}
+
+/// A second lane, to prove an ack is only the addressed seat's.
+fn other_lane(s: &mut Store) {
+    s.write(|tx| {
+        testing::seed_active_seat(tx, "p", "cold", SeatRole::Lane, OTHER_PANE, "opencode", NOW)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+fn cold_env() -> Env {
+    Env {
+        ctx: Some(GearCtx { project: "p".into(), seat: "cold".into(), generation: 1 }),
+        pane_id: Some(OTHER_PANE.into()),
         admin: false,
     }
 }
@@ -225,9 +243,10 @@ fn request_conflict() {
 #[test]
 fn slice2_kinds_rejected() {
     let mut s = world();
-    // `result` is accepted since T-45 (and needs its four fields); ack, blocked
-    // and reply are still rejected.
-    for kind in [MsgKind::Ack, MsgKind::Blocked, MsgKind::Reply] {
+    // `result` is accepted since T-45 (and needs its four fields), `ack` since
+    // T-320 (and needs the instruction it answers); `blocked` and `reply` are
+    // still rejected.
+    for kind in [MsgKind::Blocked, MsgKind::Reply] {
         let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &args(kind), NOW).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat, "{kind:?} must not be stored yet");
     }
@@ -238,8 +257,7 @@ fn slice2_kinds_rejected() {
 }
 
 #[test]
-fn stale_generation_rejected() {
-    let mut s = world();
+fn stale_generation_rejected() {    let mut s = world();
     let mut env = lane_env();
     env.ctx = Some(GearCtx { project: "p".into(), seat: "heat".into(), generation: 7 });
     let err = mail::send(&mut s, &env, Some(&lane_fp()), &args(MsgKind::Question), NOW).unwrap_err();
@@ -247,4 +265,152 @@ fn stale_generation_rejected() {
 
     let inbox = s.read(|tx| tx.actionable_for("p", "p:captain", NOW)).unwrap();
     assert!(inbox.is_empty(), "nothing was stored");
+}
+
+/// The captain's instruction that asks for an ack (T-320).
+fn ack_instruction(s: &mut Store, request: &str) -> String {
+    let mut a = args(MsgKind::Instruction);
+    a.to = Some("heat".into());
+    a.body = "bring the board up to date before the station".into();
+    a.request_id = request.into();
+    let sent = mail::send_with_ack(s, &captain_env(), Some(&captain_fp()), &a, NOW).unwrap();
+    sent.msg_id
+}
+
+#[test]
+fn ack_instruction_waits_for_the_lane() {
+    let mut s = world();
+    let id = ack_instruction(&mut s, "r1");
+
+    let instruction = s.read(|tx| tx.get_message("p", &id)).unwrap().unwrap();
+    assert!(instruction.needs_ack, "the instruction asks for an ack");
+    assert_eq!(instruction.kind, MsgKind::Instruction);
+    assert_eq!(instruction.state, MsgState::Open);
+    assert!(
+        instruction
+            .body
+            .ends_with(&format!(
+                "Acknowledge it: gear send --kind ack --reply-to {id} \"<what you will do>\""
+            )),
+        "the lane is told how to acknowledge it: {}",
+        instruction.body
+    );
+
+    let item = s.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+    assert_eq!(item.thread, format!("ack:{id}"));
+    assert_eq!(item.kind, MsgKind::System);
+    assert_eq!(item.sender, "p:captain");
+    assert_eq!(item.recipient, "p:captain");
+    assert_eq!(item.state, MsgState::Waiting);
+    assert_eq!(item.wait_until, Some(NOW + 600), "back after ten minutes");
+    assert_eq!(
+        item.body,
+        format!("heat has not acknowledged {id} yet: bring the board up to date before the station")
+    );
+
+    // Not in the captain's batch while it waits, in it when the wait is due.
+    let waiting = s
+        .read(|tx| mail::select_batch(tx, "p", "p:captain", NOW + 599, mail::BatchLimits::default()))
+        .unwrap();
+    assert!(
+        waiting.iter().all(|view| view.thread != format!("ack:{id}")),
+        "a waiting item is not due yet"
+    );
+    let due = s
+        .read(|tx| mail::select_batch(tx, "p", "p:captain", NOW + 600, mail::BatchLimits::default()))
+        .unwrap();
+    assert!(
+        due.iter().any(|view| view.thread == format!("ack:{id}")),
+        "the unacknowledged instruction comes back after ten minutes"
+    );
+}
+
+#[test]
+fn the_lane_acknowledges_and_the_item_settles() {
+    let mut s = world();
+    let id = ack_instruction(&mut s, "r1");
+
+    let mut a = args(MsgKind::Ack);
+    a.reply_to = Some(id.clone());
+    a.body = "I will update the board now".into();
+    a.request_id = "r2".into();
+    let sent = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
+    assert_eq!(sent.recipient, "p:captain");
+
+    let ack = s.read(|tx| tx.get_message("p", &sent.msg_id)).unwrap().unwrap();
+    assert_eq!(ack.kind, MsgKind::Ack);
+    assert_eq!(ack.state, MsgState::Info, "an ack is information for the captain");
+    assert_eq!(ack.sender, "p:heat");
+    assert_eq!(ack.recipient, "p:captain");
+    assert_eq!(ack.reply_to.as_deref(), Some(id.as_str()));
+
+    let item = s.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();
+    assert_eq!(item.state, MsgState::Resolved, "the reminder is settled");
+    assert_eq!(
+        item.result,
+        Some(format!("acknowledged in {}", sent.msg_id))
+    );
+}
+
+#[test]
+fn only_the_addressed_lane_acknowledges_an_instruction_that_asks() {
+    let mut s = world();
+    other_lane(&mut s);
+    let id = ack_instruction(&mut s, "r1");
+    let cold_fp = Fingerprint { pane_id: OTHER_PANE.into(), kind: Some("opencode".into()), session_ref: None };
+
+    // Another lane may not answer it.
+    let mut a = args(MsgKind::Ack);
+    a.reply_to = Some(id.clone());
+    a.request_id = "r2".into();
+    let err = mail::send(&mut s, &cold_env(), Some(&cold_fp), &a, NOW + 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("an ack answers an instruction that asks for one"),
+        "{}",
+        err.detail
+    );
+
+    // An ack needs the instruction it answers.
+    let mut bare = args(MsgKind::Ack);
+    bare.request_id = "r3".into();
+    let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &bare, NOW + 1).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+
+    // A plain instruction asks for no ack.
+    let mut plain = args(MsgKind::Instruction);
+    plain.to = Some("heat".into());
+    plain.request_id = "r4".into();
+    let plain = mail::send(&mut s, &captain_env(), Some(&captain_fp()), &plain, NOW + 1).unwrap();
+    let mut a = args(MsgKind::Ack);
+    a.reply_to = Some(plain.msg_id.clone());
+    a.request_id = "r5".into();
+    let err = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 2).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+
+    // `--ack` is the captain's, and only on an instruction with `--to`.
+    let mut question = args(MsgKind::Question);
+    question.request_id = "r6".into();
+    let err = mail::send_with_ack(&mut s, &captain_env(), Some(&captain_fp()), &question, NOW + 3).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert_eq!(err.detail, "`--ack` belongs to a captain's instruction with `--to`");
+}
+
+#[test]
+fn a_replayed_ack_returns_the_stored_receipt() {
+    let mut s = world();
+    let id = ack_instruction(&mut s, "r1");
+    let mut a = args(MsgKind::Ack);
+    a.reply_to = Some(id.clone());
+    a.body = "done".into();
+    a.request_id = "r2".into();
+    let first = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 1).unwrap();
+    let second = mail::send(&mut s, &lane_env(), Some(&lane_fp()), &a, NOW + 2).unwrap();
+    assert_eq!(first.msg_id, second.msg_id);
+    assert!(!first.replayed);
+    assert!(second.replayed);
+    assert!(
+        s.read(|tx| tx.get_message("p", "M-4")).unwrap().is_none(),
+        "no second ack was stored"
+    );
 }
