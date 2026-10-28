@@ -43,6 +43,10 @@ enum Cmd {
         /// Draw the open tasks as a dependency tree.
         #[arg(long)]
         deps: bool,
+        /// The project to show. Without it the caller's own project is shown,
+        /// and with no caller every project in the store.
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
     },
     /// Captain: the queue of the project (design §8.3) — what every lane
     /// does now, why an idle lane is idle, and what it has left.
@@ -373,7 +377,7 @@ fn run(cli: Cli) -> GearResult<()> {
                 cmd_import_issues(path, label, cli.json)
             }
         },
-        Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
+        Some(Cmd::Board { deps, project }) => cmd_board(deps, project.as_deref(), cli.json),
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
@@ -867,10 +871,30 @@ fn cmd_plan_show(task: &str) -> GearResult<()> {
     Ok(())
 }
 
-fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
+/// `gear board [--deps] [--project <id>]`: the read-only plan board.
+///
+/// `--project` names the project to show and wins over the caller's own: a
+/// pane bound to no seat (the user's own board tab) has no caller, so without
+/// the flag the board shows every project in the store (T-249).
+fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let mut herdr = open_herdr().ok();
+    // A project that is not registered is refused before the board starts: a
+    // typo must not draw an empty or, worse, a wrong board.
+    if let Some(id) = project {
+        let found = store.read(|tx| tx.get_project(id))?;
+        if found.is_none() {
+            let registered = store.read(|tx| tx.project_ids())?;
+            return Err(GearError::new(
+                gear_model::ErrorCode::NoTarget,
+                format!(
+                    "no project {id} in this store; registered: {}",
+                    registered.join(", ")
+                ),
+            ));
+        }
+    }
     // The caller's seat, when it has one: a captain in a pane sees its own
     // project's board without a GEAR_CTX (T-126).
     let env = match herdr.as_mut() {
@@ -878,9 +902,12 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
         None => env,
     };
     let opts = gear_board::Options {
-        // The caller's project; without a caller (the user's own shell) the
-        // board shows every project in the store.
-        project: env.ctx.as_ref().map(|ctx| ctx.project.clone()),
+        // The project named on the command line, else the caller's; without
+        // either (the user's own shell) the board shows every project in the
+        // store.
+        project: project
+            .map(str::to_string)
+            .or_else(|| env.ctx.as_ref().map(|ctx| ctx.project.clone())),
         // The engine's lock file sits next to the database.
         db: std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from),
         json,
