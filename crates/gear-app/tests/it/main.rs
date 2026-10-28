@@ -26,6 +26,7 @@ mod plan_staff_contract;
 mod plan_verdicts_contract;
 mod profiles_contract;
 mod result_contract;
+mod remerge_contract;
 mod review_contract;
 mod reviewer_mail_contract;
 mod seats_contract;
