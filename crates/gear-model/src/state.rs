@@ -189,6 +189,10 @@ impl SeatState {
                     | (Missing, Starting | NeedsCheck | Retired)
                     // Retried by the captain (T-82): the engine onboards it again.
                     | (NeedsCheck, Queued | Active | Starting | Retired)
+                    // T-259: a reviewer parked in NeedsCheck with no job whose
+                    // agent is gone holds a slot no human can bring back: the
+                    // engine frees it.
+                    | (NeedsCheck, Released)
                     | (Unknown, Queued)
             ),
         }
@@ -294,6 +298,17 @@ mod tests {
         assert!(SeatState::can_transition(SeatRole::Lane, Queued, Starting));
         // A temp seat is not a lane: it keeps its own rules.
         assert!(!SeatState::can_transition(SeatRole::Temp, Retired, Queued));
+    }
+
+    /// T-259: a reviewer parked in NeedsCheck with no job whose agent is gone
+    /// is released by the engine — its slot is free again.
+    #[test]
+    fn a_needs_check_temp_may_be_released() {
+        use SeatState::*;
+        assert!(SeatState::can_transition(SeatRole::Temp, NeedsCheck, Released));
+        // A lane's NeedsCheck is a human's to retry: it is not released by the
+        // engine on its own.
+        assert!(!SeatState::can_transition(SeatRole::Lane, NeedsCheck, Released));
     }
 
     #[test]
