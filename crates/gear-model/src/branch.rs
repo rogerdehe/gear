@@ -46,15 +46,15 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_names_gear_uses() {
-        assert_eq!(expand(TASK_BRANCH, "gear", "mast", "T-40"), "mast/t40");
-        assert_eq!(expand(REVIEW_BRANCH, "gear", "mast", "T-40"), "review/t40");
+        assert_eq!(expand(TASK_BRANCH, "p", "pay", "T-40"), "pay/t40");
+        assert_eq!(expand(REVIEW_BRANCH, "p", "l", "T-7"), "review/t7");
     }
 
     #[test]
     fn a_template_names_the_project_and_the_lane() {
         assert_eq!(
-            expand("{project}/{lane}/t{n}", "gear", "mast", "T-252"),
-            "gear/mast/t252"
+            expand("{project}/{lane}/t{n}", "acme", "pay", "T-40"),
+            "acme/pay/t40"
         );
         assert_eq!(expand("task/{project}-{n}", "gear", "mast", "T-7"), "task/gear-7");
     }

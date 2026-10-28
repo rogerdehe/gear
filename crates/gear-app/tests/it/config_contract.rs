@@ -712,12 +712,16 @@ fn a_branch_template_must_be_expandable_and_usable() {
     );
     // A placeholder GEAR does not fill in stays a brace in the name.
     assert_eq!(
+        fields(&validate(&with("task_branch", "{team}/t{n}"))),
+        vec!["conventions.task_branch"]
+    );
+    assert_eq!(
         fields(&validate(&with("task_branch", "{lane}/{task}"))),
         vec!["conventions.task_branch"]
     );
     // A name git would refuse: a leading '/', "..", "//", a trailing '/', and
     // a trailing ".lock".
-    for bad in ["/{lane}/t{n}", "{lane}/../t{n}", "{lane}//t{n}", "{lane}/t{n}/", "{lane}/t{n}.lock"] {
+    for bad in ["/x/t{n}", "a..b/t{n}", "{lane}/../t{n}", "{lane}//t{n}", "{lane}/t{n}/", "{lane}/t{n}.lock"] {
         assert_eq!(
             fields(&validate(&with("task_branch", bad))),
             vec!["conventions.task_branch"],
