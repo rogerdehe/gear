@@ -34,12 +34,11 @@ VOYS = [
             ("T-266", "mast", "queued",    "board: graph draws dependencies",          60,  0, 0,    0, 0,   ["T-261"], "",      ""),
             ("T-267", "hull", "queued",    "release v0.5.0",                           15,  0, 0,    0, 0,   ["T-263", "T-266"], "", ""),
         ],
-        EXC=[("hull", "T-263", "rework", "round 2, 49/25m: the captain scopes what is left"),
-             ("mast", "-", "overloaded", "mast has 100m left, hull 15m: move T-266 to hull")],
+        EXC=[("hull", "T-263", "rework", "round 2, 49/25m: the captain scopes what is left")],
         DECISIONS=[("11:05", "scope", "light procedure: a task marked small skips review", "user at kickoff", True),
                    ("12:40", "rework", "T-260 round 2: accept proof missing", "bug in normal use", False),
                    ("14:05", "contract", "T-262 v2: GOAL_LOCKED also covers milestone lines", "user agreed 13:58", True)],
-        WAITING=["T-263: the captain's rework scope (hull is past its budget)", "T-262: review by review-3, 12 min in"],
+        WAITING=["T-262 in review by review-3, 12 min in"],
         FRICTION=[("T-260", "hull", "unread", "accept proof needed a real plan file; wrote one by hand (8m)")],
         BURN=[0, 45, 160, 250],
     ),
@@ -254,7 +253,7 @@ def header(w, view):
     y += 1
     x = 1; TABX.clear()
     put(w, y - 1, 1, "╭" + "─" * (wd - 4) + "╮", C["acc"])
-    for i, t in enumerate(["1 Now", "2 Graph", "3 Workload", "4 Decisions", "5 Time & tokens"], 1):
+    for i, t in enumerate(["1 Now", "2 Tasks", "3 Cost", "4 Log"], 1):
         label = f"  {t}  "
         put(w, y, x, "│", C["acc"])
         put(w, y, x + 1, label, (curses.A_REVERSE | C["acc"] | C["b"]) if i == view else C["b"])
@@ -278,38 +277,99 @@ def idle_reason(n):
     if wait: return f"next {nxt[0]} waits for {wait[0][0]} ({wait[0][1]}, {words(wait[0])})"
     return f"next {nxt[0]} is ready but not delivered"
 
+REVIEW_MERGE = 15   # measured mean minutes from hand-in to merge in this voyage (fake)
+
+def forecast():
+    """Each lane's queue, played forward (the engine's run-dry forecast, feed.rs, does the same):
+    a lane is free again when it hands a task in; its next task starts when the lane is free AND every task it
+    depends on has merged (hand-in + review and merge); the gap between the two is waiting. Durations are the
+    estimate left times the lane's measured pace. Returns per lane: end (minutes from now) and its waits."""
+    T, LANES = G["T"], G["LANES"]
+    pace = {}
+    for n in LANES:
+        d = [t for t in T if t[1] == n and t[2] == "done"]
+        pace[n] = max(0.5, min(3.0, sum(t[5] for t in d) / max(1, sum(t[4] for t in d)))) if d else 1.0
+    merged = {t[0]: 0 for t in T if t[2] == "done"}          # already on dev
+    handed = {}
+    for t in T:                                              # handed in: merges after review (passed: soon)
+        if t[2] in ("handed", "review", "verdict"): merged[t[0]] = REVIEW_MERGE
+        if t[2] in ("passed", "merging"): merged[t[0]] = 5
+    out = {}
+    for _ in range(4):                                       # deps cross lanes: settle in a few passes
+        for n in LANES:
+            free, waits, last = 0, [], 0
+            for t in [t for t in T if t[1] == n and t[2] in ("working", "asking", "delivered", "rework", "sentback")] + \
+                     [t for t in T if t[1] == n and t[2] in ("queued", "deps")]:
+                start = free
+                deps = [d for d in t[9] if d not in ("",)]
+                if t[2] in ("queued", "deps"):
+                    ready = max([merged.get(d, 10 ** 6) for d in deps] or [0])
+                    if ready > free:
+                        blocker = max(deps, key=lambda d: merged.get(d, 10 ** 6))
+                        waits.append((ready - free, blocker)); start = ready
+                left = max(t[4] - t[5], 10) if t[5] else t[4]
+                free = start + int(left * pace[n])
+                merged[t[0]] = free + REVIEW_MERGE
+                last = merged[t[0]]
+            reviewing = [merged[t[0]] for t in T if t[1] == n and t[0] in merged and t[2] in ("handed", "review", "verdict", "passed", "merging")]
+            out[n] = (max([last] + reviewing), waits, pace[n])
+    return out
+
 def view_now(w, sel):
+    """Now: one table row per lane (what it does, its stage, its time, the lane's progress, when it ends), one line on
+    balance, then one list of what to handle (needs a look and waiting on someone, each with who acts), quota last."""
     T, LANES = G["T"], G["LANES"]
     wd = w.getmaxyx()[1]
-    tw = max(32, min(60, wd // 3))          # change 5: columns follow the width
-    y = TOP[0]; put(w, y, 1, "LANES  (Enter: what this lane did and has left)", C["b"]); y += 1
+    tw = max(30, min(52, wd - 110))
+    cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 76 + tw)]
+    y = TOP[0]
+    for name, x in cols: put(w, y, x, name, C["b"])
+    put(w, y, 86 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
+    ends = {}
+    fc = forecast() if G["V"]["state"] == "sailing" else {}
     for i, n in enumerate(LANES):
-        t = lane_now(n); a = 0; sel_y = y if sel == i else None
-        done = sum(1 for x in T if x[1] == n and x[2] == "done")
-        left = sum(1 for x in T if x[1] == n and x[2] not in ("done", "moved"))
+        t = lane_now(n)
+        mine = [t_ for t_ in T if t_[1] == n and t_[2] != "moved"]
+        nd = sum(1 for t_ in mine if t_[2] == "done"); l = sum(t_[4] for t_ in mine if t_[2] != "done")
+        ends[n] = G["V"]["used_m"] + fc[n][0] if fc else 0
         put(w, y, 1, "›" if sel == i else " ", C["acc"])
-        put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"] | a)
+        put(w, y, 3, f"{n:<5}", C[LANE_COL[n]] | C["b"])
         if t:
-            over = t[5] > t[4]
-            put(w, y, 9, f"{t[0]} {t[3][:tw]:<{tw}}", a)
-            put(w, y, 16 + tw, f"{bar(t[5]/t[4], 10)} {t[5]}/{t[4]}m", C["warn"] if over else 0)
-            put(w, y, 34 + tw, words(t) + (f" · {t[11]}" if t[11] else ""), C[STAGE_COL[t[2]]])
+            put(w, y, 9, f"{t[0]} {t[3]}"[:tw])
+            put(w, y, 11 + tw, words(t)[:22], C[STAGE_COL[t[2]]])
+            put(w, y, 34 + tw, f"{t[5]}/{t[4]}m" + (" ⚠" if t[5] > t[4] else ""), C["bad"] if t[5] > t[4] else 0)
         else:
-            put(w, y, 9, "idle: " + idle_reason(n), (C["dim"] if G["V"]["state"] == "landed" else C["bad"]) | a)
-        lm = sum(x[4] for x in T if x[1] == n and x[2] not in ("done", "moved"))
+            put(w, y, 9, idle_reason(n)[:tw + 30], C["dim"] if G["V"]["state"] == "landed" else C["bad"])
+        k = nd * 10 // max(1, len(mine))
+        put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)} · {l}m left")
+        if fc:
+            put(w, y, 76 + tw, f"~{hm(ends[n])}")
+
+        if sel == i: hl(w, y)
         y += 1
-        tot = max(1, done + left); k = done * 12 // tot
-        put(w, y, 9, "█" * k + "░" * (12 - k), C[LANE_COL[n]])
-        put(w, y, 22, f"{done} of {done + left} tasks done · {left} left ({lm}m of estimates)", C["dim"])
-        if sel_y is not None: hl(w, sel_y)
-        y += 2
-    y += 1; put(w, y, 1, f"NEEDS A LOOK ({len(G['EXC'])})", C["b"] | C["warn"]); y += 1
-    for lane, tid, kind, why in G["EXC"]:
-        put(w, y, 3, f"{tid} {lane:<5} {kind:<14}", C["warn"]); put(w, y, 29, why); y += 1
-    y += 1; put(w, y, 1, "QUOTA", C["b"]); y += 1
-    for p, win, u, r in [("tokenrhythm", "5h", 41, "22:00"), ("codex", "week", 63, "Oct 30")]:
-        put(w, y, 3, f"{p:<13}{win:<6}{bar(u/100, 14)} {u:>3}% used  resets {r}",
-            C["bad"] if u >= 90 else C["warn"] if u >= 60 else C["ok"]); y += 1
+    if G["V"]["state"] == "sailing":
+        first, last = min(ends, key=ends.get), max(ends, key=ends.get); gap = ends[last] - ends[first]
+        put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}" if gap <= 30 else
+            f"✗ not balanced: {last} ends {hm(gap)} after {first}", C["ok"] if gap <= 30 else C["bad"])
+    y += 2
+    items = [("⚠", f"{tid} {lane} {why}" if tid != "-" else f"{lane} {kind}: {why}", C["warn"]) for lane, tid, kind, why in G["EXC"]]
+    # a lane that will sit with nothing to start (20 min or more): its next task waits for another task to merge
+    for n, (end, waits, pace) in (fc.items() if fc else []):
+        for gap, dep in waits:
+            if gap >= 20:
+                owner = next(t[1] for t in G["T"] if t[0] == dep)
+                nxt = next(t[0] for t in G["T"] if t[1] == n and dep in t[9])
+                items.append(("⚠", f"{n} will sit idle ~{hm(gap)}: its next task {nxt} waits for {dep} ({owner}) — "
+                                   f"captain: give {n} work it can start now, or move {dep} to {n}", C["bad"]))
+    items += [("⏳", s_, 0) for s_ in G["WAITING"]]
+    put(w, y, 1, f"TO HANDLE ({len(items)})", C["b"] | (C["warn"] if items else 0)); y += 1
+    for mark, text, a in items or [("", "nothing", C["dim"])]:
+        put(w, y, 3, f"{mark} {text}".strip(), a); y += 1
+    y += 1
+    put(w, y, 1, "Quota", C["b"]); x = 9
+    for p_, win, u, rs in [("tokenrhythm", "5h", 41, "22:00"), ("codex", "week", 63, "Oct 30")]:
+        txt = f"{p_} {win} {u}% · resets {rs}"
+        put(w, y, x, txt, C["bad"] if u >= 90 else C["warn"] if u >= 60 else C["ok"]); x += len(txt) + 5
     return len(LANES)
 
 
@@ -417,9 +477,6 @@ def view_decisions(w, sel):
     stars = [d for d in G["DECISIONS"] if d[4]]
     for t, k, what, why, star in stars or [("", "", "nothing", "", False)]:
         put(w, y, 3, f"{t} ★ {what}" if t else "nothing", C["warn"] if t else C["dim"]); y += 1
-    y += 1; put(w, y, 1, "WAITING ON SOMEONE", C["b"]); y += 1
-    for s in G["WAITING"] or ["nothing"]:
-        put(w, y, 3, s, 0 if G["WAITING"] else C["dim"]); y += 1
     y += 1; put(w, y, 1, f"ALL DECISIONS ({len(G['DECISIONS'])})", C["b"]); y += 1
     for i, (t, k, what, why, star) in enumerate(G["DECISIONS"]):
         a = 0
@@ -507,10 +564,10 @@ def task_panel(w, t):
 def main(w):
     colors(); curses.curs_set(0); view, sel = 1, 0; pick(0)
     curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION); w.keypad(True)   # change 12: clicks pick views and voyages
-    views = {1: view_now, 2: view_graph, 3: view_workload, 4: view_decisions, 5: view_cost}
+    views = {1: view_now, 2: view_graph, 3: view_cost, 4: view_decisions}
     while True:
         w.erase(); header(w, view); n = views[view](w, sel)
-        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
+        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-4 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · 4 views · fake data", C["dim"])
         w.refresh(); k = w.getch()
         if k in (ord("q"), 27): break
         if k == curses.KEY_MOUSE:
@@ -525,15 +582,15 @@ def main(w):
         if k == ord("d"): DETAIL[0] = not DETAIL[0]
         elif k == ord("["): pick(min(len(VOYS) - 1, G["i"] + 1)); sel = 0
         elif k == ord("]"): pick(max(0, G["i"] - 1)); sel = 0
-        elif k in (curses.KEY_RIGHT, ord("l"), 9): view, sel = view % 5 + 1, 0
-        elif k in (curses.KEY_LEFT, ord("h"), curses.KEY_BTAB): view, sel = (view - 2) % 5 + 1, 0
-        elif ord("1") <= k <= ord("5"): view, sel = k - ord("0"), 0
+        elif k in (curses.KEY_RIGHT, ord("l"), 9): view, sel = view % 4 + 1, 0
+        elif k in (curses.KEY_LEFT, ord("h"), curses.KEY_BTAB): view, sel = (view - 2) % 4 + 1, 0
+        elif ord("1") <= k <= ord("4"): view, sel = k - ord("0"), 0
         elif k in (curses.KEY_DOWN, ord("j")): sel = min(sel + 1, n - 1)
         elif k in (curses.KEY_UP, ord("k")): sel = max(sel - 1, 0)
         elif k in (10, 13, curses.KEY_ENTER):
-            if view in (1, 3): lane_panel(w, G["LANES"][sel])
+            if view == 1: lane_panel(w, G["LANES"][sel])
             elif view == 2: task_panel(w, G["graph_rows"][sel])
-            elif view == 5:
+            elif view == 3:
                 lane = G["LANES"][sel]; OPENED[lane] = not OPENED.get(lane)
 
 curses.wrapper(main)
