@@ -697,13 +697,17 @@ impl Store {
     /// The time from `BEGIN IMMEDIATE` to the commit or rollback is measured:
     /// a write over [`SLOW_WRITE_MS`] prints one line to stderr naming the
     /// caller ([`slow_write_line`]), so a writer that held the store shows.
+    ///
+    /// The clock starts **after** the transaction is acquired (F1 of the
+    /// T-379 review): a caller that queued for the lock is waiting, not
+    /// holding the store, and the line must not blame it for the wait.
     #[track_caller]
     pub fn write<T>(&mut self, f: impl FnOnce(&Tx<'_>) -> GearResult<T>) -> GearResult<T> {
-        let started = Instant::now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(map_sqlite)?;
+        let started = Instant::now();
         let tx = Tx { tx };
         let result = match f(&tx) {
             Ok(value) => tx.tx.commit().map_err(map_sqlite).map(|()| value),
