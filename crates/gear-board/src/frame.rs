@@ -1106,20 +1106,33 @@ pub fn styled_lane_panel(lane: &LaneBoard, color: Color) -> Vec<Line> {
     rows.push(Line::new());
     rows.push(Line::styled("NOW", Style::bold()));
     for task in &lane.tasks {
-        let (symbol, stage) = match task.state {
-            gear_model::TaskState::Running => ("◉", graph::GraphStage::Working),
-            gear_model::TaskState::Verifying => ("◎", graph::GraphStage::Review),
+        let stage = match task.state {
+            gear_model::TaskState::Running => graph::Stage::Working,
+            gear_model::TaskState::Verifying => graph::Stage::Review,
             _ => continue,
         };
+        // The stage says what the task does now, in the prototype's words.
+        let words = graph::Stage::words(&graph::GraphTask {
+            id: task.id.clone(),
+            lane: lane.lane.clone(),
+            stage,
+            moved_to: None,
+            title: task.title.clone(),
+            est_min: task.est_min,
+            actual_min: task.actual_min,
+            rounds: 0,
+            deps: Vec::new(),
+            finished: None,
+        });
         rows.push(Line::styled(
             format!(
                 "  {} {} {:<30} {}",
-                symbol,
+                stage.symbol(),
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
-                task.state.as_str()
+                words
             ),
-            Style::fg(graph::stage_color(stage)),
+            Style::fg(stage.color()),
         ));
     }
     rows.push(Line::new());
