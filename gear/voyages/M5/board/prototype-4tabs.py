@@ -285,10 +285,10 @@ def view_now(w, sel):
     T, LANES = G["T"], G["LANES"]
     wd = w.getmaxyx()[1]
     tw = max(30, min(52, wd - 110))
-    cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 70 + tw)]
+    cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 76 + tw)]
     y = TOP[0]
     for name, x in cols: put(w, y, x, name, C["b"])
-    put(w, y, 78 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
+    put(w, y, 86 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
     ends = {}
     for i, n in enumerate(LANES):
         t = lane_now(n)
@@ -304,8 +304,8 @@ def view_now(w, sel):
         else:
             put(w, y, 9, idle_reason(n)[:tw + 30], C["dim"] if G["V"]["state"] == "landed" else C["bad"])
         k = nd * 10 // max(1, len(mine))
-        put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)}")
-        if G["V"]["state"] == "sailing": put(w, y, 70 + tw, f"~{hm(ends[n])}")
+        put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)} · {l}m left")
+        if G["V"]["state"] == "sailing": put(w, y, 76 + tw, f"~{hm(ends[n])}")
         if sel == i: hl(w, y)
         y += 1
     if G["V"]["state"] == "sailing":
