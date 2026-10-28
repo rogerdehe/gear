@@ -10,6 +10,7 @@ use gear_store::{testing, AttemptRow, AttemptStep, NewMessage, Store, TaskRow};
 const T0: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
 const LANE_PANE: &str = "w1:p2";
+const DECK_PANE: &str = "w1:p3";
 
 fn profile(kind: &str) -> gear_herdr::Profile {
     gear_herdr::Profile {
@@ -94,6 +95,20 @@ fn task(tx: &gear_store::Tx<'_>, id: &str, rank: i64) -> gear_model::GearResult<
     })
 }
 
+/// Startable work elsewhere in the project: the feed talks about a lane only
+/// while some lane has work to start (T-232). Two ready tasks and no
+/// measurements keep `deck`'s own thread quiet.
+fn startable_elsewhere(w: &mut World) {
+    w.store
+        .write(|tx| {
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, DECK_PANE, "opencode", T0)?;
+            lane_task(tx, "T-8", "deck", 8, TaskState::Ready, None, vec![])?;
+            lane_task(tx, "T-9", "deck", 9, TaskState::Ready, None, vec![])
+        })
+        .unwrap();
+    w.herdr.add_agent(DECK_PANE, "opencode", AgentStatus::Working);
+}
+
 /// The lane's items, open and closed.
 fn items(store: &mut Store, lane: &str) -> Vec<gear_store::MessageRow> {
     store
@@ -128,6 +143,8 @@ fn a_lane_running_dry_gets_one_item_and_loses_it_when_refilled() {
 #[test]
 fn a_lane_with_nothing_at_all_is_idle() {
     let mut w = world(AgentStatus::Idle, 0);
+    // The project has work to start elsewhere: the idle lane is told (T-232).
+    startable_elsewhere(&mut w);
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
 
@@ -335,6 +352,7 @@ fn measured_history(w: &mut World) {
 #[test]
 fn measured_early_warning_stays_quiet_after_acknowledgment_until_worse() {
     let mut w = world(AgentStatus::Working, 1);
+    startable_elsewhere(&mut w);
     measured_history(&mut w);
     let changes = feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
     assert_eq!(changes.len(), 1);
@@ -409,6 +427,7 @@ fn a_twenty_minute_old_viewed_item_rings_urgently_once_per_period() {
 #[test]
 fn tail_plan_closes_existing_idle_alert_and_prevents_its_doorbell() {
     let mut w = world(AgentStatus::Working, 0);
+    startable_elsewhere(&mut w);
     feed::keep_lanes_fed(&mut w.store, "p", T0).unwrap();
     assert_eq!(items(&mut w.store, "heat")[0].state, MsgState::Open);
     let (env, fp) = cap_env();
@@ -437,6 +456,7 @@ fn tail_plan_closes_existing_idle_alert_and_prevents_its_doorbell() {
 fn measured_horizon_counts_the_current_task_before_the_ready_queue() {
     use gear_store::{AttemptRow, AttemptStep};
     let mut w = world(AgentStatus::Working, 2);
+    startable_elsewhere(&mut w);
     measured_history(&mut w);
     w.store.write(|tx| {
         let mut task = tx.get_task("p", "T-1")?.unwrap();
@@ -676,6 +696,7 @@ fn a_lane_one_task_from_dry_warns_once() {
     let mut w = world(AgentStatus::Working, 0);
     // The lane works on its last task; the one behind it waits for a
     // dependency that is not done.
+    startable_elsewhere(&mut w);
     w.store
         .write(|tx| {
             lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
@@ -727,6 +748,7 @@ fn a_lane_one_task_from_dry_warns_once() {
 #[test]
 fn a_lane_that_hands_its_last_task_in_says_it_is_idle() {
     let mut w = world(AgentStatus::Working, 0);
+    startable_elsewhere(&mut w);
     w.store
         .write(|tx| {
             lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
@@ -822,4 +844,123 @@ fn a_resolved_balance_item_is_not_told_again() {
     let items = balance_items(&mut w.store);
     assert_eq!(items.len(), 2, "{items:?}");
     assert_eq!(items[1].state, MsgState::Open, "the imbalance is told again");
+}
+
+// ---- the quiet project: no lane has work left to start (T-232)
+
+/// A project of two lanes: `heat` works on its last task, `deck` has nothing.
+/// With `ready`, one more task of `heat` can be started.
+fn two_lane_world(ready: bool) -> World {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", T0)?;
+            testing::seed_active_seat(tx, "p", "deck", SeatRole::Lane, DECK_PANE, "opencode", T0)?;
+            lane_task(tx, "T-1", "heat", 1, TaskState::Running, Some(30), vec![])?;
+            tx.insert_attempt(&AttemptRow {
+                session_ref: None,
+                session_cli: None,
+                session_action: None,
+                sent_at: None,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Started,
+                candidate: None,
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
+            })?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0)?;
+            if ready {
+                lane_task(tx, "T-2", "heat", 2, TaskState::Ready, Some(30), vec![])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut herdr = FakeHerdr::new();
+    herdr.add_agent(CAP_PANE, "codex", AgentStatus::Idle);
+    herdr.add_agent(LANE_PANE, "opencode", AgentStatus::Working);
+    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    for kind in ["codex", "opencode"] {
+        cfg.profiles.insert(kind.to_string(), profile(kind));
+    }
+    World { store, herdr, cfg }
+}
+
+/// T-232: with nothing startable anywhere no item opens for any lane, and the
+/// IDLE item an earlier tick left open closes with the plain fact.
+#[test]
+fn no_item_is_opened_and_the_idle_item_closes_when_no_lane_has_work_left_to_start() {
+    let mut w = two_lane_world(false);
+    // What an earlier tick left open for the idle lane.
+    w.store
+        .write(|tx| {
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: "p".into(),
+                thread: "lane:deck".into(),
+                task: None,
+                attempt: None,
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: "p:captain".into(),
+                kind: MsgKind::System,
+                urgent: false,
+                body: "lane deck is IDLE".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    assert_eq!(
+        changes,
+        vec![feed::FeedChange { lane: "deck".into(), action: "closed" }],
+        "{changes:?}"
+    );
+    assert!(items(&mut w.store, "heat").is_empty(), "no item for the working lane");
+    let deck = items(&mut w.store, "deck");
+    assert_eq!(deck.len(), 1, "{deck:?}");
+    assert_eq!(deck[0].state, MsgState::Resolved);
+    assert_eq!(deck[0].result.as_deref(), Some("no lane has work left to start"));
+    assert!(balance_items(&mut w.store).is_empty(), "no imbalance item");
+    for seat in ["p:heat", "p:deck"] {
+        let severity = w.store.read(|tx| tx.get_meta(&format!("feed-severity:{seat}"))).unwrap();
+        assert_eq!(severity.as_deref(), Some("0"), "{seat}");
+    }
+
+    // The next tick stays quiet too.
+    assert!(feed::keep_lanes_fed(&mut w.store, "p", T0 + 5).unwrap().is_empty());
+}
+
+/// T-232: one startable task anywhere and the lanes are told as today.
+#[test]
+fn one_startable_task_keeps_the_lanes_talking() {
+    let mut w = two_lane_world(true);
+
+    let changes = feed::keep_lanes_fed(&mut w.store, "p", T0 + 1).unwrap();
+
+    let heat = items(&mut w.store, "heat");
+    assert_eq!(heat.len(), 1, "{heat:?}");
+    assert_eq!(heat[0].state, MsgState::Open);
+    assert_eq!(heat[0].body, "lane heat has 1 ready task left");
+    let deck = items(&mut w.store, "deck");
+    assert_eq!(deck.len(), 1, "{deck:?}");
+    assert_eq!(deck[0].state, MsgState::Open);
+    assert_eq!(deck[0].body, "lane deck is IDLE");
+    assert_eq!(changes.len(), 2, "{changes:?}");
 }
