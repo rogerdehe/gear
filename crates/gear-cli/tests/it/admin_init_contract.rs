@@ -69,11 +69,10 @@ fn config_version(db: &Path) -> i64 {
         .expect("the project")
 }
 
-/// T-100: a project that is not registered yet is created from the user's own
-/// shell only. An agent — even the captain of that very project — may re-apply
-/// a registered project's config (the test below), never create one.
+/// T-100: a project that is not registered yet is created by its captain (a
+/// caller with no seat yet), never by another project's seat.
 #[test]
-fn a_first_registration_is_the_users_own() {
+fn a_first_registration_is_the_captains_not_another_seats() {
     let dir = scratch("first");
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
@@ -85,7 +84,7 @@ fn a_first_registration_is_the_users_own() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(config_version(&db), 1, "the user registered the project");
 
-    // An agent may not create one, whatever GEAR_ADMIN says.
+    // Another project's seat may not create one, whatever GEAR_ADMIN says.
     let other = scratch("first-agent");
     let other_repo = other.join("repo");
     std::fs::create_dir_all(&other_repo).expect("the repo");
@@ -94,11 +93,10 @@ fn a_first_registration_is_the_users_own() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.starts_with("ERROR FORBIDDEN: "), "{err}");
-    assert!(err.contains("user's own shell"), "{err}");
+    assert!(err.contains("never registers another"), "{err}");
     assert_eq!(config_version(&other_db), 0, "nothing was registered");
 
-    // And a plain shell pane with no agent in it is still the user (no Herdr
-    // here means the pane cannot be read: the answer is no, and it says why).
+    // A captain with no seat yet registers it.
     let o = init(&other, &other_db, &config(&other, &other_repo), None, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }
