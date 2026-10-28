@@ -62,8 +62,11 @@ pub fn start_reviews(
         // no reviewer is started for it.
         Err(_) => return Ok(report),
     };
-    // Without `[temps]` there is no reviewer to start.
+    // Without `[temps]` there is no reviewer to start. A hand-in would wait in
+    // Submitted with nothing telling the captain (another project's M0), so
+    // the captain is told to settle it (v0.4.8).
     if config.temps.is_none() {
+        tell_captain_of_hand_ins_without_reviewers(store, project, now)?;
         return Ok(report);
     }
 
@@ -1804,6 +1807,62 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
     })
 }
 
+/// The key that remembers that the captain was told that an attempt was handed
+/// in while the project has no reviewers to settle it (`[temps]` absent).
+fn verdict_wait_key(task: &str, attempt: i64) -> String {
+    format!("engine.verdict_wait.{task}.{attempt}")
+}
+
+/// A project without `[temps]` has no reviewer: a hand-in would wait in
+/// Submitted with nothing telling the captain (another project's M0). Tell the
+/// captain once per attempt, on the thread `verdict:<task>:<attempt>`, to
+/// settle the attempt in `# Verdicts`.
+fn tell_captain_of_hand_ins_without_reviewers(
+    store: &mut Store,
+    project: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let hand_ins = tasks_to_review(store, project)?;
+    if hand_ins.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        // No captain: nobody to tell.
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        for task in &hand_ins {
+            // One message per attempt: a tick does not bring the same news
+            // back, and a resolved item stays resolved.
+            let key = verdict_wait_key(&task.task, task.attempt);
+            if tx.get_meta(&key)?.is_some() {
+                continue;
+            }
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("verdict:{}:{}", task.task, task.attempt),
+                task: Some(task.task.clone()),
+                attempt: Some(task.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: format!(
+                    "{} attempt {} was handed in and this project has no reviewers \
+                     ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)",
+                    task.task, task.attempt
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            tx.set_meta(&key, &now.to_string())?;
+        }
+        Ok(())
+    })
+}
+
 /// The next free thread number for `prefix`: the highest one still open, plus
 /// one, skipping threads that exist (the same rule as `gear send`).
 fn next_thread_seq(
@@ -1968,6 +2027,34 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
 review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
+    /// The same project with no `[temps]` at all: no reviewer can start.
+    const CONFIG_NO_REVIEWERS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 1
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
+"#;
+
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
         let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
@@ -2074,6 +2161,85 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 _ => None,
             })
             .collect()
+    }
+
+    /// The messages the captain got on a thread.
+    fn thread(store: &mut Store, name: &str) -> Vec<gear_store::MessageRow> {
+        store.read(|tx| tx.thread_messages("p", name)).unwrap()
+    }
+
+    /// v0.4.8: a hand-in in a project without `[temps]` reaches the captain —
+    /// once per attempt, on the thread `verdict:<task>:<attempt>`.
+    #[test]
+    fn a_hand_in_without_reviewers_tells_the_captain_once_per_attempt() {
+        let mut store = world(CONFIG_NO_REVIEWERS);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let told = thread(&mut store, "verdict:T-1:1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Open);
+        assert!(told[0].urgent);
+        assert_eq!(told[0].task.as_deref(), Some("T-1"));
+        assert_eq!(told[0].attempt, Some(1));
+        assert_eq!(
+            told[0].body,
+            "T-1 attempt 1 was handed in and this project has no reviewers ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)"
+        );
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_some());
+
+        // A second tick adds none.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 1);
+
+        // A second attempt of the same task gives one more.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "the edge case".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 25,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "ops/reports/T-1.md", T0 + 30)
+                    .map(|_| ())
+            })
+            .unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 40).unwrap();
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 1, "attempt 1 stays one");
+        let second = thread(&mut store, "verdict:T-1:2");
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert!(second[0].body.starts_with("T-1 attempt 2 "), "{}", second[0].body);
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.2")).unwrap().is_some());
+    }
+
+    /// With `[temps]` a reviewer starts and the captain hears nothing on the
+    /// verdict thread.
+    #[test]
+    fn with_reviewers_a_hand_in_tells_the_captain_nothing_on_the_verdict_thread() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 0);
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_none());
     }
 
     /// T-63: the reviewer is sent the contract the hand-in was made against —
