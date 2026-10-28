@@ -270,7 +270,7 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     if !direction { return review_packet_for(store, config, &task.task, task.attempt, &task.candidate) }
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
-    let branch = format!("{}/{}", task.lane, task.task.to_lowercase().replace('-', ""));
+    let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
     Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
 }
 
@@ -324,7 +324,7 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
         let existing = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
         if existing.as_ref().is_some_and(|v| v["state"] == "running") { continue }
         let repo = config.repo_of_task(&row);
-        let branch = format!("{}/{}", lane, row.id.to_lowercase().replace('-', ""));
+        let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &row.id);
         let sha = if let Some(sha) = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["sha"].as_str()) { sha.to_string() } else {
             let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")]) else { continue };
             let sha = sha.trim().to_string();
@@ -899,8 +899,8 @@ fn start_reviewer(
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
-    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&task.task) };
-    let seat_branch = format!("home/{}", seat.name);
+    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&config.conventions.review_branch, &config.project.id, &task.lane, &task.task) };
+    let seat_branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, &config.project.id, &seat.name);
     let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
     let model = entry.map(ModelEntry::model);
@@ -956,6 +956,14 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
+            // T-253: the worktree must belong to the repo the review runs in.
+            // Herdr places worktrees by the repo folder's name and the branch,
+            // so a same-named repo came back with another repository's
+            // checkout. It is not used, and the captain hears about it.
+            if let Err(reason) = crate::onboard::check_worktree(store, &seat.project, &seat.name, &repo.path, &worktree.path, now) {
+                park(store, &seat.id, &reason, now)?;
+                return Ok(Started::NotYet);
+            }
             // T-107: a reviewer's worktree left with GEAR's old pre-push hook
             // loses it before the agent starts.
             if let Err(reason) = crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path)) {
@@ -1545,7 +1553,7 @@ fn review_packet_for(
         &bar,
         candidate,
         &repo.integration,
-        &review_branch(task),
+        &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -1690,10 +1698,12 @@ fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     }
 }
 
-/// The review branch of a task: `review/t<n>` (conventions 17 §3: the
-/// reviewers' branch).
-fn review_branch(task: &str) -> String {
-    format!("review/{}", task.to_lowercase().replace('-', ""))
+/// The review branch of a task (T-253): the project's
+/// `[conventions].review_branch` template with `{project}`, `{lane}` and `{n}`
+/// filled in — `review/t<n>` by default (conventions 17 §3: the reviewers'
+/// branch).
+fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
+    gear_model::branch::expand(template, project, lane, task)
 }
 
 /// The Herdr agent name (and workspace label) of a task's reviewer:
@@ -2750,7 +2760,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         // T-76: the folder the reviewer runs in is trusted, so the args are
         // the profile's with the worktree filled in.
         let args = &starts(&herdr)[0].1;
-        assert!(args.starts_with(&gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/home-review-1")), "{args:?}");
+        assert!(args.starts_with(&gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/p-review-1")), "{args:?}");
         assert!(args.iter().any(|s| s.starts_with("developer_instructions=")), "{args:?}");
     }
 
@@ -2967,7 +2977,7 @@ review = [
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
 
         // The shell reports the checkout: the reviewer starts.
@@ -2984,7 +2994,7 @@ review = [
         // still one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -2998,7 +3008,7 @@ review = [
                     "check_for_update_on_startup=false".to_string(),
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
-                    "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
+                    "projects={\"/fake-worktrees/p-review-1\"={trust_level=\"trusted\"}}".to_string(),
                     "-c".to_string(),
                     gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy(), "")[0].clone(),
                     "-m".to_string(),
@@ -3324,7 +3334,7 @@ review = [
                     created: T0,
                 })?;
                 // The first job recorded the seat's worktree path.
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
                 Ok(())
             })
             .unwrap();
@@ -3402,7 +3412,7 @@ review = [
             .unwrap();
 
         store.write(|tx| {
-            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
             tx.insert_round(&gear_store::NewRound {
                 key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
                 seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
@@ -3468,7 +3478,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
                 Ok(())
             })
             .unwrap();
@@ -3505,7 +3515,7 @@ review = [
         let worktrees_after_first = worktrees(&herdr);
         assert_eq!(
             worktrees_after_first,
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
         // The job's agent is named after its task.
         let names: Vec<String> = herdr
@@ -3586,7 +3596,7 @@ review = [
         // checkout is on the last job's review branch, not on the seat's).
         assert_eq!(worktrees(&herdr), worktrees_after_first, "one worktree in total");
         assert!(
-            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("home-review-1"))),
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1"))),
             "reopened by path: {:?}",
             herdr.calls
         );
@@ -3719,7 +3729,7 @@ review = [
             .unwrap();
 
         store.write(|tx| {
-            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
             tx.insert_round(&gear_store::NewRound {
                 key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
                 seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
@@ -3780,7 +3790,7 @@ review = [
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
         assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(branch, "home/review-1");
+        assert_eq!(branch, "p/review-1");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
@@ -3820,7 +3830,7 @@ profile = "opencode"
 "#;
         let mut store = world(&config);
         // Isolated repo doors prevent the fake's branch-only map from letting
-        // root's home/review-1 stand in for web's checkout. Distinct paths and
+        // root's p/review-1 stand in for web's checkout. Distinct paths and
         // panes also make a checkout in the wrong repo observable.
         let mut web = FakeHerdr::new();
         let mut root = FakeHerdr::new();
@@ -3829,7 +3839,7 @@ profile = "opencode"
             (&mut root, "/root-review-1", "root:p1"),
         ] {
             door.add_shell(pane);
-            door.add_worktree("home/review-1", path, pane);
+            door.add_worktree("p/review-1", path, pane);
         }
         for (n, lane, door, path, pane, repo, base) in [
             (1, "heat", &mut web, "/web-review-1", "web:p1", "/repo/web", "web-dev"),
@@ -3848,7 +3858,7 @@ profile = "opencode"
             release_review_job(&mut store, n);
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
-            assert!(matches!(door.worktree_remove("wt-home-review-1"), Outcome::Ok(())));
+            assert!(matches!(door.worktree_remove("wt-p-review-1"), Outcome::Ok(())));
             door.add_shell(pane);
             door.add_worktree(&format!("review/t{n}"), path, pane);
         }
@@ -3895,7 +3905,7 @@ profile = "opencode"
         crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Released);
         herdr.add_shell("child:p1");
-        herdr.add_worktree("home/review-1", "/child-review", "child:p1");
+        herdr.add_worktree("p/review-1", "/child-review", "child:p1");
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 14).unwrap();
         assert_eq!(report.started, vec!["p:review-1"]);
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
