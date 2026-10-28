@@ -117,7 +117,7 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - A passing direction check is forwarded to the lane as an urgent instruction when the reviewer writes "ok." plus a sentence instead of exactly "ok" (M4.1 T-227, M-3985): the engine compares the result to "ok" exactly, so keel (already handed in, nothing to do) got an urgent "instruction" and spent minutes deciding how to answer it, until the captain interrupted. A result that starts with "ok" is a pass; the reviewer's rules say to answer with "ok" alone.
 - A voyage's departure is the creation of its milestone, not its first dispatch (acme M1, 2026-10-28): a milestone left as an empty shell (after a rename M1 -> M0) counted 165 min elapsed at its real start, so every station and pace figure was wrong. The departure is the first delivery of a task of that milestone.
 - The gate's exit status is all GEAR reads, and nothing warns about a pipe that hides it (acme gate `go vet ./internal/... 2>&1 | head -20` passes whatever vet says). init warns when the gate command contains a pipe without `set -o pipefail`; conventions.md says the gate must exit non-zero on any failure.
-- A doorbell op left in Executing holds the lane's delivery slot for ever (M4.2, 2026-10-28: a `gear send` failed with "database is locked" under load after writing the op; hull sat idle 20 min with T-236 ready). The doorbell expiry (DOORBELL_EXPIRY_S) covers only Submitted/Unknown ops; an Executing op older than the expiry is moved to Unknown (or Failed) by the engine, and `gear send` writes the op and the prompt result in a way a lock cannot split.
+- Moved into M4.2 as a task: an op stuck in Executing holds a lane's delivery slot.
 
 ## Later fixes (not urgent; collected 2026-10-28)
 
@@ -141,6 +141,7 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - Stages of a long voyage on the board: a long voyage is cut into stations, each a release that runs end to end (M4 does this by hand as v0.4.0 … v0.4.4); the board shows the stations, which is reached, and what the next one needs. Design it from what M4's stages taught, not before.
 - OpenCode and Codex daemon identity proof (T-123), moved from M4 by the user.
 - Cut from M4: T-181 acknowledged instructions and the config drift warning (goal in gear/voyages/M4.md).
+- Endless thinking (user, 2026-10-28; low value now that MiniMax Flash is being dropped): pi has a `thinkingBudgets` setting (token budget per thinking level; whether a provider honours it depends on its API) and extension events (`message_update`) with an abort signal, so an extension could stop a turn whose thinking passes N tokens. OpenCode: nothing found. The user saw a MiniMax lane resume endless thinking after an interrupt, so GEAR's own remedy would be interrupt plus a new session (the session rule already has "new"). Decide at M5 only if a kept model shows it.
 - A view across Herdr sessions (several stores) and shared quota scheduling, only when it is needed.
 - Work that is not a task (trial project feedback B04-01): lanes giving read-only evidence or environment support to another lane, on a captain's instruction. GEAR knows only tasks, so such lanes look stuck or idle. Discuss: a small tracked kind of work (an instruction with an expected receipt and a deadline) versus always making it a task.
 

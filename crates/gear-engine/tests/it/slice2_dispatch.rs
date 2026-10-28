@@ -140,10 +140,17 @@ fn full_work_loop() {
     assert_eq!((attempt_state(&mut w), task_state(&mut w)), (AttemptState::Submitted, TaskState::Verifying));
     w.herdr.set_status(LANE_PANE, AgentStatus::Idle); // turn ended
 
-    // 6. the captain is rung for it; the lane gets nothing new (no ready task, result pending)
+    // 6. the lane gets nothing new (no ready task, result pending). Nothing in
+    //    the project is startable any more, so the feed rings nobody (T-232) —
+    //    the result waits for the captain in the inbox, not in a doorbell.
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 400).unwrap();
-    assert_eq!(w.herdr.prompts_to(CAP_PANE).len(), 1, "captain rung for the result");
+    assert!(w.herdr.prompts_to(CAP_PANE).is_empty(), "no lane has work left to start");
     assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 1, "no continue for a submitted attempt");
+    let said = w.store.read(|tx| tx.messages_from_since("p", "p:heat", T0 + 300)).unwrap();
+    assert!(
+        said.iter().any(|m| m.kind == MsgKind::Result && m.task.as_deref() == Some("T-1")),
+        "the captain has the result: {said:?}"
+    );
 
     // 7. the captain accepts it
     let r = apply(&mut w, "<!-- gear-plan project=p base=1 -->\n# Verdicts\n- T-1 attempt=1 contract=1 candidate=abc1234 pass evidence=notes/T-1.md\n", "v2", T0 + 500);
