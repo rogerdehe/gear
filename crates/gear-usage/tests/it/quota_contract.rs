@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use gear_usage::{codex_day_dir, read_quota_in, QuotaReader};
+use gear_usage::{codex_day_dir, read_quota_in, reset_from_text, QuotaReader};
 use serde_json::json;
 
 use crate::shared::{iso, now, write_lines, T13};
@@ -351,6 +351,70 @@ fn a_codex_session_without_a_rollout_is_an_error() {
     .err()
     .expect("a session without a rollout is an error");
     assert!(error.contains("rollout"), "{error}");
+}
+
+#[test]
+fn a_reset_time_is_read_from_the_text_of_the_provider() {
+    // (1) RFC 3339 among the words: 2026-10-29T05:00:00Z is 2 days and 16 h
+    // after T13.
+    assert_eq!(
+        reset_from_text("quota resets at 2026-10-29T05:00:00Z.", T13),
+        Some(T13 + 230_400)
+    );
+    // (2) `retry-after: <n>` is in seconds.
+    assert_eq!(reset_from_text("Retry-After: 120", T13), Some(T13 + 120));
+    // (3) `in <duration>`, the groups summed.
+    assert_eq!(
+        reset_from_text("Usage limit reached. Try again in 2h 13m.", T13),
+        Some(T13 + 7_980)
+    );
+    assert_eq!(
+        reset_from_text("rate limit, resets in 45 minutes", T13),
+        Some(T13 + 2_700)
+    );
+    assert_eq!(reset_from_text("resets in 90s", T13), Some(T13 + 90));
+    assert_eq!(
+        reset_from_text("available again in 3 hours 5 min", T13),
+        Some(T13 + 11_100)
+    );
+}
+
+#[test]
+fn the_last_line_that_states_a_reset_wins() {
+    let text = "resets in 1h\nUsage limit reached. Try again in 2h 13m.\nsome tool output\n";
+    assert_eq!(reset_from_text(text, T13), Some(T13 + 7_980));
+}
+
+#[test]
+fn a_matching_line_followed_by_an_unrelated_line_still_matches() {
+    let text = "Usage limit reached. Try again in 2h 13m.\nDone: 12 files changed.";
+    assert_eq!(reset_from_text(text, T13), Some(T13 + 7_980));
+}
+
+#[test]
+fn a_clock_time_is_not_a_reset() {
+    // GEAR does not know the time zone of "3pm".
+    assert_eq!(reset_from_text("resets 3pm", T13), None);
+}
+
+#[test]
+fn a_duration_without_a_reset_word_is_not_a_reset() {
+    assert_eq!(reset_from_text("in 2h", T13), None);
+    assert_eq!(reset_from_text("the build took 2h 13m", T13), None);
+}
+
+#[test]
+fn a_reset_out_of_the_window_is_not_a_reset() {
+    // Not after `now`.
+    assert_eq!(reset_from_text("resets in 0s", T13), None);
+    assert_eq!(
+        reset_from_text("quota resets at 2026-10-26T12:00:00Z", T13),
+        None
+    );
+    // More than eight days after it.
+    assert_eq!(reset_from_text("resets in 9 days", T13), None);
+    // Eight days is still inside the window.
+    assert_eq!(reset_from_text("resets in 8 days", T13), Some(T13 + 691_200));
 }
 
 #[test]
