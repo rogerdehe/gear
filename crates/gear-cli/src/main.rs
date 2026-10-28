@@ -936,6 +936,11 @@ fn cmd_admin_init(
         home.as_deref(),
         now_ts(),
     )?;
+    // T-321: remember which file this config was applied from, so the home
+    // page can tell a config file that drifted from the config the project
+    // runs on. Canonical, so the meta names the same file every run.
+    let path = canonical(&config.to_string_lossy());
+    store.write(|tx| tx.set_meta(&gear_app::admin::config_path_key(&r.project), &path))?;
     // This store becomes the Herdr session's GEAR target (design/14, L-54).
     if let (Ok(socket), Ok(db), Some(home)) = (
         std::env::var("HERDR_SOCKET_PATH"),
