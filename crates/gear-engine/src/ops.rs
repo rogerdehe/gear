@@ -737,30 +737,37 @@ pub fn confirm_pending_with(
         }
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
+                // What proves the op, and whether that proof is a view of the
+                // reviewer's own seat (T-267).
                 let evidence = match op.kind {
                     // A doorbell is proven by a view of the ids it carried
                     // that are still open; ids closed another way need no
                     // showing (else the doorbell never settles, holds the
                     // slot, and no doorbell rings again — L-66).
-                    OpKind::Doorbell => shown_in_a_view(tx, project, &op, now)?,
-                    // A review delivery is proven by the verdict the reviewer
-                    // hands in — the review packet is not on the reviewer's
-                    // home page. A review takes longer than the check budget
-                    // of a doorbell, so it spends none (like a kind without an
+                    OpKind::Doorbell => shown_in_a_view(tx, project, &op, now)?.map(|ts| (ts, false)),
+                    // A review delivery is proven by the reviewer's own first
+                    // `gear` — a view of its seat and generation after the
+                    // delivery — or by the verdict it hands in, whichever came
+                    // first (T-267). A newer delivery of the same seat, task
+                    // and attempt supersedes this one: only it is the packet
+                    // the reviewer got, and its confirmation voids this op.
+                    // A review takes longer than the check budget of a
+                    // doorbell, so it spends none (like a kind without an
                     // evidence rule, R-46).
                     OpKind::Deliver if is_reviewer(tx, &op.seat)? => {
-                        match review_verdict(tx, &op)? {
-                            Some(created) => Some(created),
+                        if superseded(tx, project, &op)? { continue }
+                        match review_delivery_evidence(tx, &op)? {
+                            Some(found) => Some(found),
                             None => continue,
                         }
                     }
                     // A delivery is proven by the task/attempt it announced.
-                    OpKind::Deliver => shown_delivery(tx, &op)?,
+                    OpKind::Deliver => shown_delivery(tx, &op)?.map(|ts| (ts, false)),
                     // Onboard/release/title/notify have no evidence rule yet:
                     // leave them completely alone — no budget, no flag (R-46).
                     _ => continue,
                 };
-                if let Some(view_ts) = evidence {
+                if let Some((view_ts, review_by_view)) = evidence {
                     require_transition(
                         state.can_transition(OpState::Confirmed),
                         "operation",
@@ -768,13 +775,14 @@ pub fn confirm_pending_with(
                         "confirmed",
                     )?;
                     // design/08: confirm(op, evidence) — keep the pointer. A
-                    // review delivery is settled by a verdict row, not by a
-                    // view: say so, so the stored explanation can be traced
-                    // (P3 of the T-5 review).
+                    // review delivery settled by a verdict row says so, as one
+                    // settled by the reviewer's own view says `view` like any
+                    // other: the stored explanation can be traced (P3 of the
+                    // T-5 review).
                     let review_delivery = op.kind == OpKind::Deliver && is_reviewer(tx, &op.seat)?;
                     let hand_in = op.kind == OpKind::Deliver && !review_delivery && !tx.views_since(&op.seat, op.generation, op.created)?.iter().any(|view|
                         view.ts == view_ts && view.shown_task.as_deref() == op.task.as_deref() && view.shown_attempt == op.attempt);
-                    let evidence = if review_delivery {
+                    let evidence = if review_delivery && !review_by_view {
                         format!("verdict {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
                     } else if hand_in {
                         format!("hand-in {} attempt {} @ {view_ts}", op.task.as_deref().unwrap_or("-"), op.attempt.unwrap_or(0))
@@ -782,6 +790,9 @@ pub fn confirm_pending_with(
                         format!("view {}/{} @ {view_ts}", op.seat, op.generation)
                     };
                     tx.set_op_state(project, &op.id, OpState::Confirmed, Some(&evidence), now)?;
+                    if review_delivery {
+                        supersede_older_review_deliveries(tx, project, &op, now)?;
+                    }
                     if op.kind == OpKind::Deliver {
                         // The delivery got through: nothing is left to send
                         // again for this attempt (T-97).
@@ -1035,8 +1046,85 @@ fn shown_in_a_view(tx: &Tx<'_>, project: &str, op: &OpRow, now: Ts) -> GearResul
     Ok(Some(now))
 }
 
+/// What proves a reviewer's delivery (T-267): the first view of the reviewer's
+/// own seat and generation at or after the delivery, or the verdict the
+/// reviewer hands in — whichever came first. The flag is true when the view
+/// came first, so the stored evidence is the view's.
+fn review_delivery_evidence(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<(Ts, bool)>> {
+    let verdict = review_verdict(tx, op)?;
+    let view = tx
+        .views_since(&op.seat, op.generation, op.created)?
+        .first()
+        .map(|view| view.ts);
+    Ok(match (view, verdict) {
+        (Some(view), Some(verdict)) if view > verdict => Some((verdict, false)),
+        (Some(view), _) => Some((view, true)),
+        (None, Some(verdict)) => Some((verdict, false)),
+        (None, None) => None,
+    })
+}
+
+/// A reviewer whose packet was delivered twice has two delivery ops for one
+/// attempt, and only the newer one is the packet the reviewer got: while it
+/// still waits for its evidence, the older op is not confirmed (T-267) —
+/// the newer one's confirmation voids it.
+fn superseded(tx: &Tx<'_>, project: &str, op: &OpRow) -> GearResult<bool> {
+    Ok(tx.ops_in_state(project, OpState::Submitted)?.into_iter().any(|other| {
+        other.id != op.id
+            && other.kind == OpKind::Deliver
+            && other.seat == op.seat
+            && other.task == op.task
+            && other.attempt == op.attempt
+            && (other.created, op_seq(&other.id)) > (op.created, op_seq(&op.id))
+    }))
+}
+
+/// The numeric part of an op id (`O-12` → 12).
+fn op_seq(id: &str) -> i64 {
+    id.rsplit('-').next().and_then(|n| n.parse::<i64>().ok()).unwrap_or(0)
+}
+
+/// A reviewer's delivery op that the reviewer's own first `gear` proves
+/// received is confirmed; every older Submitted delivery of the same seat for
+/// the same task and attempt is then Void (T-267) — otherwise it holds the
+/// seat's delivery slot and is sent again.
+fn supersede_older_review_deliveries(
+    tx: &Tx<'_>,
+    project: &str,
+    op: &OpRow,
+    now: Ts,
+) -> GearResult<()> {
+    let older: Vec<String> = tx
+        .ops_in_state(project, OpState::Submitted)?
+        .into_iter()
+        .filter(|other| {
+            other.id != op.id
+                && other.kind == OpKind::Deliver
+                && other.seat == op.seat
+                && other.task == op.task
+                && other.attempt == op.attempt
+                && (other.created, op_seq(&other.id)) < (op.created, op_seq(&op.id))
+        })
+        .map(|other| other.id)
+        .collect();
+    for id in older {
+        // A Submitted op that reached the pane is voided the raw way, as a
+        // review's start op is (release.rs): the state machine has no
+        // Submitted → Void transition, and this is the one op the newer
+        // delivery replaces.
+        tx.set_op_state(
+            project,
+            &id,
+            OpState::Void,
+            Some(&format!("superseded by {}", op.id)),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
 /// The time the reviewer's verdict on the reviewed attempt was stored, if it
-/// is there: a review delivery is proven by the verdict, not by a view.
+/// is there.
 fn review_verdict(tx: &Tx<'_>, op: &OpRow) -> GearResult<Option<Ts>> {
     let (Some(task), Some(attempt)) = (op.task.as_deref(), op.attempt) else {
         return Ok(None);
@@ -1224,6 +1312,177 @@ mod tests {
         assert_eq!(confirmed, vec!["O-1".to_string()]);
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Confirmed);
+    }
+
+    /// A reviewer's delivery of `task` attempt 1, Submitted, created `created`.
+    fn review_delivery(tx: &Tx<'_>, task: &str, created: Ts) -> String {
+        let op = tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: "p:r-1".into(),
+                generation: 1,
+                kind: OpKind::Deliver,
+                task: Some(task.into()),
+                attempt: Some(1),
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "Review packet" }),
+                created,
+            })
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created).unwrap();
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created).unwrap();
+        op.id
+    }
+
+    /// A view of the reviewer's own seat and generation at `ts`.
+    fn reviewer_view(tx: &Tx<'_>, ts: Ts) {
+        tx.insert_view(&gear_store::ViewRecord {
+            project: "p".into(),
+            seat: "p:r-1".into(),
+            generation: 1,
+            ts,
+            shown_msgs: vec![],
+            shown_ops: vec![],
+            shown_task: None,
+            shown_attempt: None,
+            shown_contract: None,
+        })
+        .unwrap();
+    }
+
+    fn reviewer_world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", "w1:p3", "codex", T0)
+            })
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_review_delivery_is_confirmed_by_the_reviewers_first_view() {
+        // T-267: the reviewer's own `gear` proves the packet arrived, before
+        // any verdict — a lost packet shows at once instead of waiting for a
+        // review that never started.
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, flagged) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        assert!(flagged.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed);
+        assert_eq!(op.result, Some(format!("view p:r-1/1 @ {}", T0 + 10)));
+    }
+
+    #[test]
+    fn the_first_evidence_of_a_review_delivery_is_the_one_stored() {
+        // A verdict that came before the view is the earlier proof: the op
+        // keeps saying so (T-267, "whichever came first").
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: true,
+                    findings: "ops/reviews/T-1.md".into(),
+                    by_seat: "p:r-1".into(),
+                    created: T0 + 5,
+                })?;
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.result, Some(format!("verdict T-1 attempt 1 @ {}", T0 + 5)));
+    }
+
+    #[test]
+    fn a_newer_review_delivery_supersedes_the_older_one() {
+        // Two deliveries of one attempt (T-267): the newer is the packet the
+        // reviewer got, so confirming it voids the older, which would hold the
+        // seat's delivery slot and be sent again.
+        let mut store = reviewer_world();
+        store
+            .write(|tx| {
+                review_delivery(tx, "T-1", T0);
+                review_delivery(tx, "T-1", T0 + 5);
+                reviewer_view(tx, T0 + 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0 + 20).unwrap();
+
+        assert_eq!(confirmed, vec!["O-2".to_string()]);
+        let older = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(older.state, OpState::Void);
+        assert_eq!(older.result.as_deref(), Some("superseded by O-2"));
+        let newer = store.read(|tx| tx.get_op("p", "O-2")).unwrap().unwrap();
+        assert_eq!(newer.state, OpState::Confirmed);
+    }
+
+    #[test]
+    fn a_lane_delivery_still_needs_a_view_of_its_task_and_attempt() {
+        // Unchanged (T-48): any view of a lane's seat is not proof; the view
+        // must show the task and attempt the delivery announced.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                let op = tx
+                    .insert_op(&NewOp {
+                        project: "p".into(),
+                        seat: "p:heat".into(),
+                        generation: 1,
+                        kind: OpKind::Deliver,
+                        task: Some("T-1".into()),
+                        attempt: Some(1),
+                        ref_msg: None,
+                        plan_version: None,
+                        payload: serde_json::json!({ "text": "New task T-1" }),
+                        created: T0,
+                    })
+                    .unwrap();
+                tx.set_op_state("p", &op.id, OpState::Executing, None, T0)?;
+                tx.set_op_state("p", &op.id, OpState::Submitted, None, T0)?;
+                tx.insert_view(&gear_store::ViewRecord {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    ts: T0 + 10,
+                    shown_msgs: vec![],
+                    shown_ops: vec![],
+                    shown_task: None,
+                    shown_attempt: None,
+                    shown_contract: None,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending_with(&mut store, "p", 2, 60, &[], T0 + 20).unwrap();
+
+        assert!(confirmed.is_empty(), "a view of the seat alone proves nothing");
+        assert_eq!(store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap().state, OpState::Submitted);
     }
 
     #[test]
