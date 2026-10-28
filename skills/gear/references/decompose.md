@@ -30,10 +30,10 @@ A task in the plan is a header plus `goal`, `accept`, `estimate`, `deps`. The en
 ## 4. Self-check
 
 - **Coverage:** every part of the voyage's `done:` maps to a task.
-- **Independence:** each lane's queued tasks start without each other.
+- **Independence and balance:** each lane's queued tasks start without each other, and the lanes' startable work (after `deps:`) ends near the same time. When one lane holds most of it, re-split the owned paths for the whole wave at once, not one task per run-dry.
 - **Merge-safety:** each task, merged alone, leaves the integration branch green.
 - **Ownership:** each task touches only its lane's paths, in one repo.
-- **Reachability:** the goal can be done with what is on the integration branch plus the interfaces written into it.
+- **Reachability:** the goal can be done with what is on the integration branch plus the interfaces written into it; every function, field, list and test the task names exists — grep each one, and read what a list it feeds into triggers.
 - **Old tests:** a change of existing behaviour includes updating the tests that assert the old behaviour.
 - **Proportion:** a task description longer than the code it asks for is writing the code; give signatures and test names instead.
 

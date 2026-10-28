@@ -1,0 +1,3 @@
+# M2.1 backlog
+
+M2.1 was a point voyage with no backlog of its own (scope: one project over several repositories). What it left went to M3's backlog, section "Moved out of M2.1" (`gear/voyages/M3/backlog.md`), as its voyage report says: every agent's quota markers and status bar; the engine-side dry-lane forecast; the cross-CLI session handover; review against the newest contract; the parallel check skipping landed tasks; a task built on an unreviewed branch merging after it; merging the approved commit; a hand-in must be pushed; the engine finishing a lane's retirement; the captain registering the project. Each is closed in M3's backlog.
