@@ -2669,9 +2669,24 @@ mod tests {
                 .subsec_nanos()
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        sh(&root, &format!("cp -R '{}'/. .", template(shape).display()));
+        copy_tree(template(shape), &root);
         root
+    }
+
+    /// Copy the template into `to`, tree and all, in this process (T-274): a
+    /// copied fixture costs a copy, not a shell and a `cp` on the test's
+    /// budget. File modes come along, which is what a git repo needs.
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                fs::copy(entry.path(), &target).unwrap();
+            }
+        }
     }
 
     /// A scratch repo with a bare origin: `dev` plus one commit each on
@@ -2707,9 +2722,46 @@ mod tests {
             }
         }
 
+        /// The merge worktree and the head of the template's task branch in
+        /// one shell: the two the tests ask for together, for one shell
+        /// instead of two (T-274).
+        fn prepared(&self) -> (gear_herdr::Worktree, String) {
+            let path = self.root.join("merge");
+            let heads = sh(
+                &self.root,
+                &format!(
+                    "git -C {} worktree add -q -b p/merge {} origin/dev && \
+                     git -C origin.git rev-parse heat/t5",
+                    self.work.display(),
+                    path.display()
+                ),
+            );
+            let head = heads.lines().last().unwrap_or_default().trim().to_string();
+            let worktree = gear_herdr::Worktree {
+                workspace_id: "wt-merge".into(),
+                pane_id: "wt-merge:p1".into(),
+                path: path.display().to_string(),
+                branch: "p/merge".into(),
+            };
+            (worktree, head)
+        }
+
         /// The head commit of a branch on origin.
         fn head_of(&self, branch: &str) -> String {
             sh(&self.root, &format!("git -C origin.git rev-parse {branch}"))
+        }
+
+        /// What origin holds after a merge: its integration branch and its
+        /// branches, from one shell (T-274: the assertions of a test asked
+        /// for both, and paid a process for each).
+        fn state(&self) -> State {
+            let out = sh(
+                &self.root,
+                "git -C origin.git log --format=%s dev; echo ---; \
+                 git -C origin.git for-each-ref --format='%(refname:short)' refs/heads",
+            );
+            let (dev, branches) = out.split_once("---").unwrap_or((&out, ""));
+            State { dev: dev.trim().to_string(), branches: branches.trim().to_string() }
         }
 
         /// What origin's integration branch holds.
@@ -2731,6 +2783,21 @@ mod tests {
         /// pushed has no head on origin).
         fn local_head_of(&self, branch: &str) -> String {
             sh(&self.work, &format!("git rev-parse {branch}"))
+        }
+    }
+
+    /// What origin of a scratch repo holds: see [`Scratch::state`].
+    struct State {
+        /// The subjects on the integration branch, one per line.
+        dev: String,
+        /// The branch names origin still has, one per line.
+        branches: String,
+    }
+
+    impl State {
+        /// `true` when the task branch's commit is on the integration branch.
+        fn has_task_commit(&self) -> bool {
+            self.dev.lines().any(|line| line == "task")
         }
     }
 
@@ -3437,7 +3504,7 @@ mod tests {
             // The fixture has one shape (T-53's child repo `web` on `web-dev`);
             // its copy carries the same relative remote as the template.
             assert_eq!((name, integration), ("web", "web-dev"), "the child fixture's one shape");
-            sh(root, &format!("cp -R '{}'/. .", template(Shape::ChildWeb).display()));
+            copy_tree(template(Shape::ChildWeb), root);
             Child {
                 root: root.to_path_buf(),
                 work: root.join("web"),
@@ -3916,8 +3983,7 @@ gate = "{gate}"
     #[test]
     fn a_pr_mode_merge_pushes_the_pull_request_head_and_waits_for_the_land_op() {
         let scratch = Scratch::new("pr");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
@@ -3991,8 +4057,7 @@ gate = "{gate}"
     #[test]
     fn no_claim_pull_request_fails_the_merge_with_the_text() {
         let scratch = Scratch::new("pr-nopr");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
@@ -4023,8 +4088,7 @@ gate = "{gate}"
     #[test]
     fn a_refused_land_fails_the_merge_with_the_forges_message() {
         let scratch = Scratch::new("pr-refused");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = pr_world(&candidate);
@@ -5129,14 +5193,15 @@ gate = "{project_gate}"
         let line = merge_one(&worktree, &repo("true"), &op(&scratch.head_of("heat/t5"))).unwrap();
 
         assert!(line.contains("merged T-5 into dev"), "{line}");
-        // dev has both commits …
-        let log = scratch.dev_log();
+        // dev has both commits … (one shell for the log and the branches)
+        let state = scratch.state();
+        let log = &state.dev;
         assert!(log.contains("task"), "{log}");
         assert!(log.contains("review"), "{log}");
         assert_eq!(log.lines().filter(|line| line.starts_with("merge(T-5)")).count(), 2, "{log}");
-        assert!(scratch.dev_has_task_commit());
+        assert!(state.has_task_commit());
         // … and the two branches are closed on origin.
-        let branches = scratch.origin_branches();
+        let branches = &state.branches;
         assert!(!branches.contains("heat/t5"), "{branches}");
         assert!(!branches.contains("review/t5"), "{branches}");
     }
@@ -5262,8 +5327,9 @@ gate = "{project_gate}"
 
         assert!(failed.reason.contains("conflict merging"), "{}", failed.reason);
         assert_eq!(failed.blocker, Blocker::Stuck, "a conflict does not clear");
-        assert_eq!(scratch.dev_log(), before, "dev is untouched");
-        let branches = scratch.origin_branches();
+        let state = scratch.state();
+        assert_eq!(state.dev, before, "dev is untouched");
+        let branches = &state.branches;
         assert!(branches.contains("heat/t5"), "{branches}");
     }
 
@@ -5278,9 +5344,10 @@ gate = "{project_gate}"
         assert!(failed.reason.contains("gate failed"), "{}", failed.reason);
         assert!(failed.reason.contains("the gate said no"), "{}", failed.reason);
         assert_eq!(failed.blocker, Blocker::Stuck, "the work is not good enough");
-        assert_eq!(scratch.dev_log(), before, "dev is untouched");
-        assert!(!scratch.dev_has_task_commit());
-        let branches = scratch.origin_branches();
+        let state = scratch.state();
+        assert_eq!(state.dev, before, "dev is untouched");
+        assert!(!state.has_task_commit());
+        let branches = &state.branches;
         assert!(branches.contains("heat/t5"), "{branches}");
         // The worktree is back at the integration branch (nothing half-merged
         // for the next run).
@@ -5382,8 +5449,7 @@ gate = "{project_gate}"
         // not merged, and it is not a failure either: the branch moved, the
         // candidate did not.
         let scratch = Scratch::new("moved");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         // An unreviewed commit lands on the task branch.
         sh(
             &scratch.work,
@@ -5486,8 +5552,7 @@ gate = "{project_gate}"
         // and `candidate` only. The missing review branch must be derived —
         // never `git merge --no-ff origin/`.
         let scratch = Scratch::new("settled");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut settled = op(&candidate);
         settled.payload = serde_json::json!({ "branch": "heat/t5", "candidate": candidate.clone() });
 
@@ -5537,8 +5602,7 @@ gate = "{project_gate}"
         // untouched and the captain gets one item (F6 of the review).
         let scratch = Scratch::new("noreview-op");
         sh(&scratch.root, "git -C origin.git update-ref -d refs/heads/review/t5");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
@@ -5626,8 +5690,7 @@ gate = "{project_gate}"
     #[test]
     fn a_merged_attempt_gets_its_merge_time() {
         let scratch = Scratch::new("mergetime");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         let mut store = world(TaskState::Ready);
@@ -5678,8 +5741,7 @@ gate = "{project_gate}"
     #[test]
     fn passed_work_still_merges_while_the_captain_is_on_quota() {
         let scratch = Scratch::new("captain-quota");
-        let worktree = scratch.merge_worktree();
-        let candidate = scratch.head_of("heat/t5");
+        let (worktree, candidate) = scratch.prepared();
         let mut herdr = gear_herdr::fake::FakeHerdr::new();
         herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
         herdr.add_agent("w9:p1", "claude", gear_herdr::AgentStatus::Idle);

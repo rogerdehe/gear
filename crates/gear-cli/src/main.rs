@@ -2559,6 +2559,16 @@ fn cmd_admin_stop() -> GearResult<()> {
         println!("engine not running");
         return Ok(());
     }
+    // One engine and one store serve every project of a Herdr session, and each
+    // project cannot restart at its own point while it does: a captain that
+    // stops the engine says which projects that pauses (T-298). Read-only — a
+    // stop writes nothing — and a store that cannot be read prints nothing
+    // more; the stop goes on either way.
+    if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
+        if let Some(projects) = projects_in(std::path::Path::new(&db)) {
+            println!("{}", stop_notice(&projects));
+        }
+    }
     let text = std::fs::read_to_string(dir.join("engine.lock")).unwrap_or_default();
     let pid: i32 = text.trim().parse().map_err(|_| {
         GearError::new(gear_model::ErrorCode::NoTarget, "engine is running but its pid is unknown")
@@ -2597,6 +2607,24 @@ fn cmd_admin_stop() -> GearResult<()> {
         gear_model::ErrorCode::Forbidden,
         format!("the engine (pid {pid}) is still running after 20 min"),
     ))
+}
+
+/// What `gear admin stop` says before it signals the engine (T-298): the
+/// projects this store holds, because they all pause until it starts again.
+fn stop_notice(projects: &[String]) -> String {
+    format!(
+        "this engine runs {} project(s) of this store: {}; each pauses until the engine starts \
+         again (the next gear call starts it)",
+        projects.len(),
+        projects.join(", ")
+    )
+}
+
+/// Ids of the projects in the store at `db`, read-only; `None` when the store
+/// cannot be read (T-298: the stop then says nothing more and goes on).
+fn projects_in(db: &std::path::Path) -> Option<Vec<String>> {
+    let mut store = gear_store::Store::open_read_only(db).ok()?;
+    store.read(|tx| tx.project_ids()).ok()
 }
 
 /// How often `gear admin stop` looks at the engine lock: once a second for 20
@@ -6274,6 +6302,47 @@ path="api"
         .unwrap();
 
         assert_eq!(tick_calls.get(), 0, "a stop before the first tick runs none");
+    }
+
+    #[test]
+    fn stop_notice_names_every_project_the_engine_pauses() {
+        let notice = stop_notice(&["harbor".to_string(), "mast".to_string()]);
+        assert_eq!(
+            notice,
+            "this engine runs 2 project(s) of this store: harbor, mast; each pauses until the \
+             engine starts again (the next gear call starts it)"
+        );
+    }
+
+    #[test]
+    fn stop_notice_counts_a_single_project() {
+        let notice = stop_notice(&["harbor".to_string()]);
+        assert!(notice.starts_with("this engine runs 1 project(s) of this store: harbor;"), "{notice}");
+    }
+
+    #[test]
+    fn projects_in_reads_the_store_read_only() {
+        let dir = std::env::temp_dir().join(format!("gear-stop-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("gear.db");
+        let mut store = Store::open(&db).unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "harbor", "sess", T0)?;
+                testing::seed_project(tx, "mast", "sess", T0)
+            })
+            .unwrap();
+        let before = std::fs::metadata(&db).unwrap().len();
+        assert_eq!(projects_in(&db), Some(vec!["harbor".to_string(), "mast".to_string()]));
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), before, "a stop writes nothing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn projects_in_says_nothing_for_an_unreadable_store() {
+        let missing = std::env::temp_dir().join(format!("gear-stop-missing-{}/gear.db", std::process::id()));
+        assert_eq!(projects_in(&missing), None, "the stop goes on without a notice");
     }
 
     #[test]

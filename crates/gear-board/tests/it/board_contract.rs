@@ -355,7 +355,7 @@ impl std::io::Write for FdWriter {
     }
 }
 
-/// Read from the master side until `needle` is in the buffer, then drain.
+/// Read from the master side until `needle` is in the buffer.
 fn read_until(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
     // The master never blocks the test: a board that draws nothing must
     // fail the test, not hang it.
@@ -366,31 +366,31 @@ fn read_until(master: libc::c_int, needle: &str, timeout: Duration) -> Vec<u8> {
     }
     let deadline = std::time::Instant::now() + timeout;
     let mut buffer: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let mut found = false;
     while std::time::Instant::now() < deadline {
+        if String::from_utf8_lossy(&buffer).contains(needle) {
+            // The needle ends the footer, the last line of a frame: nothing
+            // comes after it that the frame needs.
+            return buffer;
+        }
+        // Wait on the descriptor, not on the clock: the time left to the
+        // deadline is the only timeout.
+        let mut fds = libc::pollfd { fd: master, events: libc::POLLIN, revents: 0 };
+        let millis = (deadline.saturating_duration_since(std::time::Instant::now()))
+            .as_millis() as i32;
+        // SAFETY: `fds` is one pollfd we own; the call only waits.
+        let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+        if ready <= 0 {
+            continue;
+        }
+        let mut chunk = [0u8; 4096];
         // SAFETY: the buffer is one chunk long.
         let read = unsafe {
             libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
         };
-        if read > 0 {
-            buffer.extend_from_slice(&chunk[..read as usize]);
-            found = String::from_utf8_lossy(&buffer).contains(needle);
+        if read <= 0 {
             continue;
         }
-        if found {
-            // The frame is there; give the rest a moment to arrive.
-            std::thread::sleep(Duration::from_millis(50));
-            // SAFETY: the buffer is one chunk long.
-            let more = unsafe {
-                libc::read(master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
-            };
-            if more > 0 {
-                buffer.extend_from_slice(&chunk[..more as usize]);
-            }
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+        buffer.extend_from_slice(&chunk[..read as usize]);
     }
     buffer
 }
