@@ -859,14 +859,27 @@ fn apply_queue(
 
     // A retired lane comes back when a task names it again (T-247): a config
     // re-apply alone never revives a lane, a Ready task on that lane does —
-    // and only while the lane is still in the project's config.
+    // and only while the lane is still in the project's config and the lane
+    // quota has a free slot (T-304).
     let lanes: Vec<String> = match project_config(tx, project)? {
         Some(config) => config.lanes.into_iter().map(|lane| lane.name).collect(),
         None => Vec::new(),
     };
     if !lanes.is_empty() {
         let tasks = tx.tasks_of_project(project)?;
-        for seat in tx.seats_of_project(project)? {
+        let quota = tx
+            .get_project(project)?
+            .map(|row| row.quota_lanes)
+            .unwrap_or_default();
+        let seats = tx.seats_of_project(project)?;
+        // The running lanes, counted once and advanced after every revival in
+        // this apply: a second revival must see the slot the first one took
+        // (T-304, review F1). `set_seat_state` writes the store, not `seats`.
+        let mut running = seats
+            .iter()
+            .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
+            .count();
+        for seat in &seats {
             if seat.role != SeatRole::Lane || seat.state != SeatState::Retired {
                 continue;
             }
@@ -879,12 +892,26 @@ fn apply_queue(
             {
                 continue;
             }
+            // The quota counts the lane seats that are not Retired: a lane
+            // that is already retired keeps its seat and takes no slot, so a
+            // full quota leaves it retired (T-304).
+            if running as i64 >= quota {
+                let warning = format!(
+                    "lane {} stays retired: {running} lanes run and the quota allows {quota}; retire another lane or raise [quota] lanes",
+                    seat.name
+                );
+                if !warnings.contains(&warning) {
+                    warnings.push(warning);
+                }
+                continue;
+            }
             tx.set_seat_state(
                 &seat.id,
                 SeatState::Queued,
                 Some("a task names it again"),
                 now,
             )?;
+            running += 1;
             staffed.push(format!("start {}", seat.name));
         }
     }
@@ -1496,8 +1523,13 @@ pub fn end_parked_lanes(
         if seat.role != SeatRole::Lane || seat.state != SeatState::Parked {
             continue;
         }
-        // A quota park is the quota path's business.
-        if tx.get_meta(&format!("resume:{}", seat.id))?.is_some() {
+        // A quota park is the quota path's business: it writes the resume
+        // deadline under its own key (`engine.resume.<seat>`), and a park
+        // without that deadline there is no quota park.
+        if tx
+            .get_meta(&format!("engine.resume.{}", seat.id))?
+            .is_some_and(|deadline| !deadline.is_empty())
+        {
             continue;
         }
         let Some(reason) = seat.state_reason.as_deref() else {
@@ -2108,7 +2140,7 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
         ),
         // Tasks predate the first block: the departure is known, the words are not.
         _ => format!(
-            "Voyage {} {} · not described yet (no `# Milestone {}` block)",
+            "Voyage {} {} · not described yet (no `# Voyage {}` block)",
             voyage.milestone, voyage.title, voyage.milestone
         ),
     };
