@@ -329,6 +329,11 @@ pub fn tick(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &EngineCfg, now: T
         })?;
         report.park_ended.extend(ended);
         report.busy_lanes.extend(store.write(|tx| busy::check(tx, &project, &observed, now))?);
+        // T-288: a lane still busy with no task five minutes on is interrupted,
+        // so its next packet can go. A lane that is helping is never touched.
+        for pane in store.write(|tx| busy::due_interrupts(tx, &project, &observed, now))? {
+            let _ = herdr.send_keys(&pane, &["esc".into()]);
+        }
         // A seat blocked by a dialog for minutes reaches the captain (lesson
         // 7b): the agent waits on a dialog nobody sees.
         report
