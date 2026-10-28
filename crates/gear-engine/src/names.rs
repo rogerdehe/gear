@@ -241,11 +241,10 @@ fn report_taken(
     holder: Option<&str>,
     now: Ts,
 ) -> GearResult<()> {
-    // The captain's own name cannot be reported to the captain: its doorbell
-    // is the only signal there is, and the next tick looks again.
-    if seat.role == SeatRole::Captain {
-        return Ok(());
-    }
+    // T-285: the captain seat gets its item like any seat. Its agent is the
+    // one that types for the captain, so an unnamed captain pane is exactly
+    // what an item has to unblock — leaving it without one left it unnamed for
+    // ever.
     let Some(captain) = tx.captain_of(project)? else {
         return Ok(()); // no captain: nobody to tell
     };

@@ -72,6 +72,11 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             seat_branch: "{project}/{seat}".into(),
             remote: "origin".into(),
             voyage_dir: "gear/voyages/{milestone}".into(),
+            // T-299: the commit messages are configuration too; the fixture
+            // names none, so GEAR's own form stands.
+            merge_message: "merge({task}): {source}".into(),
+            review_message: "review({task}): {what}".into(),
+            plan_message: "{milestone}: {what}".into(),
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");
@@ -956,4 +961,100 @@ fn a_remote_and_a_voyage_folder_must_be_usable() {
         validate(&with("voyage_dir", "plans/{project}/{milestone}")),
         vec![]
     );
+}
+
+// T-299: commit messages are configuration. The three defaults are the forms
+// GEAR itself writes; a project may name its own, with the placeholders the
+// writer fills in.
+
+#[test]
+fn commit_messages_default_to_the_forms_gear_writes() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.merge_message, gear_model::commit::MERGE_MESSAGE);
+    assert_eq!(cfg.conventions.review_message, gear_model::commit::REVIEW_MESSAGE);
+    assert_eq!(cfg.conventions.plan_message, gear_model::commit::PLAN_MESSAGE);
+    assert_eq!(
+        (
+            cfg.conventions.merge_message.as_str(),
+            cfg.conventions.review_message.as_str(),
+            cfg.conventions.plan_message.as_str(),
+        ),
+        ("merge({task}): {source}", "review({task}): {what}", "{milestone}: {what}"),
+    );
+    assert_eq!(validate(&cfg), vec![], "the defaults are valid");
+}
+
+#[test]
+fn the_three_commit_messages_parse_and_are_read_like_the_other_conventions() {
+    let text = MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\nmerge_message = \"[{task}] merge {source}\"\nreview_message = \"{project} review of {task} (attempt {attempt}): {what}\"\nplan_message = \"PROJ-1 {milestone} {what}\"",
+    );
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.conventions.merge_message, "[{task}] merge {source}");
+    assert_eq!(
+        cfg.conventions.review_message,
+        "{project} review of {task} (attempt {attempt}): {what}"
+    );
+    assert_eq!(cfg.conventions.plan_message, "PROJ-1 {milestone} {what}");
+    assert_eq!(validate(&cfg), vec![], "a project may name its own commit messages");
+}
+
+#[test]
+fn a_commit_message_template_must_be_usable() {
+    let with = |field: &str, value: &str| {
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\n{field} = \"{value}\""),
+        ))
+        .unwrap()
+    };
+    // The merge message must name the task; it may name `{source}`.
+    assert_eq!(
+        fields(&validate(&with("merge_message", "merged"))),
+        vec!["conventions.merge_message"]
+    );
+    assert_eq!(
+        fields(&validate(&with("merge_message", ""))),
+        vec!["conventions.merge_message"]
+    );
+    assert_eq!(
+        fields(&validate(&with("merge_message", "merge({task}): {branch}"))),
+        vec!["conventions.merge_message"]
+    );
+    assert_eq!(validate(&with("merge_message", "[{task}] merge {source}")), vec![]);
+    // The review message must name the task; `{attempt}` and `{what}` are the
+    // reviewer's.
+    assert_eq!(
+        fields(&validate(&with("review_message", "{who} reviewed"))),
+        vec!["conventions.review_message"]
+    );
+    assert_eq!(
+        fields(&validate(&with("review_message", "reviewed {attempt}"))),
+        vec!["conventions.review_message"]
+    );
+    assert_eq!(
+        validate(&with("review_message", "{task} {attempt} {what}")),
+        vec![]
+    );
+    // The plan message may leave out `{milestone}`; it may not name a
+    // placeholder GEAR does not fill in, and it may not be empty.
+    assert_eq!(
+        fields(&validate(&with("plan_message", ""))),
+        vec!["conventions.plan_message"]
+    );
+    assert_eq!(
+        fields(&validate(&with("plan_message", "{task}: {what}"))),
+        vec!["conventions.plan_message"]
+    );
+    assert_eq!(validate(&with("plan_message", "PROJ-1 {milestone} {what}")), vec![]);
+    assert_eq!(validate(&with("plan_message", "{what}")), vec![]);
+    // Each text names the template and the placeholders GEAR fills in.
+    let issues = validate(&with("merge_message", "merge({task}): {branch}"));
+    assert!(issues[0].problem.contains("merge({task}): {branch}"), "{issues:?}");
+    assert!(issues[0].problem.contains("{project}"), "{issues:?}");
+    assert!(issues[0].problem.contains("{source}"), "{issues:?}");
+    let issues = validate(&with("merge_message", "merged"));
+    assert!(issues[0].problem.contains("merged"), "{issues:?}");
+    assert!(issues[0].problem.contains("{task}"), "{issues:?}");
 }
