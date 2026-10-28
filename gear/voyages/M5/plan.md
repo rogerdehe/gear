@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=636 -->
+<!-- gear-plan project=gear base=637 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -63,6 +63,7 @@ eta: 16h
 - 2026-10-29 06:00 hand-fix: a third lost Enter (mast O-3877 "Continue T-321"), one Enter sent; T-371 and T-375 move to the head of the queue in the file: [now] does not reorder a lane's queue, the block's place does | why: mast idle | else: the next Continue stalls a lane again
 - station M-4797: keep course 360 min in, 59 done; forecast 1386 min; the eta waits for the user
 - 2026-10-29 06:20 scope: LOCKED seen a second time (the captain's apply at M-4797, after F-129): lesson 11 becomes T-379
+- station M-4800: keep course 364 min in, 60 done; forecast 1415 min; the eta waits for the user
 # Queue
 
 ## T-371 [now] lane=hull milestone=M5 required
