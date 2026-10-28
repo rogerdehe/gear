@@ -97,6 +97,27 @@ fn a_lower_temps_quota_retires_the_oldest_released_reviewers() {
 }
 
 #[test]
+fn a_standby_reviewer_beyond_the_quota_goes_releasing() {
+    let mut s = Store::open_in_memory().unwrap();
+    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), T0).unwrap();
+    reviewer(&mut s, "review-7", SeatState::Active, T0 + 10);
+    reviewer(&mut s, "review-9", SeatState::Released, T0 + 10);
+    // Its agent and its pane are still there: it cannot be Retired in one step.
+    reviewer(&mut s, "review-11", SeatState::Standby, T0 + 20);
+    reviewer(&mut s, "review-10", SeatState::Released, T0 + 30);
+
+    init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), T0 + 50).unwrap();
+
+    // The Active seat and the newest idle one fill the quota.
+    assert_eq!(state_of(&mut s, "review-7").0, SeatState::Active);
+    assert_eq!(state_of(&mut s, "review-10").0, SeatState::Released);
+    // The idle seat past the quota that has no agent is Retired ...
+    assert_eq!(state_of(&mut s, "review-9"), (SeatState::Retired, Some("temps quota lowered to 2".to_string())));
+    // ... and the one whose agent is still there is sent on its way out.
+    assert_eq!(state_of(&mut s, "review-11"), (SeatState::Releasing, Some("temps quota lowered to 2".to_string())));
+}
+
+#[test]
 fn a_quota_that_fits_the_seats_retires_nothing() {
     let mut s = Store::open_in_memory().unwrap();
     init_with_home(&mut s, &admin(), &config(2), Some(crate::skill_home()), T0).unwrap();

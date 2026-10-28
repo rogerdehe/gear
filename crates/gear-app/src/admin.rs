@@ -589,7 +589,10 @@ fn re_register(
 /// Active or Starting holds a working reviewer: it is never retired and it
 /// takes a slot. The idle seats — Released or Standby — fill the slots that are
 /// left, newest `state_since` first (their worktrees are the warm ones), and
-/// every idle seat past them becomes Retired.
+/// every idle seat past them goes: a Released one (no agent left) becomes
+/// Retired, a Standby one (its agent and pane are still there) becomes
+/// Releasing, so the engine's own release path closes the pane and the next
+/// config apply retires it.
 fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearResult<()> {
     let seats: Vec<SeatRow> = tx
         .seats_of_project(project)?
@@ -617,7 +620,14 @@ fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearR
 
     let reason = format!("temps quota lowered to {quota}");
     for seat in idle.into_iter().skip(room) {
-        tx.set_seat_state(&seat.id, SeatState::Retired, Some(&reason), now)?;
+        // A Standby reviewer still has its agent: Releasing is the transition
+        // that lets the engine close its pane (Temp has no Standby -> Retired).
+        let state = if seat.state == SeatState::Standby {
+            SeatState::Releasing
+        } else {
+            SeatState::Retired
+        };
+        tx.set_seat_state(&seat.id, state, Some(&reason), now)?;
     }
     Ok(())
 }
