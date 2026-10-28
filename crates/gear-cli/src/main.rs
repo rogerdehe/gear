@@ -975,6 +975,11 @@ fn cmd_admin_init(
         // The project is registered with this config version; a re-init
         // stores the next one (T-6).
         println!("project {} (config v{})", r.project, r.config_version);
+        // T-373: a changed `conventions.seat_branch` leaves worktrees behind;
+        // name them and the command that takes each one away.
+        for line in &r.stale_worktrees {
+            println!("{line}");
+        }
         for seat in &r.seats {
             println!("seat {seat}");
         }

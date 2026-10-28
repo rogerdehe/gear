@@ -1083,3 +1083,56 @@ fn check_refuses_more_lanes_than_the_quota_allows() {
     );
     assert!(!db.exists(), "a check writes nothing");
 }
+
+/// A config for project `p` with one lane, whose `seat_branch` is `template`.
+fn lane_config(dir: &Path, repo: &Path, template: &str) -> PathBuf {
+    let path = dir.join("gear-lanes.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"thermal calculation\"\nowns = [\"src/heat/\"]\nkind = \"opencode\"\nprofile = \"opencode\"\n\
+             \n[conventions]\ngate = \"make test\"\nseat_branch = {template:?}\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// T-373: a re-applied config that changes `conventions.seat_branch` prints,
+/// right after the project line, the worktree of every seat that has one: the
+/// branch it was made for, the branch new agents get, and the command that
+/// removes the old tree.
+#[test]
+fn a_changed_seat_branch_prints_the_worktree_it_leaves_behind() {
+    let dir = scratch("stale");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    let o = init(&dir, &db, &lane_config(&dir, &repo, "{project}/seat/{seat}"), None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    // The engine made the lane's worktree; the store knows where it is.
+    {
+        let mut store = Store::open(&db).expect("the store");
+        store
+            .write(|tx| tx.set_meta("engine.worktree_path.p:heat", "/work/p-heat"))
+            .expect("the meta");
+    }
+
+    let o = init(&dir, &db, &lane_config(&dir, &repo, "{project}/home/{seat}"), None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let expected = "seat heat: its worktree /work/p-heat was made for branch p/seat/heat; \
+                    new agents of this seat get a worktree on p/home/heat; \
+                    remove the old one with `herdr worktree remove` once the seat runs in the new one";
+    let out = String::from_utf8_lossy(&o.stdout).into_owned();
+    let lines: Vec<&str> = out.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("project p (config v2)"))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(lines[at + 1], expected, "{out}");
+    assert_eq!(config_version(&db), 2);
+}
