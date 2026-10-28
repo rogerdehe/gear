@@ -134,9 +134,15 @@ pub fn deliver_doorbell_now(
         // Intended ops, so nobody else types this one, and the seat's slot is
         // held from here on.
         tx.set_op_state(project, &op.id, OpState::Executing, None, now)?;
-        Ok(Some((op.id, binding.pane_id, agent_name, kind)))
+        Ok(Some((op.id, binding.pane_id, agent_name, kind, row.role)))
     })?;
-    let Some((op_id, pane_id, agent_name, kind)) = claimed else { return Ok(None) };
+    let Some((op_id, pane_id, agent_name, kind, role)) = claimed else { return Ok(None) };
+    // T-241: an urgent text for a lane or a reviewer must not sit behind a
+    // long tool call — the working turn is cut first, then the text is aimed
+    // as today. The captain's turn is never cut.
+    if urgent && matches!(role, SeatRole::Lane | SeatRole::Temp) {
+        interrupt_working_turn(herdr, &pane_id);
+    }
     // Outside any transaction: call Herdr. Design §10.1: the text goes to the
     // live agent **name**, never to the pane id — a pane that lost its agent
     // refuses the text instead of typing it into a shell.
@@ -320,7 +326,13 @@ pub fn execute_intended(
     let mut outcomes = Vec::with_capacity(prepared.len());
     for item in &prepared {
         outcomes.push(match item {
-            Prepared::Run { pane_id, text, agent_name, kind, policy, .. } => {
+            Prepared::Run { pane_id, text, agent_name, kind, policy, interrupt, .. } => {
+                // T-241: an urgent doorbell for a lane or a reviewer cuts the
+                // working turn first, so the text is not queued as steering
+                // behind a long tool call.
+                if *interrupt {
+                    interrupt_working_turn(herdr, pane_id);
+                }
                 // Design §10.1: the text goes to the live agent **name**. The
                 // agent of the pane is read first: only an agent of the
                 // seat's kind is the seat's agent, and a pane without one
@@ -391,7 +403,17 @@ pub fn execute_intended(
 enum Prepared {
     /// The op may run: send `text` to the agent of `pane_id`, which must
     /// carry `agent_name` (T-134) and be of the seat's kind (`kind`).
-    Run { id: String, pane_id: String, text: String, agent_name: String, kind: String, policy: PromptPolicy },
+    Run {
+        id: String,
+        pane_id: String,
+        text: String,
+        agent_name: String,
+        kind: String,
+        policy: PromptPolicy,
+        /// T-241: cut the agent's working turn (esc) before the text is
+        /// aimed, so an urgent doorbell is not queued as steering.
+        interrupt: bool,
+    },
     /// The op waits: it stays Intended and the next tick looks again (a
     /// delivery for a seat that is blocked, T-68).
     Wait { id: String },
@@ -456,6 +478,7 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
     let Some(text) = op.payload.get("text").and_then(serde_json::Value::as_str) else {
         return void("the op carries no text".to_string());
     };
+    let mut urgent = false;
     let policy = if op.kind == OpKind::Deliver { PromptPolicy::Delivery } else {
         let ids = op.payload.get("covers").and_then(|v| v.as_array());
         let mut working = ids.is_some_and(|v| !v.is_empty());
@@ -467,12 +490,19 @@ fn check_op(tx: &Tx<'_>, op: &OpRow) -> GearResult<Prepared> {
                 if let Some(message) = message {
                     working &= crate::doorbell::reaches_while_working(&message, &seat, &binding.kind, captain.as_deref());
                     unknown &= message.urgent;
+                    urgent |= message.urgent;
                 } else { working = false; unknown = false; }
             }
         }
         PromptPolicy::Doorbell { working, unknown }
     };
     Ok(Prepared::Run {
+        // T-241: an urgent doorbell for a lane or a reviewer cuts the working
+        // turn first (never the captain: its turn is not cut). Deliveries and
+        // every other op never interrupt.
+        interrupt: op.kind == OpKind::Doorbell
+            && matches!(seat.role, SeatRole::Lane | SeatRole::Temp)
+            && urgent,
         policy,
         id: op.id.clone(),
         pane_id: binding.pane_id.clone(),
@@ -604,6 +634,18 @@ fn aim(
         crate::names::Target::Gone(reason) => Aimed::Gone(reason),
         crate::names::Target::Blocked(reason) => Aimed::Retry(reason),
         crate::names::Target::Unreadable(reason) => Aimed::Retry(reason),
+    }
+}
+
+/// T-241: cut a working turn so a text is not queued as steering. Only the
+/// pane's own report of a **working** agent matters; an idle, done, blocked or
+/// unknown agent, or a pane that cannot be read, is left alone (as quiet.rs
+/// does before its own escape).
+fn interrupt_working_turn(herdr: &mut dyn HerdrAct, pane_id: &str) {
+    if let Ok(Some(info)) = herdr.agent_get(pane_id) {
+        if info.agent_status == gear_herdr::AgentStatus::Working {
+            let _ = herdr.send_keys(pane_id, &["esc".into()]);
+        }
     }
 }
 
@@ -1317,5 +1359,187 @@ mod tests {
         assert!(confirmed.is_empty());
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Unknown);
+    }
+
+    // ---- T-241: an urgent message cuts a working turn ---------------------
+
+    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::AgentStatus;
+    use gear_model::{MsgKind, MsgState};
+    use gear_store::NewMessage;
+
+    const CAP_PANE: &str = "w1:p1";
+    const LANE_PANE: &str = "w1:p2";
+    const REVIEW_PANE: &str = "w1:p3";
+    const REVIEW_NAME: &str = "p-review-t1";
+
+    /// Captain, one lane (`pi`, queues input while it works) and one temp
+    /// reviewer, all with an active binding.
+    fn interrupt_world() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "pi", T0)?;
+                testing::seed_temp_seat(tx, "p", "r-1", "T-1", REVIEW_PANE, "pi", T0)?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+
+    /// An open message for `recipient`, urgent or not. Returns its id.
+    fn message_for(tx: &Tx<'_>, recipient: &str, urgent: bool) -> GearResult<String> {
+        Ok(tx
+            .insert_message(&NewMessage {
+                project: "p".into(),
+                thread: "t".into(),
+                task: None,
+                attempt: None,
+                sender: "gear:captain".into(),
+                sender_gen: 0,
+                recipient: recipient.into(),
+                kind: MsgKind::Instruction,
+                urgent,
+                body: "please look".into(),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: T0,
+                meta: None,
+            })
+            .unwrap()
+            .id)
+    }
+
+    /// An Intended doorbell for `seat` covering `message`.
+    fn doorbell_for(tx: &Tx<'_>, seat: &str, message: &str) -> GearResult<String> {
+        Ok(tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: seat.into(),
+                generation: 1,
+                kind: OpKind::Doorbell,
+                task: None,
+                attempt: None,
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({
+                    "text": "GEAR: 1 item(s) waiting for you. Run `gear` now.",
+                    "covers": [message]
+                }),
+                created: T0 + 1,
+            })
+            .unwrap()
+            .id)
+    }
+
+    fn prompt_or_esc(h: &FakeHerdr, pane: &str, no_esc_message: &str) {
+        let esc = h.calls.iter().position(|c| {
+            matches!(c, Call::SendKeys { pane: p, keys } if p == pane && keys == &["esc".to_string()])
+        });
+        let prompt = h.calls.iter().position(|c| matches!(c, Call::Prompt { pane: p, .. } if p == pane));
+        match (esc, prompt) {
+            (None, Some(_)) => assert_eq!(no_esc_message, "", "{no_esc_message}"),
+            (Some(e), Some(p)) => assert!(e < p, "the escape goes before the prompt"),
+            (esc, prompt) => panic!("unexpected calls: esc={esc:?} prompt={prompt:?}"),
+        }
+    }
+
+    fn review_herdr(status: AgentStatus) -> FakeHerdr {
+        let mut h = FakeHerdr::new();
+        h.add_agent_named(REVIEW_PANE, "pi", status, REVIEW_NAME);
+        h
+    }
+
+    #[test]
+    fn an_urgent_doorbell_to_a_working_lane_cuts_the_turn_first() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = message_for(tx, "p:heat", true)?;
+                doorbell_for(tx, "p:heat", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(LANE_PANE, "pi", AgentStatus::Working, "p-heat");
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        prompt_or_esc(&herdr, LANE_PANE, "a working lane is cut before its urgent doorbell");
+    }
+
+    #[test]
+    fn a_non_urgent_doorbell_to_a_working_lane_sends_no_escape() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = message_for(tx, "p:heat", false)?;
+                doorbell_for(tx, "p:heat", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(LANE_PANE, "pi", AgentStatus::Working, "p-heat");
+
+        execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "only an urgent doorbell cuts a turn");
+    }
+
+    #[test]
+    fn an_urgent_doorbell_to_an_idle_lane_sends_no_escape() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = message_for(tx, "p:heat", true)?;
+                doorbell_for(tx, "p:heat", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(LANE_PANE, "pi", AgentStatus::Idle, "p-heat");
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "an idle lane has no turn to cut");
+    }
+
+    #[test]
+    fn an_urgent_doorbell_to_the_captain_sends_no_escape() {
+        let mut store = interrupt_world();
+        store
+            .write(|tx| {
+                let id = message_for(tx, "p:captain", true)?;
+                doorbell_for(tx, "p:captain", &id)?;
+                Ok(())
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent_named(CAP_PANE, "codex", AgentStatus::Working, "p-captain");
+
+        let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
+
+        assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
+        assert!(!herdr.calls.iter().any(|c| matches!(c, Call::SendKeys { .. })), "the captain's turn is not cut");
+    }
+
+    #[test]
+    fn an_urgent_send_to_a_working_reviewer_cuts_the_turn_first() {
+        let mut store = interrupt_world();
+        let message = store
+            .write(|tx| message_for(tx, "p:r-1", true))
+            .unwrap();
+        let mut herdr = review_herdr(AgentStatus::Working);
+
+        let pane = deliver_doorbell_now(&mut store, &mut herdr, "p", "p:r-1", 1, &message, true, T0 + 2)
+            .unwrap();
+
+        assert_eq!(pane.as_deref(), Some(REVIEW_PANE));
+        prompt_or_esc(&herdr, REVIEW_PANE, "a working reviewer is cut before its urgent send");
     }
 }
