@@ -379,7 +379,9 @@ fn a_lane_in_a_child_repo_runs_from_onboard_to_merge_in_that_repo() {
         })
         .unwrap();
     assert!(
-        packet.contains(&format!("Diff to review: `feat..{candidate}`")),
+        packet.contains(&format!(
+            "Diff to review: `git diff feat...{candidate}` (three dots: the change since the merge base)"
+        )),
         "{packet}"
     );
 
