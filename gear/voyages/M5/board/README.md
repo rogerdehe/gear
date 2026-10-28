@@ -1,15 +1,19 @@
 # M5 board prototype (draft for the user's review, 2026-10-28)
 
-`python3 gear/voyages/M5/board/prototype.py` runs it with fake data in any terminal (curses, no dependencies). It replaces the M4 prototype (`gear/voyages/M4/board/`) once the user agrees.
+`python3 gear/voyages/M5/board/prototype.py` runs it with fake data in any terminal (curses, no dependencies).
 
-What changed from M4, from the user's review of the real board:
-- **Every voyage, not only the current one.** The header lists the voyages, newest first (⛵ sailing, ⚓ landed); `[` and `]` pick an older or newer one, and the whole board then shows that voyage only: nothing of another voyage is on screen.
-- **The goal is always on screen.** The header carries the picked voyage's done sentence, its stations (✓ reached, ▶ now, · next), each clause of the goal met (✓) or how far it still is (✗), and a red line when the goal was changed (with the user's yes; Decisions shows before and after).
-- **The full width.** Views split into two columns on a wide terminal; bars and columns follow the width.
-- **Task stages in words**: waits for T-n to merge, queued, delivered not started, working, waits for the captain's answer, handed in and waits for a reviewer, in review, waits for the captain's verdict, sent back, reworking (round n), passed and waits to merge, merging, merge failed, merged, failed, moved to another voyage.
-- Views:
-  1. Now — lanes left (task, stage, time against estimate, done and left), right: needs a look (open tasks only), quota.
-  2. Graph — dev as the main line, newest on top: each task branches off dev where its work starts (after its dependencies merged) and joins dev at its merge ●; a waiting task hangs dashed (┆) with what it waits for.
-  3. Workload — says whether the lanes are balanced: per lane what it did and has left, when it ends, and which lane to move a wave from.
-  4. Decisions — a summary: what changed the course (★), what waits on whom, counts; the full log stays in the store (`gear report voyage`).
-  5. Time & tokens — grouped by lane: time, development tokens and cost, review tokens and cost, total; Enter expands a lane into its tasks.
+**Which one is the standard:** the M4 prototype (`gear/voyages/M4/board/`) stays the contract for everything this list does not change. The M5 prototype is the M4 prototype with the changes below and nothing else: the same colours (ok green, warn yellow, bad red, dim grey, acc cyan; lanes cyan, magenta, yellow, blue), the same symbols, views, keys, mouse clicks and Enter panels. A lane builds the real board (`crates/gear-board`) to the M4 prototype plus these changes; where the real data differs, keep the layout and the meaning.
+
+Changes against M4, each from the user's review of the real board (2026-10-28):
+
+1. **Every voyage, one at a time.** The board keeps every voyage of the project; `[` picks the older one, `]` the newer one, and the whole board then shows that voyage only (header, every view, every panel). The header's first line names the voyage, its state (⛵ sailing, ⚓ landed) and the voyage each key goes to. A landed voyage keeps its data (no "time unknown", no empty lanes: its lanes read "retired at the landing").
+2. **The goal, boxed and bright,** under the title: the voyage's done sentence in a yellow bold box. When the goal was changed (with the user's yes), a red line under the box gives the time, before and after.
+3. **The goal's clauses and the milestones in the header.** M4's Now view listed the done sentence's clauses at the bottom ("DONE SENTENCE"); they move into the header as `goal n/m met` (✔ met, · not yet). A new `milestones` row lists the voyage's stations: ✔ reached (when), ▶ the current one (planned by), · next.
+4. **Time against the plan.** The M4 time row keeps its bar and words and adds ◆ (projected finish) and │ (planned end) on the bar, and says how far ahead or behind plan it is; a landed voyage says how long it took against the plan.
+5. **The full width.** Bars and the task-title columns grow with the terminal (M4 cut titles at 32-34 characters at fixed columns).
+6. **Tasks of this voyage only**, in the M4 tasks row; tasks moved to another voyage are named apart ("moved out: T-n") and not counted.
+7. **Task stages in words**, one per task in time order: waits for T-n to merge · queued · delivered, not started · working · waits for the captain's answer · handed in, waits for a reviewer · in review · waits for the captain's verdict · sent back, rework queued · reworking (round n) · passed, waits to merge · merging (gate running) · merge failed, waits for the captain · merged · failed (rounds used up) · moved to another voyage. M4's symbols stay; new ones: ◌ delivered, ◍ passed or merging, ✗ failed or merge failed, → moved. A mark beside the stage when it holds (e.g. "past its budget").
+8. **Graph:** M4's layout unchanged (dev, rev, one column per lane, newest on top, the selected row lights up what it needs and what needs it); the new stages place a task in the rev column from hand-in to merge. The dependency drawing the user asked for at M4's design is still open (M5 backlog, the git-style graph item): it is designed next, on this layout.
+9. **Workload says whether the work is balanced:** each lane's "ends about", and one line: balanced, or "not balanced: <lane> ends <time> after <lane> — move its next startable wave". M4's bars and burn-up stay.
+10. **Decisions starts with a summary:** what changed the course (★) and what waits on whom, then M4's full list and the friction reports.
+11. **Time & tokens grouped by lane:** one row per lane with estimate, actual, ratio, rounds, development tokens and cost, review tokens and cost, total; Enter on a lane opens its tasks (M4's per-task rows). The footer gives the voyage's tokens and cost, development and review apart.
