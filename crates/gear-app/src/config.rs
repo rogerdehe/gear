@@ -363,9 +363,14 @@ pub struct TempsSection {
     pub profile: String,
 }
 
+/// The default cap on a task's planned time (T-279): no task is planned for
+/// longer than this, so none keeps a lane unattended for hours before its
+/// hand-in is reviewed.
+pub const MAX_TASK_MIN: u32 = 60;
+
 /// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
-/// the branches GEAR itself uses (T-252), gate "" (none: a project names its
-/// own gate, T-255).
+/// max_task_min 60, the branches GEAR itself uses (T-252), gate "" (none: a
+/// project names its own gate, T-255).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -373,6 +378,10 @@ pub struct Conventions {
     pub release: String,
     pub staging: String,
     pub review_max_rounds: u32,
+    /// The cap on a task's planned time in minutes (T-279): a plan whose
+    /// estimate is over it is refused, so the captain cuts the work into
+    /// tasks each with its own test cycle. Default 60.
+    pub max_task_min: u32,
     /// What the engine runs in its integration worktree after a merge, before
     /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
     /// build + test command, so the project names its own — a `[[repos]]`
@@ -405,6 +414,7 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
+            max_task_min: MAX_TASK_MIN,
             gate: String::new(),
             task_branch: gear_model::branch::TASK_BRANCH.to_string(),
             review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
@@ -830,6 +840,14 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
 
     if cfg.timing.delivery_grace_s == 0 {
         issues.push(issue("timing.delivery_grace_s", "must be at least one second".to_string()));
+    }
+    // A cap of zero would refuse every task (T-279): the captain plans each
+    // task's time, and no estimate is under it.
+    if cfg.conventions.max_task_min == 0 {
+        issues.push(issue(
+            "conventions.max_task_min",
+            format!("must be at least one minute (the default is {MAX_TASK_MIN})"),
+        ));
     }
     for (model, price) in &cfg.prices {
         if !model.split_once('/').is_some_and(|(provider, name)| !provider.trim().is_empty() && !name.trim().is_empty()) {

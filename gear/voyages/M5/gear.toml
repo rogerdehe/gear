@@ -23,8 +23,8 @@ profile = "claude"
 # M5 (user, 2026-10-28): two lanes on DeepSeek V4.1 Flash via TokenRhythm, 600K context, no fallback model.
 [[lanes]]
 name = "hull"
-duty = "M5 engine: everything in crates/gear-engine (tick, dispatch, review, direction checks, restart, release, merge)"
-owns = ["crates/gear-engine/"]
+duty = "M5 engine, app, store, model and usage: crates/gear-engine, gear-app, gear-store, gear-model, gear-usage (re-split 2026-10-29 for balance)"
+owns = ["crates/gear-engine/", "crates/gear-app/", "crates/gear-store/", "crates/gear-model/", "crates/gear-usage/"]
 kind = "pi"
 profile = "pi"
 models = [
@@ -33,8 +33,8 @@ models = [
 
 [[lanes]]
 name = "mast"
-duty = "M5 app, CLI, store, model, herdr, board, forge, usage, skills, docs and scripts: everything outside crates/gear-engine"
-owns = ["crates/gear-app/", "crates/gear-cli/", "crates/gear-store/", "crates/gear-model/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+duty = "M5 board, CLI, herdr, forge, skills, docs, scripts and the board prototype: everything outside hull's crates (re-split 2026-10-29)"
+owns = ["crates/gear-cli/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "skills/", "gear/voyages/M5/board/", "Makefile", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
 kind = "pi"
 profile = "pi"
 models = [
