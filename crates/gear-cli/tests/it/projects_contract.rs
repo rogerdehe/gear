@@ -76,14 +76,14 @@ fn register(home: &Path, socket: &str, db: &Path) {
 fn every_store_on_this_machine_is_listed() {
     let home = crate::scratch::home("projects");
     let shared = home.join(".local/state/gear/gear.db");
-    let session_store = home.join(".local/state/gear/sess-a/gear.db");
+    let session_store = home.join(".local/state/gear/s1/gear.db");
     let registered = home.join("elsewhere/reg.db");
     std::fs::create_dir_all(session_store.parent().expect("the session dir")).expect("the state dir");
     std::fs::create_dir_all(registered.parent().expect("the registered dir")).expect("the config dir");
     // The shared store holds a project in a voyage, a session store one
     // without, the registered one none at all.
-    seeded(&shared, "shared-proj", "default", Some("M2"));
-    seeded(&session_store, "a-proj", "sess-a", None);
+    seeded(&shared, "a", "default", Some("M2"));
+    seeded(&session_store, "b", "s1", None);
     Store::open(&registered).expect("an empty store");
     // The registry names the registered store, names the session store a
     // second time, and names a file that is not there.
@@ -100,12 +100,12 @@ fn every_store_on_this_machine_is_listed() {
     let text = String::from_utf8_lossy(&out.stdout);
     // Each store's projects under it, with the voyage (or `-`).
     let shared_block = format!(
-        "{}\n  shared-proj · session default · config v1 · voyage M2",
+        "{}\n  a · session default · config v1 · voyage M2",
         shown(&shared)
     );
     assert!(text.contains(&shared_block), "the shared store said:\n{text}");
     let session_block = format!(
-        "{}\n  a-proj · session sess-a · config v1 · voyage -",
+        "{}\n  b · session s1 · config v1 · voyage -",
         shown(&session_store)
     );
     assert!(text.contains(&session_block), "the session store said:\n{text}");
