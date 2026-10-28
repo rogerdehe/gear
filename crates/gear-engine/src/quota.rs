@@ -1805,7 +1805,7 @@ fn alert_body(
 mod tests {
     use super::*;
     use crate::observe::Presence;
-    use gear_herdr::fake::{Call, FakeHerdr};
+    use gear_herdr::fake::{Call, FakeHerdr, Inject};
     use gear_model::{OpState, TaskState};
     use gear_store::{testing, ContractRow, ProjectRow, TaskRow};
     use std::collections::BTreeSet;
@@ -2326,6 +2326,90 @@ quota_reset_h = 5
         let told = captain_messages(&mut store);
         assert_eq!(told.len(), 1, "one info item: {told:?}");
         assert!(told[0].state == MsgState::Info && !told[0].urgent && told[0].body.contains("restarted on"));
+    }
+
+    /// An uncertain start whose screen shows a missing CLI is certain enough
+    /// (T-286): the seat is flagged and the plan cleared instead of waiting
+    /// forever for a switch that cannot happen.
+    #[test]
+    fn an_uncertain_cross_cli_start_with_a_missing_cli_flags_instead_of_waiting() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex" }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        herdr.exit_agent(PANE);
+        // The shell is still busy, so the start waits (the environment line
+        // has run and is not sent again).
+        herdr.refuse_starts = Some(("agent_pane_busy".into(), 1));
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+        assert_eq!(lane_seat(&mut store).state, SeatState::Starting);
+
+        herdr.set_screen(PANE, "zsh: command not found: codex");
+        herdr.inject_next = Some(Inject::Uncertain);
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert_eq!(crate::restart::pending(&mut store, "p:heat").unwrap(), None);
+        assert_eq!(agent_starts(&herdr).len(), 2, "{:?}", agent_starts(&herdr));
+
+        tick_quota(&mut store, &mut herdr, false, T0 + 50);
+        assert_eq!(agent_starts(&herdr).len(), 2, "no third agent_start: {:?}", herdr.calls);
+    }
+
+    /// A restart whose next CLI is not installed says so and stops (T-286):
+    /// the seat is flagged for the install, the plan is cleared, and no later
+    /// tick sends the start again — a missing CLI is not a switch that never
+    /// ends.
+    #[test]
+    fn a_cross_cli_restart_to_a_missing_cli_flags_the_seat_once() {
+        let mut store = world(&config(
+            r#""minimax-cn/MiniMax-M3.1-Flash", { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] }"#,
+            "fallback",
+        ));
+        let mut herdr = herdr_with_quota();
+        tick_quota(&mut store, &mut herdr, true, T0 + 10);
+        // The limit is confirmed: the restart begins (the agent is closed).
+        tick_quota(&mut store, &mut herdr, true, T0 + 20);
+        assert!(agent_starts(&herdr).is_empty(), "nothing started yet");
+        herdr.exit_agent(PANE);
+        // The shell has no codex on PATH when the start comes.
+        herdr.set_screen(PANE, "zsh: command not found: codex");
+        herdr.refuse_starts = Some(("agent_start_timeout".into(), 1));
+
+        tick_quota(&mut store, &mut herdr, false, T0 + 30);
+
+        let seat = lane_seat(&mut store);
+        assert_eq!(seat.state, SeatState::NeedsCheck, "{:?}", seat.state_reason);
+        let reason = seat.state_reason.unwrap_or_default();
+        assert!(
+            reason.contains("the codex CLI is not installed or not on PATH"),
+            "{reason}"
+        );
+        assert_eq!(
+            crate::restart::pending(&mut store, "p:heat").unwrap(),
+            None,
+            "the plan is cleared"
+        );
+        assert_eq!(agent_starts(&herdr).len(), 1, "one attempt: {:?}", agent_starts(&herdr));
+
+        // The next tick does not send the start again.
+        tick_quota(&mut store, &mut herdr, false, T0 + 40);
+        assert_eq!(
+            agent_starts(&herdr).len(),
+            1,
+            "no second agent_start: {:?}",
+            herdr.calls
+        );
+        assert_eq!(lane_seat(&mut store).state, SeatState::NeedsCheck);
     }
 
     #[test]
