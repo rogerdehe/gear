@@ -43,6 +43,9 @@ The branch names, the remote and the voyage folder are configuration: a project 
 | `seat_branch` | `{project}/{seat}` | `{project}`, `{seat}` |
 | `remote` | `origin` | — (the git remote a hand-in is checked against) |
 | `voyage_dir` | `gear/voyages/{milestone}` | `{project}`, `{milestone}`; its `plan.md`, `reports/` and `reviews/` |
+| `merge_message` | `merge({task}): {source}` | `{project}`, `{task}`, `{source}` |
+| `review_message` | `review({task}): {what}` | `{project}`, `{task}`, `{attempt}`, `{what}` |
+| `plan_message` | `{milestone}: {what}` | `{project}`, `{milestone}`, `{what}` |
 
 ## 4. Worktrees — always through Herdr
 
