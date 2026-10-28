@@ -13,6 +13,9 @@
 //!   apply (§10.7 row B3, T-66);
 //! - the **imbalance**: a lane with nothing left next to a lane with a pile
 //!   of work that has not started (§8.4) — one item for the project.
+//!
+//! When no lane of the project has work left to start, none of it is told:
+//! the lane items close with that fact and the project stays quiet (T-232).
 
 use gear_model::{GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
 use gear_store::{MessageRow, NewMessage, Store, Tx};
@@ -24,6 +27,9 @@ const ENOUGH_READY: usize = 2;
 
 /// The thread the imbalance item lives in (§8.4).
 const BALANCE_THREAD: &str = "balance";
+
+/// Why a lane item closes when the whole project has nothing left to start.
+const NO_WORK_LEFT: &str = "no lane has work left to start";
 
 /// What happened to one lane this tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +53,12 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
     let Some(captain) = tx.captain_of(project)? else {
         return Ok(Vec::new()); // no captain: nobody to warn
     };
+    // Nothing startable anywhere in the project: no lane can run dry, and one
+    // item per lane would ring for every lane at once (M4.1). Every lane item
+    // closes and the project stays quiet (T-232).
+    if startable_tasks(tx, project)? == 0 {
+        return close_all_lanes(tx, project, &captain.id, now);
+    }
     let mut changes = Vec::new();
     // The lanes that are one task from dry: the engine checks this every
     // tick, not only at plan apply (§10.7 row B3, T-66).
@@ -180,6 +192,59 @@ fn feed(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<FeedChange>> {
     // The imbalance of the lanes (§8.4): one item for the project.
     if let Some(change) = imbalance(tx, project, &captain.id, now)? {
         changes.push(change);
+    }
+    Ok(changes)
+}
+
+/// The tasks a lane could start now: the loop's own rule (`ready`), a task
+/// with a seat-occupying attempt already taken is not available. Zero means
+/// the project has no work left to start at all (T-232).
+fn startable_tasks(tx: &Tx<'_>, project: &str) -> GearResult<usize> {
+    let mut count = 0;
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane
+            || !matches!(seat.state, SeatState::Active | SeatState::Standby)
+        {
+            continue;
+        }
+        for task in dispatch::ready_tasks_of(tx, &seat)? {
+            let taken = tx
+                .attempts_of_task(project, &task.id)?
+                .iter()
+                .any(|attempt| attempt.state.occupies_seat());
+            if !taken {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// No lane has work left to start: every lane item closes with that fact and
+/// the severity is forgotten, so nothing rings while the project is empty
+/// (T-232).
+fn close_all_lanes(
+    tx: &Tx<'_>,
+    project: &str,
+    captain: &str,
+    now: Ts,
+) -> GearResult<Vec<FeedChange>> {
+    let mut changes = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role != SeatRole::Lane {
+            continue;
+        }
+        tx.set_meta(&format!("feed-severity:{}", seat.id), "0")?;
+        if close(
+            tx,
+            project,
+            &seat.name,
+            captain,
+            NO_WORK_LEFT,
+            now,
+        )? {
+            changes.push(FeedChange { lane: seat.name.clone(), action: "closed" });
+        }
     }
     Ok(changes)
 }
