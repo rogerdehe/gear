@@ -3,6 +3,7 @@ mod board_contract;
 mod decisions_contract;
 mod deliveries_contract;
 mod deps_contract;
+mod golden_contract;
 mod graph_contract;
 mod idle_contract;
 mod measures_contract;
