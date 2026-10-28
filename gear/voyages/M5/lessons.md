@@ -17,3 +17,4 @@
 13. F-130/F-131 (T-318): an accept that runs a release build costs a cold release build per worktree (7-10 min here) for the writer and again for the reviewer; size the budget for it, or prove the step with `make -n` and one existing build.
 14. M-4616: re-splitting the lanes after decomposition turned same-lane order into cross-lane order with no deps (T-334 mast needs T-329, which moved to hull). After a re-split, every former 'after:' between two tasks that now sit on different lanes becomes a deps: line.
 15. M-4774: a merge that conflicts is a rework (merge dev, resolve), not a remerge, though the item's hint offers only `- remerge`; and a fail on an accepted attempt must name the candidate exactly as stored (here the short sha the lane handed in), or settle refuses it as a different verdict.
+16. [now] in a queue header does not move a task up a lane's queue; the block's place in the file does. T-371 waited behind 10 hull tasks while lost Enters recurred.
