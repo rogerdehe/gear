@@ -11,8 +11,8 @@ use gear_app::home;
 use gear_app::identity::Fingerprint;
 use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, SeatRole, TaskState, Ts};
-use gear_store::{testing, NewMessage, Store, TaskRow};
+use gear_model::{ErrorCode, GearCtx, MsgKind, MsgState, OpKind, OpState, SeatRole, TaskState, Ts};
+use gear_store::{testing, NewMessage, NewOp, Store, TaskRow};
 
 const NOW: i64 = 1_800_000_000;
 const CAP_PANE: &str = "w1:p1";
@@ -477,4 +477,63 @@ fn the_snapshot_marks_a_tailed_lane() {
     let home = home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1).unwrap();
     assert_eq!(lane_line(&home.text, "hull"), "  hull · agent unknown · no current task · 0 queued", "{}", home.text);
     assert!(!home.text.contains("tail: warnings off"), "{}", home.text);
+}
+
+/// One unconfirmed delivery of the lane `heat`, created at `created` (T-271).
+fn deliver(s: &mut Store, created: Ts) {
+    s.write(|tx| {
+        let op = tx.insert_op(&NewOp {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            kind: OpKind::Deliver,
+            task: Some("T-1".into()),
+            attempt: Some(1),
+            ref_msg: None,
+            plan_version: None,
+            payload: serde_json::json!({}),
+            created,
+        })?;
+        tx.set_op_state("p", &op.id, OpState::Submitted, None, created + 1)?;
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// T-271: the snapshot says which deliveries are not confirmed — three lines,
+/// the rest as a count.
+#[test]
+fn the_snapshot_names_the_unconfirmed_deliveries() {
+    let mut s = world();
+    // Four deliveries, the oldest 4 minutes back.
+    for age in [240, 180, 120, 60] {
+        deliver(&mut s, NOW - age);
+    }
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
+    let lines: Vec<&str> = home.text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("deliveries not confirmed: 4"))
+        .unwrap_or_else(|| panic!("the deliveries line: {}", home.text));
+    assert_eq!(lines[at + 1], "    O-1 heat T-1 4m", "{}", home.text);
+    assert_eq!(lines[at + 2], "    O-2 heat T-1 3m", "{}", home.text);
+    assert_eq!(lines[at + 3], "    O-3 heat T-1 2m", "{}", home.text);
+    assert_eq!(lines[at + 4], "    +1 more", "{}", home.text);
+}
+
+/// T-271: no delivery, no extra line.
+#[test]
+fn the_snapshot_names_no_delivery_when_there_is_none() {
+    let mut s = world();
+    let home =
+        home::build(&mut s, &seat_env("captain", CAP_PANE), Some(&fp(CAP_PANE, "codex")), NOW + 1)
+            .unwrap();
+    assert!(home.text.contains("deliveries not confirmed: 0"), "{}", home.text);
+    assert!(
+        !home.text.lines().any(|line| line.trim_start().starts_with("O-")),
+        "{}",
+        home.text
+    );
 }
