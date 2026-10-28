@@ -61,6 +61,7 @@ eta: 16h
 - station M-4768: keep course 337 min in, 57 done; forecast 1407 min; the eta waits for the user
 
 - 2026-10-29 06:00 hand-fix: a third lost Enter (mast O-3877 "Continue T-321"), one Enter sent; T-371 and T-375 move to the head of the queue in the file: [now] does not reorder a lane's queue, the block's place does | why: mast idle | else: the next Continue stalls a lane again
+- station M-4797: keep course 360 min in, 59 done; forecast 1386 min; the eta waits for the user
 # Queue
 
 ## T-371 [now] lane=hull milestone=M5 required
