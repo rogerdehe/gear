@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=575 -->
+<!-- gear-plan project=gear base=576 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -21,6 +21,7 @@ eta: 16h
 
 - 2026-10-28 23:55 override: T-263 passes over its review fail; the only finding is the test in crates/gear-board/tests/it/decisions_contract.rs, outside "lib.rs only", but the accept asked for a board test and that file is where the board's tests live: the contract's wording was the captain's error | why: the work is right, the scope line was wrong | else: a rework that moves a test to a worse place
 
+- station M-4369: keep course 36 min in, 6 done, pace 0.77x; hull has 122 min left against mast's 56, so the next wave goes to mast first
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
