@@ -292,16 +292,21 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Where GEAR keeps its store when `GEAR_DB` is not set: one place for every
-/// project on this machine, `~/.local/state/gear/gear.db`. Set once, before
-/// anything reads it, so this process, the engine it starts and the agents
-/// the engine starts all agree.
+/// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
+/// session, since an engine drives one session and pane ids are only unique
+/// inside one. The store registered for the caller's session comes first
+/// (`~/.config/gear/targets.tsv`); else a named session `<name>` gets
+/// `~/.local/state/gear/<name>/gear.db`, and no session or the default one
+/// `~/.local/state/gear/gear.db`. Set once, before anything reads it, so this
+/// process, the engine it starts and the agents the engine starts all agree.
 fn default_store_path() {
     if std::env::var_os(gear_model::ctx::ENV_DB).is_some() {
         return;
     }
     if let Some(home) = std::env::var_os("HOME") {
-        let db = default_store_in(std::path::Path::new(&home));
+        let home = std::path::PathBuf::from(home);
+        let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+        let db = default_store_in(&home, socket.as_deref());
         if let Some(dir) = db.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -309,9 +314,26 @@ fn default_store_path() {
     }
 }
 
-/// The default store under `home`.
-fn default_store_in(home: &std::path::Path) -> std::path::PathBuf {
-    home.join(".local/state/gear/gear.db")
+/// The default store under `home` for the Herdr session at `socket`.
+fn default_store_in(home: &std::path::Path, socket: Option<&str>) -> std::path::PathBuf {
+    let shared = home.join(".local/state/gear/gear.db");
+    let Some(socket) = socket else { return shared };
+    if let Some(db) = registered_store(&targets_path_in(home), socket) {
+        return std::path::PathBuf::from(db);
+    }
+    match session_name_of(home, socket) {
+        Some(name) => home.join(".local/state/gear").join(name).join("gear.db"),
+        None => shared,
+    }
+}
+
+/// The name of a named Herdr session from its socket
+/// (`~/.config/herdr/sessions/<name>/herdr.sock`); None for the default one.
+fn session_name_of(home: &std::path::Path, socket: &str) -> Option<String> {
+    let rest = std::path::Path::new(socket).strip_prefix(home.join(".config/herdr/sessions")).ok()?;
+    let mut parts = rest.components();
+    let name = parts.next()?.as_os_str().to_str()?.to_string();
+    (parts.as_path() == std::path::Path::new("herdr.sock")).then_some(name)
 }
 
 fn run(cli: Cli) -> GearResult<()> {
@@ -6065,4 +6087,28 @@ path="api"
         std::fs::remove_file(&path).ok();
     }
 
+}
+
+#[cfg(test)]
+mod default_store_tests {
+    use super::*;
+
+    #[test]
+    fn each_herdr_session_gets_its_own_store_unless_one_is_registered() {
+        let home = std::env::temp_dir().join(format!("gear-default-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let sock = |name: &str| home.join(".config/herdr/sessions").join(name).join("herdr.sock").to_string_lossy().to_string();
+        let shared = home.join(".local/state/gear/gear.db");
+        assert_eq!(default_store_in(&home, None), shared, "no Herdr: the shared store");
+        let plain = home.join(".config/herdr/herdr.sock").to_string_lossy().to_string();
+        assert_eq!(default_store_in(&home, Some(&plain)), shared, "the default session: the shared store");
+        assert_eq!(
+            default_store_in(&home, Some(&sock("b"))),
+            home.join(".local/state/gear/b/gear.db"),
+            "a named session: its own store"
+        );
+        register_store(&targets_path_in(&home), &sock("a"), "/x/a.db").expect("registry");
+        assert_eq!(default_store_in(&home, Some(&sock("a"))), std::path::PathBuf::from("/x/a.db"), "a registered store wins");
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
