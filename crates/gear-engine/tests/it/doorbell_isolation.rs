@@ -151,6 +151,34 @@ impl World {
             .unwrap()
     }
 
+    /// An open item the engine wrote for `to`, in its own thread (T-254: the
+    /// engine's own items, the ones the captain was rung for).
+    fn engine_item(&mut self, to: &str, thread: &str, body: &str, at: i64) -> String {
+        self.store
+            .write(|tx| {
+                Ok(tx
+                    .insert_message(&NewMessage {
+                        meta: None,
+                        project: "p".into(),
+                        thread: thread.into(),
+                        task: None,
+                        attempt: None,
+                        sender: "engine".into(),
+                        sender_gen: 0,
+                        recipient: to.into(),
+                        kind: MsgKind::System,
+                        urgent: false,
+                        body: body.into(),
+                        reply_to: None,
+                        needs_ack: false,
+                        state: MsgState::Open,
+                        created: at,
+                    })?
+                    .id)
+            })
+            .unwrap()
+    }
+
     /// The review packet of T-7, due for the reviewer's pane.
     fn packet(&mut self, seat: &SeatRow) -> String {
         self.store
@@ -503,4 +531,80 @@ fn a_new_reviewers_gear_shows_no_message_from_an_earlier_job() {
         "another job's answer is not this job's instruction: {}",
         home.text
     );
+}
+
+// ---------------------------------------------------------------- T-254
+
+/// The message ids a doorbell text names, in order.
+fn named_by(text: &str) -> Vec<String> {
+    text.split_once(". Run")
+        .unwrap()
+        .0
+        .split_whitespace()
+        .filter(|word| word.starts_with("M-"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The doorbells rung at `pane`, in the order they were typed.
+fn doorbells_to<'a>(w: &'a World, pane: &str) -> Vec<&'a str> {
+    w.herdr
+        .prompts_to(pane)
+        .into_iter()
+        .filter(|text| text.contains("item(s) waiting for you"))
+        .collect()
+}
+
+/// Three open engine threads from one sender: with `per_sender` 2 the batch
+/// keeps two of them, so the captain must be rung for those two only.
+#[test]
+fn the_captains_doorbell_names_only_the_items_its_gear_shows() {
+    let mut w = world();
+    let first = w.engine_item("p:captain", "merge:1", "T-305: merge of T-305 failed", T0 + 10);
+    let second = w.engine_item("p:captain", "merge:2", "T-310: merge of T-310 failed", T0 + 20);
+    let third = w.engine_item("p:captain", "merge:3", "T-341: merge of T-341 failed", T0 + 30);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
+
+    let said = doorbells_to(&w, CAP_PANE);
+    assert_eq!(said.len(), 1, "{said:?}");
+    assert_eq!(named_by(&said[0]), vec![first.clone(), second.clone()], "{}", said[0]);
+
+    // And that is what its own `gear` shows: the same two items, not the third.
+    let captain = w.store.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
+    let home = home_of(&mut w, &captain, CAP_PANE, "codex", T0 + 40);
+    assert!(home.text.contains(&first) && home.text.contains(&second), "{}", home.text);
+    assert!(!home.text.contains(&third), "{}", home.text);
+}
+
+/// Once one of the two is resolved, the third enters the batch — and the
+/// doorbell names it.
+#[test]
+fn a_resolved_item_lets_the_next_one_into_the_captains_doorbell() {
+    let mut w = world();
+    let first = w.engine_item("p:captain", "merge:1", "T-305: merge of T-305 failed", T0 + 10);
+    let second = w.engine_item("p:captain", "merge:2", "T-310: merge of T-310 failed", T0 + 20);
+    let third = w.engine_item("p:captain", "merge:3", "T-341: merge of T-341 failed", T0 + 30);
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
+    let said = doorbells_to(&w, CAP_PANE);
+    assert_eq!(named_by(&said[0]), vec![first.clone(), second.clone()], "{}", said[0]);
+
+    // The captain answers the first: the item is resolved, and the doorbell
+    // that named it was taken (so its slot and cooldown are over).
+    w.store
+        .write(|tx| {
+            tx.update_message_state("p", &first, MsgState::Resolved, Some("merged"), None, None, T0 + 50)?;
+            for op in tx.ops_of_seat_kind("p:captain", OpKind::Doorbell)? {
+                tx.set_op_state("p", &op.id, OpState::Confirmed, Some("taken"), T0 + 50)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 100).unwrap();
+
+    let said = doorbells_to(&w, CAP_PANE);
+    assert_eq!(said.len(), 2, "a second doorbell: {said:?}");
+    assert_eq!(named_by(&said[1]), vec![second.clone(), third.clone()], "{}", said[1]);
 }
