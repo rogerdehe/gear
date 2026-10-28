@@ -206,6 +206,10 @@ pub trait HerdrAct: HerdrRead {
     /// Herdr `agent.rename`: give the agent in `pane_id` the name `name`
     /// (T-134). A name another pane holds is refused, never stolen.
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()>;
+    /// Herdr `tab.rename`: give the tab `tab_id` the label `label` (T-278).
+    /// `gear board` names its own tab, so the tab bar shows the board's name
+    /// instead of a number.
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()>;
     fn send_keys(&mut self, pane_id: &str, keys: &[String]) -> Outcome<()>;
     /// Type `text` into the pane as keystrokes (`pane.send_text`), without
     /// Enter. Unlike `pane_run`/`prompt` (a paste), typed text triggers an
@@ -424,6 +428,14 @@ impl HerdrAct for SocketHerdr {
     fn agent_rename(&mut self, pane_id: &str, name: &str) -> Outcome<()> {
         let params = json!({ "target": pane_id, "name": name });
         match self.client.call("agent.rename", params) {
+            Ok(_) => Outcome::Ok(()),
+            Err(e) => outcome_from_error(&e),
+        }
+    }
+
+    fn tab_rename(&mut self, tab_id: &str, label: &str) -> Outcome<()> {
+        let params = json!({ "tab_id": tab_id, "label": label });
+        match self.client.call("tab.rename", params) {
             Ok(_) => Outcome::Ok(()),
             Err(e) => outcome_from_error(&e),
         }
