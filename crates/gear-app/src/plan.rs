@@ -1948,6 +1948,64 @@ mod tests {
     }
 
     #[test]
+    fn a_mechanical_task_stores_its_reason_and_the_block_shows_it() {
+        // T-272: the queue field is a contract field: `mechanical: <reason>`
+        // says the gate alone proves the change, so no review is needed.
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nmechanical: delete three dead fns\ndeps: -\n"),
+            "r1",
+        )
+        .unwrap();
+
+        let contract = s.read(|tx| tx.get_contract("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(contract.mechanical.as_deref(), Some("delete three dead fns"));
+
+        // `gear plan show` prints it as a field the captain can edit back in.
+        let shown = s.read(|tx| show(tx, "p", "T-1")).unwrap();
+        assert!(shown.contains("mechanical: delete three dead fns"), "{shown}");
+    }
+
+    #[test]
+    fn clearing_the_mechanical_reason_opens_a_contract_version() {
+        // Re-applying the block without the field clears it, the way
+        // `evidence-due` does: the queue item is the contract as the captain
+        // wants it.
+        let mut s = world();
+        run(
+            &mut s,
+            &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nmechanical: delete three dead fns\ndeps: -\n"),
+            "r1",
+        )
+        .unwrap();
+
+        let r = run(
+            &mut s,
+            &draft_text(1, "## T-1 [must] lane=heat\ngoal: A\naccept: a\ndeps: -\n"),
+            "r2",
+        )
+        .unwrap();
+
+        assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
+        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        assert_eq!(contract.mechanical, None);
+        assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version, 2);
+    }
+
+    #[test]
+    fn a_mechanical_field_without_a_reason_is_refused() {
+        let text = draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nmechanical:\ndeps: -\n");
+        let err = parse(&text).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat);
+        assert!(
+            err.detail.contains("`mechanical` needs the reason the gate alone proves this change"),
+            "{}",
+            err.detail
+        );
+    }
+
+    #[test]
     fn a_stale_base_is_reported_before_an_unsupported_section() {
         let mut s = world();
         run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"), "r1").unwrap();
