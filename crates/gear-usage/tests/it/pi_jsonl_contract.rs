@@ -154,3 +154,81 @@ fn a_time_in_milliseconds_is_read_as_a_time() {
     assert_eq!(usage.records, 1, "{usage:?}");
     assert_eq!(usage.input, 10, "{usage:?}");
 }
+
+/// A round of sessions; no prices: the fixtures carry their cost themselves.
+fn round_of(sessions: &[String]) -> Option<gear_usage::RoundUsage> {
+    gear_usage::round_usage(
+        UsageLog::PiJsonl,
+        sessions,
+        T12,
+        T14,
+        None,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+#[test]
+fn a_session_file_that_was_never_written_does_not_blank_the_round() {
+    // pi may open a session and replace it at once: the first file of a round
+    // can be absent while the other one holds every token (T-226).
+    let dir = tempfile::tempdir().unwrap();
+    let readable = session(
+        dir.path(),
+        &[assistant(T12, 10, 1, 100, 0, 0.01), assistant(T13, 20, 2, 200, 5, 0.02)],
+    );
+    let missing = dir
+        .path()
+        .join("never.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let round = round_of(&[missing.clone(), readable.clone()]).unwrap();
+    assert_eq!(round.usage.input, 30, "{round:?}");
+    assert_eq!(round.usage.output, 3, "{round:?}");
+    assert_eq!(round.usage.cache_read, 300, "{round:?}");
+    assert_eq!(round.usage.cache_write, 5, "{round:?}");
+    assert_eq!(round.usage.reasoning, 14, "{round:?}");
+    assert_eq!(round.usage.records, 2, "{round:?}");
+    let cost = round.usage.cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "{cost}");
+    assert_eq!(round.cost_source, "agent");
+
+    // The same when the missing file comes last.
+    let round = round_of(&[readable, missing]).unwrap();
+    assert_eq!(round.usage.input, 30, "{round:?}");
+}
+
+#[test]
+fn a_round_with_no_readable_session_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = |name: &str| dir.path().join(name).to_string_lossy().into_owned();
+    // No session at all, and every session's file gone: token count unknown.
+    assert!(round_of(&[]).is_none());
+    assert!(round_of(&[missing("first.jsonl"), missing("second.jsonl")]).is_none());
+    // A duplicate of the one missing path does not become a readable session.
+    assert!(round_of(&[missing("first.jsonl"), missing("first.jsonl")]).is_none());
+}
+
+#[test]
+fn two_readable_sessions_are_summed() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = session(
+        dir.path(),
+        &[assistant(T12, 10, 1, 100, 0, 0.01)],
+    );
+    let second_path = dir.path().join("other");
+    let second = write_lines(
+        &second_path.join("session.jsonl"),
+        &[assistant(T13, 20, 2, 200, 5, 0.02)],
+    )
+    .to_string_lossy()
+    .into_owned();
+    let round = round_of(&[first, second]).unwrap();
+    assert_eq!(round.usage.input, 30, "{round:?}");
+    assert_eq!(round.usage.output, 3, "{round:?}");
+    assert_eq!(round.usage.cache_read, 300, "{round:?}");
+    assert_eq!(round.usage.cache_write, 5, "{round:?}");
+    assert_eq!(round.usage.reasoning, 14, "{round:?}");
+    assert_eq!(round.usage.records, 2, "{round:?}");
+    let cost = round.usage.cost_usd.unwrap();
+    assert!((cost - 0.03).abs() < 1e-9, "{cost}");
+}
