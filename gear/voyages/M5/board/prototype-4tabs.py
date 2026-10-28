@@ -178,6 +178,11 @@ def header(w, view):
     y = 3
     for line in wrap(V["goal"], bw - 4):
         put(w, y, 1, "║ " + line.ljust(bw - 4) + " ║", C["warn"] | C["b"]); y += 1
+    # change 16: the quality bar sits in the goal box: it is how the goal is judged, locked like the goal
+    barline = f"Quality bar: {V['bar']} — " + {"FASTEST": "only what breaks the chain or loses data blocks a task",
+        "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
+        "STRICT": "severe issues block a task; medium ones are the captain's call"}[V["bar"]]
+    put(w, y, 1, "║ " + barline.ljust(bw - 4) + " ║", C["warn"]); y += 1
     put(w, y, 1, "╚" + "═" * (bw - 2) + "╝", C["warn"] | C["b"]); y += 1
     if V["goal_changed"]:
         at, before, after = V["goal_changed"]
@@ -225,10 +230,7 @@ def header(w, view):
         put(w, y, mx, "Tasks", L); taskbar(mx + 11, y)
         put(w, y, mx + 12 + n, f"{merged}/{len(tasks)} merged · {going} going · {waiting} waiting")
         y += 1
-        put(w, y, 1, "Quality bar", L); put(w, y, 15, f"{V['bar']} — " + {"FASTEST": "only what breaks the chain or loses data blocks a task",
-            "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
-            "STRICT": "severe issues block a task; medium ones are the captain's call"}[V["bar"]])
-        put(w, y, mx, "d: unfold the goal check, milestones, time and tasks", C["dim"]); y += 1
+        put(w, y, 1, "d: unfold the goal check, milestones, time and tasks", C["dim"]); y += 1
     else:
         put(w, y, 1, "Goal check", L)
         for ok, s_ in G["DONE"]:
@@ -246,9 +248,6 @@ def header(w, view):
         put(w, y, 17 + n, f"{merged} of {len(tasks)} merged · {going} in progress · {waiting} not started"
                           + (f" · moved out: {', '.join(moved)}" if moved else ""), C["b"]); y += 1
         put(w, y, 15, "█ merged   ▓ in progress   ░ not started", C["dim"]); y += 1
-        put(w, y, 1, "Quality bar", L); put(w, y, 15, f"{V['bar']} — " + {"FASTEST": "only what breaks the chain or loses data blocks a task",
-            "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
-            "STRICT": "severe issues block a task; medium ones are the captain's call"}[V["bar"]])
         put(w, y, wd - 20, "d: fold", C["dim"]); y += 1
     # change 15: the views are a tab bar that looks like one: framed tabs, the picked one lit, a rule under it
     y += 1
