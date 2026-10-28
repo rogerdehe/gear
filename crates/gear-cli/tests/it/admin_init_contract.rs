@@ -346,6 +346,12 @@ fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+/// The first line of stdout: a `--check` run prints its headline, then the
+/// seats it starts (T-261).
+fn headline(o: &Output) -> String {
+    stdout(o).lines().next().unwrap_or_default().to_string()
+}
+
 /// Every path under `root`, relative and sorted: a snapshot of the tree.
 fn tree(root: &Path) -> Vec<PathBuf> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
@@ -406,7 +412,7 @@ fn check_validates_a_config_and_opens_no_store() {
     // nothing.
     let o = check_cmd(&dir, &db, &path, None, false, false);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o).trim(), "config ok: project p, 1 lanes, 1 reviewers");
+    assert_eq!(headline(&o), "config ok: project p, 1 lanes, 1 reviewers");
     assert!(!db.exists(), "no store was opened");
 
     // The JSON form names the same three facts.
@@ -445,7 +451,7 @@ fn check_creates_no_default_store_without_gear_db() {
     let before = tree(&home);
     let o = check_cmd_without_db(&home, &path);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o).trim(), "config ok: project p, 0 lanes, 0 reviewers");
+    assert_eq!(headline(&o), "config ok: project p, 0 lanes, 0 reviewers");
     assert_eq!(tree(&home), before, "a check creates no default store directory");
 
     // The error path changes nothing either.
@@ -549,7 +555,7 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     // On another repository the same config passes.
     let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(stdout(&o).trim(), "config ok: project q, 0 lanes, 0 reviewers");
+    assert_eq!(headline(&o), "config ok: project q, 0 lanes, 0 reviewers");
 }
 
 /// `gear admin init <config>` as the user's own shell with no `GEAR_DB`: the
@@ -603,4 +609,134 @@ fn check_reads_the_default_store_when_gear_db_is_unset() {
     let o = check_cmd_without_db(&home, &config_for(&dir, "q", &elsewhere));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(stderr(&o).is_empty(), "{}", stderr(&o));
+}
+
+/// A two-lane config for project `p` on `repo`, with a lane chain, a review
+/// chain and a lane overriding its model (T-261).
+fn config_two_lanes(dir: &Path, repo: &Path) -> PathBuf {
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 2\ntemps = 1\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\", \"Cargo.toml\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"keel\"\nduty = \"everything\"\nowns = [\"docs/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\nmodels = [\"mine/model\"]\n\
+             \n[temps]\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[models]\nlanes = [\n  {{ model = \"role/model\", cli = \"codex\" }},\n  {{ model = \"role/fallback\", cli = \"codex\" }},\n]\nreview = [\"review/model\", \"review/fallback\"]\n\
+             \n[conventions]\ngate = \"make test\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    path
+}
+
+/// T-261: `--check` says which lanes the config starts, with the model each
+/// one runs — its own first `models` entry, else the role chain's first — and
+/// then which reviewers.
+#[test]
+fn check_names_every_lane_and_the_reviewers_with_their_models() {
+    let dir = scratch("check-seats");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config_two_lanes(&dir, &repo);
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project p, 2 lanes, 1 reviewers\n\
+         \x20 lane heat: codex role/model · owns src/, Cargo.toml\n\
+         \x20 lane keel: codex mine/model · owns docs/\n\
+         \x20 reviewers: 1 × codex review/model\n"
+    );
+    assert!(!db.exists(), "a check writes nothing");
+}
+
+/// T-261: the JSON form carries the same lane list and the reviewers' model.
+#[test]
+fn check_json_carries_the_lane_list_and_review_model() {
+    let dir = scratch("check-seats-json");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config_two_lanes(&dir, &repo);
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, None, false, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(
+        parsed["lane_list"],
+        serde_json::json!([
+            { "name": "heat", "kind": "codex", "model": "role/model" },
+            { "name": "keel", "kind": "codex", "model": "mine/model" },
+        ])
+    );
+    assert_eq!(parsed["review_model"], serde_json::json!("review/model"));
+}
+
+/// T-261: a config with neither `[temps]` nor a model chain still says who it
+/// starts: no reviewers, and every model left to the seat's own CLI ("-").
+#[test]
+fn check_says_none_without_temps_and_dashes_without_models() {
+    let dir = scratch("check-no-temps");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[conventions]\ngate = \"make test\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, None, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "config ok: project p, 1 lanes, 0 reviewers\n\
+         \x20 lane heat: codex - · owns src/\n\
+         \x20 reviewers: none\n"
+    );
+
+    let o = check_cmd(&dir, &db, &path, None, false, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(
+        parsed["lane_list"],
+        serde_json::json!([{ "name": "heat", "kind": "codex", "model": "-" }])
+    );
+    assert_eq!(parsed["review_model"], serde_json::json!("-"));
+}
+
+/// T-261: a successful `init` names the same seats and models as `--check`.
+#[test]
+fn init_names_the_lanes_and_reviewers_after_registering() {
+    let dir = scratch("init-seats");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config_two_lanes(&dir, &repo);
+    let db = dir.join("gear.db");
+
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let printed = stdout(&o);
+    assert!(printed.contains("project p (config v1)"), "{printed}");
+    assert!(printed.contains("  lane heat: codex role/model · owns src/, Cargo.toml"), "{printed}");
+    assert!(printed.contains("  lane keel: codex mine/model · owns docs/"), "{printed}");
+    assert!(printed.contains("  reviewers: 1 × codex review/model"), "{printed}");
+    assert_eq!(config_version(&db), 1, "the project was registered");
 }

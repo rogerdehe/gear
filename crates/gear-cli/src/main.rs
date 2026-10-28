@@ -501,7 +501,66 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// read (`config ok: project <id>, <n> lanes, <m> reviewers`). Its
 /// cross-project branch check (T-256) reads an existing store, never creates
 /// one, and says so when there is none.
+///
+/// Both forms go on to name the seats the config starts and the model each
+/// one runs (T-261), so a captain sees a wrong model here rather than once the
+/// fleet runs.
 fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+    // T-261: the lane list — `(name, kind, model)` — with the model being the
+    // lane's first `models` entry, else the role chain's first, else "-".
+    let lane_list = |parsed: &gear_app::config::ProjectConfig| -> Vec<(String, String, String)> {
+        parsed
+            .lanes
+            .iter()
+            .map(|lane| {
+                let model = lane
+                    .models
+                    .first()
+                    .or_else(|| parsed.models.lanes.first())
+                    .map(|entry| entry.model().to_string())
+                    .unwrap_or_else(|| "-".to_string());
+                (lane.name.clone(), lane.kind.clone(), model)
+            })
+            .collect()
+    };
+    // The model a reviewer runs: the first `[models] review` entry, else "-".
+    let review_model = |parsed: &gear_app::config::ProjectConfig| -> String {
+        parsed
+            .models
+            .review
+            .first()
+            .map(|entry| entry.model().to_string())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let lane_json = |lanes: &[(String, String, String)]| -> Vec<serde_json::Value> {
+        lanes
+            .iter()
+            .map(|(name, kind, model)| {
+                serde_json::json!({ "name": name, "kind": kind, "model": model })
+            })
+            .collect()
+    };
+    // The same facts as lines: one per lane, then the reviewers.
+    let seat_lines = |parsed: &gear_app::config::ProjectConfig| -> Vec<String> {
+        let mut lines: Vec<String> = parsed
+            .lanes
+            .iter()
+            .zip(lane_list(parsed))
+            .map(|(lane, (name, kind, model))| {
+                format!("  lane {name}: {kind} {model} · owns {}", lane.owns.join(", "))
+            })
+            .collect();
+        lines.push(match &parsed.temps {
+            Some(temps) => format!(
+                "  reviewers: {} × {} {}",
+                parsed.quota.temps,
+                temps.kind,
+                review_model(parsed)
+            ),
+            None => "  reviewers: none".to_string(),
+        });
+        lines
+    };
     // T-228: `--check` validates the config and changes nothing — no
     // GEAR_ADMIN, no store, no Herdr, no engine.
     if check_only {
@@ -521,6 +580,7 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
         if json {
+            let lane_list = lane_list(&parsed);
             println!(
                 "{}",
                 serde_json::json!({
@@ -528,6 +588,8 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                     "project": parsed.project.id,
                     "lanes": lanes,
                     "reviewers": reviewers,
+                    "lane_list": lane_json(&lane_list),
+                    "review_model": review_model(&parsed),
                 })
             );
         } else {
@@ -535,6 +597,9 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
                 "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
                 parsed.project.id
             );
+            for line in seat_lines(&parsed) {
+                println!("{line}");
+            }
         }
         return Ok(());
     }
@@ -589,14 +654,26 @@ fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> Gea
             eprintln!("gear: could not register the store in {}: {e}", registry.display());
         }
     }
+    // The config parsed already (init validated it): say which seats it
+    // starts, and on which model (T-261).
+    let parsed = gear_app::config::parse(&text)?;
+    let lanes = lane_list(&parsed);
     if json {
-        println!("{}", serde_json::to_string(&r).unwrap_or_default());
+        let mut value = serde_json::to_value(&r).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("lane_list".to_string(), serde_json::json!(lane_json(&lanes)));
+            object.insert("review_model".to_string(), serde_json::json!(review_model(&parsed)));
+        }
+        println!("{value}");
     } else {
         // The project is registered with this config version; a re-init
         // stores the next one (T-6).
         println!("project {} (config v{})", r.project, r.config_version);
         for seat in &r.seats {
             println!("seat {seat}");
+        }
+        for line in seat_lines(&parsed) {
+            println!("{line}");
         }
     }
     Ok(())
