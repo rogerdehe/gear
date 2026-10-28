@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=578 -->
+<!-- gear-plan project=gear base=579 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -82,7 +82,7 @@ estimate: 35
 
 ## T-268 [must] lane=mast milestone=M5 required
 goal: [v0.5.0 S1] `- remerge` merges the review branch the project names, in the right op order (found while writing M5's contracts; T-92 F2 open since M4 #9). crates/gear-app/src/plan.rs fn remerge writes the merge op payload with `"review": format!("review/{slug}")`, the fixed default, while every other path expands `conventions.review_branch` (T-252), so a project with its own review template remerges a branch that does not exist; and it finds the task's last merge op by sorting on `(created, id)` as strings, so O-999 sorts after O-1000 when both were created in the same second. Change fn remerge only, no other design: (1) the payload's "review" is `gear_model::branch::expand(&conventions.review_branch, project, &lane, task_id)` (the `conventions` it already reads); (2) the sort key is `(created, <the number after "O-" parsed as u64, 0 when it does not parse>)`.
-accept: Plan tests: a project with `review_branch = "{project}/review/t{n}"` remerges T-1 with payload review "p/review/t1"; the default config still writes "review/t1"; two failed merge ops of one task created in the same second with ids O-999 and O-1000: the remerge is allowed and judged on O-1000. Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
+accept: Plan tests: a project with `review_branch = "{project}/review/t{n}"` remerges T-1 with payload review "p/review/t1"; the default config still writes "review/t1"; two merge ops of one task created in the same second, O-999 Confirmed and O-1000 Failed: the remerge is allowed (the old string sort picks O-999 and refuses "already merged"); O-999 Failed and O-1000 Confirmed: refused naming O-1000 (mast's question M-4380). Run only `make check CRATE=gear-app`; the merge gate runs `make gate`.
 estimate: 15
 
 ## T-269 [must] lane=mast milestone=M5 required
