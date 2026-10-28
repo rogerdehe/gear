@@ -1481,11 +1481,13 @@ pub fn run_with(
             shown %= board.projects.len();
             board.projects.rotate_left(shown);
         }
-        // The selection never leaves the rows of the view (F4): a view that
-        // shrank, or a key pressed at its end, does not lose the selection.
+        // The selection moves over the rows the view paints as picks, and
+        // never leaves them (F4): a view that shrank, or a key pressed at its
+        // end, does not lose the selection.
         screen.size = keys.size();
-        let rows = frame::view(&board, screen.tab, screen.selected).rows.len();
-        screen.selected = screen.selected.min(rows.saturating_sub(1));
+        let mut tall = frame::Canvas::new(screen.size.0, 1000);
+        let picks = frame::view(&board, &screen, &mut tall, frame::VIEW_ROW);
+        screen.selected = screen.selected.min(picks.len().saturating_sub(1));
         let text = frame::canvas(&board, &screen, panel.as_deref()).ansi(opts.color);
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
@@ -1550,7 +1552,7 @@ pub fn run_with(
                     break;
                 }
                 Event::Down | Event::Key('j') => {
-                    screen.selected = (screen.selected + 1).min(rows.saturating_sub(1));
+                    screen.selected = (screen.selected + 1).min(picks.len().saturating_sub(1));
                     panel = None;
                     break;
                 }
@@ -1579,10 +1581,15 @@ pub fn run_with(
                         if row >= frame::FIRST_ROW && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
-                            let scroll = frame::scroll_of(rows, screen.selected, screen.size.1);
-                            let index = (row - frame::FIRST_ROW) + scroll;
-                            // A click outside the rows of the view is ignored.
-                            if index < rows {
+                            let offset = frame::offset_of(
+                                &picks,
+                                screen.selected,
+                                frame::VIEW_ROW,
+                                screen.size.1,
+                            );
+                            // A click selects the pick drawn on that row; a
+                            // row without a pick selects nothing.
+                            if let Some(index) = picks.iter().position(|pick| *pick == row + offset) {
                                 screen.selected = index;
                                 panel = None;
                                 break;

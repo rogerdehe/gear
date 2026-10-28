@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use gear_board::frame::{canvas, frame, Tab};
 use gear_board::graph::styled_lines;
-use gear_board::style::{colour_allowed, Color, Style};
+use gear_board::style::{colour_allowed, lane_color, Color, Style};
 use gear_board::{run_with, to_json, Event, Keys, Options};
 use gear_model::{AttemptState, SeatRole, TaskState};
 use gear_store::{testing, AttemptRow, AttemptStep, ContractRow, NewFriction, Store, TaskRow};
@@ -182,7 +182,52 @@ fn a_task_over_its_estimate_has_a_yellow_bar() {
     // A lane name is bold, in its lane colour (the first lane is cyan).
     let (row, x) = find(&text, "› hull");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Acc));
-    assert_eq!(screen.style_at(x + 2, row), Style::fg(Color::Acc).and_bold().reversed_if(true));
+    // The selected row is lit across the width (README change 13): the lane
+    // name's own colour is not drawn on it.
+    assert_eq!(screen.style_at(x + 2, row), Style { fg: None, bold: false, reverse: true });
+}
+
+#[test]
+fn the_selected_row_is_lit_across_the_width_in_one_colour() {
+    let board = board();
+    let size = (160, 40);
+    // The second lane of the fixture, `rewrite`, is the selected row.
+    let screen = canvas(&board, &crate::screen(Tab::Now, 1, size), None);
+    let text = screen.text();
+    let (row, _) = find(&text, "› rewrite");
+    let lit = Style { fg: None, bold: false, reverse: true };
+    for column in 1..size.0 - 1 {
+        assert_eq!(screen.style_at(column, row), lit, "column {column} of the lit row: {text}");
+    }
+    assert_eq!(screen.style_at(0, row).reverse, false, "the mark's column is not lit: {text}");
+    assert_eq!(screen.style_at(size.0 - 1, row).reverse, false, "the last column stays: {text}");
+    // No other row carries a reverse cell, but the row of the tabs (the open
+    // tab is in reverse video).
+    for y in 0..size.1 {
+        if y == row || y == gear_board::frame::TAB_ROW {
+            continue;
+        }
+        for x in 0..size.0 {
+            assert!(!screen.style_at(x, y).reverse, "row {y} column {x} is in reverse: {text}");
+        }
+    }
+}
+
+#[test]
+fn a_lane_cycles_the_prototypes_lane_colours() {
+    // README: the lanes are cyan, magenta, yellow, blue, in the lane order
+    // hull, deck, keel, mast.
+    let lanes = ["hull", "deck", "keel", "mast"];
+    assert_eq!(lane_color(&lanes, "hull"), Color::Acc);
+    assert_eq!(lane_color(&lanes, "deck"), Color::Mag);
+    assert_eq!(lane_color(&lanes, "keel"), Color::Warn);
+    assert_eq!(lane_color(&lanes, "mast"), Color::Blu);
+    // The fifth lane starts the cycle again, and a lane that is not in the
+    // order is grey.
+    let five = ["a", "b", "c", "d", "e"];
+    assert_eq!(lane_color(&five, "c"), Color::Warn);
+    assert_eq!(lane_color(&five, "e"), Color::Acc);
+    assert_eq!(lane_color(&five, "f"), Color::Dim);
 }
 
 #[test]

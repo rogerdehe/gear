@@ -181,6 +181,22 @@ impl Canvas {
         }
     }
 
+    /// Copy `count` rows of another canvas: its row `src` to this canvas's
+    /// row `dst`, and so on. Both canvases are cut at their own edge.
+    pub fn copy_rows(&mut self, from: &Canvas, src: usize, dst: usize, count: usize) {
+        let columns = self.width.min(from.width);
+        for index in 0..count {
+            let (source, target) = (src + index, dst + index);
+            if source >= from.height || target >= self.height {
+                break;
+            }
+            for column in 0..columns {
+                self.cells[target * self.width + column] = from.cells[source * from.width + column];
+                self.styles[target * self.width + column] = from.styles[source * from.width + column];
+            }
+        }
+    }
+
     /// Show a part of the screen in reverse video (the tab that is open).
     pub fn reverse(&mut self, y: usize, x: usize, len: usize) {
         if y < self.height && x < self.width {
@@ -294,36 +310,27 @@ pub fn frame(board: &Board, screen: &Screen, panel: Option<&[String]>) -> String
 /// The whole screen on a canvas, in the prototype's colours.
 pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas {
     let (width, height) = screen.size;
-    let tab = screen.tab;
-    let selected = screen.selected;
     let mut canvas = Canvas::new(width, height);
-    header(&mut canvas, board, tab);
+    header(&mut canvas, board, screen.tab);
 
-    let view = view(board, tab, selected);
-    // The view's heading sits on its own row; the rows the user can pick come
-    // after it, and the footer keeps the last row of the screen.
-    canvas.put_line(0, VIEW_ROW, &view.heading);
-    let first = FIRST_ROW;
-    let last = height.saturating_sub(2);
+    // The view paints on a tall canvas, the screen's width: the prototype's
+    // views put their texts at fixed columns, a later one over an earlier one
+    // (README change 13). The screen copies the part the user looks at.
+    let top = VIEW_ROW;
+    let mut tall = Canvas::new(width, 1000);
+    let picks = view(board, screen, &mut tall, top);
     // The selected row stays on the screen: the rows above it scroll away
     // (F8). The offset is the one the mouse hit testing uses.
-    let scroll = scroll_of(view.rows.len(), selected, height);
-    // The rows are drawn from the offset, and the screen row is what is
-    // bounded (F8): bounding the row before the offset dropped the rows the
-    // user scrolled to.
-    for (index, line) in view.rows.iter().enumerate().skip(scroll) {
-        let row = first + (index - scroll);
-        if row >= last {
-            break;
+    let offset = offset_of(&picks, screen.selected, top, height);
+    let last = height.saturating_sub(2);
+    // The footer's row and the row above it stay the frame's.
+    canvas.copy_rows(&tall, top + offset, top, last.saturating_sub(top));
+    // The selected row is lit across the width, in one colour (README change
+    // 13).
+    if let Some(row) = picks.get(screen.selected).map(|row| row.saturating_sub(offset)) {
+        if row >= top && row < last {
+            canvas.light_row(row);
         }
-        canvas.put_line(0, row, line);
-    }
-    for (index, line) in view.rest.iter().enumerate() {
-        let row = first + view.rows.len() + index;
-        if row >= last {
-            break;
-        }
-        canvas.put_line(0, row, line);
     }
     canvas.put_styled(1, height - 1, FOOTER, Style::fg(Color::Dim));
     if let Some(panel) = panel {
@@ -335,14 +342,19 @@ pub fn canvas(board: &Board, screen: &Screen, panel: Option<&[Line]>) -> Canvas 
 /// The offset of the first visible row of a view (the viewport, F8).
 ///
 /// The rows above it are scrolled away, so the mouse hit testing adds the
-/// same offset to the row the user clicked.
-pub fn scroll_of(rows: usize, selected: usize, height: usize) -> usize {
-    let first = FIRST_ROW;
+/// same offset to the row the user clicked. The offset is zero while the
+/// selected pick's row is above the footer's spacer, else the smallest offset
+/// that shows it.
+pub fn offset_of(picks: &[usize], selected: usize, top: usize, height: usize) -> usize {
     let last = height.saturating_sub(2);
-    let visible = last.saturating_sub(first);
-    selected
-        .saturating_sub(visible.saturating_sub(1))
-        .min(rows.saturating_sub(visible))
+    let Some(row) = picks.get(selected).copied() else {
+        return 0;
+    };
+    if row < last {
+        0
+    } else {
+        (row - last + 1).min(row.saturating_sub(top))
+    }
 }
 
 /// The head of the board: the title, the time and tasks bars and the tabs.
@@ -489,13 +501,6 @@ pub fn tab_at(x: u16) -> Option<Tab> {
         .map(|(_, _, tab)| tab)
 }
 
-/// A view of the board: its heading, the rows the user can pick and the rest.
-pub struct ViewRows {
-    pub heading: Line,
-    pub rows: Vec<Line>,
-    pub rest: Vec<Line>,
-}
-
 /// The selection mark of a row: `›` in the accent colour.
 fn mark(selected: bool) -> Line {
     if selected {
@@ -515,79 +520,116 @@ fn lane_style(project: &ProjectBoard, lane: &str) -> Style {
     Style::fg(lane_color(&lane_order(project), lane))
 }
 
-/// The view of the board.
-pub fn view(board: &Board, tab: Tab, selected: usize) -> ViewRows {
+/// Paint the view of the board on a canvas, at row `top`: the heading on its
+/// own row, the rows of the view from `top + 1`.
+///
+/// The canvas row of every selectable row is returned, in order: the picks.
+/// It is what the selection moves over, and what the selected row is lit on.
+pub fn view(board: &Board, screen: &Screen, canvas: &mut Canvas, top: usize) -> Vec<usize> {
     let Some(project) = board.projects.first() else {
-        return ViewRows {
-            heading: Line::plain("no project in the store"),
-            rows: Vec::new(),
-            rest: Vec::new(),
-        };
+        canvas.put_line(0, top, &Line::plain("no project in the store"));
+        return Vec::new();
     };
-    match tab {
-        Tab::Now => view_now(project, selected),
-        Tab::Tasks => {
-            let lines =
-                graph::styled_lines(&project.graph, &project.graph_lanes, Some(selected));
-            let count = project.graph.len();
-            let heading = lines.first().cloned().unwrap_or_default();
-            let rows = lines
-                .get(1..=count)
-                .map(|rows| rows.to_vec())
-                .unwrap_or_default();
-            let rest = lines.get(count + 1..).map(|rest| rest.to_vec()).unwrap_or_default();
-            ViewRows { heading, rows, rest }
-        }
-        Tab::Cost => view_tokens(project, selected),
-        Tab::Log => view_decisions(project, selected),
+    match screen.tab {
+        Tab::Now => view_now(project, screen, canvas, top),
+        Tab::Tasks => view_tasks(project, screen, canvas, top),
+        Tab::Cost => view_tokens(project, screen, canvas, top),
+        Tab::Log => view_decisions(project, screen, canvas, top),
     }
+}
+
+/// The second view: the work as a graph, painted from the graph's own lines.
+fn view_tasks(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    // The graph's own highlighter still knows the selection (its dependency
+    // marks); the reversed cells it draws are the row the canvas lights on its
+    // own, one colour across the width (README change 13).
+    let lines = graph::styled_lines(&project.graph, &project.graph_lanes, Some(screen.selected));
+    let count = project.graph.len();
+    let mut picks = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let row = top + index;
+        canvas.put_line(0, row, line);
+        // The first line is the head of the columns; then one line per task.
+        if (1..=count).contains(&index) {
+            picks.push(row);
+        }
+    }
+    picks
 }
 
 /// The fourth view: the captain's decisions (★ = worth a look at landing) and
 /// the agents' friction reports (the prototype).
-fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_decisions(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
+    );
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     // The starred decisions are the ones the user reads in full (F1): the
     // others are counted by kind below.
     let starred: Vec<&crate::DecisionBoard> =
         project.decisions.iter().filter(|decision| decision.star).collect();
     for (index, decision) in starred.iter().enumerate() {
-        let picked = index == selected;
-        rows.push(
-            mark(picked)
+        let picked = index == screen.selected;
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{} ★ {:<9}", clock_of(&decision.at), decision.kind),
-                    Style::fg(Color::Warn).reversed_if(picked),
+                    Style::fg(Color::Warn),
                 )
                 .push(" ", Style::PLAIN)
-                .push(decision.what.clone(), Style::PLAIN.reversed_if(picked)),
+                .push(decision.what.clone(), Style::PLAIN),
         );
+        // The decision is what the selection moves over; its reason is not.
+        picks.push(row);
+        row += 1;
         // The reason stands on its own line, as the prototype draws it: a
         // decision line with the reason appended loses it on a narrow screen
         // (F2).
         if let Some(why) = &decision.why {
-            rows.push(
-                Line::plain(format!("{:22}", ""))
+            canvas.put_line(
+                0,
+                row,
+                &Line::plain(format!("{:22}", ""))
                     .push(format!("why: {why}"), Style::fg(Color::Dim)),
             );
+            row += 1;
         }
     }
     // The count of the decisions by kind (§7.2): the landing review shows it
     // next to the starred lines.
     if !project.decisions.is_empty() {
-        rows.push(Line::new());
-        rows.push(Line::plain(format!("by kind: {}", counts_of_kind(project))));
+        row += 1;
+        canvas.put_line(0, row, &Line::plain(format!("by kind: {}", counts_of_kind(project))));
+        row += 1;
     }
     // The friction reports the agents left (§6.1): an open one is unread.
-    rows.push(Line::new());
-    rows.push(Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
+    row += 1;
+    canvas.put_line(0, row, &Line::styled("FRICTION REPORTS FROM AGENTS", Style::bold()));
+    row += 1;
     let width = lane_width(project.frictions.iter().map(|friction| friction.lane.as_str()), 6, 1);
     for friction in &project.frictions {
         let (status, color) =
             if friction.closed { ("closed", Color::Dim) } else { ("open", Color::Warn) };
-        rows.push(
-            Line::plain("  ")
+        canvas.put_line(
+            0,
+            row,
+            &Line::plain("  ")
                 .push(
                     format!("{} {:<width$}", friction.task, friction.lane),
                     lane_style(project, &friction.lane),
@@ -595,12 +637,9 @@ fn view_decisions(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(format!("{status:<8}"), Style::fg(color))
                 .push(friction.body.clone(), Style::PLAIN),
         );
+        row += 1;
     }
-    ViewRows {
-        heading: Line::styled("DECISIONS MADE  (★ = worth a look at landing)", Style::bold()),
-        rows,
-        rest: Vec::new(),
-    }
+    picks
 }
 
 /// The decisions of the project that are not starred, by kind: `2 scope, 1 cut`.
@@ -635,8 +674,14 @@ fn ratio_color(ratio: f64) -> Color {
 
 /// The third view: the time and the tokens of every task that ran (the
 /// prototype).
-fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_tokens(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     let mut tokens_total = 0;
     let mut cache_total = 0;
     let mut cost_total = 0.0;
@@ -648,8 +693,19 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
     // (the user, 2026-10-28).
     let priced = tasks.iter().any(|(_, task)| task.cost_usd.is_some());
     let width = lane_width(tasks.iter().map(|(lane, _)| *lane), 6, 1);
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled(
+            format!(
+                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
+                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
+            ),
+            Style::fg(Color::Dim),
+        ),
+    );
     for (index, (lane, task)) in tasks.into_iter().enumerate() {
-        let picked = index == selected;
+        let picked = index == screen.selected;
         let estimate = task.est_min.unwrap_or(0);
         let actual = task.actual_min.unwrap_or(0);
         let ratio = if estimate > 0 {
@@ -692,9 +748,11 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
             None if priced => "      ?".to_string(),
             None => String::new(),
         };
-        let row_style = Style::PLAIN.reversed_if(picked);
-        rows.push(
-            mark(picked)
+        let row_style = Style::PLAIN;
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(format!("{:<7}", task.id), row_style)
                 .push(format!("{lane:<width$}"), lane_style(project, lane))
@@ -708,6 +766,8 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
                     row_style,
                 ),
         );
+        picks.push(row);
+        row += 1;
     }
     let mut total = format!(
         "so far: {:.1}M tokens, {:.1}M cache reads, {}",
@@ -720,17 +780,11 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
         total.push_str(&format!(" (known so far; {unknown} unknown)"));
     }
     let rest = vec![Line::styled(total, Style::bold())];
-    ViewRows {
-        heading: Line::styled(
-            format!(
-                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
-                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
-            ),
-            Style::fg(Color::Dim),
-        ),
-        rows,
-        rest,
+    for line in &rest {
+        canvas.put_line(0, row, line);
+        row += 1;
     }
+    picks
 }
 
 /// The tasks of the Time & tokens view, in the order of its rows: the tasks
@@ -766,11 +820,22 @@ fn quota_color(used_percent: f64) -> Color {
 
 /// The first view: the lanes, what needs a look, the quota and the done
 /// sentence.
-fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
-    let mut rows = Vec::new();
+fn view_now(
+    project: &ProjectBoard,
+    screen: &Screen,
+    canvas: &mut Canvas,
+    top: usize,
+) -> Vec<usize> {
+    canvas.put_line(
+        0,
+        top,
+        &Line::styled("LANES  (Enter: what this lane did and has left)", Style::bold()),
+    );
+    let mut picks = Vec::new();
+    let mut row = top + 1;
     let width = lane_width(lane_order(project), 5, 0);
     for (index, lane) in project.lanes.iter().enumerate() {
-        let picked = index == selected;
+        let picked = index == screen.selected;
         let current = current_task(lane);
         let (middle, middle_style) = match (&lane.idle_text, current) {
             // A lane that helps on the captain's instruction is shown as
@@ -798,15 +863,17 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
             },
             None => (String::new(), Style::PLAIN),
         };
-        rows.push(
-            mark(picked)
+        canvas.put_line(
+            0,
+            row,
+            &mark(picked)
                 .push(" ", Style::PLAIN)
                 .push(
                     format!("{:<width$}", lane.lane),
-                    lane_style(project, &lane.lane).and_bold().reversed_if(picked),
+                    lane_style(project, &lane.lane).and_bold(),
                 )
                 .push(" ", Style::PLAIN)
-                .push(format!("{middle:<44}"), middle_style.reversed_if(picked))
+                .push(format!("{middle:<44}"), middle_style)
                 .push(" ", Style::PLAIN)
                 .push(format!("{measures:>20}"), measures_style)
                 .push(
@@ -817,6 +884,8 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
                     Style::fg(Color::Dim),
                 ),
         );
+        picks.push(row);
+        row += 1;
     }
     let mut rest = Vec::new();
     // The overlaps with the integration branch (T-188): information lines.
@@ -865,11 +934,11 @@ fn view_now(project: &ProjectBoard, selected: usize) -> ViewRows {
     for clause in done_clauses(project) {
         rest.push(Line::styled(format!("  · {clause}"), Style::fg(Color::Dim)));
     }
-    ViewRows {
-        heading: Line::styled("LANES  (Enter: what this lane did and has left)", Style::bold()),
-        rows,
-        rest,
+    for line in &rest {
+        canvas.put_line(0, row, line);
+        row += 1;
     }
+    picks
 }
 
 /// The task the lane works on now.
