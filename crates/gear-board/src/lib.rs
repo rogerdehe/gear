@@ -17,6 +17,7 @@ mod deps;
 pub mod frame;
 pub mod graph;
 pub mod idle;
+pub mod style;
 mod screen;
 pub mod voyage;
 
@@ -81,6 +82,9 @@ pub struct Options {
     pub view: View,
     /// How long a frame stays on the screen.
     pub refresh: Duration,
+    /// Draw in colour. `run` turns it off when `NO_COLOR` is set; the JSON
+    /// and the text printed once (no terminal) never carry colour.
+    pub color: bool,
 }
 
 impl Default for Options {
@@ -91,6 +95,7 @@ impl Default for Options {
             json: false,
             view: View::Lanes,
             refresh: REFRESH,
+            color: true,
         }
     }
 }
@@ -1277,7 +1282,13 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
     }
     let mut keys = screen::Terminal::new();
     screen::enter(out).map_err(write_error)?;
-    let result = run_with(store, opts, out, &mut keys, herdr);
+    // NO_COLOR (no-color.org): any value but the empty one turns the colours
+    // off.
+    let opts = Options {
+        color: opts.color && style::colour_allowed(std::env::var_os("NO_COLOR").as_deref()),
+        ..opts.clone()
+    };
+    let result = run_with(store, &opts, out, &mut keys, herdr);
     // The terminal is given back even when the board failed.
     let _ = screen::leave(out);
     result
@@ -1296,7 +1307,7 @@ pub fn run_with(
 ) -> GearResult<()> {
     let mut tab = tab_of(opts.view);
     let mut selected = 0usize;
-    let mut panel: Option<Vec<String>> = None;
+    let mut panel: Option<Vec<style::Line>> = None;
     let mut first = true;
     loop {
         let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
@@ -1323,7 +1334,7 @@ pub fn run_with(
         // shrank, or a key pressed at its end, does not lose the selection.
         let rows = frame::view(&board, tab, selected).rows.len();
         selected = selected.min(rows.saturating_sub(1));
-        let text = frame::frame(&board, tab, selected, panel.as_deref(), keys.size());
+        let text = frame::canvas(&board, tab, selected, panel.as_deref(), keys.size()).ansi(opts.color);
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -1441,15 +1452,15 @@ fn open_panel(
     store: &mut Store,
     tab: frame::Tab,
     selected: usize,
-) -> GearResult<Option<Vec<String>>> {
+) -> GearResult<Option<Vec<style::Line>>> {
     let Some(project) = board.projects.first() else { return Ok(None) };
     match tab {
-        frame::Tab::Now | frame::Tab::Workload => {
-            Ok(project.lanes.get(selected).map(frame::lane_panel))
-        }
+        frame::Tab::Now | frame::Tab::Workload => Ok(project.lanes.get(selected).map(|lane| {
+            frame::styled_lane_panel(lane, frame::lane_color_of(project, &lane.lane))
+        })),
         frame::Tab::Graph => {
             let Some(task) = project.graph.get(selected) else { return Ok(None) };
-            let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;
+            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
         frame::Tab::Tokens => {
@@ -1459,7 +1470,7 @@ fn open_panel(
             let Some((_, task)) = tasks.get(selected) else {
                 return Ok(None);
             };
-            let rows = store.read(|tx| graph::panel(tx, &project.project, &task.id, now_ts()))?;
+            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
         _ => Ok(None),

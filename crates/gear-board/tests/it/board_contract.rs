@@ -783,7 +783,9 @@ impl Frames {
         let start = self.buffer.find(CLEAR)? + CLEAR.len();
         let rest = &self.buffer[start..];
         let end = rest.find(gear_board::frame::FOOTER)? + gear_board::frame::FOOTER.len();
-        let frame = rest[..end].to_string();
+        // The frame is read as the user reads it: the colours and the
+        // reverse video of the board are not part of the text.
+        let frame = plain(&rest[..end]);
         self.buffer = rest[end..].to_string();
         Some(frame)
     }
@@ -796,11 +798,17 @@ fn plain(line: &str) -> String {
     let mut chars = line.chars().peekable();
     while let Some(character) = chars.next() {
         if character == '\u{1b}' {
-            // The sequence ends at its last letter.
-            for character in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&character) {
-                    break;
+            // A control sequence (`ESC [`, its parameters, its final letter)
+            // or a two-character escape: neither prints anything.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for character in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&character) {
+                        break;
+                    }
                 }
+            } else {
+                chars.next();
             }
             continue;
         }
