@@ -147,7 +147,9 @@ pub fn read_quota_in(
 /// None when no line states a reset, or when the time it states is not after
 /// `now` or more than eight days after it: a clock time such as `resets 3pm`
 /// has no time zone GEAR could read, and a window longer than eight days is
-/// none of the windows GEAR knows.
+/// none of the windows GEAR knows. A time out of that window is None for the
+/// **whole call**: the last line that states a reset is the provider's latest
+/// word, and an earlier line may be stale.
 pub fn reset_from_text(text: &str, now: Ts) -> Option<Ts> {
     // The longest window a stated reset can be of: eight days, in seconds.
     const LONGEST: Ts = 8 * 86_400;
@@ -159,6 +161,9 @@ pub fn reset_from_text(text: &str, now: Ts) -> Option<Ts> {
         if time > now && time - now <= LONGEST {
             return Some(time);
         }
+        // The provider's latest word names a time GEAR cannot use: an earlier
+        // line would only be staler (contract v3).
+        return None;
     }
     None
 }

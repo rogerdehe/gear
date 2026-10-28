@@ -415,6 +415,10 @@ fn a_reset_out_of_the_window_is_not_a_reset() {
     assert_eq!(reset_from_text("resets in 9 days", T13), None);
     // Eight days is still inside the window.
     assert_eq!(reset_from_text("resets in 8 days", T13), Some(T13 + 691_200));
+    // The last matching line decides: an earlier line may be stale, so a time
+    // out of the window on it is None for the whole call (contract v3).
+    let text = "resets in 1h\nUsage limit reached. Try again in 9 days.";
+    assert_eq!(reset_from_text(text, T13), None);
 }
 
 #[test]
