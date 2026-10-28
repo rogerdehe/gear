@@ -660,6 +660,12 @@ pub fn project_with_agents(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The friction reports are the ones of the measured voyage too (T-263).
+    let frictions = frictions_of(
+        tx,
+        project,
+        workload.as_ref().map(|voyage| voyage.milestone.as_str()),
+    )?;
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -675,7 +681,7 @@ pub fn project_with_agents(
         graph_lanes,
         quota: quota_readings(tx)?,
         decisions,
-        frictions: frictions_of(tx, project)?,
+        frictions,
         // The overlaps with the integration branch (T-188): information
         // lines, never items that wait for the captain.
         overlaps: integration_overlaps_of(tx, project)?,
@@ -1109,13 +1115,30 @@ fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<
         .collect())
 }
 
-/// The friction reports of the project (§6.1): the open ones and the closed
-/// ones, oldest first.
-fn frictions_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FrictionBoard>> {
-    Ok(tx
-        .frictions_of_project(project)?
-        .into_iter()
-        .map(|friction| FrictionBoard {
+/// The friction reports of the voyage, as the board shows them (§6.1): the
+/// open ones and the closed ones, oldest first.
+///
+/// A friction belongs to the voyage of the task it names: with no measured
+/// voyage, none (T-263).
+fn frictions_of(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: Option<&str>,
+) -> GearResult<Vec<FrictionBoard>> {
+    let Some(voyage) = voyage else {
+        return Ok(Vec::new());
+    };
+    let mut frictions = Vec::new();
+    for friction in tx.frictions_of_project(project)? {
+        // The task of the report: a friction of a task of another voyage is
+        // history, not the measured voyage's.
+        let Some(task) = tx.get_task(project, &friction.task)? else {
+            continue;
+        };
+        if task.milestone.as_deref() != Some(voyage) {
+            continue;
+        }
+        frictions.push(FrictionBoard {
             task: friction.task,
             lane: friction
                 .seat
@@ -1126,8 +1149,9 @@ fn frictions_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<FrictionBoard>> {
             body: friction.body,
             closed: friction.closed_at.is_some(),
             outcome: friction.outcome,
-        })
-        .collect())
+        });
+    }
+    Ok(frictions)
 }
 
 fn workload_voyage(
