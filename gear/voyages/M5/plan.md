@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=606 -->
+<!-- gear-plan project=gear base=607 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -41,6 +41,7 @@ eta: 16h
 - 2026-10-29 02:45 hand-fix: mast's delivery O-3634 ("Continue T-317: run `gear` first") sat typed in pi's input box with its Enter lost, the agent idle; the captain sent one Enter (herdr agent send-keys gear-mast enter) and mast went on; the root fix is T-371 | why: mast idle on an unsent packet (M-4569) | else: mast idle until a restart
 - station M-4570: keep course 180 min in, 29 done; forecast 1440 min; the eta waits for the user
 - 2026-10-29 02:50 hand-fix: the same lost Enter on hull: O-3638 "Continue T-273: run `gear` first" sat in pi's input box, hull idle (M-4576); one Enter sent; T-371 goes to the head of hull's queue ([now]): twice in ten minutes, both a Continue to a pi lane | why: hull idle | else: the next Continue stalls a lane again
+- station M-4586: keep course 184 min in, 30 done; forecast 1500 min; the eta waits for the user
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
