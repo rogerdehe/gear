@@ -241,6 +241,10 @@ pub fn verdict_section(hint: &crate::tasks::VerdictHint) -> &'static str {
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
 
+/// The most unconfirmed deliveries the snapshot names; the rest is one line of
+/// count, so the snapshot stays short (T-271).
+const SNAPSHOT_DELIVERIES: usize = 3;
+
 /// The captain's snapshot: the totals, one line per lane (the task it is on
 /// and how much is queued), the deliveries in flight and the temp slots.
 ///
@@ -274,6 +278,20 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         plan.temps.in_use,
         plan.temps.quota
     ));
+    // Which deliveries those are (T-271): the count alone made the captain ask
+    // the store. The oldest first, three lines, the rest as a count.
+    for item in plan.unconfirmed.iter().take(SNAPSHOT_DELIVERIES) {
+        lines.push(format!(
+            "    {} {} {} {}m",
+            item.op,
+            item.seat,
+            item.task.as_deref().unwrap_or("-"),
+            item.age_s / 60
+        ));
+    }
+    if plan.unconfirmed.len() > SNAPSHOT_DELIVERIES {
+        lines.push(format!("    +{} more", plan.unconfirmed.len() - SNAPSHOT_DELIVERIES));
+    }
     // The voyages (T-22): the sentence each phase is judged by, its bar and its
     // planned landing, so the captain sees the bar before the inbox. Each
     // voyage is independent: the snapshot lists the ones with open work, and

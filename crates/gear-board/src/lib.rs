@@ -138,6 +138,9 @@ pub struct ProjectBoard {
     /// page shows them, because a delivery that is not confirmed is a lane
     /// that may not have started.
     pub unconfirmed_deliveries: usize,
+    /// The same deliveries named, oldest first (T-271): the home page says
+    /// which ones they are, so the count is never a number without names.
+    pub unconfirmed: Vec<Unconfirmed>,
     /// The quota readings of the providers (§9.1).
     pub quota: Vec<QuotaReading>,
     /// The captain's decisions of this voyage (§7.1): the log the board
@@ -148,6 +151,19 @@ pub struct ProjectBoard {
     /// The tasks that overlap the integration branch of their repo (T-188):
     /// information lines, never items that wait for the captain.
     pub overlaps: Vec<Overlap>,
+}
+
+/// One delivery the engine has not confirmed yet (T-271).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unconfirmed {
+    /// The op, e.g. `O-12`.
+    pub op: String,
+    /// The seat's name (not its id).
+    pub seat: String,
+    /// The task the delivery carried, when it named one.
+    pub task: Option<String>,
+    /// How long it has been in flight: `now` − the op's creation.
+    pub age_s: i64,
 }
 
 /// One task that overlaps the integration branch of its repo (T-188).
@@ -633,6 +649,7 @@ pub fn project_with_agents(
     // retired seat, or of an older generation of a live one, is history: the
     // home page showed it as a lost message.
     let mut unconfirmed_deliveries = 0;
+    let mut unconfirmed: Vec<Unconfirmed> = Vec::new();
     for state in [
         OpState::Intended,
         OpState::Executing,
@@ -643,15 +660,27 @@ pub fn project_with_agents(
             if op.kind != OpKind::Deliver {
                 continue;
             }
-            let live = tx.get_seat(&op.seat)?.is_some_and(|seat| {
+            let seat = tx.get_seat(&op.seat)?;
+            let live = seat.as_ref().is_some_and(|seat| {
                 matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Starting)
                     && seat.generation == op.generation
             });
             if live {
                 unconfirmed_deliveries += 1;
+                unconfirmed.push(Unconfirmed {
+                    op: op.id.clone(),
+                    seat: seat.map(|seat| seat.name).unwrap_or_default(),
+                    task: op.task.clone(),
+                    age_s: (now - op.created).max(0),
+                });
             }
         }
     }
+    // The oldest first: the delivery that waits longest is the one that may be
+    // a lane that never started.
+    unconfirmed.sort_by(|left, right| {
+        right.age_s.cmp(&left.age_s).then_with(|| left.op.cmp(&right.op))
+    });
 
     let voyages = voyage::reports(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
@@ -688,6 +717,7 @@ pub fn project_with_agents(
         waiting,
         temps,
         unconfirmed_deliveries,
+        unconfirmed,
     })
 }
 
