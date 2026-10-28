@@ -33,6 +33,9 @@ fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(S
     // branch with, `{lane}/t{n}` when it says nothing.
     let conventions = crate::dispatch::conventions(tx, &seat.project);
     let branch = crate::dispatch::task_branch(&conventions.task_branch, &seat.project, &seat.name, &attempt.task);
+    // The project's own remote (T-262): the push clock reads the ref its
+    // `[conventions].remote` names.
+    let remote = &conventions.remote;
     let start = tx.attempt_times(&seat.project, &attempt.task, attempt.n)?.started.unwrap_or(attempt.started);
     let task = tx.get_task(&seat.project, &attempt.task)?;
     let project = tx.get_project(&seat.project)?;
@@ -40,7 +43,7 @@ fn last_push(tx: &Tx<'_>, seat: &SeatRow, attempt: &AttemptRow) -> GearResult<(S
         .and_then(|p| gear_app::config::parse(&p.config_toml).ok())
         .map(|c| c.repo_of_lane(&seat.name).path));
     let pushed = repo.and_then(|repo| std::process::Command::new("git")
-        .args(["-C", &repo, "log", "-1", "--format=%ct", &format!("refs/remotes/origin/{branch}"), "--"])
+        .args(["-C", &repo, "log", "-1", "--format=%ct", &format!("refs/remotes/{remote}/{branch}"), "--"])
         .output().ok()).filter(|o| o.status.success())
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .and_then(|s| s.trim().parse::<Ts>().ok());
