@@ -408,14 +408,6 @@ def view_workload(w, sel):
             f"not balanced: {last} ends {hm(gap)} after {first} — move {last}'s next startable wave to {first}",
             C["ok"] if gap <= 30 else C["bad"])
     y += 2
-    put(w, y, 1, "BURN-UP  (minutes of estimate merged, per voyage hour)", C["b"]); y += 1
-    BURN = G["BURN"]; top = max(BURN + [tot_d + tot_l]); H = 8
-    for row in range(H, 0, -1):
-        lvl = top * row / H
-        line = "".join(" ██ " if b >= lvl else "    " for b in BURN)
-        put(w, y, 8, line, C["ok"]); y += 1
-    put(w, y - H, 8 + 4 * len(BURN), f"  ─ total {tot_d + tot_l}m", C["dim"])
-    put(w, y, 8, "".join(f" h{i:<2}" for i in range(len(BURN))), C["dim"])
     return len(LANES)
 
 
