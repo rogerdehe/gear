@@ -4695,7 +4695,12 @@ path="api"
 
     #[test]
     fn a_failed_herdr_leaves_the_message_stored_and_the_engine_rings_it() {
-        let (mut store, mut herdr) = working_world("codex", AgentStatus::Working);
+        // T-241 rework: the fake injects exactly one refusal, and an urgent
+        // doorbell to a *working* lane now spends it on the Escape that cuts the
+        // turn (the five ops.rs tests assert that order). This test is about the
+        // refused prompt and its recovery, so the lane is idle here: no Escape
+        // is sent, and the refusal lands on the prompt itself.
+        let (mut store, mut herdr) = working_world("codex", AgentStatus::Idle);
         herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "agent_blocked".into() });
         run_send(
             &mut store,
