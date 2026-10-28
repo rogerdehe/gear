@@ -408,9 +408,9 @@ fn register(
 ///   the engine onboards it;
 /// - a registered lane keeps its seat: its generation, state and bindings stay,
 ///   only its profile follows the config;
-/// - a **retired** lane that is in the new config is registered again: it goes
-///   back to Queued ("registered again"), so the engine onboards it once more
-///   (T-54).
+/// - a **retired** lane stays retired, even when it is in the new config
+///   (T-247): a re-apply starts no agent; a Ready task that names the lane is
+///   what brings it back, in `plan::apply_queue`.
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
 /// a plan change.
@@ -531,17 +531,10 @@ fn re_register(
                 if seat.profile != lane.profile {
                     tx.set_seat_profile(&seat_id, &lane.profile)?;
                 }
-                // A retired lane that is in the new config is registered again:
-                // a new voyage may reuse the name, and the engine onboards
-                // the seat once more (T-54).
-                if seat.state == SeatState::Retired {
-                    tx.set_seat_state(
-                        &seat_id,
-                        SeatState::Queued,
-                        Some("registered again"),
-                        now,
-                    )?;
-                }
+                // A retired lane stays retired through any re-apply (T-247):
+                // a config change is not a reason to start an agent again. A
+                // Ready task that names the lane brings it back (see
+                // `plan::apply_queue`).
             }
             // A new lane is registered Queued; the engine onboards it.
             None => {
