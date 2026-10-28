@@ -2474,12 +2474,30 @@ fn floor_div(a: i64, b: i64) -> i64 {
 /// creates the first tasks departs then (review R1) and a later block edit
 /// cannot move it (R2). A milestone whose tasks predate the voyage record takes
 /// its departure from the oldest plan draft that already carried them.
+///
+/// A milestone emptied of its tasks loses its departure (T-239), so a reused
+/// milestone id starts its clock when its new tasks come: the reset is recorded
+/// in `meta`, and `departure_from_history` searches only the drafts applied
+/// after it. A milestone that still has tasks never changes.
 fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for task in tx.tasks_of_project(project)? {
         if let Some(milestone) = task.milestone {
             *counts.entry(milestone).or_insert(0) += 1;
         }
+    }
+    // A voyage whose milestone has no task left keeps no departure: the id is
+    // free to be reused, and its history must not start at the emptied drafts.
+    let version = tx.plan_version(project)?;
+    for voyage in tx.voyages_of_project(project)? {
+        if voyage.departure.is_none() || counts.contains_key(&voyage.milestone) {
+            continue;
+        }
+        tx.clear_voyage_departure(project, &voyage.milestone)?;
+        tx.set_meta(
+            &departure_reset_key(project, &voyage.milestone),
+            &version.to_string(),
+        )?;
     }
     for (milestone, tasks) in counts {
         let voyage = tx.get_voyage(project, &milestone)?;
@@ -2507,16 +2525,29 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     Ok(())
 }
 
+/// The meta key that remembers the plan version at which a milestone lost its
+/// last task (T-239): `departure_from_history` starts after it.
+fn departure_reset_key(project: &str, milestone: &str) -> String {
+    format!("departure-reset:{project}:{milestone}")
+}
+
 /// Where a milestone that predates the voyage record departed from: the oldest
 /// plan version whose draft already had tasks on it, with how many. The plan's
 /// stored drafts are the persisted history (tasks carry no creation time).
+///
+/// A milestone that was emptied and reused starts after its reset (T-239): the
+/// drafts before it carried the earlier voyage's tasks, not this one's.
 fn departure_from_history(
     tx: &Tx<'_>,
     project: &str,
     milestone: &str,
 ) -> GearResult<Option<(Ts, i64, Option<i64>)>> {
     let newest = tx.plan_version(project)?;
-    for version in 1..=newest {
+    let reset = tx
+        .get_meta(&departure_reset_key(project, milestone))?
+        .and_then(|raw| raw.trim().parse::<i64>().ok());
+    let start = reset.map_or(1, |version| version + 1);
+    for version in start..=newest {
         let Some(plan) = tx.get_plan(project, version)? else {
             continue;
         };
