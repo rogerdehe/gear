@@ -532,6 +532,37 @@ fn a_repo_gate_is_never_left_as_a_todo() {
     assert_eq!(fields(&validate(&cfg)), vec!["repos[0].gate"]);
 }
 
+/// T-242: a pipeline's exit status is its last command's, so a gate that
+/// pipes into another command can pass while the build failed. `||` is not a
+/// pipe, and `pipefail` makes the pipeline report the failing stage.
+#[test]
+fn a_gate_may_not_pipe_away_a_failure() {
+    let mut cfg = parse(MINIMAL).unwrap();
+    cfg.conventions.gate =
+        "go build ./... && go vet ./internal/... 2>&1 | head -20".into();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.gate"]);
+
+    for gate in [
+        "make gate",
+        "a && b",
+        "a || b",
+        "set -o pipefail; a | b",
+    ] {
+        let mut cfg = parse(MINIMAL).unwrap();
+        cfg.conventions.gate = gate.into();
+        assert_eq!(validate(&cfg), vec![], "{gate}");
+    }
+
+    // The repo's own gate is checked the same way, under its own name.
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].gate = Some("cargo test 2>&1 | tail -5".into());
+    assert_eq!(fields(&validate(&cfg)), vec!["repos.api.gate"]);
+
+    let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
+    cfg.repos[0].gate = Some("set -o pipefail; cargo test 2>&1 | tail -5".into());
+    assert_eq!(validate(&cfg), vec![], "pipefail is enough");
+}
+
 #[test]
 fn a_repo_branches_are_non_empty_and_different() {
     let mut cfg = parse(&format!("{MINIMAL}{REPOS}")).unwrap();
