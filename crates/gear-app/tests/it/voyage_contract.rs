@@ -402,3 +402,43 @@ fn historical_departure_scope_uses_the_original_plan() {
     assert_eq!(reports[0].scope_min, Some(330));
     assert_eq!(reports[0].departure_scope_min, Some(60));
 }
+
+/// T-239: a milestone emptied of its tasks keeps no departure, so a reused id
+/// starts its clock when its new tasks come — and its departure scope is those
+/// new tasks' estimates, not the earlier voyage's plan.
+#[test]
+fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
+    let mut s = world();
+    // M1 departs at NOW with two tasks of 30m each.
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (Some(NOW), Some(2), Some(60))
+    );
+
+    // The trial is moved to M0: M1 loses every task and with them its departure.
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
+    run(&mut s, moved, "r2", NOW + 100).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (None, None, None),
+        "a milestone with no task has no departure"
+    );
+    // M0, which now holds the tasks, departed on this apply.
+    let voyage = s.read(|tx| tx.get_voyage("p", "M0")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 100), Some(2)));
+
+    // The real voyage reuses M1: its departure is its own first task, not the
+    // trial's, and its scope is the new tasks' estimates.
+    let reuse = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: delivery v0.2.0\ndone: users install v0.2.0\nbar: block only loop breaks\neta: 3h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 45\ndeps: -\n";
+    run(&mut s, reuse, "r3", NOW + 200).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (Some(NOW + 200), Some(1), Some(45)),
+        "the reused id starts when its new tasks come"
+    );
+    assert_eq!(voyage.title, "delivery v0.2.0");
+}
