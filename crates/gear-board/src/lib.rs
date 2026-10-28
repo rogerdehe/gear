@@ -1576,9 +1576,11 @@ pub fn run_with(
                         // Only the rows the frame draws are rows of the view
                         // (F8): the click is on the screen row, the spacer
                         // below the data and the footer's row select nothing.
+                        // The view's first row is a row of the view (T-342's
+                        // rework): scrolling can put a pick there.
                         let row = y.saturating_sub(1) as usize;
                         let last = screen.size.1.saturating_sub(2);
-                        if row >= frame::FIRST_ROW && row < last {
+                        if row >= frame::VIEW_ROW && row < last {
                             // The rows above the viewport are scrolled away:
                             // the clicked row is the one the frame drew.
                             let offset = frame::offset_of(

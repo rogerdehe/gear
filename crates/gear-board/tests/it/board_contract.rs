@@ -1353,3 +1353,46 @@ fn a_view_scrolls_to_its_selected_pick_and_a_click_keeps_it() {
         assert!(!line.contains("\u{1b}[7m"), "row {y} is not lit: {line:?}");
     }
 }
+
+/// T-342's rework (F1 of the review of attempt 1): the view's own first row is
+/// a row of the view, so after scrolling a click on it picks the task drawn
+/// there.
+#[test]
+fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
+    use gear_board::frame;
+    let mut store = world_with_a_long_graph();
+    // `2` is the graph; sixteen `Down` scroll the view to the last task. The
+    // click at x 1 y 6 is the view's first row, where T-13 is drawn (the
+    // viewport starts at `top` = 5, so screen row 6 is the view's first).
+    let mut events = vec![Event::Key('2')];
+    for _ in 0..16 {
+        events.push(Event::Key('j'));
+    }
+    events.push(Event::Mouse { button: 0, x: 1, y: 6 });
+    let opts = Options {
+        project: Some("p".into()),
+        color: false,
+        refresh: Duration::from_millis(1),
+        ..Options::default()
+    };
+    let mut out: Vec<u8> = Vec::new();
+    run_with(&mut store, &opts, &mut out, &mut Events(events), None).unwrap();
+
+    let frame_text = last_frame(&out);
+    let rows: Vec<&str> = frame_text.lines().collect();
+    let lit: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(y, line)| *y != frame::TAB_ROW && line.contains("\u{1b}[7m"))
+        .map(|(y, _)| y)
+        .collect();
+    assert_eq!(lit.len(), 1, "one lit row: {frame_text}");
+    assert!(
+        rows[lit[0]].contains("T-13"),
+        "the click selected the task drawn on the view's first row: {frame_text}"
+    );
+    assert!(
+        !frame_text.contains("T-17"),
+        "the selection moved off the last task: {frame_text}"
+    );
+}
