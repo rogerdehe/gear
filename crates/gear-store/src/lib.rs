@@ -2518,7 +2518,7 @@ impl<'s> Tx<'s> {
         Ok(verdicts)
     }
 
-    // ---- v6: the M4 store API (§1 and §13.1 of ops/plan/m4-design.md)
+    // ---- v6: the M4 store API (§1 and §13.1 of gear/voyages/M4/design.md)
 
     /// The session the attempt ran in (§3): written at check-in and again at
     /// hand-in, when the agent may have compacted or been restarted.

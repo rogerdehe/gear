@@ -2142,7 +2142,7 @@ fn wall_clock() -> Ts {
         .unwrap_or(0)
 }
 
-/// A lane that is about to stand idle after an apply (T-58, ops/lessons.md 7a).
+/// A lane that is about to stand idle after an apply (T-58, gear/lessons.md 7a).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdleLane {
     /// The lane's name.
@@ -2175,7 +2175,7 @@ impl IdleLane {
     }
 }
 
-/// The lanes that are **about to** stand idle after an apply (T-58, ops/lessons.md
+/// The lanes that are **about to** stand idle after an apply (T-58, gear/lessons.md
 /// 7a): a lane that is up (Active or Standby — the states the engine's feed
 /// watches), **not** in the voyage's tail, with no queued task it could start
 /// now — every dependency of its queued tasks is still open.

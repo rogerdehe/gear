@@ -1,6 +1,6 @@
 # M4.2 backlog
 
-The list M4.2 drew from at its departure; what it took is in gear/voyages/M4.2.md.
+The list M4.2 drew from at its departure; what it took is in gear/voyages/M4.2/plan.md.
 
 ## Fixes from real use (user, 2026-10-28; collected after M4 landed and during M4.1, which took only T-226 and T-227)
 
@@ -18,7 +18,7 @@ Problems found after M4's landing and in other projects' first voyages are colle
 - Moving a running task to another lane in the plan leaves its open attempt on the old seat (M4 20:27: T-160 keel → hull; the captain abandoned attempt 1 in the store). The plan should abandon it (the old lane told) and the new lane start a new attempt.
 - A merge loses a push race to the captain's plan commits on the same branch (M4 03:40, T-187: three retries, then failed until a hand remerge). The captain's plan commits must not fail a merge.
 - **Rework budgets are sized for one fix (M4 friction, ~9 reports).** A rework round of 13-25 min is given for a review with three to nine blocking findings; the overrun question then fires on nearly every rework. Size the rework budget from the blocking findings it carries.
-- Cut from M4 (station M-2503/M-2572): T-180 admin stop waits for merges (T-121), T-183 names (T-134 F2/F3), T-185 three merge.rs tests over 10 s. T-182 (a push race does not re-run the gate) goes with the push-race item above. Their goals are in gear/voyages/M4.md.
+- Cut from M4 (station M-2503/M-2572): T-180 admin stop waits for merges (T-121), T-183 names (T-134 F2/F3), T-185 three merge.rs tests over 10 s. T-182 (a push race does not re-run the gate) goes with the push-race item above. Their goals are in gear/voyages/M4/plan.md.
 - T-176's rest: the engine reconnects when its Herdr server restarts (following the project's own session is done by v0.4.5's store per session).
 - One word for a voyage: "voyage" and "milestone" name the same thing (files in gear/voyages/, headers `# Milestone`). Say voyage everywhere a person reads it; the id stays M1, M2, … (user, 2026-10-28).
 - Task branch name from a template (a captain on another project, 2026-10-28; wanted before that project's M2): `[conventions] task_branch = "{project}/{lane}/t{n}"`, default `"{lane}/t{n}"` so nothing changes for existing projects. init requires `{lane}` and `{n}`, refuses a template that does not expand to a valid ref, and refuses one whose refs would clash as git directories with an existing branch (`acme/pay/t1` against a branch `acme`). Today the name is built in at least five places (gear-app base::task_branch and tasks.rs:981, gear-engine dispatch::task_branch and merge branch_of, gear-forge sync branch_of; home branches in onboard.rs and review.rs): one function first, every caller through it.

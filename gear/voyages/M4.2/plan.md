@@ -8,7 +8,7 @@ bar: STABLE (user, M4): an error in normal use and a stability or usability prob
 eta: 6h
 
 # Decisions
-- 2026-10-28 14:30 scope: M4.2 runs the collected backlog (ops/plan/m4-backlog.md "M4.2") in waves; the first wave is the six tasks below, more are added as lanes run dry (user: "开始 4.2吧") | why: user | else: one big plan written before departure
+- 2026-10-28 14:30 scope: M4.2 runs the collected backlog (gear/voyages/M4/backlog.md "M4.2") in waves; the first wave is the six tasks below, more are added as lanes run dry (user: "开始 4.2吧") | why: user | else: one big plan written before departure
 - 2026-10-28 14:30 model: lanes hull (crates/gear-engine/) and mast (everything else) on pi with tokenrhythm/deepseek-v4.1-flash-1017 (600K); reviewers Codex gpt-6.1-sol medium, then tokenrhythm/deepseek-v4-pro-0813 on pi; quota lanes 2, temps 2 (user) | why: user, 2026-10-28 | else: MiniMax lanes as in M4.1
 - 2026-10-28 14:30 config: machine share with another project's 4 lanes and 4 reviewers on 10 cores / 16 GB: cargo builds capped at 2 jobs (/Volumes/Data/cargo/config.toml), Go builds at -p=2 (go env GOFLAGS); contracts scope tests to the crate they touch; the full suite only at hand-in | why: load reached 175 on 2026-10-28 | else: builds starve the machine
 - 2026-10-28 15:00 config: the machine-wide caps (cargo jobs = 2, RUST_TEST_THREADS, go GOFLAGS=-p=2) are removed; the caps move into Makefile targets (T-238: check, gate, full), and the gate becomes `make gate` once T-238 merges (user: no global config, the dispatcher names the command) | why: user | else: global settings that also slow the user's own builds

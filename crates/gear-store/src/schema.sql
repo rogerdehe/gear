@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- The GitHub issue a task came from (T-79): the plan's `issue: #<n>`. NULL
   -- for a task with none.
   issue INTEGER,
-  -- v6 (§1 of ops/plan/m4-design.md): the task keeps its own repo, base and
+  -- v6 (§1 of gear/voyages/M4/design.md): the task keeps its own repo, base and
   -- gate, copied from the lane's config when it is created. A reader that
   -- finds NULL falls back to the lane's current config (old tasks behave as
   -- today). `rework_estimate_min` is the `estimate=<min>` of the fail verdict
@@ -159,7 +159,7 @@ CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, args_hash TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS audit (ts INTEGER NOT NULL, project TEXT, actor TEXT NOT NULL,
   action TEXT NOT NULL, detail TEXT);
 
--- v6 (§1 of ops/plan/m4-design.md). The tables of the M4 schema: the rounds
+-- v6 (§1 of gear/voyages/M4/design.md). The tables of the M4 schema: the rounds
 -- and their tokens, the stretches a seat could not work, the friction reports
 -- and the captain's decision log.
 

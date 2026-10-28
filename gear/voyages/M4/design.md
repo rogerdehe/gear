@@ -1,6 +1,6 @@
 # M4 design
 
-Status: draft for alignment with the user (2026-10-26). Every M4 task says "implement §x.y of ops/plan/m4-design.md exactly". Lanes do not design: when this document and the code disagree, or a case is not covered here, the lane stops and asks the captain (`gear send --kind question`), it does not invent a rule.
+Status: draft for alignment with the user (2026-10-26). Every M4 task says "implement §x.y of gear/voyages/M4/design.md exactly". Lanes do not design: when this document and the code disagree, or a case is not covered here, the lane stops and asks the captain (`gear send --kind question`), it does not invent a rule.
 
 Words used below:
 
@@ -281,7 +281,7 @@ Subscription plans (MiniMax, Codex) get the API-equivalent price: the number say
 
 ### 4.5 Where it shows
 
-`gear report time` gets token and cost columns per task and per round; the board's view 5 (`ops/plan/m4-board/`); the voyage report totals (§7.5).
+`gear report time` gets token and cost columns per task and per round; the board's view 5 (`gear/voyages/M4/board/`); the voyage report totals (§7.5).
 
 ---
 
@@ -473,7 +473,7 @@ The captain's guide (`skills/gear/references/captain.md`, `course.md`) changes b
 
 ### 8.1 The board
 
-Build `gear board` to match the prototype `ops/plan/m4-board/prototype.py` (run it: `python3 ops/plan/m4-board/prototype.py`) and its README. The prototype is the contract for layout, views, keys and wording; the data comes from the store. Nothing on the board repeats Herdr (no pane lines, no messaging).
+Build `gear board` to match the prototype `gear/voyages/M4/board/prototype.py` (run it: `python3 gear/voyages/M4/board/prototype.py`) and its README. The prototype is the contract for layout, views, keys and wording; the data comes from the store. Nothing on the board repeats Herdr (no pane lines, no messaging).
 
 ### 8.2 Why a lane is idle
 

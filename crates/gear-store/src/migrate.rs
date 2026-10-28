@@ -18,7 +18,7 @@
 //! gone (T-108), and the step only drops the table.
 //! **v4** adds `tasks.issue` (the GitHub issue a task came from, T-79).
 //! **v5** drops `push_destinations` (T-108: no push allow-list).
-//! **v6** is the M4 schema (§1 of ops/plan/m4-design.md): the session of an
+//! **v6** is the M4 schema (§1 of gear/voyages/M4/design.md): the session of an
 //! attempt, the repo/base/gate a task keeps, the rounds and their tokens, the
 //! stretches a seat could not work, the friction reports and the captain's
 //! decision log. The migration leaves every new column NULL: the store
@@ -158,7 +158,7 @@ fn step_3_to_4(tx: &Transaction<'_>) -> GearResult<()> {
     Ok(())
 }
 
-/// v5 → v6: the M4 schema (§1 of ops/plan/m4-design.md).
+/// v5 → v6: the M4 schema (§1 of gear/voyages/M4/design.md).
 ///
 /// The new tables (`rounds`, `seat_pauses`, `frictions`, `decisions`) are
 /// created by the schema itself (every statement of it is `IF NOT EXISTS`).

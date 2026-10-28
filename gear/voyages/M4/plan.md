@@ -1,6 +1,6 @@
 <!-- gear-plan project=gear base=487 -->
 # Goal
-GEAR runs a long voyage unattended without wasting seats or hiding what it did, in four stations, each a release that runs end to end: v0.4.0 seats and sessions (one seat model, the session rule, quota waits to the real reset, the B03 stoppers fixed), v0.4.1 progress you can see (the board of ops/plan/m4-board, `gear queue`, the overrun question, declared waits), v0.4.2 a voyage you can review (tokens and cost per round, friction reports, the decision log, the landing review), v0.4.3 lanes follow the work and GitHub PR landing. The design is ops/plan/m4-design.md; every task implements its sections exactly.
+GEAR runs a long voyage unattended without wasting seats or hiding what it did, in four stations, each a release that runs end to end: v0.4.0 seats and sessions (one seat model, the session rule, quota waits to the real reset, the B03 stoppers fixed), v0.4.1 progress you can see (the board of gear/voyages/M4/board, `gear queue`, the overrun question, declared waits), v0.4.2 a voyage you can review (tokens and cost per round, friction reports, the decision log, the landing review), v0.4.3 lanes follow the work and GitHub PR landing. The design is gear/voyages/M4/design.md; every task implements its sections exactly.
 
 # Milestone M4: one seat model, a voyage the user can review
 done: (1) v0.4.0: on this project, with no hand fix, a rework resumes its attempt's session, a follow-up keeps (or compacts) its session, an unrelated task starts a new one, back-to-back reviews reuse a Standby reviewer with a new session each and idle reviewers are released, and a MiniMax quota stop parks the lane until the provider's reset time and continues it; (2) v0.4.1: `gear board` matches the prototype's five views and keys on live data, every idle lane says why, and a task past its estimate gets the overrun question and its answer reaches the captain; (3) v0.4.2: `gear report voyage` shows tokens and cost per round, the ★ decisions and the friction reports, and this voyage's landing starts with that review with the user; (4) v0.4.3: a lane is rebound to another repo of a two-repo fixture with its old tasks merging on their own repo, a kind change runs in the same pane and worktree, and a fixture GitHub project lands a task through its pull request; (5) v0.4.0, v0.4.1, v0.4.2 and v0.4.3 are released
@@ -126,28 +126,28 @@ eta: 12h
 - station M-3903: keep course — 1460m gone, 84 done; only T-224 is in review (T-223 merging). Then v0.4.1, v0.4.2 and v0.4.3 are released in turn with the engine rebuilt, and the landing review with the user starts.
 - 2026-10-27 11:50 staff: the four lanes are held until the user decides whether to reclaim them | why: every task is done and the idle items rang every few minutes | else: idle noise until the landing
 - station M-3908: land — all 85 tasks done; v0.4.0, v0.4.1, v0.4.2 and v0.4.3 released; engine on 0.4.3; the voyage report was reviewed with the user at the landing (11:40); the lanes are held until the user decides whether to reclaim them; open questions for the user: Codex quota, a codex quota source, three captain-guide additions, the leftover fixture projects
-- 2026-10-27 12:40 note: the landing line's "all 85 tasks done" leaves out six tasks cut at stations M-2503 and M-2572 and still cancelled: T-176, T-180, T-181, T-182, T-183, T-185; with T-123 they are M5 items (ops/plan/m4-backlog.md) | why: the user's 20:03 full-scope decision did not restore them (lesson 39) | else: a landing that hides cut work
+- 2026-10-27 12:40 note: the landing line's "all 85 tasks done" leaves out six tasks cut at stations M-2503 and M-2572 and still cancelled: T-176, T-180, T-181, T-182, T-183, T-185; with T-123 they are M5 items (gear/voyages/M4/backlog.md) | why: the user's 20:03 full-scope decision did not restore them (lesson 39) | else: a landing that hides cut work
 - 2026-10-27 12:40 staff: the four lanes deck, hull, keel and mast are retired | why: the user reclaims them after the landing | else: held lanes waiting
 - 2026-10-28 23:35 hand-fix: the four lanes are retired again | why: a config re-init (dropping --no-lens) brought the retired lanes back up (M4.1 backlog) | else: four idle agents
 - tail: -
 
 # Queue
 ## T-224 [must] lane=hull milestone=M4 required
-goal: [v0.4.1] Finish T-218 (ops/reviews/T-218.md round 2 F2): in the pending-retry branch of the outstanding-failure sweep in crates/gear-engine/src/lib.rs, before a Failed retry opens a stall, an attempt that has already advanced to Started through a confirmed check-in retires the stale failed-delivery record and the retry marker and opens nothing for this cause; independent missing-agent or escalation flags stay. Moved to hull at 10:35: crates/gear-engine/src/lib.rs and the lane_nudge.rs helpers are allowed edits for this task.
+goal: [v0.4.1] Finish T-218 (gear/voyages/M4/reviews/T-218.md round 2 F2): in the pending-retry branch of the outstanding-failure sweep in crates/gear-engine/src/lib.rs, before a Failed retry opens a stall, an attempt that has already advanced to Started through a confirmed check-in retires the stale failed-delivery record and the retry marker and opens nothing for this cause; independent missing-agent or escalation flags stay. Moved to hull at 10:35: crates/gear-engine/src/lib.rs and the lane_nudge.rs helpers are allowed edits for this task.
 accept: The review's recovery variant (the replacement lane checks in at T+135 and works): no stall item at T+140, T+160 and T+1000 and the attempt Started; the original F1 regression without the check-in keeps its one item. `scripts/test.sh` passes.
 estimate: 10
 deps: T-218
 followup-of: T-218
 
 ## T-225 [must] lane=hull milestone=M4 required
-goal: [v0.4.1] Finish T-209 (ops/reviews/T-209.md round 2 F1): in crates/gear-engine/src/restart.rs, when the missing-agent tick resumes an already persisted same-CLI plan with resume_required and the pane shows a shell, apply the same fallback as for a new plan (a fresh start with the same model and args, then the packet), never an endless wait.
+goal: [v0.4.1] Finish T-209 (gear/voyages/M4/reviews/T-209.md round 2 F1): in crates/gear-engine/src/restart.rs, when the missing-agent tick resumes an already persisted same-CLI plan with resume_required and the pane shows a shell, apply the same fallback as for a new plan (a fresh start with the same model and args, then the packet), never an endless wait.
 accept: Regression from the review: a Started lane with an open round and no session reference gets a same-CLI config change while its agent is present without a session id; after the agent exits to a shell, the next ticks make exactly one AgentStart and replay the packet. `scripts/test.sh` passes.
 estimate: 15
 deps: T-209
 followup-of: T-209
 
 ## T-223 [must] lane=keel milestone=M4 required
-goal: [v0.4.2] Finish T-199 (ops/reviews/T-199.md round 2 F1): in crates/gear-engine/src/review.rs, after finish_direction_results consumes direction results in a tick, recheck tasks_to_review before calling start_direction_checks, and start no direction check when a hand-in is now eligible for review (hand-ins first, design §14). Moved to keel: crates/gear-engine/src/review.rs is an allowed edit for this task.
+goal: [v0.4.2] Finish T-199 (gear/voyages/M4/reviews/T-199.md round 2 F1): in crates/gear-engine/src/review.rs, after finish_direction_results consumes direction results in a tick, recheck tasks_to_review before calling start_direction_checks, and start no direction check when a hand-in is now eligible for review (hand-ins first, design §14). Moved to keel: crates/gear-engine/src/review.rs is an allowed edit for this task.
 accept: Regression with one reviewer slot: a direction check for T-1 finishes with an ok result while T-1 is submitted, and a second Started task T-2 has a new push: in that tick T-1's full review takes the seat and no direction check starts for T-2. `scripts/test.sh` passes.
 estimate: 15
 deps: T-199
@@ -178,21 +178,21 @@ estimate: 15
 deps: -
 
 ## T-218 [must] lane=keel milestone=M4 required
-goal: [v0.4.1] Finish T-206 (ops/reviews/T-206.md round 2 F3): in crates/gear-engine/src/ops.rs confirm_pending_with, when the failed Deliver op's seat has its one automatic retry pending (the marker T-206 sets to allowed/pending), do not push the seat into `flagged`; the stall item opens only when the retried delivery itself fails or is not confirmed in its own window.
+goal: [v0.4.1] Finish T-206 (gear/voyages/M4/reviews/T-206.md round 2 F3): in crates/gear-engine/src/ops.rs confirm_pending_with, when the failed Deliver op's seat has its one automatic retry pending (the marker T-206 sets to allowed/pending), do not push the seat into `flagged`; the stall item opens only when the retried delivery itself fails or is not confirmed in its own window.
 accept: Extend `the_first_failure_waits_for_the_retry`: no stall item after the first failure at T+10, the redelivery at T+130, and one stall item only after the retried delivery's own window ends unconfirmed. `scripts/test.sh` passes.
 estimate: 15
 deps: T-206
 followup-of: T-206
 
 ## T-215 [must] lane=mast milestone=M4 required
-goal: [v0.4.2] Retired lanes are not in the time report (ops/reviews/T-171.md round 2 F10): in crates/gear-app/src/time.rs work_of, collect only lane seats that are not Retired, or that have a round or pause inside the requested voyage's window; the fleet-stop denominator (all lanes paused together) counts only those lanes. A lane retired before the voyage is neither a lane line nor part of the denominator.
+goal: [v0.4.2] Retired lanes are not in the time report (gear/voyages/M4/reviews/T-171.md round 2 F10): in crates/gear-app/src/time.rs work_of, collect only lane seats that are not Retired, or that have a round or pause inside the requested voyage's window; the fleet-stop denominator (all lanes paused together) counts only those lanes. A lane retired before the voyage is neither a lane line nor part of the denominator.
 accept: Fixture from the review: heat and keel, keel retired at T0, M4 departs at T0+60 with its only task on heat, heat's quota pause open from departure, report at T0+3660: fleet stopped 1h00m (1 stop), elapsed without quota stops 0h00m, no keel line. A lane retired during the voyage after a round still shows. `scripts/test.sh` passes.
 estimate: 15
 deps: T-171
 followup-of: T-171
 
 ## T-216 [must] lane=mast milestone=M4 required
-goal: [v0.4.1] Finish T-190 (ops/reviews/T-190.md round 2 F2, F4): F2 `gear plan check` in crates/gear-cli/src/main.rs resolves its caller through the same resolve_caller / identity::require_seat path as `gear plan apply` (a stale or unknown captain is refused; a captain found from its pane without GEAR_CTX is accepted); F4 run_plan always reads the agents snapshot (not only when releasing) so end_parked_lanes in crates/gear-app/src/plan.rs ends an expired park with an active binding on any ordinary apply.
+goal: [v0.4.1] Finish T-190 (gear/voyages/M4/reviews/T-190.md round 2 F2, F4): F2 `gear plan check` in crates/gear-cli/src/main.rs resolves its caller through the same resolve_caller / identity::require_seat path as `gear plan apply` (a stale or unknown captain is refused; a captain found from its pane without GEAR_CTX is accepted); F4 run_plan always reads the agents snapshot (not only when releasing) so end_parked_lanes in crates/gear-app/src/plan.rs ends an expired park with an active binding on any ordinary apply.
 accept: Tests: plan check with GEAR_CTX of an older captain generation is refused and writes nothing; plan check from the captain's pane without GEAR_CTX works; an ordinary apply (a hold on another lane) ends heat's expired park when its agent is present. `scripts/test.sh` passes.
 estimate: 20
 deps: T-190
@@ -229,7 +229,7 @@ estimate: 15
 deps: -
 
 ## T-210 [must] lane=hull milestone=M4 required
-goal: [v0.4.3] A captain retry keeps a rebind exit bounded (ops/reviews/T-175.md round 2 F1): in crates/gear-app/src/plan.rs retry_lane, when the lane has an outstanding rebind exit, reset it once to a retry phase; in crates/gear-engine/src/rebind.rs tick, apply the exiting timeout to Queued too (remove the Queued exemption), so each newly reserved exit is sent once, observed, and bounded, also after an engine restart.
+goal: [v0.4.3] A captain retry keeps a rebind exit bounded (gear/voyages/M4/reviews/T-175.md round 2 F1): in crates/gear-app/src/plan.rs retry_lane, when the lane has an outstanding rebind exit, reset it once to a retry phase; in crates/gear-engine/src/rebind.rs tick, apply the exiting timeout to Queued too (remove the Queued exemption), so each newly reserved exit is sent once, observed, and bounded, also after an engine restart.
 accept: Extend the uncertain/reserved-exit test: after `- retry heat`, keep the old agent present across many ticks: exactly one new exit send, then NeedsCheck again at the deadline; with the agent gone after the retry, the move completes. `scripts/test.sh` passes.
 estimate: 20
 deps: T-175
@@ -242,7 +242,7 @@ estimate: 30
 deps: T-150
 
 ## T-209 [must] lane=hull milestone=M4 required
-goal: [v0.4.1] An agent that exited from its pane is started again once (ops/reviews/T-206.md F1; M4 03:16 and 04:10: two Codex reviewers quit at startup on "workspace routing discovery timed out"; the engine typed its nudge into the bare shell). In the missing-agent branch of the tick (crates/gear-engine/src/lib.rs, before the seat is flagged), for a lane with a Started or Delivered attempt or a temp reviewer bound to a Submitted attempt, whose pane shows a shell: reuse the existing lane and reviewer start machinery in the same bound pane and worktree with the same selected model and rendered args, then deliver that job's packet again after readiness. Once per seat and job (durable marker in meta engine.restart.<seat>.<task>.<attempt>); the stall item opens only if that start fails or the restarted job stalls again. Do not build a second onboarding path. Allowed edits: lib.rs, the start adapters it calls, and lane_nudge.rs.
+goal: [v0.4.1] An agent that exited from its pane is started again once (gear/voyages/M4/reviews/T-206.md F1; M4 03:16 and 04:10: two Codex reviewers quit at startup on "workspace routing discovery timed out"; the engine typed its nudge into the bare shell). In the missing-agent branch of the tick (crates/gear-engine/src/lib.rs, before the seat is flagged), for a lane with a Started or Delivered attempt or a temp reviewer bound to a Submitted attempt, whose pane shows a shell: reuse the existing lane and reviewer start machinery in the same bound pane and worktree with the same selected model and rendered args, then deliver that job's packet again after readiness. Once per seat and job (durable marker in meta engine.restart.<seat>.<task>.<attempt>); the stall item opens only if that start fails or the restarted job stalls again. Do not build a second onboarding path. Allowed edits: lib.rs, the start adapters it calls, and lane_nudge.rs.
 accept: Fake-Herdr tests for a lane and a reviewer: an exited agent gets exactly one AgentStart with identical model and args, its packet is replayed after readiness, and a second exit opens one stall item and no second start. `scripts/test.sh` passes.
 estimate: 40
 deps: T-206
@@ -254,7 +254,7 @@ estimate: 25
 deps: T-188, T-163, T-197
 
 ## T-207 [must] lane=deck milestone=M4 required
-goal: [v0.4.2] Reports count open rounds and never show unknown usage as zero (ops/reviews/T-171.md F9, design §4.3): in the CLI runners of `gear report time` and `gear report voyage` (crates/gear-cli/src/main.rs), call the existing read-only gear_engine::rounds::count_round for each open round at the injected now, pass the counts into the report construction as overrides and recompute task, lane and voyage sums; a round whose usage cannot be read stays unknown, and the renderers (crates/gear-app/src/time.rs Tokens::line and its callers) print `tokens ? / cost ?` for unknown, never `0`. The reports stay read-only (no store writes). Allowed edits: those two files and crates/gear-app/src/voyage.rs. Moved to deck at 09:50: crates/gear-cli/src/main.rs, crates/gear-app/src/time.rs and crates/gear-app/src/voyage.rs are allowed edits for this task.
+goal: [v0.4.2] Reports count open rounds and never show unknown usage as zero (gear/voyages/M4/reviews/T-171.md F9, design §4.3): in the CLI runners of `gear report time` and `gear report voyage` (crates/gear-cli/src/main.rs), call the existing read-only gear_engine::rounds::count_round for each open round at the injected now, pass the counts into the report construction as overrides and recompute task, lane and voyage sums; a round whose usage cannot be read stays unknown, and the renderers (crates/gear-app/src/time.rs Tokens::line and its callers) print `tokens ? / cost ?` for unknown, never `0`. The reports stay read-only (no store writes). Allowed edits: those two files and crates/gear-app/src/voyage.rs. Moved to deck at 09:50: crates/gear-cli/src/main.rs, crates/gear-app/src/time.rs and crates/gear-app/src/voyage.rs are allowed edits for this task.
 accept: CLI fixture tests: an open round with a readable session log shows its nonzero counts in both reports; an unreadable log shows ? for tokens and cost; a closed round's stored counts are unchanged; the store is not written. `scripts/test.sh` passes.
 estimate: 40
 deps: T-171
@@ -266,19 +266,19 @@ estimate: 40
 deps: T-135
 
 ## T-201 [must] lane=hull milestone=M4 required
-goal: [v0.4.0] A retry recovers a failed session step (T-145 rework review F3, ops/reviews/T-145.md): the runner's stored state is keyed by project, task, attempt, role and the seat's generation; a state from an older generation is discarded, so after `- retry <lane>` (new generation) the runner starts the action again.
+goal: [v0.4.0] A retry recovers a failed session step (T-145 rework review F3, gear/voyages/M4/reviews/T-145.md): the runner's stored state is keyed by project, task, attempt, role and the seat's generation; a state from an older generation is discarded, so after `- retry <lane>` (new generation) the runner starts the action again.
 accept: Fake-Herdr test from the review: drive an ineffective exit to NeedsCheck, retry the lane (new generation), run again: the action restarts and reaches Ready. `scripts/test.sh` passes.
 estimate: 15
 deps: T-145
 
 ## T-202 [must] lane=hull milestone=M4 required
-goal: [v0.4.0] Finish T-148 (rework review, ops/reviews/T-148.md): F1 quota and error episodes get separate start keys in signal_start, count_quota_tick and count_error_tick, and the active episode start survives confirmation, so a reading older than the episode start never decides the park. F4 codex_session picks a current temp reviewer whose binding is Active and of kind codex (Active reviewers before Standby), never a Released seat or a Void binding; none eligible returns None.
+goal: [v0.4.0] Finish T-148 (rework review, gear/voyages/M4/reviews/T-148.md): F1 quota and error episodes get separate start keys in signal_start, count_quota_tick and count_error_tick, and the active episode start survives confirmation, so a reading older than the episode start never decides the park. F4 codex_session picks a current temp reviewer whose binding is Active and of kind codex (Active reviewers before Standby), never a Released seat or a Void binding; none eligible returns None.
 accept: Fake-reader tests from the review: a quota-only and an error-only signal with a cached reading and a failed signal read do not use the old reading; a released codex-1 and an active codex-2 pass codex-2's session. `scripts/test.sh` passes.
 estimate: 20
 deps: T-148
 
 ## T-203 [must] lane=hull milestone=M4 required
-goal: [v0.4.0] A status-refused doorbell frees its slot (T-152 rework review F3, ops/reviews/T-152.md): in crates/gear-engine/src/ops.rs aim, a Doorbell refused by the status policy returns the existing definitely-unsent Refused outcome with its reason (its callers map it to Failed, which releases the slot and the message coverage); a Deliver op still returns Retry; a naming or read failure stays Retry.
+goal: [v0.4.0] A status-refused doorbell frees its slot (T-152 rework review F3, gear/voyages/M4/reviews/T-152.md): in crates/gear-engine/src/ops.rs aim, a Doorbell refused by the status policy returns the existing definitely-unsent Refused outcome with its reason (its callers map it to Failed, which releases the slot and the message coverage); a Deliver op still returns Retry; a naming or read failure stays Retry.
 accept: The review's probe as a test: Unknown agent, a non-urgent captain instruction sent through deliver_doorbell_now, then an urgent one; the next tick prompts the urgent doorbell. A Deliver op on Unknown still stays Intended. `scripts/test.sh` passes.
 estimate: 15
 deps: T-152
@@ -289,7 +289,7 @@ estimate: 40
 deps: T-137, T-151
 
 ## T-135 [now] lane=deck milestone=M4 required
-goal: [v0.4.0] Schema v6 and its store API: implement ops/plan/m4-design.md §1 (the migration leaves the new columns NULL) and §13.1 exactly, in crates/gear-store, including round_budget_min of §5.1 and the seat_pauses table of §5.4.
+goal: [v0.4.0] Schema v6 and its store API: implement gear/voyages/M4/design.md §1 (the migration leaves the new columns NULL) and §13.1 exactly, in crates/gear-store, including round_budget_min of §5.1 and the seat_pauses table of §5.4.
 accept: Store tests: a v5 store migrates to v6 with the new columns NULL; round_budget_min for a dev, a rework with and without rework_estimate_min, and a review with 0 and 5 earlier rounds; each §13.1 function round-trips; insert_round twice fails; insert_decision_if_new returns false the second time; insert_friction returns F-1 then F-2. `scripts/test.sh` passes, no test over 10 s.
 estimate: 45
 deps: -
@@ -385,7 +385,7 @@ estimate: 45
 deps: T-135
 
 ## T-152 [must] lane=hull milestone=M4 required
-goal: [v0.4.0] Herdr's state decides busy and ready everywhere in the engine: design §10.2 (busy.rs, dispatch readiness, doorbell timing and every caller of the old busy marker class read Herdr's agent state; idle and done are ready; working, blocked and unknown are never ready for a delivery, a typed command or a session action). Moved to hull (Codex Terra) at 23:45 after keel spent 2 h 20 min on the rework without code: do F1 and F2 of ops/reviews/T-152.md as the round-1 rework note says (the urgent doorbell still reaches an Unknown agent; Blocked gets no prompt; a Deliver op is prompted only on Idle or Done, else stays Intended), on top of current origin/dev with T-153's prepare_lane step kept before the status recheck; keel's dispatch.rs, ops.rs, doorbell.rs, lib.rs and tests are allowed edits.
+goal: [v0.4.0] Herdr's state decides busy and ready everywhere in the engine: design §10.2 (busy.rs, dispatch readiness, doorbell timing and every caller of the old busy marker class read Herdr's agent state; idle and done are ready; working, blocked and unknown are never ready for a delivery, a typed command or a session action). Moved to hull (Codex Terra) at 23:45 after keel spent 2 h 20 min on the rework without code: do F1 and F2 of gear/voyages/M4/reviews/T-152.md as the round-1 rework note says (the urgent doorbell still reaches an Unknown agent; Blocked gets no prompt; a Deliver op is prompted only on Idle or Done, else stays Intended), on top of current origin/dev with T-153's prepare_lane step kept before the status recheck; keel's dispatch.rs, ops.rs, doorbell.rs, lib.rs and tests are allowed edits.
 accept: Engine tests: a done pi whose last screen line says "Working tree clean" gets its task; an unknown agent never gets one; a working agent gets only at-once messages as today. `scripts/test.sh` passes.
 estimate: 40
 deps: T-136
@@ -409,7 +409,7 @@ estimate: 35
 deps: T-135
 
 ## T-156 [must] lane=deck milestone=M4 required
-goal: [v0.4.1] The new board, part 1: rewrite `gear board` to the prototype ops/plan/m4-board/prototype.py and its README (run the prototype first and copy its layout): the frame (title, time and tasks bars, the five tabs, footer), keys ←/→, Tab, 1-5, ↑↓/j/k, Enter, q, mouse clicks on the tab row and rows (xterm SGR mouse), the overlay panel, and view 1 Now on store data (lanes with idle_reason, needs-a-look, quota readings from meta `quota.reading.*`, done sentence text). Views 2-5 show "next task" placeholders, except view 2: T-157 rendered it (`graph::lines(..., selected)` and `graph::panel`); wire its ↑↓ selection into `lines` and Enter to `graph::panel` in the overlay. The PTY test reads by poll(POLLIN) and stops on the footer line, no sleeps (row A9, T-128 F1).
+goal: [v0.4.1] The new board, part 1: rewrite `gear board` to the prototype gear/voyages/M4/board/prototype.py and its README (run the prototype first and copy its layout): the frame (title, time and tasks bars, the five tabs, footer), keys ←/→, Tab, 1-5, ↑↓/j/k, Enter, q, mouse clicks on the tab row and rows (xterm SGR mouse), the overlay panel, and view 1 Now on store data (lanes with idle_reason, needs-a-look, quota readings from meta `quota.reading.*`, done sentence text). Views 2-5 show "next task" placeholders, except view 2: T-157 rendered it (`graph::lines(..., selected)` and `graph::panel`); wire its ↑↓ selection into `lines` and Enter to `graph::panel` in the overlay. The PTY test reads by poll(POLLIN) and stops on the footer line, no sleeps (row A9, T-128 F1).
 accept: PTY test (poll-based, no sleeps): the frame and view 1 render from a fixture store; ←/→ and a click switch tabs; Enter on a lane opens its panel. `scripts/test.sh` passes, no test over 10 s.
 estimate: 45
 deps: T-155
@@ -659,7 +659,7 @@ estimate: 30
 deps: T-195
 
 ## T-197 [must] lane=deck milestone=M4 required
-goal: [v0.4.1] Finish the board frame (T-156 round 2, ops/reviews/T-156.md): F2 screen::draw writes the terminal-sized canvas with no trailing newline (title row 1, tabs row 4, footer last row). F8 frame and run_with share one viewport offset: draw from the scroll offset and bound the screen row; mouse rows add the offset; clicks outside the data rows do nothing. F3 draw_panel: one total box width with borders, left computed from it, each interior row padded or clipped to the interior width, the footer row reserved. F6 the test reader Frames returns only complete frames ending with the footer line; a timeout fails.
+goal: [v0.4.1] Finish the board frame (T-156 round 2, gear/voyages/M4/reviews/T-156.md): F2 screen::draw writes the terminal-sized canvas with no trailing newline (title row 1, tabs row 4, footer last row). F8 frame and run_with share one viewport offset: draw from the scroll offset and bound the screen row; mouse rows add the offset; clicks outside the data rows do nothing. F3 draw_panel: one total box width with borders, left computed from it, each interior row padded or clipped to the interior width, the footer row reserved. F6 the test reader Frames returns only complete frames ending with the footer line; a timeout fails.
 accept: PTY test at 80x24 with a graph longer than the viewport: clicking the visible Graph tab switches; repeated Down keeps the last task visible and Enter opens it; a terminal-height panel keeps both borders and the footer; a split-write check never accepts a frame without the footer; under 10 s. `scripts/test.sh` passes.
 estimate: 40
 deps: T-156
@@ -677,19 +677,19 @@ estimate: 45
 deps: T-143, T-198
 
 ## T-200 [must] lane=hull milestone=M4 required
-goal: [v0.4.0] Finish T-146 (round 2, ops/reviews/T-146.md): F2 release_one clears seats.task_id when an Active review is cancelled, take_seat clears it when it reserves the next task, and the pending-job lookups prefer engine.review_pending over seats.task_id. F4 the Standby model check compares the selected entry with the reviewer's current model (engine.model via model_meta_key, kept up to date by the quota and restart paths), not with the startup entry.
+goal: [v0.4.0] Finish T-146 (round 2, gear/voyages/M4/reviews/T-146.md): F2 release_one clears seats.task_id when an Active review is cancelled, take_seat clears it when it reserves the next task, and the pending-job lookups prefer engine.review_pending over seats.task_id. F4 the Standby model check compares the selected entry with the reviewer's current model (engine.model via model_meta_key, kept up to date by the quota and restart paths), not with the startup entry.
 accept: The reviewer's two probes as tests: a reused seat's new start is not cancelled by its old task; a reviewer moved sol to astra by restart::advance and then Standby is restarted when the selected entry is sol again. `scripts/test.sh` passes.
 estimate: 25
 deps: T-146
 
 ## T-204 [must] lane=keel milestone=M4 required
-goal: [v0.4.1] A partial token or cost sum is never shown as complete (T-166 rework review F5, ops/reviews/T-166.md): in crates/gear-board/src/lib.rs, tokens_of returns None when any round of the task has all four counted token fields absent (absent cache fields on a measured round stay allowed; a measured zero stays zero); cost_of returns None when any round has cost_usd None. The view then shows ? and labels its footer as it already does.
+goal: [v0.4.1] A partial token or cost sum is never shown as complete (T-166 rework review F5, gear/voyages/M4/reviews/T-166.md): in crates/gear-board/src/lib.rs, tokens_of returns None when any round of the task has all four counted token fields absent (absent cache fields on a measured round stay allowed; a measured zero stays zero); cost_of returns None when any round has cost_usd None. The view then shows ? and labels its footer as it already does.
 accept: Fixture tests: a measured dev round plus an unmeasured review round shows ? for tokens and cost; a measured dev round plus a token-measured but unpriced review round shows its tokens and ? for cost; the footer is labelled in both. `scripts/test.sh` passes.
 estimate: 15
 deps: T-166
 
 ## T-205 [must] lane=keel milestone=M4 required
-goal: [v0.4.1] integrated-by checks exactly what contract v3 of T-165 says (ops/reviews/T-165.md F4, F5): in crates/gear-app/src/plan.rs replace the tree scan with the existing base::contains helper (candidate as base, the fetched integration ref as descendant) and delete the obsolete tree scan; in crates/gear-app/src/tasks.rs require_merged_at requires the named task Done and a Confirmed Merge op for the attempt that gives the merge time, on both the first and the already-passed settlement paths.
+goal: [v0.4.1] integrated-by checks exactly what contract v3 of T-165 says (gear/voyages/M4/reviews/T-165.md F4, F5): in crates/gear-app/src/plan.rs replace the tree scan with the existing base::contains helper (candidate as base, the fetched integration ref as descendant) and delete the obsolete tree scan; in crates/gear-app/src/tasks.rs require_merged_at requires the named task Done and a Confirmed Merge op for the attempt that gives the merge time, on both the first and the already-passed settlement paths.
 accept: Tests: an unrelated commit with an equal tree is refused; a descendant is accepted; a named task not Done is refused; a Done task without a confirmed merge op is refused; the fixture's accepted case has a Done task with a confirmed merge op. `scripts/test.sh` passes.
 estimate: 20
 deps: T-165

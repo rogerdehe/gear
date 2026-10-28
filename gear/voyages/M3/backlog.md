@@ -2,7 +2,7 @@
 
 ## Moved out of M2.1 (user, 2026-10-25)
 
-- Every built-in agent's quota markers and status bar: moved to ops/plan/m4-backlog.md (user, 2026-10-25); M3 keeps Codex's 429 back-off (trial G11).
+- Every built-in agent's quota markers and status bar: moved to gear/voyages/M4/backlog.md (user, 2026-10-25); M3 keeps Codex's 429 back-off (trial G11).
 
 - **Warn before a lane runs dry, from the engine (user, 2026-10-25).** The voyage should expose where a lane is about to stand idle, early; an idle lane is only the last net. M2.1 T-58 warns at `gear plan apply` for a lane with nothing startable behind its current task. M3: the engine's tick does the same continuously (a dep finishing late, a task cancelled, a hand-in sooner than planned), and forecasts from estimates and the lane's pace ("engine runs dry in ~15 min: its next task waits on T-52 in review") so the captain refills before the gap. Today's low-queue item fires only at 0 ready tasks — too late.
 

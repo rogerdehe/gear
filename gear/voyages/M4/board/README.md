@@ -1,6 +1,6 @@
 # M4 board prototype (agreed with the user, 2026-10-26)
 
-`python3 ops/plan/m4-board/prototype.py` runs it with fake data in any terminal (curses, no dependencies). This is the agreed design for `gear board` in M4: build the real board to match it, reading the store instead of the fake data. Where the real data differs, keep the layout and the meaning.
+`python3 gear/voyages/M4/board/prototype.py` runs it with fake data in any terminal (curses, no dependencies). This is the agreed design for `gear board` in M4: build the real board to match it, reading the store instead of the fake data. Where the real data differs, keep the layout and the meaning.
 
 Views (←/→, Tab, 1-5, or a click on the tab row; ↑↓ select; Enter details; q quit):
 

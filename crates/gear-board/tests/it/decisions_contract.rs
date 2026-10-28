@@ -1,5 +1,5 @@
 //! T-166: the board's fourth view (Decisions) and fifth view (Time & tokens),
-//! as the prototype of `ops/plan/m4-board` draws them.
+//! as the prototype of `gear/voyages/M4/board` draws them.
 
 use gear_board::frame::{frame, Tab};
 use gear_model::{AttemptState, SeatRole, TaskState};

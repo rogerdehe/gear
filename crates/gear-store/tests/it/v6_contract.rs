@@ -1,5 +1,5 @@
 //! T-135: schema v6 and the M4 store API (§1 and §13.1 of
-//! ops/plan/m4-design.md, with the budget of §5.1 and the pauses of §5.4).
+//! gear/voyages/M4/design.md, with the budget of §5.1 and the pauses of §5.4).
 //!
 //! The tests say what the design says: a v5 store migrates to v6 and its new
 //! columns are NULL, every function of §13.1 round-trips, and the budget of a

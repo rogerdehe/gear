@@ -1,4 +1,4 @@
-//! The colours of the board: the prototype's palette (`ops/plan/m4-board`).
+//! The colours of the board: the prototype's palette (`gear/voyages/M4/board`).
 //!
 //! A cell of the screen has a style: a colour from a small fixed set, bold
 //! and reverse video. A [`Line`] is a text with one style per character; the

@@ -1,4 +1,4 @@
-//! T-136: the session fields of the profiles (§2 of ops/plan/m4-design.md,
+//! T-136: the session fields of the profiles (§2 of gear/voyages/M4/design.md,
 //! with the live checks of §12) and the patch that overrides them (§13.3).
 
 use gear_herdr::{builtin, classify_screen, Profile, ProfilePatch, ScreenFlag};
