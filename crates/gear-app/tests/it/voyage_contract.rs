@@ -352,7 +352,11 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     }
     let project = s.read(|tx| gear_board::project(tx, "p", now)).unwrap();
     assert_eq!(project.voyages, reports);
-    let board = gear_board::Board { engine: gear_board::EngineState::Running, projects: vec![project] };
+    let board = gear_board::Board {
+        engine: gear_board::EngineState::Running,
+        now,
+        projects: vec![project],
+    };
     for view in [gear_board::View::Lanes, gear_board::View::Deps] {
         let text = gear_board::render(&board, view);
         assert!(text.contains(&block), "{text}");

@@ -15,6 +15,7 @@
 
 mod deps;
 pub mod frame;
+pub mod golden;
 pub mod graph;
 pub mod idle;
 pub mod style;
@@ -106,6 +107,9 @@ impl Default for Options {
 pub struct Board {
     /// The engine's liveness; the board warns only when it is down.
     pub engine: EngineState,
+    /// The time the board was built at: the header's clock, and nothing else.
+    /// A frame depends on the store and on this `now`, never on the wall clock.
+    pub now: Ts,
     /// One block per project.
     pub projects: Vec<ProjectBoard>,
 }
@@ -411,7 +415,7 @@ pub fn build_with_agents(
         };
         ids.iter().map(|id| project_with_agents(tx, id, now, agents)).collect()
     })?;
-    Ok(Board { engine, projects })
+    Ok(Board { engine, now, projects })
 }
 
 /// The plan of one project: the model both the board and the captain's home

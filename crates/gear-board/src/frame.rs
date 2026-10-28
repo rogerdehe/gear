@@ -142,13 +142,17 @@ impl Canvas {
     }
 
     /// Write a text in a style; what was under it loses its own style.
+    ///
+    /// As the prototype's `put` does, the last column is never written: the
+    /// text is cut at `width - x - 1` characters.
     pub fn put_styled(&mut self, x: usize, y: usize, text: &str, style: Style) {
         if y >= self.height {
             return;
         }
+        let last = self.width - 1;
         for (offset, character) in text.chars().enumerate() {
             let column = x + offset;
-            if column >= self.width {
+            if column >= last {
                 break;
             }
             self.cells[y * self.width + column] = character;
@@ -156,14 +160,16 @@ impl Canvas {
         }
     }
 
-    /// Write a line, every character in its own style.
+    /// Write a line, every character in its own style; cut at the last
+    /// column, as [`Canvas::put_styled`] is.
     pub fn put_line(&mut self, x: usize, y: usize, line: &Line) {
         if y >= self.height {
             return;
         }
+        let last = self.width - 1;
         for (offset, (character, style)) in line.cells().enumerate() {
             let column = x + offset;
-            if column >= self.width {
+            if column >= last {
                 break;
             }
             self.cells[y * self.width + column] = character;
@@ -186,6 +192,36 @@ impl Canvas {
             self.styles[y * self.width + x]
         } else {
             Style::PLAIN
+        }
+    }
+
+    /// The character of a cell; a space outside the canvas.
+    pub fn char_at(&self, x: usize, y: usize) -> char {
+        if x < self.width && y < self.height {
+            self.cells[y * self.width + x]
+        } else {
+            ' '
+        }
+    }
+
+    /// The width of the canvas, in cells.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// The height of the canvas, in cells.
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Light a whole row in reverse video (the prototype's `hl`): columns 1 to
+    /// `width - 2`, both included; the characters stay.
+    pub fn light_row(&mut self, y: usize) {
+        if y >= self.height {
+            return;
+        }
+        for column in 1..self.width.saturating_sub(1) {
+            self.styles[y * self.width + column] = Style { fg: None, bold: false, reverse: true };
         }
     }
 
@@ -351,9 +387,11 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
             Style::fg(Color::Bad),
         );
     }
-    let clock = clock_now();
+    // The clock sits where the prototype puts it, `wd - 8` (T-340 contract v2:
+    // the golden frames are the standard).
+    let clock = crate::idle::clock(board.now);
     canvas.put_styled(
-        canvas.width.saturating_sub(clock.chars().count()),
+        canvas.width.saturating_sub(8),
         0,
         &clock,
         Style::fg(Color::Dim),
@@ -1195,15 +1233,6 @@ pub fn hours(minutes: i64) -> String {
     } else {
         format!("{}h{:02}m", minutes / 60, (minutes % 60))
     }
-}
-
-/// The clock of the board, as the user's clock sees it.
-fn clock_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
-    crate::idle::clock(now)
 }
 
 /// The idle reason of a lane, in words (the board's own).
