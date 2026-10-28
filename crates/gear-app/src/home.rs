@@ -315,7 +315,13 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
             }
         })
         .collect();
-    voyages.sort_by(|left, right| left.milestone.cmp(&right.milestone));
+    // T-301: the earliest departure first, a voyage that has not departed
+    // last; the id breaks the tie. An id is any word, so the id alone is no
+    // order (`M10` would come before `M9`).
+    voyages.sort_by(|left, right| {
+        (left.departure.unwrap_or(i64::MAX), &left.milestone)
+            .cmp(&(right.departure.unwrap_or(i64::MAX), &right.milestone))
+    });
     for voyage in &voyages {
         lines.push(format!("  {}", crate::plan::voyage_line(voyage)));
     }
