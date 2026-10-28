@@ -138,6 +138,8 @@ Problems found after M4's landing and in other projects' first voyages are colle
 
 - The board's graph shows a reworked task as "working 89/25m" (T-241, 2026-10-28) where the rework itself took 17 min: the minutes count from the first delivery through review, merge wait and the failed merge. Show the current round's active time against the current round's budget (the rework estimate), and the task's total apart.
 
+- A direction packet to a Codex reviewer is lost after its session switch (twice on review-11, 2026-10-28: T-245 at 03:34 and T-252 at 04:01; op Submitted, the pane a fresh Codex screen at 0% context, no prompt in its history). The review packet path has a nudge that re-sends the packet; the direction path had none until T-245, and the delivery is marked Submitted without the text being seen. Find why the prompt is lost (typed before the new session was ready?) and confirm a delivery by the agent's own first action, as the review packet asks ("Run `gear` first").
+
 ## Later fixes (not urgent; collected 2026-10-28)
 
 - A stuck or IDLE alert says what it is about (trial project feedback B04-01, v0.3.4): the operation and its age, the task or instruction it belongs to, the lane's last check-in or hand-in, and what it waits for. IDLE says it means "no next task to dispatch", not "the agent does nothing". Re-check against v0.4.x first: T-213 (a doorbell behind a working turn is not a stall), Herdr's agent state for busy/ready (v0.4.0) and the session-write check (v0.4.1) removed most of these false alerts.
