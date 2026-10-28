@@ -43,6 +43,10 @@ exit_keys = ["ctrl+c", "ctrl+d"]
 [profiles.opencode]
 confirm_rounds = 5
 {profiles}
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#
     )
 }

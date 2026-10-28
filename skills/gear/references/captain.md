@@ -78,7 +78,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    [conventions]
    integration = "dev"
    release = "main"
-   gate = "make test"          # the project's own build+test, run before every merge (default: cargo)
+   gate = "make test"          # the project's own build+test, run before every merge (no default: name it)
    ```
 
    ```bash

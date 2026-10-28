@@ -524,7 +524,9 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "[conventions]".to_string(),
         "integration = \"dev\"           # the branch results are merged into (it must exist)".to_string(),
         "release = \"main\"              # the release branch".to_string(),
-        "gate = \"TODO\"                 # your build + test command, run before every merge (e.g. \"npm test\")".to_string(),
+        // T-255: the gate has no default, so the skeleton names it as empty
+        // and asks the captain for the command this project actually runs.
+        "gate = \"\"                     # fill in: the command the merge runs in the integration worktree; it must exit non-zero on any failure (e.g. \"make gate\", \"go test ./...\")".to_string(),
     ]);
     // A kind Herdr can start but GEAR has no built-in profile for (T-31): the
     // user fills the block in — the comment says which fields matter.
