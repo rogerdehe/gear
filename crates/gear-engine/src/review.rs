@@ -95,7 +95,7 @@ pub fn start_reviews(
 
     let hand_ins = tasks_to_review(store, project)?;
     start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &hand_ins, &mut report, now)?;
-    finish_direction_results(store, project, now)?;
+    finish_direction_results(store, cfg, &config, project, now)?;
     // A direction result can free the seat of a hand-in that waited behind its
     // own direction check: the hand-in is eligible now (F1 of the T-199
     // review, round 2). The hand-in comes first (design §14): it takes the
@@ -422,7 +422,29 @@ fn direction_passed(body: &str) -> bool {
     first.trim_end_matches(['.', ',', ';', ':', '!']).to_lowercase() == "ok"
 }
 
-fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
+fn finish_direction_results(store: &mut Store, cfg: &EngineCfg, config: &ProjectConfig, project: &str, now: Ts) -> GearResult<()> {
+    // T-283: the tip of every live check's branch, read before the write
+    // transaction as `start_direction_checks` reads it. A failing result on a
+    // candidate the lane has already moved past is what the reviewer saw then,
+    // not an instruction: it reaches the captain as information (M4.2 T-237,
+    // M-4110/M-4119 — the `misread` was already fixed on the newer push). A
+    // read that fails leaves the job out of the map: it behaves as today.
+    let mut tips: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for task in store.read(|tx| tx.tasks_of_project(project))? {
+        for attempt in store.read(|tx| tx.attempts_of_task(project, &task.id))? {
+            if attempt.state != AttemptState::Started { continue }
+            let key = direction_key(project, &task.id, attempt.n);
+            let Some(job) = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) else { continue };
+            if job["state"] != "running" { continue }
+            let Some(lane) = task.lane.clone() else { continue };
+            let repo = config.repo_of_task(&task);
+            let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &task.id);
+            let Ok(tip) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/{}/{branch}", config.conventions.remote)]) else { continue };
+            let tip = tip.trim().to_string();
+            if tip.is_empty() { continue }
+            tips.insert(key, tip);
+        }
+    }
     store.write(|tx| {
         for task in tx.tasks_of_project(project)? {
             for attempt in tx.attempts_of_task(project, &task.id)? {
@@ -443,16 +465,27 @@ fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearRe
                 if let Some(result) = &result {
                     if !direction_passed(&result.body) {
                         let captain = tx.captain_of(project)?;
-                        // A late verdict reaches nobody but the captain: the
-                        // lane is not told about the attempt it handed in.
-                        let recipients = if live {
+                        // T-283: a live check whose sha is no longer the branch
+                        // tip judged a candidate the lane has already left. Its
+                        // failing result is the captain's information, not the
+                        // lane's instruction: the lane is not told.
+                        let superseded = live && tips.get(&key).is_some_and(|tip| tip.as_str() != sha);
+                        let body = if superseded {
+                            format!("Direction check of {} attempt {} on {:.8} (superseded: the branch is at {:.8} now, so the lane is not told): {}", task.id, attempt.n, sha, tips[&key], result.body)
+                        } else {
+                            format!("Direction check of {} attempt {}: {}", task.id, attempt.n, result.body)
+                        };
+                        // A late or superseded verdict reaches nobody but the
+                        // captain: the lane is not told about the attempt it
+                        // handed in, nor about a candidate it moved past.
+                        let recipients = if live && !superseded {
                             vec![(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
                         } else {
                             vec![(captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)]
                         };
                         for (recipient, kind, urgent, state) in recipients {
                             if let Some(recipient) = recipient {
-                                tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient, kind, urgent, body: format!("Direction check of {} attempt {}: {}", task.id, attempt.n, result.body), reply_to: None, needs_ack: false, state, created: now })?;
+                                tx.insert_message(&NewMessage { meta: None, project: project.into(), thread: format!("direction:{}:{}:{sha}", task.id, attempt.n), task: Some(task.id.clone()), attempt: Some(attempt.n), sender: "engine".into(), sender_gen: 0, recipient, kind, urgent, body: body.clone(), reply_to: None, needs_ack: false, state, created: now })?;
                             }
                         }
                     }
@@ -2989,6 +3022,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let key = direction_key("p", "T-1", 1);
@@ -3023,15 +3057,15 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], first);
         let result = |tx: &Tx<'_>, sha: &str, body: &str, time| tx.insert_message(&NewMessage { meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()), project:"p".into(), thread:format!("result:{time}"), task:Some("T-1".into()), attempt:Some(1), sender:"p:review-1".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Result, urgent:false, body:body.into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:time }).map(|_| ());
         store.write(|tx| result(tx, &first, "ok. Candidate follows contract v4; src/base is the right place", T0 + 12)).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 13).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], first);
         let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
         assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 0, "a passing direction check sends the lane nothing");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], second);
         store.write(|tx| result(tx, &second, "use the required approach", T0 + 15)).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 16).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 17).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 16).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 17).unwrap();
         let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 17)).unwrap();
         assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1);
         // T-262: a push that only writes the voyage's reports starts no
@@ -3181,6 +3215,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let key = direction_key("p", "T-1", 1);
@@ -3192,7 +3227,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         // The lane hands T-1 in while its direction check still runs, and the
         // check never answers.
         store.write(|tx| gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, &first, "ops/reports/T-1.md", T0 + 11)).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 12).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 12).unwrap();
         assert_eq!(job(&mut store, &key)["checked_sha"], first, "the job is closed with its own sha");
         assert_eq!(job(&mut store, &key).get("state"), None, "the job is no longer running");
         let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
@@ -3230,6 +3265,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let key = direction_key("p", "T-1", 1);
@@ -3242,7 +3278,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
             sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
             reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
         }).map(|_| ())).unwrap();
-        finish_direction_results(&mut store, "p", T0 + 13).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
         let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
         assert_eq!(job["checked_sha"], first, "the late result closes the job too");
         assert!(
@@ -3279,13 +3315,119 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         }).unwrap();
         REVIEW_GIT_FAKE.with(|fake| fake.set(false));
         let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
         let mut herdr = FakeHerdr::new();
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
         let key = direction_key("p", "T-1", 1);
-        finish_direction_results(&mut store, "p", T0 + 11).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 11).unwrap();
         let job: serde_json::Value = serde_json::from_str(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
         assert_eq!(job["state"], "running", "the check keeps waiting for its result");
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Active);
+    }
+
+    /// T-283: a failing direction result on a candidate the lane has already
+    /// moved past (the branch reads B, the job checked A) is the captain's
+    /// information, not the lane's instruction — the lane pushed the fix
+    /// already (M4.2 T-237, M-4110/M-4119). The job still closes with its own
+    /// sha, so the next pass checks the tip by itself.
+    #[test]
+    fn a_failing_direction_result_on_a_candidate_the_lane_moved_past_reaches_only_the_captain() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        let key = direction_key("p", "T-1", 1);
+        let job = |store: &mut Store| serde_json::from_str::<serde_json::Value>(&store.read(|tx| tx.get_meta(&key)).unwrap().unwrap()).unwrap();
+        assert_eq!(job(&mut store)["sha"], first);
+        // The lane pushes the fix while the check on A still runs.
+        std::fs::write(work.join("src/base"), "two").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm two");
+        publish(&work, "heat/t1");
+        let second = sh(&work, "git rev-parse HEAD");
+        assert_ne!(first, second);
+        // The check answers `F1` on the candidate it had, A.
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
+        assert_eq!(job(&mut store)["checked_sha"], first, "the job closes with its own sha");
+        assert_eq!(job(&mut store).get("state"), None, "the job is no longer running");
+        assert!(
+            store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap().is_empty(),
+            "a superseded failure is not an instruction for the lane"
+        );
+        let written: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine").collect();
+        assert_eq!(written.len(), 1, "one message only: {written:?}");
+        assert_eq!(written[0].recipient, "p:captain");
+        assert_eq!(written[0].kind, MsgKind::System);
+        assert_eq!(written[0].state, MsgState::Info);
+        assert!(written[0].body.contains("superseded"), "{}", written[0].body);
+        assert!(written[0].body.contains("F1: misread the contract sentence"), "{}", written[0].body);
+        // The seat came free, and the next pass checks the tip itself.
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
+        assert_eq!(job(&mut store)["sha"], second, "the next check is on the branch tip");
+    }
+
+    /// T-283: a branch tip that cannot be read decides nothing: the failing
+    /// result reaches the lane exactly as before.
+    #[test]
+    fn a_failing_direction_result_whose_branch_cannot_be_read_reaches_the_lane() {
+        let root = tempfile::tempdir().unwrap();
+        sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.path().join("work");
+        std::fs::create_dir(work.join("src")).unwrap();
+        std::fs::write(work.join("src/base"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        std::fs::write(work.join("src/base"), "one").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm one");
+        publish(&work, "heat/t1");
+        let first = sh(&work, "git rev-parse HEAD");
+        let text = CONFIG.replace("repo = \"/repo\"", &format!("repo = \"{}\"", work.display()));
+        let mut store = world(&text);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap(); task.state = TaskState::Running; tx.update_task(&task)?;
+            let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap(); attempt.state = AttemptState::Started; attempt.candidate = None; tx.update_attempt(&attempt)
+        }).unwrap();
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut config = cfg(); config.review_git = std::sync::Arc::new(DirectionFixtureGit);
+        let pc = gear_app::config::parse(&text).unwrap();
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 10).unwrap();
+        // The branch ref is gone: the tip cannot be read.
+        sh(&work, "git update-ref -d refs/remotes/origin/heat/t1");
+        store.write(|tx| tx.insert_message(&NewMessage {
+            meta: Some(serde_json::json!({"direction":true,"sha":first}).to_string()), project: "p".into(),
+            thread: format!("direction:T-1:1:{first}"), task: Some("T-1".into()), attempt: Some(1), sender: "p:review-1".into(),
+            sender_gen: 1, recipient: "p:captain".into(), kind: MsgKind::Result, urgent: false, body: "F1: misread the contract sentence".into(),
+            reply_to: None, needs_ack: false, state: MsgState::Info, created: T0 + 12,
+        }).map(|_| ())).unwrap();
+        finish_direction_results(&mut store, &config, &pc, "p", T0 + 13).unwrap();
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 1, "an unreadable tip decides nothing");
+        let written: Vec<_> = store.read(|tx| tx.thread_messages("p", &format!("direction:T-1:1:{first}"))).unwrap().into_iter().filter(|m| m.sender == "engine").collect();
+        assert!(!written.iter().any(|m| m.body.contains("superseded")), "{written:?}");
     }
 
     #[test]

@@ -852,6 +852,14 @@ fn cmd_admin_init(
             }
             None => eprintln!("cross-project check skipped: no store"),
         }
+        // T-304: the lane quota counts the lanes that can run — the seats,
+        // retired ones excluded — so it is checked after the branch check,
+        // against the retired lanes of this project's seats.
+        if let Some(problem) =
+            gear_app::admin::lane_quota_problem(&parsed, &retired_lanes_of(&parsed.project.id)?)
+        {
+            return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
+        }
         let lanes = parsed.lanes.len();
         let reviewers = parsed.quota.temps;
         // T-315: only when asked for — this runs the CLIs.
@@ -1016,6 +1024,38 @@ fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
             Ok(others)
         })
         .map(Some)
+}
+
+/// The lane names this project's seats hold as `Retired` (T-304), for the lane
+/// quota check of `admin init --check`. It reads the same store `other_projects`
+/// does, with the same path rule, read-only, and is empty when there is no
+/// store to read (a check creates nothing).
+fn retired_lanes_of(project: &str) -> GearResult<Vec<String>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(Vec::new());
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store.read(|tx| {
+        let mut names = Vec::new();
+        for seat in tx.seats_of_project(project)? {
+            if seat.role == gear_model::SeatRole::Lane
+                && seat.state == gear_model::SeatState::Retired
+            {
+                names.push(seat.name);
+            }
+        }
+        Ok(names)
+    })
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).

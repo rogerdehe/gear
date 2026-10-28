@@ -332,3 +332,138 @@ profile = "opencode"
     assert_eq!(captain.role, SeatRole::Captain);
     assert_eq!(captain.profile, "codex");
 }
+
+/// T-304: a Ready task on a retired lane brings it back only while the lane
+/// quota has a free slot; the quota counts the lane seats that are not Retired.
+#[test]
+fn a_full_lane_quota_leaves_a_retired_lane_retired() {
+    const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+    let mut s = Store::open_in_memory().unwrap();
+    let three = config_with(
+        &format!("{HEAT}{PRICING}{SAIL}"),
+        "\"minimax-cn/MiniMax-M3.1-Flash\"",
+    );
+    init_with_home(&mut s, &admin(), &three, Some(crate::skill_home()), T0).unwrap();
+    // sail is reclaimed, then the captain lowers the quota to two: heat and
+    // pricing fill it, sail is retired and does not count (T-304).
+    s.write(|tx| tx.set_seat_state("harbor:sail", SeatState::Retired, Some("reclaimed"), T0 + 1))
+        .unwrap();
+    let two = three.replace("lanes = 3", "lanes = 2");
+    init_with_home(&mut s, &admin(), &two, Some(crate::skill_home()), T0 + 2).unwrap();
+
+    // A NEW task names sail: the quota is full, so it stays retired and the
+    // apply says why.
+    let applied = apply_task_on(&mut s, "sail", 0, "r1");
+    assert!(
+        !applied.staffed.iter().any(|line| line == "start sail"),
+        "{:?}",
+        applied.staffed
+    );
+    assert!(
+        applied.warnings.contains(&"lane sail stays retired: 2 lanes run and the quota allows 2; retire another lane or raise [quota] lanes".to_string()),
+        "{:?}",
+        applied.warnings
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Retired);
+    assert_eq!(sail.state_reason.as_deref(), Some("reclaimed"));
+
+    // Another lane retires, so a slot is free: the Ready task on sail brings
+    // it back.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 4)
+    })
+    .unwrap();
+    let applied = apply_task_on(&mut s, "heat", 1, "r2");
+    assert!(
+        applied.staffed.contains(&"start sail".to_string()),
+        "{:?}",
+        applied.staffed
+    );
+    let sail = s.read(|tx| tx.get_seat("harbor:sail")).unwrap().unwrap();
+    assert_eq!(sail.state, SeatState::Queued, "the engine onboards it again");
+    assert_eq!(sail.state_reason.as_deref(), Some("a task names it again"));
+}
+
+/// T-304 review F1: two Ready tasks on two retired lanes and one free slot
+/// revive **one** lane, not both — the count advances within the apply.
+#[test]
+fn two_ready_tasks_revive_only_one_lane_when_one_slot_is_free() {
+    const SAIL: &str = r#"
+[[lanes]]
+name = "sail"
+duty = "sail trim"
+owns = ["src/sail/"]
+kind = "opencode"
+profile = "opencode"
+"#;
+    let mut s = Store::open_in_memory().unwrap();
+    let three = config_with(
+        &format!("{HEAT}{PRICING}{SAIL}"),
+        "\"minimax-cn/MiniMax-M3.1-Flash\"",
+    );
+    init_with_home(&mut s, &admin(), &three, Some(crate::skill_home()), T0).unwrap();
+    // pricing and sail are reclaimed; the captain lowers the quota to two, so
+    // heat fills one slot and exactly one slot is free.
+    s.write(|tx| {
+        tx.set_seat_state("harbor:pricing", SeatState::Retired, Some("reclaimed"), T0 + 1)?;
+        tx.set_seat_state("harbor:sail", SeatState::Retired, Some("reclaimed"), T0 + 1)
+    })
+    .unwrap();
+    let two = three.replace("lanes = 3", "lanes = 2");
+    init_with_home(&mut s, &admin(), &two, Some(crate::skill_home()), T0 + 2).unwrap();
+
+    // One apply names both: one comes back, the other stays retired.
+    let text = "<!-- gear-plan project=harbor base=0 -->\n# Queue\n\
+## NEW [must] lane=pricing\ngoal: G\naccept: a\nestimate: 30\ndeps: -\n\
+## NEW [must] lane=sail\ngoal: G\naccept: a\nestimate: 30\ndeps: -\n";
+    let draft = parse(text).unwrap();
+    let env = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP_PANE.into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: CAP_PANE.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
+    let applied = apply(&mut s, &env, Some(&fp), None, &draft, text, "r1", T0 + 3).unwrap();
+
+    let started: Vec<&String> = applied
+        .staffed
+        .iter()
+        .filter(|line| line.starts_with("start "))
+        .collect();
+    assert_eq!(started.len(), 1, "{:?}", applied.staffed);
+    let warning = format!(
+        "lane {} stays retired: 2 lanes run and the quota allows 2; retire another lane or raise [quota] lanes",
+        if started[0] == "start pricing" { "sail" } else { "pricing" }
+    );
+    assert!(applied.warnings.contains(&warning), "{:?}", applied.warnings);
+
+    // At most the quota runs, and exactly one of the two is still Retired.
+    let seats = s.read(|tx| tx.seats_of_project("harbor")).unwrap();
+    let running = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
+        .count();
+    assert!(running <= 2, "{running} lanes run under a quota of 2");
+    let retired: Vec<&str> = seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
+        .map(|seat| seat.name.as_str())
+        .collect();
+    assert_eq!(retired.len(), 1, "{retired:?}");
+}

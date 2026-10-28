@@ -339,6 +339,42 @@ fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
     Ok(others)
 }
 
+/// The problem of a config that would run more lanes than `[quota] lanes`
+/// allows (T-304), or `None` when it fits.
+///
+/// The quota counts the lanes that can run: a lane seat that is Retired does
+/// not take a slot, and a config lane that has no seat yet does (the engine
+/// will onboard it). `retired` are the lane names this project's seats hold as
+/// `SeatState::Retired`; a first registration has none.
+pub fn lane_quota_problem(
+    config: &config::ProjectConfig,
+    retired: &[String],
+) -> Option<String> {
+    let running = config
+        .lanes
+        .iter()
+        .filter(|lane| !retired.iter().any(|name| *name == lane.name))
+        .count();
+    if running as u32 > config.quota.lanes {
+        return Some(format!(
+            "quota.lanes: {running} lanes would run but the quota allows {} (a retired lane does not count)",
+            config.quota.lanes
+        ));
+    }
+    None
+}
+
+/// Every lane name this project's seats hold as `Retired` (T-304).
+fn retired_lane_names(tx: &Tx<'_>, project: &str) -> GearResult<Vec<String>> {
+    let mut names = Vec::new();
+    for seat in tx.seats_of_project(project)? {
+        if seat.role == SeatRole::Lane && seat.state == SeatState::Retired {
+            names.push(seat.name);
+        }
+    }
+    Ok(names)
+}
+
 /// The problem of two projects sharing branches, voyage folders or GitHub
 /// issues (T-256, T-302), or `None` when they cannot collide.
 ///
@@ -486,6 +522,11 @@ fn register(
 ) -> GearResult<InitResult> {
     let project_id = config.project.id.clone();
     check_other_projects(tx, config)?;
+    // The lane quota counts the lanes that would run (T-304); a first
+    // registration has no retired lane seat yet.
+    if let Some(problem) = lane_quota_problem(config, &[]) {
+        return Err(GearError::new(ErrorCode::BadFormat, problem));
+    }
 
     tx.insert_project(&ProjectRow {
         id: project_id.clone(),
@@ -585,6 +626,11 @@ fn re_register(
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
     check_other_projects(tx, config)?;
+    // The lane quota counts the lanes that would run (T-304): the retired lane
+    // seats keep their seat and do not take a slot.
+    if let Some(problem) = lane_quota_problem(config, &retired_lane_names(tx, &project_id)?) {
+        return Err(GearError::new(ErrorCode::BadFormat, problem));
+    }
 
     // The session the project lives in does not change mid-run.
     if config.project.herdr_session != project.herdr_session {
