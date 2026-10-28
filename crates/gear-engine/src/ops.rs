@@ -664,6 +664,34 @@ pub fn confirm_pending_with(
     store.write(|tx| {
         let mut confirmed = Vec::new();
         let mut flagged: Vec<String> = Vec::new();
+        // Liveness (T-240): only recover_on_start moved Executing ops on, and
+        // an op whose sender never recorded its outcome held the seat's
+        // delivery slot for ever — the `gear send` path sets its doorbell to
+        // Executing, calls Herdr, then records the outcome in a second write;
+        // when that write fails ("database is locked") the op stayed
+        // Executing and no doorbell rang again. A doorbell or a delivery stuck
+        // in Executing past `DOORBELL_EXPIRY_S` is therefore treated as an
+        // Unknown op: the loop below expires the doorbell and never re-sends
+        // the delivery. A merge legitimately runs longer, and every other kind
+        // is untouched.
+        for op in tx.ops_in_state(project, OpState::Executing)? {
+            if !matches!(op.kind, OpKind::Doorbell | OpKind::Deliver) || now - op.created < DOORBELL_EXPIRY_S {
+                continue;
+            }
+            require_transition(
+                OpState::Executing.can_transition(OpState::Unknown),
+                "operation",
+                "executing",
+                "unknown",
+            )?;
+            tx.set_op_state(
+                project,
+                &op.id,
+                OpState::Unknown,
+                Some("stale executing: its sender never recorded the outcome"),
+                now,
+            )?;
+        }
         for state in [OpState::Submitted, OpState::Unknown] {
             for op in tx.ops_in_state(project, state)? {
                 let evidence = match op.kind {
@@ -1176,5 +1204,118 @@ mod tests {
         let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
         assert_eq!(op.state, OpState::Submitted);
         assert_eq!(op.check_budget, 0, "no budget is spent on it");
+    }
+
+    /// An op its sender left in `Executing` (T-240): the second write that
+    /// recorded the outcome never landed.
+    fn executing_op(tx: &Tx<'_>, seat: &str, kind: OpKind, created: Ts) -> String {
+        let op = tx
+            .insert_op(&NewOp {
+                project: "p".into(),
+                seat: seat.into(),
+                generation: 1,
+                kind,
+                task: None,
+                attempt: None,
+                ref_msg: None,
+                plan_version: None,
+                payload: serde_json::json!({ "text": "x" }),
+                created,
+            })
+            .unwrap();
+        tx.set_op_state("p", &op.id, OpState::Executing, None, created).unwrap();
+        op.id
+    }
+
+    #[test]
+    fn a_doorbell_stuck_in_executing_does_not_hold_the_slot() {
+        // T-240: `gear send` sets its doorbell to Executing, calls Herdr and
+        // records the outcome in a second write; under load that write failed
+        // ("database is locked"), so the op stayed Executing and held the
+        // seat's delivery slot for ever — no doorbell rang again (M4.2: hull
+        // sat idle 20 min with work ready). Past DOORBELL_EXPIRY_S such an op
+        // is an Unknown op, which the doorbell expiry below then settles.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                executing_op(tx, "p:heat", OpKind::Doorbell, T0 - DOORBELL_EXPIRY_S);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0).unwrap();
+
+        assert_eq!(confirmed, vec!["O-1".to_string()]);
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Confirmed, "it left Executing and expired like any doorbell");
+        assert_eq!(
+            op.result.as_deref(),
+            Some("expired: rung again if items still wait")
+        );
+    }
+
+    #[test]
+    fn a_doorbell_executing_for_ten_seconds_is_left_alone() {
+        // A doorbell whose Herdr call is still running is not stale yet.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                executing_op(tx, "p:heat", OpKind::Doorbell, T0 - 10);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0).unwrap();
+
+        assert!(confirmed.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Executing);
+    }
+
+    #[test]
+    fn a_merge_executing_for_an_hour_is_untouched() {
+        // A merge legitimately runs longer than a doorbell: it is not made
+        // Unknown behind its sender's back.
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                executing_op(tx, "p:heat", OpKind::Merge, T0 - 3600);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) = confirm_pending(&mut store, "p", 1, T0).unwrap();
+
+        assert!(confirmed.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Executing);
+    }
+
+    #[test]
+    fn a_delivery_executing_for_five_minutes_becomes_unknown() {
+        // A stale delivery is not re-sent: it becomes Unknown, exactly as a
+        // delivery whose sender died with the engine (recover_on_start).
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .write(|tx| {
+                testing::seed_project(tx, "p", "sess", T0)?;
+                testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
+                executing_op(tx, "p:heat", OpKind::Deliver, T0 - 300);
+                Ok(())
+            })
+            .unwrap();
+
+        let (confirmed, _) =
+            confirm_pending_with(&mut store, "p", 1, 1000, &[], T0).unwrap();
+
+        assert!(confirmed.is_empty());
+        let op = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
+        assert_eq!(op.state, OpState::Unknown);
     }
 }
