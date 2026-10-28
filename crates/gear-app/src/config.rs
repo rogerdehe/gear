@@ -733,6 +733,9 @@ pub fn profile_table(
 /// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
 ///   release: non-empty and different (its own, else `[conventions]`'s);
+/// - a gate (`conventions.gate` or a repo's own) that pipes into another
+///   command without `pipefail` (T-242): the pipeline's exit status is its last
+///   command's, so a failure in an earlier stage can pass;
 /// - a lane's `repo` names one of the `[[repos]]` entries;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
@@ -747,6 +750,31 @@ pub fn profile_table(
 /// - an entry whose CLI is `claude` (its own, else the kind of the seat that
 ///   runs it) names a bare model id or alias, never `provider/model` (T-235).
 /// Empty chains are valid: models are not managed by GEAR then.
+/// The finding for a gate that pipes without `pipefail` (T-242).
+const GATE_PIPE: &str = "the gate pipes into another command, so its exit status is the last command's and a failure can pass: drop the pipe or start with `set -o pipefail;`";
+
+/// A gate that pipes into another command reports only that command's exit
+/// status: a failure in an earlier stage passes (T-242). `||` is not a pipe,
+/// and `pipefail` makes the pipeline report the failing stage.
+fn gate_pipes_without_pipefail(gate: &str) -> bool {
+    if gate.contains("pipefail") {
+        return false;
+    }
+    let bytes = gate.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'|' {
+            if bytes.get(index + 1) == Some(&b'|') {
+                index += 2;
+                continue;
+            }
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
@@ -771,6 +799,9 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             "conventions.gate",
             "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
         ));
+    }
+    if gate_pipes_without_pipefail(&cfg.conventions.gate) {
+        issues.push(issue("conventions.gate", GATE_PIPE.to_string()));
     }
 
     // ---- quota policy: a fallback needs a next model (L-74). A one-model
@@ -1011,6 +1042,9 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     &format!("repos[{index}].gate"),
                     "the gate must be the repo's own build + test command (it runs before every merge in that repo)".to_string(),
                 ));
+            }
+            if gate_pipes_without_pipefail(gate) {
+                issues.push(issue(&format!("repos.{}.gate", repo.name), GATE_PIPE.to_string()));
             }
         }
     }
