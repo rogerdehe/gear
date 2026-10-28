@@ -66,6 +66,8 @@ pub enum StaffItem {
     Release { line: usize, name: String },
     /// `- rebind heat repo=backend owns=[src/, tests/]`.
     Rebind { line: usize, lane: String, repo: String, owns: Vec<String> },
+    /// `- rebind heat cancel`: withdraw a pending rebind (T-305).
+    RebindCancel { line: usize, lane: String },
     /// `- remerge T-<n>`: retry the task's failed merge (T-92).
     Remerge { line: usize, task: String },
 }
@@ -730,6 +732,15 @@ fn parse_staff(text: &str, line: usize) -> GearResult<StaffItem> {
         }
         "rebind" => {
             let lane = tokens.next().ok_or_else(|| bad(line, "`rebind` needs a lane"))?;
+            // `- rebind <lane> cancel` withdraws a pending request (T-305).
+            let rest = tokens.clone().collect::<Vec<_>>();
+            if rest.first() == Some(&"cancel") {
+                tokens.next();
+                if tokens.next().is_some() {
+                    return Err(bad(line, "`rebind ... cancel` takes only a lane"));
+                }
+                return Ok(StaffItem::RebindCancel { line, lane: lane.into() });
+            }
             let repo = tokens.next().and_then(|s| s.strip_prefix("repo="))
                 .filter(|s| !s.is_empty()).ok_or_else(|| bad(line, "`rebind` needs `repo=<name>`"))?;
             let remaining = tokens.collect::<Vec<_>>().join(" ");

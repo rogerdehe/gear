@@ -231,9 +231,35 @@ fn apply_queue(
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
         if let StaffItem::Rebind { lane, repo, owns, line } = item {
+            // The old values come from the stored config, before the request:
+            // an idle lane's rebind is applied in this call (T-305).
+            let (old_repo, old_owns) = lane_binding(tx, project, lane, *line)?;
             let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
-            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
-                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            let preview = rebind_preview(&old_repo, repo, &old_owns, owns);
+            let message = if waiting.is_empty() {
+                let mut text = format!("rebind {lane}: {preview}: applied");
+                // The undo is the rebind line back to the old binding; a lane
+                // in the project root has none (a repo is named, not "root").
+                if !old_repo.is_empty() {
+                    text.push_str(&format!(
+                        " (to undo: - rebind {lane} repo={old_repo} owns=[{}])",
+                        old_owns.join(", ")
+                    ));
+                }
+                text
+            } else {
+                format!(
+                    "rebind {lane}: {preview}: waits for {}; nothing changes until then (to withdraw: - rebind {lane} cancel)",
+                    waiting.join(", ")
+                )
+            };
+            warnings.push(message.clone());
+            staffed.push(message);
+            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            continue;
+        }
+        if let StaffItem::RebindCancel { lane, line } = item {
+            let message = cancel_rebind(tx, project, lane, *line)?;
             warnings.push(message.clone());
             staffed.push(message);
             record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
@@ -625,7 +651,7 @@ fn apply_queue(
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
     for item in &draft.staff {
-        if matches!(item, StaffItem::Rebind { .. }) { continue; }
+        if matches!(item, StaffItem::Rebind { .. } | StaffItem::RebindCancel { .. }) { continue; }
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
             // The decision log (design §7.4): a staff line is a decision.
@@ -701,6 +727,7 @@ fn apply_queue(
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
             StaffItem::Release { .. } => unreachable!("release is applied above"),
             StaffItem::Rebind { .. } => unreachable!("rebind is applied above"),
+            StaffItem::RebindCancel { .. } => unreachable!("rebind is applied above"),
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
@@ -1197,7 +1224,8 @@ pub fn staff_line(item: &StaffItem) -> usize {
         | StaffItem::Retry { line, .. }
         | StaffItem::Release { line, .. }
         | StaffItem::Remerge { line, .. }
-        | StaffItem::Rebind { line, .. } => *line,
+        | StaffItem::Rebind { line, .. }
+        | StaffItem::RebindCancel { line, .. } => *line,
     }
 }
 
@@ -1206,6 +1234,39 @@ pub fn staff_line(item: &StaffItem) -> usize {
 struct RebindRequest { repo: String, owns: Vec<String> }
 
 pub fn rebind_pending_key(seat: &str) -> String { format!("lane-rebind:{seat}") }
+
+/// The lane's binding before a rebind (T-305): the repo's name ("" for the
+/// project root) and the paths it owns.
+fn lane_binding(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearResult<(String, Vec<String>)> {
+    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+    let config = crate::config::parse(&row.config_toml)?;
+    let owns = config.lanes.iter().find(|l| l.name == lane).map(|l| l.owns.clone()).unwrap_or_default();
+    Ok((config.repo_of_lane(lane).name, owns))
+}
+
+/// The preview of a rebind, which is the apply line itself (T-305): what
+/// changes, old and new.
+fn rebind_preview(old_repo: &str, new_repo: &str, old_owns: &[String], new_owns: &[String]) -> String {
+    let old = if old_repo.is_empty() { "root" } else { old_repo };
+    format!("repo {old} → {new_repo}, owns [{}] → [{}]", old_owns.join(", "), new_owns.join(", "))
+}
+
+/// `- rebind <lane> cancel` (T-305): the way back from a recorded request.
+fn cancel_rebind(tx: &Tx<'_>, project: &str, lane: &str, line: usize) -> GearResult<String> {
+    let seat_id = format!("{project}:{lane}");
+    let seat = tx.get_seat(&seat_id)?.ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
+    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired { return Err(bad(line, "rebind needs a non-retired lane")); }
+    if tx.get_meta(&format!("lane-rebind-applied:{seat_id}"))?.is_some_and(|v| !v.is_empty()) {
+        return Err(bad(line, format!("lane {lane} is still moving to its new worktree")));
+    }
+    let key = rebind_pending_key(&seat_id);
+    if tx.get_meta(&key)?.is_some_and(|v| !v.is_empty()) {
+        tx.set_meta(&key, "")?;
+        Ok(format!("rebind {lane}: the pending rebind is withdrawn"))
+    } else {
+        Ok(format!("rebind {lane}: nothing pending to withdraw"))
+    }
+}
 
 fn rebind_config(tx: &Tx<'_>, project: &str, lane: &str, request: &RebindRequest, line: usize) -> GearResult<String> {
     let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
@@ -2996,6 +3057,7 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
         StaffItem::Rebind { lane, repo, owns, .. } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+        StaffItem::RebindCancel { lane, .. } => format!("rebind {lane} cancel"),
     }
 }
 
