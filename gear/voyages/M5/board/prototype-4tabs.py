@@ -326,7 +326,7 @@ def view_now(w, sel):
     cols = [("LANE", 3), ("NOW DOING", 9), ("STAGE", 11 + tw), ("TIME", 34 + tw), ("LANE DONE", 46 + tw), ("ENDS", 76 + tw)]
     y = TOP[0]
     for name, x in cols: put(w, y, x, name, C["b"])
-    put(w, y, 108 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
+    put(w, y, 86 + tw, "(Enter: the lane's work)", C["dim"]); y += 1
     ends = {}
     fc = forecast() if G["V"]["state"] == "sailing" else {}
     for i, n in enumerate(LANES):
@@ -346,30 +346,23 @@ def view_now(w, sel):
         put(w, y, 46 + tw, "█" * k + "░" * (10 - k), C[LANE_COL[n]]); put(w, y, 57 + tw, f"{nd} of {len(mine)} · {l}m left")
         if fc:
             put(w, y, 76 + tw, f"~{hm(ends[n])}")
-            if fc[n][1]:
-                gap, dep = max(fc[n][1])
-                put(w, y, 85 + tw, f"waits {hm(gap)} for {dep}", C["bad"] | C["b"])
+
         if sel == i: hl(w, y)
         y += 1
     if G["V"]["state"] == "sailing":
         first, last = min(ends, key=ends.get), max(ends, key=ends.get); gap = ends[last] - ends[first]
-        idle = [(n, max(fc[n][1])) for n in LANES if fc[n][1]]
-        if gap <= 30 and not idle:
-            put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}, none waits", C["ok"])
-        else:
-            msg = f"✗ not balanced: {last} ends {hm(gap)} after {first}"
-            if idle:
-                n, (g, dep) = max(idle, key=lambda x: x[1][0])
-                owner = next(t[1] for t in G["T"] if t[0] == dep)
-                msg += f"; {n} waits {hm(g)} for {dep} ({owner}) — give {n} work it can start now, or move {dep} to {n}"
-            else:
-                msg += f" — move {last}'s next startable wave to {first}"
-            put(w, y, 3, msg, C["bad"])
-        y += 1
-        put(w, y, 3, "ENDS = each lane's queue played forward: estimate left × the lane's pace, a task starts when its "
-                     f"dependencies have merged (hand-in + ~{REVIEW_MERGE}m review and merge); the gap is the wait", C["dim"])
+        put(w, y, 3, f"✔ balanced: every lane ends within {hm(gap)}" if gap <= 30 else
+            f"✗ not balanced: {last} ends {hm(gap)} after {first}", C["ok"] if gap <= 30 else C["bad"])
     y += 2
     items = [("⚠", f"{tid} {lane} {why}" if tid != "-" else f"{lane} {kind}: {why}", C["warn"]) for lane, tid, kind, why in G["EXC"]]
+    # a lane that will sit with nothing to start (20 min or more): its next task waits for another task to merge
+    for n, (end, waits, pace) in (fc.items() if fc else []):
+        for gap, dep in waits:
+            if gap >= 20:
+                owner = next(t[1] for t in G["T"] if t[0] == dep)
+                nxt = next(t[0] for t in G["T"] if t[1] == n and dep in t[9])
+                items.append(("⚠", f"{n} will sit idle ~{hm(gap)}: its next task {nxt} waits for {dep} ({owner}) — "
+                                   f"captain: give {n} work it can start now, or move {dep} to {n}", C["bad"]))
     items += [("⏳", s_, 0) for s_ in G["WAITING"]]
     put(w, y, 1, f"TO HANDLE ({len(items)})", C["b"] | (C["warn"] if items else 0)); y += 1
     for mark, text, a in items or [("", "nothing", C["dim"])]:

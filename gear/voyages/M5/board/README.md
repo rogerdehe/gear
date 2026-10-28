@@ -21,3 +21,11 @@ Changes against M4, each from the user's review of the real board (2026-10-28):
 13. **A selected row is lit across the whole width, in one colour** (M4 lit only the cells drawn with the selection, so a row showed two or three different backgrounds).
 14. **The header is folded by default:** under the goal box, one row with the goal check (n of m met, the next unmet clause) and the current milestone (n of m reached), one row with the time bar (expected finish against the plan, ahead or behind) and the task bar, and the quality bar. `d` unfolds every clause, every milestone and the legends, and folds them again; the views keep their room however many milestones a voyage has. The header labels (Goal check, Milestone, Time, Tasks, Quality bar) are bold titles, not grey.
 15. **The views are a tab bar that looks like one:** framed (╭─╮ │ ╰─╯), each tab separated, the picked one lit, under the header.
+
+## The 4-view variant (`prototype-4tabs.py`, for the user's comparison)
+
+Views: **Now** (what happens and what needs a hand), **Tasks** (the dependency graph), **Cost** (Time & tokens by lane), **Log** (the decisions and the friction reports). Workload folds into Now; "waiting on someone" moves from Decisions to Now.
+
+Now is one table, one row per lane: LANE, NOW DOING, STAGE, TIME (actual/estimate, ⚠ over), LANE DONE (bar, n of m, minutes of estimate left), ENDS. Under it one line: balanced, or which lane ends how long after which. Then **TO HANDLE**: needs a look, waiting on someone, and every lane that will sit idle 20 minutes or more ("hull will sit idle ~1h31m: its next task T-267 waits for T-266 (mast) — captain: give hull work it can start now, or move T-266 to hull"). Quota on one line.
+
+ENDS and the idle time come from each lane's queue played forward (the engine's run-dry forecast in feed.rs does the same; the board reuses it): a lane is free again when it hands a task in; its next task starts when the lane is free and every task it depends on has merged (hand-in plus the voyage's measured review-and-merge time); durations are the estimate left times the lane's measured pace (actual / estimate of its merged tasks); the gap between free and start is idle time. The board does not print this explanation.
