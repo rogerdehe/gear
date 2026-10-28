@@ -15,3 +15,4 @@
 11. F-129: a reviewer's `gear --show` got LOCKED from the store once and passed on retry (the store was busy with the engine's tick). M4.2 saw "database is locked" too (O-3206). One more sighting makes it a task: a read waits on the lock with a bound instead of failing.
 12. T-322: 'no new file appears' in an accept is read literally by the reviewer (SQLite's -wal/-shm count); say what must not appear (a store, a directory).
 13. F-130/F-131 (T-318): an accept that runs a release build costs a cold release build per worktree (7-10 min here) for the writer and again for the reviewer; size the budget for it, or prove the step with `make -n` and one existing build.
+14. M-4616: re-splitting the lanes after decomposition turned same-lane order into cross-lane order with no deps (T-334 mast needs T-329, which moved to hull). After a re-split, every former 'after:' between two tasks that now sit on different lanes becomes a deps: line.
