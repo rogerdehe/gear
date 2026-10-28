@@ -363,7 +363,8 @@ pub struct TempsSection {
     pub profile: String,
 }
 
-/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3.
+/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
+/// gate "" (none: a project names its own gate, T-255).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -372,7 +373,9 @@ pub struct Conventions {
     pub staging: String,
     pub review_max_rounds: u32,
     /// What the engine runs in its integration worktree after a merge, before
-    /// it pushes (T-12).
+    /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
+    /// build + test command, so the project names its own — a `[[repos]]`
+    /// entry may name its gate instead.
     pub gate: String,
 }
 
@@ -383,10 +386,13 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
-            gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
+            gate: String::new(),
         }
     }
 }
+
+/// The finding for a project that does not name its gate (T-255).
+const GATE_MISSING: &str = "name the command the merge gate runs in the integration worktree; it must exit non-zero on any failure (e.g. `make gate`, `go test ./...`)";
 
 /// What to do when an agent stops on a provider limit (17 §0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -733,6 +739,9 @@ pub fn profile_table(
 /// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
 ///   release: non-empty and different (its own, else `[conventions]`'s);
+/// - a gate: no default (T-255), so `conventions.gate` must be named unless
+///   every repo of the project has its own; `conventions.gate` is not left as
+///   a TODO either;
 /// - a gate (`conventions.gate` or a repo's own) that pipes into another
 ///   command without `pipefail` (T-242): the pipeline's exit status is its last
 ///   command's, so a failure in an earlier stage can pass;
@@ -792,13 +801,25 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
-    // ---- the gate runs before every merge: it must be the project's own
-    // build + test command, never left as the skeleton's TODO.
-    if cfg.conventions.gate.trim().is_empty() || cfg.conventions.gate.contains("TODO") {
+    // ---- the gate runs before every merge in the integration worktree, and
+    // it is the project's own command: GEAR ships no default (T-255), because
+    // a default that fits one stack's build leaves another project with a
+    // gate that cannot run. A `[[repos]]` entry may name its own gate; the
+    // root repo, and every entry without one, run `conventions.gate`, so when
+    // that is empty the project must still name a gate for them.
+    if cfg.conventions.gate.contains("TODO") {
         issues.push(issue(
             "conventions.gate",
             "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
         ));
+    }
+    let gate_missing = cfg.conventions.gate.trim().is_empty();
+    let repo_without_own_gate = cfg
+        .repos
+        .iter()
+        .any(|repo| repo.gate.as_deref().is_none_or(|gate| gate.trim().is_empty()));
+    if gate_missing && (cfg.repos.is_empty() || repo_without_own_gate) {
+        issues.push(issue("conventions.gate", GATE_MISSING.to_string()));
     }
     if gate_pipes_without_pipefail(&cfg.conventions.gate) {
         issues.push(issue("conventions.gate", GATE_PIPE.to_string()));

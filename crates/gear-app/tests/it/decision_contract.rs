@@ -258,6 +258,10 @@ duty = "thermal calculation"
 owns = ["src/heat/"]
 kind = "opencode"
 profile = "opencode"
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#;
     let mut s = Store::open_in_memory().unwrap();
     let env = Env { ctx: None, pane_id: None, admin: true };

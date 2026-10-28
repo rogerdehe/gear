@@ -55,6 +55,10 @@ profile = "codex"
 lanes = [{lane_models}]
 review = ["gpt-6.1-sol"]
 on_quota = {{ lanes = "wait", review = "wait" }}
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#
     )
 }

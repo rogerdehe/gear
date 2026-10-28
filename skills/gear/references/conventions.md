@@ -87,7 +87,7 @@ Send it with `gear send --kind question`, then continue with other ready work if
 ## 7. Review and merge (what the engine does)
 
 - A hand-in starts a temp reviewer on a different model from the writer's, on its own branch `review/t<n>`. What it delivers: `gear --skill review`.
-- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
+- A **pass** is settled and merged by the engine: it merges the candidate into the integration branch of the task's repo, runs that repo's gate (`[[repos]].gate`, falling back to `[conventions].gate`), pushes, and deletes the task and review branches. A merge that fails (conflict, red gate) goes to the captain once.
 - A **fail** goes to the captain, who judges it against the bar and writes the rework (`gear --skill course`).
 - Status comes from facts: an attempt exists → in progress; handed in → in review; merged → done. "The agent said done" is not a fact.
 
@@ -97,8 +97,10 @@ Send it with `gear send --kind question`, then continue with other ready work if
 [conventions]
 integration = "dev"     # the integration branch
 release = "main"        # the release branch
-gate = "make test"      # the project's own build + test, run before every merge
+gate = "make test"      # the project's own build + test, run before every merge; no default
 ```
+
+The gate has no default: GEAR cannot know another project's build and test, so a project that names none is refused at `gear admin init` until it does (`make gate`, `go test ./...`, `npm test` — whatever exits non-zero on any failure and runs in seconds).
 
 A repo may also carry a `[github]` mode (issues in, pull requests out); what the engine writes there and when: `gear --skill github`.
 
