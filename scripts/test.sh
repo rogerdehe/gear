@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run every test of the workspace, print each test's time, and warn loudly
-# about slow ones. The user's red line (gear/CONVENTIONS.md "Test time"): the
+# about slow ones. The user's red line (the voyage's CONVENTIONS.md "Test time"): the
 # whole suite under 300 s; 60 s passes, 30 s is good, 10 s is excellent.
 #
 #   scripts/test.sh            all tests

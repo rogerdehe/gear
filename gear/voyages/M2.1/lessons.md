@@ -1,0 +1,9 @@
+# M2.1 lessons
+
+What M2.1 taught, recorded as it happened. A lesson holds for this voyage; only what the release review distils into the shipped skill (`skills/gear/`) carries over. Numbers are the ones lessons had in the old shared file, so earlier references still find them.
+
+7a. **An interface between two tasks is a contract, not a dependency** (M2.1, 2026-10-25). The captain made T-53 wait for T-52 because T-53 used T-52's API — the API was already written out in T-52's goal, so nothing stopped T-53 from starting. The engine lane stood idle from the first minute, and the captain's own snapshot showed it (`engine · no current task · 1 queued`) and was ignored; the user had to point it out. A `deps:` is for work that cannot start without the other's result; shared names are fixed in both contracts and the later task merges the integration branch in. The same day it happened again inside one lane (T-54 waited for T-52, which sat in review): a follow-up in the same lane builds on the lane's own branch, never on a dep. The contract lets a task start, not hand in: code that calls another lane's new API compiles only after that task lands (M3: T-74 and T-80 waited on T-73, T-78, T-79), so the producing task goes first in its lane and the caller goes after independent work. At every apply, every lane must have a task it can start now.
+
+7b. **A dialog at an agent's start is a stop nobody sees** (M2.1). A Codex reviewer sat on the "Update available" dialog and nothing rang the captain. Turn such dialogs off in the profile's start args, and ring the captain for any seat blocked for minutes.
+
+7c. **Self-hosting runs the build it was started with** (M2.1). The engine ran a binary from before the voyage, so merged fixes were not live and a stopgap was removed too early. Rebuild and restart after the merges you need live — and only when no merge op is in flight (a restart interrupted T-58's merge; it recovered).

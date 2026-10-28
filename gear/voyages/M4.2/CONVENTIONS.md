@@ -6,9 +6,9 @@ Use the exact result command in the packet, then end the turn.
 
 The shared rules are [default working conventions](../skills/gear/references/conventions.md),
 also available as `gear --skill conventions`. Review guidance is `gear --skill review`;
-[gear/REVIEW.md](REVIEW.md) is retained as this repository's review record format.
+[REVIEW.md](REVIEW.md) is retained as this repository's review record format.
 
-Everything of one voyage lives in `gear/voyages/<M>/` (`<M>` is the task's milestone): `plan.md`, `backlog.md`, the writer's report `reports/T-<n>.md` and the review `reviews/T-<n>.md`. Files that span voyages sit in `gear/` itself: this file, `REVIEW.md`, `lessons.md`, `STOPGAPS.md`, `field-notes/`.
+Everything of one voyage lives in its folder `gear/voyages/<M>/` (`<M>` is the task's milestone): `plan.md`, `backlog.md`, the writer's report `reports/T-<n>.md`, the review `reviews/T-<n>.md`, and this voyage's `CONVENTIONS.md`, `REVIEW.md`, `gear.toml`, `lessons.md` and `stopgaps.md`. Nothing the captain writes spans voyages: the next voyage starts from a copy of these rules, adapted at its kickoff; only what the release review puts into the skill carries over.
 
 ## Test time (user's red line)
 
@@ -23,4 +23,4 @@ The whole test suite — every test of the repository together (`scripts/test.sh
 
 ## The last step of every voyage
 
-Every voyage plan of GEAR ends with this task, planned at kickoff: read the voyage's lessons (`gear/lessons.md`, the voyage file's Decisions, what went to the backlog) against the shipped skill (`skills/gear/`); fix what contradicts, is stale or no longer matches the code by rewriting or deleting — never by piling on rules; then release. Nothing found means nothing to change.
+Every voyage plan of GEAR ends with this task, planned at kickoff: read the voyage's lessons (the voyage's `lessons.md`, its plan's Decisions, what went to the backlog) against the shipped skill (`skills/gear/`); fix what contradicts, is stale or no longer matches the code by rewriting or deleting — never by piling on rules; then release. Nothing found means nothing to change.

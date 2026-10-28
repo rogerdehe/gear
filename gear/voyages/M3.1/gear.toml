@@ -1,0 +1,106 @@
+# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25.
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 4
+temps = 4
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "hull"
+duty = "M3.1 engine: starting and switching a pi lane, a dead temp seat freeing its slot, admin stop waiting for merges, the engine side of the trial's batch-2 fixes"
+owns = ["crates/gear-engine/Cargo.toml", "crates/gear-engine/examples/", "crates/gear-engine/tests/", "crates/gear-engine/src/attention.rs", "crates/gear-engine/src/blocked.rs", "crates/gear-engine/src/busy.rs", "crates/gear-engine/src/captain_quota.rs", "crates/gear-engine/src/delivery.rs", "crates/gear-engine/src/dispatch.rs", "crates/gear-engine/src/feed.rs", "crates/gear-engine/src/guardrails.rs", "crates/gear-engine/src/lib.rs", "crates/gear-engine/src/merge.rs", "crates/gear-engine/src/model.rs", "crates/gear-engine/src/observe.rs", "crates/gear-engine/src/onboard.rs", "crates/gear-engine/src/opencode.rs", "crates/gear-engine/src/ops.rs", "crates/gear-engine/src/parallel.rs", "crates/gear-engine/src/quota.rs", "crates/gear-engine/src/release.rs", "crates/gear-engine/src/restart.rs", "crates/gear-engine/src/review.rs", "crates/gear-engine/src/stall.rs", "crates/gear-engine/src/start.rs", "crates/gear-engine/src/switch.rs", "crates/gear-engine/src/tailed.rs", "crates/gear-engine/src/trust.rs"]
+kind = "pi"
+profile = "pi"
+# User 2026-10-26: every lane on pi.
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
+
+[[lanes]]
+name = "deck"
+duty = "M3.1 everything outside the engine: agent profiles (pi, Codex quota), skills and skill install, CLI, plan apply, packets, mail, docs"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-board/", "crates/gear-herdr/", "crates/gear-forge/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
+kind = "pi"
+profile = "pi"
+# M3.1 kickoff (user): after the pi support lands, deck runs on pi to compare with hull on OpenCode.
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
+
+[[lanes]]
+name = "keel"
+duty = "M3.1 engine messaging: a message reaches a working lane at once (T-130), agents keep their Herdr names (T-134)"
+owns = ["crates/gear-engine/src/doorbell.rs", "crates/gear-engine/src/naming.rs"]
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
+
+[[lanes]]
+name = "mast"
+duty = "M3.1 app and CLI: gear learns its ancestry in process (T-131), a held lane is released from the plan (T-133); the skills"
+owns = ["crates/gear-app/", "crates/gear-cli/", "skills/"]
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "opencode-go/deepseek-v4.1-flash", cli = "pi" },
+  { model = "minimax-cn/MiniMax-M3.1-Flash", cli = "pi" },
+]
+
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, first; then OpenCode Go deepseek-v4-pro (M3.1 kickoff)
+kind = "codex"
+profile = "codex"
+
+[models]
+# M3 kickoff (user): lanes MiniMax M3.1 Flash, then OpenCode Go DeepSeek V4.1
+# Flash (both on OpenCode: an in-place switch). Reviewers Codex sol medium, then
+# OpenCode Go DeepSeek V4 Pro (another CLI: closed and restarted in the pane).
+# Both exhausted: park quota_reset_h hours, then back to the first model.
+lanes = [
+  "minimax-cn/MiniMax-M3.1-Flash",
+  "opencode-go/deepseek-v4.1-flash",
+]
+# The reviewer never runs the model it reviews.
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+  { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
+]
+on_quota = { lanes = "fallback", review = "fallback" }
+quota_reset_h = 5
+
+# The in-place model switch (T-33): what `/model` shows in the picker and what
+# the status bar says once the model is on. Required for an OpenCode lane or
+# reviewer on that model — without it the seat is flagged, never closed.
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
+bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+variant = "high"
+
+[models.switch."opencode-go/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro (New) OpenCode Go"
+bar = "DeepSeek V4 Pro (New) OpenCode Go"
+variant = "high"
+
+[conventions]
+integration = "dev"
+release = "main"
+# The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
+gate = "cargo build --workspace --all-targets && scripts/test.sh"

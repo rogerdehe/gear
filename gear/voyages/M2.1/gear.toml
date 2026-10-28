@@ -1,0 +1,70 @@
+# GEAR's own project config. M2.1 kickoff confirmed by the user 2026-10-25.
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 3
+temps = 3
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "config"
+duty = "M2.1 multi-repo in gear-app: [[repos]] and a lane's repo= in the config, its checks, the hand-in check, init per repo, the kickoff skeleton; re-init restarts a retired lane"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "engine"
+duty = "M2.1 multi-repo in the engine: onboarding, reviews, merges, the gate and the parallel-change check follow the lane's repo"
+owns = ["crates/gear-engine/", "crates/gear-herdr/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "docs"
+duty = "M2.1 multi-repo in the skill and docs: the [[repos]] format, choosing a voyage's repos, cutting a cross-repo requirement into per-repo tasks"
+owns = ["crates/gear-cli/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning high; the fallback is Codex gpt-6-astra, reasoning high (user, 2026-10-25)
+kind = "codex"
+profile = "codex"
+
+[models]
+# A chain entry may name the CLI that runs the model and the arguments that
+# CLI starts with (T-35). The lane's fallback needs another CLI, so the
+# engine closes opencode and starts codex in the same pane and worktree. A
+# lane on gpt-6.1-sol is reviewed by gpt-6-astra (never the writer's model).
+lanes = [
+  "minimax-cn/MiniMax-M3.1-Flash",
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+]
+# The reviewer never runs the model it reviews. Both chains exhausted: the
+# seat parks until the reset and the captain tells the user (M2.1 kickoff).
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+  { model = "gpt-6-astra", cli = "codex", args = ["-c", "model_reasoning_effort=high"] },
+]
+on_quota = { lanes = "fallback", review = "fallback" }
+quota_reset_h = 5
+
+# The in-place model switch (T-33): what `/model` shows in the picker and what
+# the status bar says once the model is on. Required for an OpenCode lane or
+# reviewer on that model — without it the seat is flagged, never closed.
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
+bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[conventions]
+integration = "dev"
+release = "main"

@@ -1707,7 +1707,7 @@ fn run_plan(
         )
     })?;
     // After a successful apply: the captain hears about a lane that would
-    // stand idle (T-58, gear/lessons.md 7a) and about the lanes his own tail
+    // stand idle (T-58, gear/voyages/M2.1/lessons.md 7a) and about the lanes his own tail
     // silences (B5: a lane that gets no warning is not a mystery). Printed
     // only — the apply itself is unchanged.
     // The warnings the captain reads: the apply's own (design §7.2: a decision

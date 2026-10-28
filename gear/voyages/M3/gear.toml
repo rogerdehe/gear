@@ -1,0 +1,79 @@
+# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25.
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 3
+temps = 3
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "steady"
+duty = "M3 engine reliability: merges, reviews, retirement, dry-lane forecast, doorbells, alerts, the push check, onboarding faults from the first trial"
+owns = ["crates/gear-engine/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "course"
+duty = "M3 config, plan, home page and agent profiles: push destinations at init, the GitHub config, retry and seat reasons, kickoff checks, the project standard line, Codex back-off and trust, the CLI handover"
+owns = ["crates/gear-model/", "crates/gear-store/", "crates/gear-app/", "crates/gear-board/", "crates/gear-herdr/"]
+kind = "opencode"
+profile = "opencode"
+
+[[lanes]]
+name = "base"
+duty = "M3 CLI, skills, docs and the GitHub layer: push-check, the forge crate and its sync, import-issues, the github and adopt skills, captain init, fixtures, the closing skill review"
+owns = ["crates/gear-cli/", "crates/gear-forge/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml"]
+kind = "opencode"
+profile = "opencode"
+
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium; the fallback is OpenCode Go deepseek-v4-pro (M3 kickoff)
+kind = "codex"
+profile = "codex"
+
+[models]
+# M3 kickoff (user): lanes MiniMax M3.1 Flash, then OpenCode Go DeepSeek V4.1
+# Flash (both on OpenCode: an in-place switch). Reviewers Codex sol medium, then
+# OpenCode Go DeepSeek V4 Pro (another CLI: closed and restarted in the pane).
+# Both exhausted: park quota_reset_h hours, then back to the first model.
+lanes = [
+  "minimax-cn/MiniMax-M3.1-Flash",
+  "opencode-go/deepseek-v4.1-flash",
+]
+# The reviewer never runs the model it reviews.
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] },
+  { model = "opencode-go/deepseek-v4-pro", cli = "opencode" },
+]
+on_quota = { lanes = "fallback", review = "fallback" }
+quota_reset_h = 5
+
+# The in-place model switch (T-33): what `/model` shows in the picker and what
+# the status bar says once the model is on. Required for an OpenCode lane or
+# reviewer on that model — without it the seat is flagged, never closed.
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
+bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+variant = "high"
+
+[models.switch."opencode-go/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro (New) OpenCode Go"
+bar = "DeepSeek V4 Pro (New) OpenCode Go"
+variant = "high"
+
+[conventions]
+integration = "dev"
+release = "main"
