@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=601 -->
+<!-- gear-plan project=gear base=602 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -35,6 +35,7 @@ eta: 16h
 - 2026-10-29 01:55 override: T-274 passes over its review fail: the engine check went from 245.6 s to 157.6 s (36 % shorter; the changed tests 1.5-2.4x faster), no test, assertion or behaviour removed; the absolute numbers (sum 431 s against 350, 58 tests over 3 s) were measured at load average 35-55 on 10 cores shared with another project and say nothing about the fixtures; under the DELIVERABLE bar a speed-up with no error does not block, and chasing the numbers on a loaded machine is not worth a rework | why: the work is right; the threshold was the captain's and could not be measured here | else: a rework round measuring noise
 
 - station M-4514: keep course 132 min in, 24 done; forecast 1379 min (23 h): eta 24h proposed to the user
+- station M-4544: keep course 159 min in, 27 done; forecast 1459 min; the eta waits for the user
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
@@ -662,4 +663,10 @@ estimate: 15
 goal: [v0.5.3 S4] Release v0.5.3, station S4 of M5. Change, no other design: (1) the version is 0.5.3 in the workspace Cargo.toml (`[workspace.package] version`), Cargo.lock (the workspace crates' entries, as `cargo build` rewrites them), herdr-plugin.toml and every version string README.md names; (2) docs/releases/v0.5.3.md, in the form of docs/releases/v0.4.10.md: one line per task of station S4 merged since the previous release (its T-number and what it changed for a user, from its goal), then "Skill" with what the release review changed in skills/ (the captain adds that text to this contract before the task starts; "nothing" when nothing changed). The captain merges dev into main, tags v0.5.3 and publishes the release; this task does not. The code change is in these files only.
 accept: `cargo build --release -p gear-cli` then `target/release/gear --version` prints "gear 0.5.3"; docs/releases/v0.5.3.md lists every merged S4 task. Run only `make check CRATE=gear-cli`; the merge gate runs `make gate`.
 deps: T-276, T-339, T-340, T-341, T-342, T-343, T-344, T-345, T-346, T-347, T-348, T-349, T-350, T-351, T-352, T-353, T-354, T-355, T-356, T-357, T-358, T-359, T-360, T-361, T-362, T-363, T-364, T-365
+estimate: 15
+
+## T-370 [must] lane=hull milestone=M5 required
+goal: [v0.5.0 S1] "The review of T-n waits: every temp seat is in use" is information, not an item that rings the captain (M5: one such item rang the captain for nearly every hand-in, M-4418, M-4425, M-4450, M-4486, M-4491, M-4499, M-4533, M-4537, M-4542, each answered "Information."; its own text says the lane is not blocked). Today crates/gear-engine/src/review.rs fn tell_captain inserts it as `MsgKind::Question`, `MsgState::Open`, so it counts as actionable, rings the doorbell and holds an INBOX slot. Change fn tell_captain only, no other design: the message is `MsgKind::System` with `MsgState::Info` (the state the direction check's captain notice uses), so it is listed among the captain's information and rings nothing; the once-per-attempt meta (`review_wait_told_key`) stays; the `already` test keeps reading `actionable_for` for an open item of the task as today. The code change is in crates/gear-engine/src/review.rs only; tests go where the crate keeps them.
+accept: review.rs tests: a hand-in while both temp seats are busy writes one System Info message to the captain with the "waits: every temp seat is in use" text, and the captain's `actionable_for` list does not contain it; a second tick writes none; existing review-queue tests pass after their expected kind and state follow. Run only `make check CRATE=gear-engine`; the merge gate runs `make gate`.
+deps: T-283
 estimate: 15
