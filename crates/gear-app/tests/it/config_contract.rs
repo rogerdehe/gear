@@ -154,11 +154,13 @@ fn owns_overlap_on_path_boundaries_only() {
 
 #[test]
 fn quota_conventions_and_timing() {
+    // The lane quota is not a config finding (T-304): only the seats know which
+    // lanes are retired, so `admin::lane_quota_problem` reports it.
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.quota.lanes = 1;
     cfg.conventions.release = "dev".into();
     cfg.timing.cooldown_s = 4;
-    assert_eq!(fields(&validate(&cfg)), vec!["quota.lanes", "conventions.release", "timing.cooldown_s"]);
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.release", "timing.cooldown_s"]);
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "main".into();
