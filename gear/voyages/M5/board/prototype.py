@@ -95,6 +95,7 @@ OPEN = ("delivered", "working", "asking", "handed", "review", "verdict", "sentba
 
 C = {}
 TABX = []
+VOYX = []       # change 12: where each voyage sits on line 0, for a click
 G = {}          # the picked voyage's data (M5 change 1)
 TOP = [5]       # first row of a view, below the header
 OPENED = {}     # lanes expanded in Time & tokens
@@ -160,11 +161,13 @@ def header(w, view):
     wd = w.getmaxyx()[1]
     # change 1: line 0 lists every voyage, newest first; the picked one is lit, [ and ] move the pick
     put(w, 0, 1, f"GEAR · {V['project']}  ", C["b"])
+    VOYX.clear()
     x = 4 + len(V["project"]) + 4
     for i, v in enumerate(VOYS):
         mark = "⛵" if v["V"]["state"] == "sailing" else "⚓"
         label = f" {v['V']['milestone']} {mark} "
         put(w, 0, x, label, (curses.A_REVERSE | C["b"]) if i == G["i"] else C["dim"])
+        VOYX.append((x, x + len(label) - 1, i))
         x += len(label) + 1
     put(w, 0, x + 1, "[ older   ] newer", C["dim"])
     put(w, 0, wd - 8, NOW, C["dim"])
@@ -512,13 +515,22 @@ def task_panel(w, t):
 
 def main(w):
     colors(); curses.curs_set(0); view, sel = 1, 0; pick(0)
-    w.keypad(True)   # change 12: no mouse capture, so the terminal can select and copy text
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION); w.keypad(True)   # change 12: clicks pick views and voyages
     views = {1: view_now, 2: view_graph, 3: view_workload, 4: view_decisions, 5: view_cost}
     while True:
         w.erase(); header(w, view); n = views[view](w, sel)
-        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5: views · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
+        put(w, w.getmaxyx()[0] - 1, 1, "←→ / Tab / 1-5 / click: views · click a voyage · [ ] older / newer voyage · d header details · ↑↓ select · Enter: a lane's work / a task's rounds / a lane's tasks · q quit      PROTOTYPE M5 · fake data", C["dim"])
         w.refresh(); k = w.getch()
         if k in (ord("q"), 27): break
+        if k == curses.KEY_MOUSE:
+            try: _, mx, my, _, bs = curses.getmouse()
+            except curses.error: continue
+            if my == 0:
+                for x0, x1, i in VOYX:
+                    if x0 <= mx <= x1: pick(i); sel = 0
+            for x0, x1, i, ty in TABX:
+                if my == ty and x0 <= mx <= x1: view, sel = i, 0
+            continue
         if k == ord("d"): DETAIL[0] = not DETAIL[0]
         elif k == ord("["): pick(min(len(VOYS) - 1, G["i"] + 1)); sel = 0
         elif k == ord("]"): pick(max(0, G["i"] - 1)); sel = 0
