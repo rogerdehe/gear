@@ -64,6 +64,7 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
             release: "main".into(),
             staging: "".into(),
             review_max_rounds: 3,
+            max_task_min: 60,
             // T-255: `gate` has no default; the fixture names one.
             gate: "make test".into(),
             task_branch: "{lane}/t{n}".into(),
@@ -179,6 +180,29 @@ fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "  ".into();
     assert_eq!(validate(&cfg), vec![], "blank staging means no staging");
+}
+
+// ---- `[conventions].max_task_min` (T-279): no task is planned longer than
+// the project's cap, 60 minutes by default.
+
+#[test]
+fn max_task_min_defaults_to_sixty_and_a_project_may_raise_it() {
+    let cfg = parse(MINIMAL).unwrap();
+    assert_eq!(cfg.conventions.max_task_min, 60, "the default cap");
+    assert_eq!(validate(&cfg), vec![], "the default is valid");
+
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmax_task_min = 90")).unwrap();
+    assert_eq!(cfg.conventions.max_task_min, 90);
+    assert_eq!(validate(&cfg), vec![], "a project may plan longer tasks");
+}
+
+#[test]
+fn a_max_task_min_of_zero_is_refused() {
+    // A cap of zero refuses every task: the captain plans each task's time,
+    // and no estimate is under it.
+    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmax_task_min = 0")).unwrap();
+    assert_eq!(fields(&validate(&cfg)), vec!["conventions.max_task_min"]);
+    assert!(!validate(&cfg)[0].problem.is_empty());
 }
 
 // ---- [models] (17 §0, design/01)
