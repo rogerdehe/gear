@@ -206,7 +206,7 @@ fn board(store: &mut Store) -> gear_board::Board {
 fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
 
     assert!(text.contains("DECISIONS MADE  (★ = worth a look at landing)"), "{text}");
     // The starred decision is in full: the time, the star, the kind, what was
@@ -238,7 +238,7 @@ fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
 fn the_time_and_tokens_view_shows_the_work_of_every_task() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     assert!(text.contains("task"), "the columns: {text}");
     assert!(text.contains("tokens"), "the columns: {text}");
@@ -281,7 +281,7 @@ fn the_time_and_tokens_view_opens_the_task_panel_of_its_row() {
 fn the_reason_of_a_decision_is_readable_on_eighty_columns() {
     let mut store = world();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (80, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (80, 40)), None);
 
     assert!(
         text.contains("why: needs token data from T-141 first"),
@@ -317,7 +317,7 @@ fn the_decisions_are_the_ones_of_the_voyage_the_board_measures() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Log, 0, (120, 40)), None);
 
     assert!(
         text.contains("light procedure moved to M5"),
@@ -364,7 +364,7 @@ fn the_rounds_of_a_task_are_the_rows_of_the_rounds_table() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     // The row of the task: two rounds now.
     assert!(text.contains("T-1"), "{text}");
@@ -459,7 +459,7 @@ fn the_unknown_usage_is_not_shown_as_zero() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -499,7 +499,7 @@ fn an_unmeasured_round_hides_no_part_of_the_sum() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -562,7 +562,7 @@ fn an_unpriced_round_hides_no_part_of_the_sum() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -617,7 +617,7 @@ fn the_cache_reads_are_shown_apart_from_the_fresh_tokens() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
@@ -667,7 +667,7 @@ fn a_view_without_prices_says_so_once_and_shows_no_cost_cell() {
         })
         .unwrap();
     let board = board(&mut store);
-    let text = frame(&board, Tab::Tokens, 0, None, (120, 40));
+    let text = frame(&board, &crate::screen(Tab::Cost, 0, (120, 40)), None);
 
     let row = text
         .lines()
