@@ -613,24 +613,37 @@ pub fn standby_after_verdict(store: &mut Store, project: &str, now: Ts) -> GearR
 /// attempt of the same task, and it is judged by its own verdict (F1 of the
 /// T-143 review).
 ///
+/// The round the seat works on now names the job first (T-375): a seat that
+/// judges a rework has its session resumed before the round's packet exists,
+/// and the last packet is still the one of the round that ended — using it
+/// would let the earlier verdict park the seat in the middle of the new
+/// review.
+///
 /// A seat with no packet (a legacy seat, a seat of an older engine) has no
 /// job to name: the latest attempt of the task is its job then.
 fn handed_a_verdict(store: &mut Store, project: &str, seat: &SeatRow, task: &str) -> GearResult<bool> {
     store.read(|tx| {
-        let attempt = match tx.last_op(&seat.id, OpKind::Deliver)? {
-            // The packet of the job: it must be about this seat's task.
-            Some(op) => {
-                if op.task.as_deref() != Some(task) {
-                    return Ok(false);
+        let round = tx
+            .open_round_of_seat(&seat.id)?
+            .filter(|round| round.role == "review" && round.task == task);
+        let attempt = match round {
+            // The open review round of this seat: the job it works on now.
+            Some(round) => Some(round.attempt),
+            None => match tx.last_op(&seat.id, OpKind::Deliver)? {
+                // The packet of the job: it must be about this seat's task.
+                Some(op) => {
+                    if op.task.as_deref() != Some(task) {
+                        return Ok(false);
+                    }
+                    op.attempt
                 }
-                op.attempt
-            }
-            // A seat with no packet: the latest attempt of the task is its job.
-            None => tx
-                .attempts_of_task(project, task)?
-                .into_iter()
-                .last()
-                .map(|attempt| attempt.n),
+                // A seat with no packet: the latest attempt of the task is its job.
+                None => tx
+                    .attempts_of_task(project, task)?
+                    .into_iter()
+                    .last()
+                    .map(|attempt| attempt.n),
+            },
         };
         let Some(attempt) = attempt else { return Ok(false) };
         Ok(tx
@@ -5082,6 +5095,209 @@ profile = "opencode"
         assert!(report.started.is_empty(), "{report:?}");
         assert_eq!(report.waiting, vec!["T-2".to_string()], "{report:?}");
     }
+
+    /// T-375: a seat that gave the verdict of attempt 1 and now holds the
+    /// rework is not parked by that earlier verdict while round 2 runs. The
+    /// open review round names the job; the last packet is still attempt 1's
+    /// (the round of attempt 2 is resumed before its packet exists).
+    #[test]
+    fn the_earlier_verdict_does_not_park_the_seat_of_the_open_round() {
+        let mut store = world(CONFIG);
+        let round = |attempt: i64| gear_store::RoundKey {
+            project: "p".into(),
+            task: "T-1".into(),
+            attempt,
+            role: "review".into(),
+        };
+        store
+            .write(|tx| {
+                testing::seed_temp_seat(tx, "p", "review-1", "T-1", "w9:p1", "codex", T0)?;
+                // Round 1 ran on this seat: its packet names attempt 1, and the
+                // verdict of attempt 1 is this seat's.
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    kind: OpKind::Deliver,
+                    task: Some("T-1".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": "the packet of attempt 1" }),
+                    created: T0,
+                })?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: round(1),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "rework".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 10,
+                })?;
+                // The lane reworked and attempt 2 is handed in. The seat holds
+                // T-1 again, and the round it opened for attempt 2 is open with
+                // no attempt-2 packet yet: its session is being resumed.
+                tx.insert_attempt(&gear_store::AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    n: 2,
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Submitted,
+                    candidate: Some("def5678".into()),
+                    report: None,
+                    safe_point: None,
+                    started: T0 + 20,
+                    updated: T0 + 20,
+                })?;
+                tx.close_round(&round(1), T0 + 20)?;
+                tx.insert_round(&gear_store::NewRound {
+                    key: round(2),
+                    seat: "p:review-1".into(),
+                    generation: 1,
+                    cli: "codex".into(),
+                    model: None,
+                    start_at: T0 + 20,
+                })
+            })
+            .unwrap();
+
+        // The job that runs now is attempt 2: the verdict of attempt 1 is not
+        // its verdict, so the seat stays Active on it.
+        assert!(
+            standby_after_verdict(&mut store, "p", T0 + 30).unwrap().is_empty(),
+            "the review of attempt 2 keeps the seat"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the seat keeps working");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "it keeps the job");
+
+        // The verdict of attempt 2 is the job's: the seat waits for the next.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 2,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 40,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 50).unwrap(),
+            vec!["p:review-1".to_string()],
+            "the verdict of the job parks the seat"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Standby, "the reviewer waits for the next review");
+        assert_eq!(seat.task_id, None, "its job binding ended");
+    }
+
+    /// T-375 (engine, two ticks): the rework hand-in is reviewed by the seat
+    /// that judged round 1. Its activation stands while the round's session is
+    /// brought up (no attempt-2 packet yet), and the earlier verdict must not
+    /// park it between the ticks.
+    #[test]
+    fn a_rework_hand_in_keeps_the_seat_that_judged_round_one_working() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        // Tick 1: the reviewer of attempt 1 starts, Active on the job.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the reviewer of attempt 1 runs");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"));
+        // The packet of attempt 1 is refused by the pane (`agent_not_ready`
+        // right after a start): the seat keeps its activation, and
+        // `recover_missing_packets` sends the packet again.
+        let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
+        store
+            .write(|tx| {
+                tx.set_op_state("p", &packet.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 11)?;
+                // The verdict of attempt 1 (its packet is the seat's last
+                // packet), and the lane's rework handed in as attempt 2.
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "rework".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 12,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 13)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 13)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "report", T0 + 13)
+            })
+            .unwrap();
+        // Tick 2: the same seat takes the rework (round 2 opens, no attempt-2
+        // packet is sent yet: the session is brought up first).
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        let open = store.read(|tx| tx.open_round_of_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!((open.attempt, open.role.as_str()), (2, "review"), "the seat works on the rework");
+        assert!(
+            !store.read(|tx| tx.ops_of_seat_kind("p:review-1", OpKind::Deliver)).unwrap().iter().any(|op| op.attempt == Some(2)),
+            "no attempt-2 packet is sent while the session is brought up"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the job's activation stands");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "the seat holds the rework");
+
+        // Between the ticks the earlier verdict is not the verdict of the job:
+        // the seat stays Active on the rework.
+        assert!(
+            standby_after_verdict(&mut store, "p", T0 + 21).unwrap().is_empty(),
+            "the earlier verdict does not park the seat of the rework"
+        );
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert_eq!(seat.state, SeatState::Active, "the seat keeps working on the rework");
+        assert_eq!(seat.task_id.as_deref(), Some("T-1"), "it keeps the job");
+
+        // The verdict of attempt 2 by that seat ends the job.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 2,
+                    passed: true,
+                    findings: "ok".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 30,
+                })
+            })
+            .unwrap();
+        assert_eq!(
+            standby_after_verdict(&mut store, "p", T0 + 31).unwrap(),
+            vec!["p:review-1".to_string()],
+            "the verdict of the rework parks the seat"
+        );
+    }
+
 }
 
 /// How many "continue" nudges a reviewer gets before the captain is told.
