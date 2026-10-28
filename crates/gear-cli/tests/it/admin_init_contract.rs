@@ -304,3 +304,113 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(config_version(&db), 1, "the same config registers");
 }
+
+/// `gear admin init --check <config>` as a caller's process (T-228). The
+/// skills are installed in the test home, since a config's kinds are checked
+/// like `init` checks them.
+fn check_cmd(home: &Path, db: &Path, config: &Path, admin: bool, json: bool) -> Output {
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, home).expect("install the skill");
+    }
+    let mut args = vec!["admin", "init", "--check"];
+    if json {
+        args.push("--json");
+    }
+    args.push(config.to_str().expect("a utf-8 path"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+    cmd.args(args)
+        .env("HOME", home)
+        .env("GEAR_DB", db)
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("GEAR_CTX");
+    if admin {
+        cmd.env("GEAR_ADMIN", "1");
+    } else {
+        cmd.env_remove("GEAR_ADMIN");
+    }
+    cmd.output().expect("run gear")
+}
+
+fn stdout(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stdout).into_owned()
+}
+
+/// T-228: `--check` validates a config and changes nothing — it needs no
+/// `GEAR_ADMIN`, opens no store and starts nothing.
+#[test]
+fn check_validates_a_config_and_opens_no_store() {
+    let dir = scratch("check");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 1\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[temps]\nkind = \"codex\"\nprofile = \"codex\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    let db = dir.join("gear.db");
+
+    // No GEAR_ADMIN=1: a check needs nobody's consent, because it changes
+    // nothing.
+    let o = check_cmd(&dir, &db, &path, false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "config ok: project p, 1 lanes, 1 reviewers");
+    assert!(!db.exists(), "no store was opened");
+
+    // The JSON form names the same three facts.
+    let o = check_cmd(&dir, &db, &path, false, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(parsed["ok"], serde_json::json!(true));
+    assert_eq!(parsed["project"], serde_json::json!("p"));
+    assert_eq!(parsed["lanes"], serde_json::json!(1));
+    assert_eq!(parsed["reviewers"], serde_json::json!(1));
+    assert!(!db.exists(), "still no store");
+}
+
+/// T-228: a config with two lanes owning the same path is refused with the
+/// same issue text `init` gives, and nothing is registered.
+#[test]
+fn check_reports_the_issues_init_reports() {
+    let dir = scratch("check-issues");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 2\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"keel\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"codex\"\nprofile = \"codex\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    let db = dir.join("gear.db");
+
+    let o = check_cmd(&dir, &db, &path, false, false);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let checked = stderr(&o);
+    assert!(checked.contains("ERROR BAD_FORMAT"), "{checked}");
+    assert!(checked.contains("lanes[1].owns"), "{checked}");
+    assert!(!db.exists(), "a check writes nothing");
+
+    // `init` on the same config says exactly the same thing.
+    let o = init(&dir, &db, &path, None, true);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(checked, stderr(&o), "the same issue text");
+    assert_eq!(config_version(&db), 0, "nothing was registered");
+}
