@@ -172,39 +172,52 @@ class Board:
             x += len(label) + 1
         self.put(0, x + 1, "[ older  ] newer", curses.A_DIM)
         v = self.v
-        state = "sailing" if v["state"] == "sailing" else "landed"
-        self.put(1, 1, f"{v['id']} {v['title']} · {state} · bar {v['bar']} · {hm(v['used'])} of {hm(v['eta'])}"
-                       f" · projected {hm(v['projected'])}", curses.A_BOLD)
-        y = 2
-        for line in wrap("Goal: " + v["done"], w - 4):
-            self.put(y, 1, line)
+        state = "⛵ sailing" if v["state"] == "sailing" else "⚓ landed"
+        self.put(1, 1, f"{v['id']} · {v['title']}", curses.A_BOLD)
+        self.put(1, max(1, w - len(state) - 3), state, curses.A_BOLD)
+        # the goal, boxed and bright: the one thing the captain and the user must not lose
+        gw = w - 4
+        gold = curses.color_pair(3) | curses.A_BOLD
+        self.put(2, 1, "╔═ GOAL " + "═" * max(0, gw - 8) + "╗", gold)
+        y = 3
+        for line in wrap(v["done"][0].upper() + v["done"][1:], gw - 4):
+            self.put(y, 1, "║ " + line.ljust(gw - 3) + "║", gold)
             y += 1
+        self.put(y, 1, "╚" + "═" * (gw - 1) + "╝", gold)
+        y += 1
         if v["goal_changed"]:
             at, before, after = v["goal_changed"]
-            self.put(y, 1, f"goal changed {at}: {before} -> {after} (with the user's yes; Decisions shows both)",
-                     curses.color_pair(10))
+            self.put(y, 1, f"{'Goal changed':<14}{at}: {before} -> {after} (the user agreed; see Decisions)",
+                     curses.color_pair(10) | curses.A_BOLD)
             y += 1
-        # stations as one line across the full width
-        x = 1
-        self.put(y, x, "Stations ", curses.A_DIM)
-        x += 9
-        for sid, what, st, at in v["stations"]:
-            mark = {"done": "✓", "now": "▶", "next": "·"}[st]
-            a = curses.color_pair(11) if st == "done" else (curses.A_BOLD if st == "now" else curses.A_DIM)
-            label = f"{mark} {sid} {what} ({hm(at)})"
-            self.put(y, x, label, a)
-            x += len(label) + 3
-        y += 1
-        # each clause of the goal: met (✓) or how far it still is (✗)
-        x = 1
+        label = curses.A_DIM
+        self.put(y, 1, "Goal check", label)
         for part in v["distance"]:
             bad = "NOT" in part or "not started" in part or "measured" in part
-            label = ("✗ " if bad else "✓ ") + part
-            if x + len(label) > w - 2:
-                y += 1
-                x = 1
-            self.put(y, x, label, curses.color_pair(10) if bad else curses.color_pair(11))
-            x += len(label) + 3
+            self.put(y, 15, ("✗ " if bad else "✓ ") + part, curses.color_pair(10) if bad else curses.color_pair(11))
+            y += 1
+        self.put(y, 1, "Milestones", label)
+        for sid, what, st, at in v["stations"]:
+            if st == "done":
+                txt, a = f"✓ {sid} {what} — reached at {hm(at)}", curses.color_pair(11)
+            elif st == "now":
+                txt, a = f"▶ {sid} {what} — now, planned by {hm(at)}", curses.A_BOLD
+            else:
+                txt, a = f"· {sid} {what} — planned by {hm(at)}", curses.A_DIM
+            self.put(y, 15, txt, a)
+            y += 1
+        if v["state"] == "sailing":
+            when = f"{hm(v['used'])} used of {hm(v['eta'])} planned · expected to finish at {hm(v['projected'])}"
+        else:
+            when = f"took {hm(v['used'])} of {hm(v['eta'])} planned"
+        self.put(y, 1, "Time", label)
+        self.put(y, 15, when)
+        y += 1
+        bars = {"FASTEST": "only what breaks the chain or loses data blocks a task",
+                "DELIVERABLE": "errors in normal use block a task; edge cases are logged",
+                "STRICT": "severe issues block a task; medium ones are the captain's call"}
+        self.put(y, 1, "Quality bar", label)
+        self.put(y, 15, f"{v['bar']} — {bars.get(v['bar'], '')}")
         y += 1
         x = 1
         for i, name in enumerate(VIEWS):
