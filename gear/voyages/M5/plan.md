@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=600 -->
+<!-- gear-plan project=gear base=601 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -34,6 +34,7 @@ eta: 16h
 - station M-4497: keep course 123 min in, 21 done; same forecast as M-4492, the new eta waits for S1's measured pace and the user's yes
 - 2026-10-29 01:55 override: T-274 passes over its review fail: the engine check went from 245.6 s to 157.6 s (36 % shorter; the changed tests 1.5-2.4x faster), no test, assertion or behaviour removed; the absolute numbers (sum 431 s against 350, 58 tests over 3 s) were measured at load average 35-55 on 10 cores shared with another project and say nothing about the fixtures; under the DELIVERABLE bar a speed-up with no error does not block, and chasing the numbers on a loaded machine is not worth a rework | why: the work is right; the threshold was the captain's and could not be measured here | else: a rework round measuring noise
 
+- station M-4514: keep course 132 min in, 24 done; forecast 1379 min (23 h): eta 24h proposed to the user
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
