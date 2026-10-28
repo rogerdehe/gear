@@ -922,6 +922,26 @@ fn doorbell_inputs(
             waiting.push(item(&message));
         }
 
+        // The captain's doorbell names only the items its `gear` shows
+        // (T-254): the home page shows a batch (at most `max_threads` threads,
+        // `per_sender` per sender), so naming every open item rang the captain
+        // for items its own `gear` never listed. Lanes and reviewers keep
+        // their own rule, unchanged.
+        if seat.role == gear_model::SeatRole::Captain {
+            let batch = gear_app::mail::select_batch(
+                tx,
+                project,
+                &seat.id,
+                now,
+                gear_app::mail::BatchLimits::default(),
+            )?;
+            let batch_ids: BTreeSet<String> = batch
+                .into_iter()
+                .flat_map(|view| view.open.into_iter().map(|message| message.id))
+                .collect();
+            waiting.retain(|item| batch_ids.contains(&item.id));
+        }
+
         // A delivery/doorbell that still occupies the seat's slot, and when the
         // previous doorbell was settled (for the cooldown).
         let slot_ops = tx.slot_ops(&seat.id)?;

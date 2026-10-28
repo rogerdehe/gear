@@ -1739,7 +1739,7 @@ fn review_packet(
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
-         Diff to review: `{integration}..{candidate}`\n\
+         Diff to review: `git diff {integration}...{candidate}` (three dots: the change since the merge base)\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
@@ -3030,7 +3030,7 @@ review = [
         assert!(text.contains("the goal"), "{text}");
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
-        assert!(text.contains("dev..abc1234"), "{text}");
+        assert!(text.contains("git diff dev...abc1234"), "{text}");
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
@@ -3795,7 +3795,10 @@ review = [
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+        assert!(
+            packet.contains("Diff to review: `git diff web-dev...abc1234` (three dots: the change since the merge base)"),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3815,7 +3818,12 @@ review = [
         assert_eq!(repo, "/repo/web");
         assert_eq!(base, "original-base");
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `original-base..abc1234`"), "{packet}");
+        assert!(
+            packet.contains(
+                "Diff to review: `git diff original-base...abc1234` (three dots: the change since the merge base)"
+            ),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3854,7 +3862,12 @@ profile = "opencode"
             assert!(door.calls.iter().any(|call| matches!(call,
                 Call::WorktreeOpen { repo: got, .. } if got == repo)));
             let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
-            assert!(packet.contains(&format!("Diff to review: `{base}..abc1234`")), "{packet}");
+            assert!(
+                packet.contains(&format!(
+                    "Diff to review: `git diff {base}...abc1234` (three dots: the change since the merge base)"
+                )),
+                "{packet}"
+            );
             release_review_job(&mut store, n);
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
