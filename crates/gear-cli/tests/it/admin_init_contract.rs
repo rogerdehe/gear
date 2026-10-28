@@ -308,7 +308,14 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
 /// `gear admin init --check <config>` as a caller's process (T-228). The
 /// skills are installed in the test home, since a config's kinds are checked
 /// like `init` checks them.
-fn check_cmd(home: &Path, db: &Path, config: &Path, admin: bool, json: bool) -> Output {
+fn check_cmd(
+    home: &Path,
+    db: &Path,
+    config: &Path,
+    ctx: Option<&str>,
+    admin: bool,
+    json: bool,
+) -> Output {
     for agent in gear_app::skill::SkillAgent::ALL {
         gear_app::skill::install(*agent, home).expect("install the skill");
     }
@@ -322,8 +329,11 @@ fn check_cmd(home: &Path, db: &Path, config: &Path, admin: bool, json: bool) -> 
         .env("HOME", home)
         .env("GEAR_DB", db)
         .env_remove("HERDR_PANE_ID")
-        .env_remove("HERDR_SOCKET_PATH")
-        .env_remove("GEAR_CTX");
+        .env_remove("HERDR_SOCKET_PATH");
+    match ctx {
+        Some(ctx) => cmd.env("GEAR_CTX", ctx),
+        None => cmd.env_remove("GEAR_CTX"),
+    };
     if admin {
         cmd.env("GEAR_ADMIN", "1");
     } else {
@@ -361,19 +371,25 @@ fn check_validates_a_config_and_opens_no_store() {
 
     // No GEAR_ADMIN=1: a check needs nobody's consent, because it changes
     // nothing.
-    let o = check_cmd(&dir, &db, &path, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(stdout(&o).trim(), "config ok: project p, 1 lanes, 1 reviewers");
     assert!(!db.exists(), "no store was opened");
 
     // The JSON form names the same three facts.
-    let o = check_cmd(&dir, &db, &path, false, true);
+    let o = check_cmd(&dir, &db, &path, None, false, true);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let parsed: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
     assert_eq!(parsed["ok"], serde_json::json!(true));
     assert_eq!(parsed["project"], serde_json::json!("p"));
     assert_eq!(parsed["lanes"], serde_json::json!(1));
     assert_eq!(parsed["reviewers"], serde_json::json!(1));
+    assert!(!db.exists(), "still no store");
+
+    // A seat's pane may check too: no caller check, so no store is read to
+    // prove who is asking.
+    let o = check_cmd(&dir, &db, &path, Some("other:heat:1"), false, false);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(!db.exists(), "still no store");
 }
 
@@ -401,7 +417,7 @@ fn check_reports_the_issues_init_reports() {
     .expect("the config");
     let db = dir.join("gear.db");
 
-    let o = check_cmd(&dir, &db, &path, false, false);
+    let o = check_cmd(&dir, &db, &path, None, false, false);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let checked = stderr(&o);
     assert!(checked.contains("ERROR BAD_FORMAT"), "{checked}");
