@@ -8,14 +8,14 @@ bar: FASTEST (user, 2026-10-28: one hour): block only a wrong restart, a missed 
 eta: 1h
 
 # Decisions
-- 2026-10-28 23:45 scope: M4.1 carries only the two fixes the acme captain needs before its M1 (user: "把他那边必须要的东西放进 4.1"); every other collected item moves to M4.2, opened when the user says | why: user, one hour | else: the full list, about 10 h
+- 2026-10-28 23:45 scope: M4.1 carries only the two fixes another project's captain needs before its M1 (user: "把他那边必须要的东西放进 4.1"); every other collected item moves to M4.2, opened when the user says | why: user, one hour | else: the full list, about 10 h
 - 2026-10-28 23:45 model: lanes hull and keel on MiniMax M3.1 Flash, reviewers on Codex gpt-6.1-sol (user: "开发线用 MiniMax，审核用 Codex"); deck and mast stay retired | why: user | else: hull on Codex Terra as in M4
 - station M-3932: keep course — 15m gone: T-226 handed in after ~10 min and is in review; keel on T-227 at 14/30m.
 - station M-3940: keep course — 30m gone: T-226 merged; keel on T-227 at 30/30m after the contract fix (v2, push check dropped).
 - station M-3948: keep course — 45m gone: T-226 merged; T-227 at 45/30m after two contract fixes (captain's unclear points), tests running; v0.4.7 likely ~15-30 min past the hour.
 - station M-3975: keep course — 60m gone, the eta is spent: T-226 merged; T-227 in its rework (attempt 2, contract v4: drop the report.flagged line, one full-tick test). Expect v0.4.7 about 20-30 min past the eta; no cut, the alert is one of the two must-haves.
 - 2026-10-28 14:05 note: voyage report — 75m against a 1h eta (pace 1.52x); both tasks merged, v0.4.7 released. T-226 (hull, MiniMax) 18m, one review pass. T-227 (keel, MiniMax) 73m: two captain interrupts on contract gaps (a push check and a store query that did not exist), contract v1 to v4, one rework for a double alert the contract itself caused (report.flagged); lesson 41. GEAR gaps seen on the way, all in the M4.2 backlog: a thinking lane is not caught, the no-push question queues behind the turn, a review packet shows a stale contract, a direction "ok." with a sentence is forwarded as an instruction, run-dry/idle notices ring when nothing can move, a re-init revives retired lanes. Friction F-100, F-101 closed as lessons. No ★ decision.
-- station M-3990: land — both tasks done and released as v0.4.7; the engine is on 0.4.7; acme told; the report is reviewed with the user next, then the lanes are reclaimed.
+- station M-3990: land — both tasks done and released as v0.4.7; the engine is on 0.4.7; the other project's captain told; the report is reviewed with the user next, then the lanes are reclaimed.
 - 2026-10-28 14:15 staff: hull and keel retired after the landing | why: user | else: idle lanes ringing
 - tail: -
 
