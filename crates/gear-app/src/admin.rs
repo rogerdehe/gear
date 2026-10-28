@@ -25,6 +25,15 @@ pub struct InitResult {
 /// the project's captain (T-86).
 const CAPTAIN: &str = "captain";
 
+/// The meta key that remembers which file the applied config came from
+/// (T-321): `config.path.<project>`. The store keeps the applied text
+/// (`projects.config_toml`) and its version, not the path; the home page needs
+/// the path to tell a config file that drifted from the config the project
+/// runs on. No schema change: the path is a meta row.
+pub fn config_path_key(project: &str) -> String {
+    format!("config.path.{project}")
+}
+
 /// `gear admin init <config>` — register the project, or apply a changed
 /// config to a project that is registered already (T-6).
 ///

@@ -1015,6 +1015,35 @@ fn check_models_warns_about_a_model_its_cli_does_not_list() {
     assert!(!marker.exists(), "a plain --check runs no CLI");
 }
 
+/// T-321: a real init records the canonical config path in the meta row the
+/// home page reads (`config.path.<project>`), so a config file that drifts
+/// from the applied config can be named.
+#[test]
+fn a_real_init_records_the_canonical_config_path() {
+    let dir = scratch("config-path");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let db = dir.join("gear.db");
+    let path = config(&dir, &repo);
+
+    // A spelling of the same file that is not canonical: `<dir>/nested/../gear.toml`.
+    std::fs::create_dir_all(dir.join("nested")).expect("the nested directory");
+    let dotty = dir.join("nested").join("..").join("gear.toml");
+    let o = init(&dir, &db, &dotty, None, true);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let mut store = Store::open(&db).expect("the store");
+    let recorded = store
+        .read(|tx| tx.get_meta(&gear_app::admin::config_path_key("p")))
+        .expect("the meta row");
+    let canonical = std::fs::canonicalize(&path).expect("the config exists");
+    assert_eq!(
+        recorded.as_deref(),
+        Some(canonical.to_string_lossy().as_ref()),
+        "the canonical config path"
+    );
+}
+
 /// T-304: `--check` refuses a config whose lanes would run past the lane
 /// quota — with no store there is no retired lane to leave out, so three lanes
 /// under `lanes = 2` are refused and nothing is written.

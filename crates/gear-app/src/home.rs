@@ -237,6 +237,31 @@ pub fn verdict_section(hint: &crate::tasks::VerdictHint) -> &'static str {
     }
 }
 
+/// The line the snapshot carries when the config file a project was registered
+/// from no longer matches the config the project runs on (T-321): the drift
+/// line when the text differs, the "cannot be read" line when the file is
+/// gone. `None` when they agree, or when the store never recorded a path (a
+/// project registered before T-321, or one registered without the CLI).
+fn config_drift(tx: &Tx<'_>, project: &str) -> GearResult<Option<String>> {
+    let Some(path) = tx.get_meta(&crate::admin::config_path_key(project))? else {
+        return Ok(None);
+    };
+    let Some(row) = tx.get_project(project)? else {
+        return Ok(None);
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) if text == row.config_toml => Ok(None),
+        Ok(_) => Ok(Some(format!(
+            "! config drift: {path} differs from the applied config v{}: re-apply it with GEAR_ADMIN=1 gear admin init {path}, or restore the file",
+            row.config_version
+        ))),
+        Err(_) => Ok(Some(format!(
+            "! config file {path} cannot be read (config v{} still runs)",
+            row.config_version
+        ))),
+    }
+}
+
 /// The most lanes the snapshot lists; the rest is one line of count, so the
 /// snapshot stays under 15 lines.
 const SNAPSHOT_LANES: usize = 10;
@@ -256,6 +281,11 @@ fn snapshot(tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[gear_herdr::Ag
         "SNAPSHOT {} tasks · {} done · {} in progress · {} waiting",
         plan.totals.tasks, plan.totals.done, plan.totals.in_progress, plan.totals.waiting
     )];
+    // T-321: the config file the project was registered from, against the
+    // config the project runs on — the second line, before the lanes.
+    if let Some(drift) = config_drift(tx, project)? {
+        lines.push(drift);
+    }
     for lane in plan.lanes.iter().take(SNAPSHOT_LANES) {
         // The captain's tail turns off a lane's idle and stall warnings; the
         // snapshot says so, or a silenced lane reads as a quiet one (T-260).
