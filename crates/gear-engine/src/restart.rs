@@ -628,16 +628,27 @@ fn start(
             wait(store, seat, plan, now, "the agent name is still taken")
         }
         Outcome::Refused { code, message } => {
-            flag(
-                store,
-                seat,
-                &format!("agent_start refused ({code}): {message} — needs check"),
-                now,
-            )?;
+            // A CLI that is not installed says so on the pane (T-286): the
+            // seat stops here for the install; the chain is not walked.
+            let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
+            let reason = match crate::start::cli_missing(&tail, &plan.cli) {
+                Some(line) => crate::start::cli_missing_text(&plan.cli, &line),
+                None => format!("agent_start refused ({code}): {message} — needs check"),
+            };
+            flag(store, seat, &reason, now)?;
             clear_pending(store, &seat.id)?;
             Ok(false)
         }
         Outcome::Uncertain { reason } => {
+            // A missing CLI is certain even when the start is not: waiting
+            // would look like a switch that never ends, so the seat is flagged
+            // and its plan cleared like a refusal (T-286).
+            let tail = herdr.read_tail(&pane, 16).unwrap_or_default();
+            if let Some(line) = crate::start::cli_missing(&tail, &plan.cli) {
+                flag(store, seat, &crate::start::cli_missing_text(&plan.cli, &line), now)?;
+                clear_pending(store, &seat.id)?;
+                return Ok(false);
+            }
             // The agent may be up: the next tick looks at the pane and finds
             // it (or sends the start again only if the pane is still empty).
             wait(
