@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=569 -->
+<!-- gear-plan project=gear base=570 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -16,6 +16,7 @@ eta: 16h
 - 2026-10-28 22:30 note: hand fixes during M5 (user): this voyage runs on the build M4.2 made, so its problems may still need a hand fix; each one is recorded here as a `hand-fix` decision, gets an M5 task that fixes it at the root, and only one that needs a sweeping change goes to gear/voyages/M6/backlog.md instead | why: user | else: hand fixes left unrecorded
 - 2026-10-28 22:30 note: the queue is written in waves: the first wave below is S1's clearest tasks with exact contracts; the next waves are written while the lanes work, before a lane runs dry | why: every contract names only what exists, read from the code first | else: lanes wait for one big plan
 
+- 2026-10-28 23:00 scope: the captain writes no code (user: "舰长不许自己写代码"): every code change, however small, is a lane's task; a hand fix is only operational (a store state, a restart, a seat freed) to keep the voyage moving, and its root fix is a task. S2 writes this into the captain's place in the skill (skills/gear/references/captain.md), where today no such rule stands | why: user | else: the captain patches code itself and the lanes' contracts and reviews are bypassed
 # Queue
 
 ## T-257 [must] lane=mast milestone=M5 required
