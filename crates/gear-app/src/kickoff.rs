@@ -428,6 +428,15 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
                 .join(", ")
         }
     };
+    // T-234: a chain of one model has nowhere to fall back to — that role
+    // waits for the reset instead, and `gear admin init` accepts the config.
+    let policy = |chain: &[String]| -> &'static str {
+        if chain.len() > 1 {
+            "\"fallback\""
+        } else {
+            "\"wait\""
+        }
+    };
 
     // Filled from where kickoff runs when it can (inside a Herdr pane, in the
     // project's repository); otherwise left as TODO.
@@ -505,8 +514,11 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
             "review = [{}]   # stronger, and never the writer's model",
             chain(&review)
         ),
-        "on_quota = { lanes = \"fallback\", review = \"fallback\" }   # then wait for the reset"
-            .to_string(),
+        format!(
+            "on_quota = {{ lanes = {}, review = {} }}   # then wait for the reset",
+            policy(&lanes),
+            policy(&review)
+        ),
         "quota_reset_h = 5".to_string(),
         String::new(),
         "[conventions]".to_string(),

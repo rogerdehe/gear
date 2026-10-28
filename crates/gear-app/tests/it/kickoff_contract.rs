@@ -162,9 +162,68 @@ fn the_skeleton_is_a_config_the_parser_reads() {
         vec!["deepseek/deepseek-v4-pro", "minimax-cn/MiniMax-M3"]
     );
     assert_eq!(config.models.quota_reset_h, 5);
+    // Two models per chain: both roles fall back (T-234).
     assert_eq!(
         config.models.on_quota.lanes,
         gear_app::config::QuotaPolicy::Fallback
+    );
+    assert_eq!(
+        config.models.on_quota.review,
+        gear_app::config::QuotaPolicy::Fallback
+    );
+}
+
+/// A machine whose chains hold one model each: OpenCode lists one fast model
+/// and one stronger one, so the lanes take the first and the review the
+/// second.
+fn one_model_per_chain() -> Inventory {
+    Inventory {
+        installed: vec![Installed {
+            kind: "opencode".into(),
+            executable: PathBuf::from("/usr/local/bin/opencode"),
+            models: vec![
+                "deepseek/deepseek-flash".into(),
+                "deepseek/deepseek-v4-pro".into(),
+            ],
+            note: None,
+            skill: true,
+        }],
+        missing: Vec::new(),
+    }
+}
+
+/// T-234: a role with one model has no next model to fall back to, so the
+/// skeleton writes `wait` for it — `gear admin init` used to refuse the
+/// skeleton on a single-model machine.
+#[test]
+fn a_role_with_one_model_waits_instead_of_falling_back() {
+    let text = kickoff::skeleton_for(&one_model_per_chain(), None);
+    let config = gear_app::config::parse(&text).expect("the skeleton is valid gear.toml");
+
+    assert_eq!(config.models.lanes.len(), 1, "{text}");
+    assert_eq!(config.models.review.len(), 1, "{text}");
+    assert_eq!(
+        config.models.on_quota.lanes,
+        gear_app::config::QuotaPolicy::Wait
+    );
+    assert_eq!(
+        config.models.on_quota.review,
+        gear_app::config::QuotaPolicy::Wait
+    );
+    assert!(
+        text.contains("on_quota = { lanes = \"wait\", review = \"wait\" }"),
+        "{text}"
+    );
+
+    // The skeleton is what the user registers: the quota policy must not be
+    // one of the issues `gear admin init` reports back.
+    let issues: Vec<String> = gear_app::config::validate(&config)
+        .into_iter()
+        .map(|issue| issue.field)
+        .collect();
+    assert!(
+        !issues.iter().any(|field| field == "models.lanes" || field == "models.review"),
+        "{issues:?}"
     );
 }
 
