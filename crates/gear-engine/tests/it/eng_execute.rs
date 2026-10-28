@@ -154,7 +154,7 @@ fn a_sender_does_not_type_a_message_the_engine_already_intends() {
         seat: "p:captain".into(),
         generation: 1,
         pane_id: CAP_PANE.into(),
-        text: "GEAR: 1 item(s) waiting for you (1 urgent): M-1. Run `gear` now.".into(),
+        text: "GEAR: 1 item(s) waiting for you (1 urgent): M-1. Run the command `gear` (no arguments) in your own shell; it shows only your items.".into(),
         covers: vec!["M-1".into()],
     };
     let intended: Vec<gear_store::OpRow> = store

@@ -1,0 +1,103 @@
+# GEAR's own project config. M3 kickoff confirmed by the user 2026-10-25; M4 config v20: ownership re-split, lanes on MiniMax only.
+# Registered with: GEAR_ADMIN=1 GEAR_DB=~/.local/state/gear/gear.db gear admin init gear/gear.toml
+
+[project]
+id = "gear"
+herdr_session = "orch"
+repo = "/Volumes/Data/myai/gear"
+
+[quota]
+lanes = 2
+temps = 2
+
+# v0.4.0 (M4 05:10): quota from the providers' own APIs (design §9.1).
+[[quota.sources]]
+provider = "codex"
+reader = "codex"
+
+[[quota.sources]]
+provider = "minimax-cn"
+reader = "minimax"
+key_file = "~/.pi/agent/auth.json"
+key_path = "minimax-cn.key"
+
+[[quota.sources]]
+provider = "opencode-go"
+reader = "opencode-go"
+key_file = "~/.pi/agent/auth.json"
+key_path = "opencode-go.key"
+
+[captain]
+pane = "w2:p2"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "hull"
+duty = "M4.2 engine: everything in crates/gear-engine (tick, dispatch, review, restart, stall and quiet notices, merge)"
+owns = ["crates/gear-engine/"]
+kind = "pi"
+profile = "pi"
+# M4.2 (user, 2026-10-28): lanes on DeepSeek V4.1 Flash via TokenRhythm, 600K context.
+models = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+
+[[lanes]]
+name = "mast"
+duty = "M4.2 app, CLI, store, herdr, board, forge, usage, skills, docs and scripts: everything outside crates/gear-engine"
+owns = ["crates/gear-app/", "crates/gear-cli/", "crates/gear-store/", "crates/gear-model/", "crates/gear-herdr/", "crates/gear-board/", "crates/gear-forge/", "crates/gear-usage/", "skills/", "docs/", "scripts/", ".github/", "README.md", "herdr-plugin.toml", "bin/", "Cargo.toml", "Cargo.lock"]
+kind = "pi"
+profile = "pi"
+models = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+
+# M4 2026-10-27 01:40 (user): GEAR lanes run pi without pi-lens (uninstalled 2026-10-28, so no --no-lens flag). It ran clippy, cargo check and
+# LSPs at every turn end (extra builds fighting the lane's own for the target lock) and is the
+# prime suspect for pi losing its session writes (lesson 35). The gate and the reviewer cover quality.
+[profiles.pi]
+unattended_args = ["--approve"]
+
+[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, first; then OpenCode Go deepseek-v4-pro (M3.1 kickoff)
+kind = "codex"
+profile = "codex"
+
+[models]
+# M3 kickoff (user): lanes MiniMax M3.1 Flash, then OpenCode Go DeepSeek V4.1
+# Flash (both on OpenCode: an in-place switch). Reviewers Codex sol medium, then
+# OpenCode Go DeepSeek V4 Pro (another CLI: closed and restarted in the pane).
+# Both exhausted: park quota_reset_h hours, then back to the first model.
+lanes = [
+  { model = "tokenrhythm/deepseek-v4.1-flash-1017", cli = "pi", context_window_k = 600 },
+]
+# The reviewer never runs the model it reviews.
+review = [
+  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"], context_window_k = 500 },
+  { model = "tokenrhythm/deepseek-v4-pro-0813", cli = "pi", context_window_k = 1000 },   # M4.2 (user): when Codex is spent
+]
+on_quota = { lanes = "wait", review = "fallback" }   # M4 (user): lanes wait for the reset, no fallback
+quota_reset_h = 5
+
+# The in-place model switch (T-33): what `/model` shows in the picker and what
+# the status bar says once the model is on. Required for an OpenCode lane or
+# reviewer on that model — without it the seat is flagged, never closed.
+[models.switch."minimax-cn/MiniMax-M3.1-Flash"]
+picker = "MiniMax-M3.1-Flash minimax.cn"   # exactly one entry: the official provider (OpenCode Go has "MiniMax M3.1 Flash")
+bar = "MiniMax-M3.1-Flash MiniMax (minimax.cn)"
+
+[models.switch."opencode-go/deepseek-v4.1-flash"]
+picker = "DeepSeek V4.1 Flash OpenCode Go"
+bar = "DeepSeek V4.1 Flash OpenCode Go"
+variant = "high"
+
+[models.switch."opencode-go/deepseek-v4-pro"]
+picker = "DeepSeek V4 Pro (New) OpenCode Go"
+bar = "DeepSeek V4 Pro (New) OpenCode Go"
+variant = "high"
+
+[conventions]
+integration = "dev"
+release = "main"
+# The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
+gate = "make gate"   # T-238 (M4.2): 4 build jobs and 4 test threads on the shared machine

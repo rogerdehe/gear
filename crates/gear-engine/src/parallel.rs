@@ -49,6 +49,9 @@ struct Input {
     project: String,
     repo: PathBuf,
     integration: String,
+    /// The project's `[conventions].task_branch` template (T-253): the scan
+    /// reads the branch a task's work is on from its names.
+    task_branch: String,
     tasks: Vec<TaskIn>,
     handins: String,
 }
@@ -304,6 +307,7 @@ fn inputs(store: &mut Store, project: &str, now: Ts) -> GearResult<Vec<Input>> {
                 project: project.to_string(),
                 repo: repo.path.into(),
                 integration: repo.integration,
+                task_branch: config.conventions.task_branch.clone(),
                 tasks,
                 handins,
             });
@@ -354,7 +358,7 @@ fn scan(input: &Input) -> Result<Findings, String> {
                 continue;
             }
         }
-        let name = crate::dispatch::task_branch(&task.lane, &task.task);
+        let name = crate::dispatch::task_branch(&input.task_branch, &input.project, &task.lane, &task.task);
         let local = revision(&input.repo, &format!("refs/heads/{name}"))?;
         let head = match local {
             Some(head) => Some(head),

@@ -1,5 +1,5 @@
 //! The graph view of the board (design §8.1, the prototype of
-//! `ops/plan/m4-board`).
+//! `gear/voyages/M4/board`).
 //!
 //! Like `git log --graph`: `dev` on the left, a review column, one column per
 //! lane, the newest work on top. A task that was merged into `dev` draws the

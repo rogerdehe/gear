@@ -299,8 +299,13 @@ pub struct TaskBoard {
     /// How many rounds the task has in the rounds table (§4.1): a dev round
     /// and a review round are two rounds of one attempt.
     pub stored_rounds: usize,
-    /// The tokens of the task's rounds, when they are counted (§4.3).
+    /// The fresh tokens of the task's rounds (input, output, cache write),
+    /// when they are counted (§4.3).
     pub tokens: Option<i64>,
+    /// The cache reads of the task's rounds, when they are counted: they are
+    /// shown apart from the fresh tokens, since a task that re-reads its
+    /// context shows millions of them (the user, 2026-10-28).
+    pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
 }
@@ -401,6 +406,21 @@ pub fn project_with_agents(
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
+    // The voyage the board measures: the active one, else the latest departed
+    // one (F5 of the T-166 review). The board shows that voyage and nothing
+    // that landed before it (T-246): a task of an older voyage is history —
+    // unless it still waits for work, which is a decision the captain owes.
+    let workload = workload_voyage(tx, project, now)?;
+    let tasks: Vec<_> = match &workload {
+        Some(voyage) => tasks
+            .into_iter()
+            .filter(|task| {
+                !task.state.is_terminal()
+                    || task.milestone.as_deref() == Some(voyage.milestone.as_str())
+            })
+            .collect(),
+        None => tasks,
+    };
     // The seats whose provider is in a back-off (T-75): the engine recorded
     // the wait, and the board says so instead of "working".
     let backoff = tx.seats_in_backoff(project)?;
@@ -455,6 +475,7 @@ pub fn project_with_agents(
             rounds: tx.attempts_of_task(project, &task.id)?.len(),
             stored_rounds: tx.rounds_of_task(project, &task.id)?.len(),
             tokens: tokens_of(tx, project, &task.id)?,
+            cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
@@ -555,8 +576,13 @@ pub fn project_with_agents(
             .sum();
     }
 
-    // The work as a graph (design §8.1).
-    let graph = graph::tasks(tx, project, now)?;
+    // The work as a graph (design §8.1), of the tasks the board shows (T-246).
+    let shown: std::collections::BTreeSet<&str> =
+        tasks.iter().map(|task| task.id.as_str()).collect();
+    let graph: Vec<graph::GraphTask> = graph::tasks(tx, project, now)?
+        .into_iter()
+        .filter(|task| shown.contains(task.id.as_str()))
+        .collect();
     let graph_lanes = graph::lanes(tx, project)?;
 
     // The captain's inbox: the items that wait for an answer.
@@ -602,7 +628,10 @@ pub fn project_with_agents(
         blocked: temps_seats.iter().filter(|seat| blocked_seat(seat)).count(),
     };
 
-    // The deliveries in flight: a Deliver op that is not settled yet.
+    // The deliveries in flight: a Deliver op that is not settled yet, and only
+    // while the seat it names is still the live incumbent (T-233). An op of a
+    // retired seat, or of an older generation of a live one, is history: the
+    // home page showed it as a lost message.
     let mut unconfirmed_deliveries = 0;
     for state in [
         OpState::Intended,
@@ -610,15 +639,21 @@ pub fn project_with_agents(
         OpState::Submitted,
         OpState::Unknown,
     ] {
-        unconfirmed_deliveries += tx
-            .ops_in_state(project, state)?
-            .iter()
-            .filter(|op| op.kind == OpKind::Deliver)
-            .count();
+        for op in tx.ops_in_state(project, state)? {
+            if op.kind != OpKind::Deliver {
+                continue;
+            }
+            let live = tx.get_seat(&op.seat)?.is_some_and(|seat| {
+                matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Starting)
+                    && seat.generation == op.generation
+            });
+            if live {
+                unconfirmed_deliveries += 1;
+            }
+        }
     }
 
     let voyages = voyage::reports(tx, project, now)?;
-    let workload = workload_voyage(tx, project, now)?;
     // The decisions belong to the voyage the board measures (F3).
     let decisions = decisions_of(
         tx,
@@ -996,8 +1031,12 @@ fn actual_min_of(
 /// The finished voyages are not in `voyages` (the home page and the station
 /// watch the active ones only), but their measurements are still true: a
 /// landed voyage keeps its burn-up and its lanes.
-/// The tokens of a task's rounds (§4.3): None when a round counted none of
-/// them, so a sum is never a total that hides an unknown part (F5).
+/// The tokens of a task's rounds (§4.3): the fresh tokens only — input,
+/// output and cache write. The cache reads are counted apart
+/// ([`cache_read_of`]): a task that re-reads its context for twenty minutes
+/// shows millions of them, and a sum that mixed them would say nothing about
+/// the work (the user, 2026-10-28). None when a round counted none of them,
+/// so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0;
@@ -1014,10 +1053,24 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
         {
             return Ok(None);
         }
-        total += round.input.unwrap_or(0)
-            + round.output.unwrap_or(0)
-            + round.cache_read.unwrap_or(0)
-            + round.cache_write.unwrap_or(0);
+        total += round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
+    }
+    Ok((!rounds.is_empty()).then_some(total))
+}
+
+/// The cache reads of a task's rounds (§4.3), counted apart from the fresh
+/// tokens: None when a round did not count its cache reads, so the sum is
+/// never a total that hides an unknown part (F5).
+fn cache_read_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let mut total = 0;
+    for round in &rounds {
+        // A round that counted no cache reads is unknown, not a measured
+        // zero: the field's presence says what was counted (F5).
+        let Some(cache_read) = round.cache_read else {
+            return Ok(None);
+        };
+        total += cache_read;
     }
     Ok((!rounds.is_empty()).then_some(total))
 }
@@ -1224,6 +1277,8 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "tasks": lane.tasks.iter().map(|task| serde_json::json!({
                         "id": task.id,
                         "state": state_word(task.state),
+                        "tokens": task.tokens,
+                        "cache_read": task.cache_read,
                     })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
                 "decisions": project.decisions.iter().map(|decision| serde_json::json!({

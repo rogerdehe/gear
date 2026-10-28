@@ -308,7 +308,7 @@ gate="new-gate"
         assert!(h.calls.iter().any(|c| matches!(c,Call::PaneClose {pane} if pane == PANE)));
         assert!(!h.calls.iter().any(|c| matches!(c,Call::WorktreeRemove {..})),"the old checkout is kept");
         assert_eq!(crate::onboard::onboard_queued(&mut store,&mut h,&cfg,T+7).unwrap(),["p:heat"]);
-        assert!(h.calls.iter().any(|c| matches!(c,Call::WorktreeCreate {repo,branch,base,..} if repo == "/repo/new" && branch == "home/heat" && base == "new-dev")));
+        assert!(h.calls.iter().any(|c| matches!(c,Call::WorktreeCreate {repo,branch,base,..} if repo == "/repo/new" && branch == "p/heat" && base == "new-dev")));
         tick(&mut store,&mut h,&cfg,T+8).unwrap();
         assert_eq!(store.read(|tx| tx.get_meta(&marker("p:heat"))).unwrap().as_deref(),Some(""));
         let seat=store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap(); assert_eq!(seat.generation,2);

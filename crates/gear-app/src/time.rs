@@ -694,7 +694,7 @@ pub fn work_of_with(
     let rounds = tx.rounds_of_project(project)?;
     // A lane that was retired before this voyage is not one of the fleet's
     // lanes: it is no line of the report, and it does not hold the fleet from
-    // being stopped (ops/reviews/T-171.md round 2, F10). A lane that was
+    // being stopped (gear/voyages/M4/reviews/T-171.md round 2, F10). A lane that was
     // retired during the voyage, but worked in it, still is one.
     let lanes: Vec<(String, String)> = seats
         .iter()

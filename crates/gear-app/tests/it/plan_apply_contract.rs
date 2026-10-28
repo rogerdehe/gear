@@ -109,7 +109,7 @@ fn cancel_and_lane_cannot_apply() {
     assert_eq!(apply(&mut s, &lane, Some(&lfp), None, &d.0, &d.1, "r3", NOW).unwrap_err().code, ErrorCode::Forbidden);
 }
 
-// ---- the lanes that are about to stand idle (T-58, ops/lessons.md 7a)
+// ---- the lanes that are about to stand idle (T-58, gear/voyages/M2.1/lessons.md 7a)
 
 /// A task of the project: its lane, its state and the tasks it waits for.
 fn task(id: &str, lane: &str, state: TaskState, deps: &[&str]) -> gear_store::TaskRow {

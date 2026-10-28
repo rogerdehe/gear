@@ -40,7 +40,7 @@ The agreed answers are written to the project config and the plan; changing them
 | Object | Rule | Example |
 |---|---|---|
 | Lane name (`name` in config) | one short word from its duty, `[a-z][a-z0-9-]*` | `data`, `runtime`, `heat` |
-| Agent name / Herdr workspace label | `<project>-<lane>`, ≤ 32 chars (Herdr agent names: `[a-z][a-z0-9_-]{0,31}`) | `gear-data`, `atlas-heat` |
+| Agent name / Herdr workspace label | `<project>-<lane>`, ≤ 32 chars (Herdr agent names: `[a-z][a-z0-9_-]{0,31}`) | `gear-data`, `harbor-heat` |
 | Temp seat (long-lived workspace) | `<project>-<kind>-<k>`: the kind of temp work plus the seat number; kinds are not listed in advance — `review` is the common one, others (e.g. an investigation) are named the same way when needed | `gear-review-1` |
 | Temp agent (one job in a seat) | `<project>-<kind>-t<n>`: kind plus the task it works on | `gear-review-t12` |
 | Captain | `<project>-captain` | `harbor-captain` |

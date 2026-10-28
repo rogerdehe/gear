@@ -62,8 +62,11 @@ pub fn start_reviews(
         // no reviewer is started for it.
         Err(_) => return Ok(report),
     };
-    // Without `[temps]` there is no reviewer to start.
+    // Without `[temps]` there is no reviewer to start. A hand-in would wait in
+    // Submitted with nothing telling the captain (another project's M0), so
+    // the captain is told to settle it (v0.4.8).
     if config.temps.is_none() {
+        tell_captain_of_hand_ins_without_reviewers(store, project, now)?;
         return Ok(report);
     }
 
@@ -267,8 +270,17 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     if !direction { return review_packet_for(store, config, &task.task, task.attempt, &task.candidate) }
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
-    let branch = format!("{}/{}", task.lane, task.task.to_lowercase().replace('-', ""));
-    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"<ok, or up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+    let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
+    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from origin/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, repo.integration, task.task, task.attempt))
+}
+
+/// A direction check passed when the first word of its body is `ok`, in any
+/// case and without a trailing `.`, `,`, `;`, `:` or `!`: the lane often writes
+/// `ok. Candidate follows contract v4 …` and that is a pass, not a problem
+/// list (T-230).
+fn direction_passed(body: &str) -> bool {
+    let first = body.trim().split_whitespace().next().unwrap_or("");
+    first.trim_end_matches(['.', ',', ';', ':', '!']).to_lowercase() == "ok"
 }
 
 fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearResult<()> {
@@ -283,7 +295,7 @@ fn finish_direction_results(store: &mut Store, project: &str, now: Ts) -> GearRe
                     m.sender == seat_id && m.sender_gen == generation && m.meta.as_deref().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()).is_some_and(|v| v["direction"] == true && v["sha"] == sha)
                 });
                 let Some(result) = result else { continue };
-                if result.body.trim().to_lowercase() != "ok" {
+                if !direction_passed(&result.body) {
                     let captain = tx.captain_of(project)?;
                     for (recipient, kind, urgent, state) in [(Some(attempt.seat.clone()), MsgKind::Instruction, true, MsgState::Open), (captain.map(|s| s.id), MsgKind::System, false, MsgState::Info)] {
                         if let Some(recipient) = recipient {
@@ -312,7 +324,7 @@ fn start_direction_checks(store: &mut Store, herdr: &mut dyn HerdrAct, cfg: &Eng
         let existing = store.read(|tx| tx.get_meta(&key))?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
         if existing.as_ref().is_some_and(|v| v["state"] == "running") { continue }
         let repo = config.repo_of_task(&row);
-        let branch = format!("{}/{}", lane, row.id.to_lowercase().replace('-', ""));
+        let branch = gear_model::branch::expand(&config.conventions.task_branch, project, &lane, &row.id);
         let sha = if let Some(sha) = existing.as_ref().filter(|v| v["state"] == "starting").and_then(|v| v["sha"].as_str()) { sha.to_string() } else {
             let Ok(sha) = review_git(cfg.review_git.as_ref(), &repo.path, &["rev-parse", "--verify", &format!("refs/remotes/origin/{branch}")]) else { continue };
             let sha = sha.trim().to_string();
@@ -887,8 +899,8 @@ fn start_reviewer(
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     // The job's branch, and the seat's own anchor (its workspace label is
     // long-lived; the agent of a job is named after its task).
-    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&task.task) };
-    let seat_branch = format!("home/{}", seat.name);
+    let branch = if direction { format!("direction/{}", task.task.to_lowercase()) } else { review_branch(&config.conventions.review_branch, &config.project.id, &task.lane, &task.task) };
+    let seat_branch = gear_model::branch::expand_seat(&config.conventions.seat_branch, &config.project.id, &seat.name);
     let seat_label = worktree_label(config, &seat.name, &repo);
     let label = agent_name(config, &task.task);
     let model = entry.map(ModelEntry::model);
@@ -944,6 +956,14 @@ fn start_reviewer(
                     return Ok(Started::NotYet);
                 }
             };
+            // T-253: the worktree must belong to the repo the review runs in.
+            // Herdr places worktrees by the repo folder's name and the branch,
+            // so a same-named repo came back with another repository's
+            // checkout. It is not used, and the captain hears about it.
+            if let Err(reason) = crate::onboard::check_worktree(store, &seat.project, &seat.name, &repo.path, &worktree.path, now) {
+                park(store, &seat.id, &reason, now)?;
+                return Ok(Started::NotYet);
+            }
             // T-107: a reviewer's worktree left with GEAR's old pre-push hook
             // loses it before the agent starts.
             if let Err(reason) = crate::onboard::forget_gear_hooks(std::path::Path::new(&worktree.path)) {
@@ -1533,7 +1553,7 @@ fn review_packet_for(
         &bar,
         candidate,
         &repo.integration,
-        &review_branch(task),
+        &review_branch(&config.conventions.review_branch, &config.project.id, &lane, task),
     );
     // The review's own budget (design §5.1) and what a verdict past it must
     // carry (design §6.2): the reviewer is charged from its own start, and a
@@ -1678,10 +1698,12 @@ fn worktree_label(config: &ProjectConfig, seat: &str, repo: &Repo) -> String {
     }
 }
 
-/// The review branch of a task: `review/t<n>` (conventions 17 §3: the
-/// reviewers' branch).
-fn review_branch(task: &str) -> String {
-    format!("review/{}", task.to_lowercase().replace('-', ""))
+/// The review branch of a task (T-253): the project's
+/// `[conventions].review_branch` template with `{project}`, `{lane}` and `{n}`
+/// filled in — `review/t<n>` by default (conventions 17 §3: the reviewers'
+/// branch).
+fn review_branch(template: &str, project: &str, lane: &str, task: &str) -> String {
+    gear_model::branch::expand(template, project, lane, task)
 }
 
 /// The Herdr agent name (and workspace label) of a task's reviewer:
@@ -1717,7 +1739,7 @@ fn review_packet(
          Done (the milestone's sentence): {done}\n\
          Bar (the quality this phase needs): {bar}\n\
          Candidate: {candidate}\n\
-         Diff to review: `{integration}..{candidate}`\n\
+         Diff to review: `git diff {integration}...{candidate}` (three dots: the change since the merge base)\n\
          Your worktree: branch `{branch}`, checked out at the candidate.\n\
          \n\
          Rules: `gear --skill review` — the mechanical acceptance you run yourself, \
@@ -1800,6 +1822,62 @@ fn tell_captain(store: &mut Store, project: &str, task: &ReviewTask, reason: &st
         // The notice is told once per attempt: remember it, so a later tick
         // does not add it again after the captain resolved the item.
         tx.set_meta(&told_key, &now.to_string())?;
+        Ok(())
+    })
+}
+
+/// The key that remembers that the captain was told that an attempt was handed
+/// in while the project has no reviewers to settle it (`[temps]` absent).
+fn verdict_wait_key(task: &str, attempt: i64) -> String {
+    format!("engine.verdict_wait.{task}.{attempt}")
+}
+
+/// A project without `[temps]` has no reviewer: a hand-in would wait in
+/// Submitted with nothing telling the captain (another project's M0). Tell the
+/// captain once per attempt, on the thread `verdict:<task>:<attempt>`, to
+/// settle the attempt in `# Verdicts`.
+fn tell_captain_of_hand_ins_without_reviewers(
+    store: &mut Store,
+    project: &str,
+    now: Ts,
+) -> GearResult<()> {
+    let hand_ins = tasks_to_review(store, project)?;
+    if hand_ins.is_empty() {
+        return Ok(());
+    }
+    store.write(|tx| {
+        // No captain: nobody to tell.
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        for task in &hand_ins {
+            // One message per attempt: a tick does not bring the same news
+            // back, and a resolved item stays resolved.
+            let key = verdict_wait_key(&task.task, task.attempt);
+            if tx.get_meta(&key)?.is_some() {
+                continue;
+            }
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: format!("verdict:{}:{}", task.task, task.attempt),
+                task: Some(task.task.clone()),
+                attempt: Some(task.attempt),
+                sender: "engine".into(),
+                sender_gen: 0,
+                recipient: captain.id.clone(),
+                kind: MsgKind::System,
+                urgent: true,
+                body: format!(
+                    "{} attempt {} was handed in and this project has no reviewers \
+                     ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)",
+                    task.task, task.attempt
+                ),
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            tx.set_meta(&key, &now.to_string())?;
+        }
         Ok(())
     })
 }
@@ -1968,6 +2046,34 @@ lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
 review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
 "#;
 
+    /// The same project with no `[temps]` at all: no reviewer can start.
+    const CONFIG_NO_REVIEWERS: &str = r#"
+[project]
+id = "p"
+herdr_session = "sess"
+repo = "/repo"
+
+[quota]
+lanes = 1
+temps = 1
+
+[captain]
+pane = "w1:p9"
+kind = "claude"
+profile = "claude"
+
+[[lanes]]
+name = "heat"
+duty = "everything"
+owns = ["src/"]
+kind = "opencode"
+profile = "opencode"
+
+[models]
+lanes = ["minimax-cn/MiniMax-M3.1-Flash"]
+review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=high"] }]
+"#;
+
     /// An engine that knows the codex profile.
     fn cfg() -> EngineCfg {
         let mut cfg = EngineCfg { db_path: std::env::temp_dir().join(format!("gear-engine-tests-{}/gear.db", std::process::id())).to_string_lossy().into_owned(), ..Default::default() };
@@ -2074,6 +2180,85 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                 _ => None,
             })
             .collect()
+    }
+
+    /// The messages the captain got on a thread.
+    fn thread(store: &mut Store, name: &str) -> Vec<gear_store::MessageRow> {
+        store.read(|tx| tx.thread_messages("p", name)).unwrap()
+    }
+
+    /// v0.4.8: a hand-in in a project without `[temps]` reaches the captain —
+    /// once per attempt, on the thread `verdict:<task>:<attempt>`.
+    #[test]
+    fn a_hand_in_without_reviewers_tells_the_captain_once_per_attempt() {
+        let mut store = world(CONFIG_NO_REVIEWERS);
+        let mut herdr = FakeHerdr::new();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        let told = thread(&mut store, "verdict:T-1:1");
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].recipient, "p:captain");
+        assert_eq!(told[0].kind, MsgKind::System);
+        assert_eq!(told[0].state, MsgState::Open);
+        assert!(told[0].urgent);
+        assert_eq!(told[0].task.as_deref(), Some("T-1"));
+        assert_eq!(told[0].attempt, Some(1));
+        assert_eq!(
+            told[0].body,
+            "T-1 attempt 1 was handed in and this project has no reviewers ([temps]): settle it in # Verdicts (pass with evidence=, or fail with rework=)"
+        );
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_some());
+
+        // A second tick adds none.
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 20).unwrap();
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 1);
+
+        // A second attempt of the same task gives one more.
+        store
+            .write(|tx| {
+                tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt: 1,
+                    passed: false,
+                    findings: "the edge case".into(),
+                    by_seat: "p:review-1".into(),
+                    created: T0 + 25,
+                })?;
+                let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
+                attempt.state = AttemptState::Rejected;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Ready;
+                tx.update_task(&task)?;
+                gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0 + 30)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 2, T0 + 30)?;
+                gear_app::tasks::submit_result(tx, "p", "T-1", 2, 1, "def5678", "ops/reports/T-1.md", T0 + 30)
+                    .map(|_| ())
+            })
+            .unwrap();
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 40).unwrap();
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 1, "attempt 1 stays one");
+        let second = thread(&mut store, "verdict:T-1:2");
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert!(second[0].body.starts_with("T-1 attempt 2 "), "{}", second[0].body);
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.2")).unwrap().is_some());
+    }
+
+    /// With `[temps]` a reviewer starts and the captain hears nothing on the
+    /// verdict thread.
+    #[test]
+    fn with_reviewers_a_hand_in_tells_the_captain_nothing_on_the_verdict_thread() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("wt1:p1", "codex", gear_herdr::AgentStatus::Idle);
+
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(thread(&mut store, "verdict:T-1:1").len(), 0);
+        assert!(store.read(|tx| tx.get_meta("engine.verdict_wait.T-1.1")).unwrap().is_none());
     }
 
     /// T-63: the reviewer is sent the contract the hand-in was made against —
@@ -2245,6 +2430,16 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
     }
 
     #[test]
+    fn direction_passed_reads_only_the_first_word() {
+        for body in ["ok", "OK.", "ok. Candidate follows contract v4"] {
+            assert!(direction_passed(body), "{body:?} passes");
+        }
+        for body in ["okay", "F1: misread the contract sentence", ""] {
+            assert!(!direction_passed(body), "{body:?} does not pass");
+        }
+    }
+
+    #[test]
     fn direction_checks_follow_pushes_and_report_results() {
         let root = tempfile::tempdir().unwrap();
         sh(root.path(), "git init -q --bare origin.git && git init -q -b dev work");
@@ -2299,9 +2494,11 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 11).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], first);
         let result = |tx: &Tx<'_>, sha: &str, body: &str, time| tx.insert_message(&NewMessage { meta: Some(serde_json::json!({"direction":true,"sha":sha}).to_string()), project:"p".into(), thread:format!("result:{time}"), task:Some("T-1".into()), attempt:Some(1), sender:"p:review-1".into(), sender_gen:1, recipient:"p:captain".into(), kind:MsgKind::Result, urgent:false, body:body.into(), reply_to:None, needs_ack:false, state:MsgState::Info, created:time }).map(|_| ());
-        store.write(|tx| result(tx, &first, "ok", T0 + 12)).unwrap();
+        store.write(|tx| result(tx, &first, "ok. Candidate follows contract v4; src/base is the right place", T0 + 12)).unwrap();
         finish_direction_results(&mut store, "p", T0 + 13).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["checked_sha"], first);
+        let inbox = store.read(|tx| tx.actionable_for("p", "p:heat", T0 + 13)).unwrap();
+        assert_eq!(inbox.iter().filter(|m| m.kind == MsgKind::Instruction && m.urgent).count(), 0, "a passing direction check sends the lane nothing");
         start_reviews(&mut store, &mut herdr, &config, &config.profiles, "p", T0 + 14).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&job(&mut store, &key)).unwrap()["sha"], second);
         store.write(|tx| result(tx, &second, "use the required approach", T0 + 15)).unwrap();
@@ -2563,7 +2760,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         // T-76: the folder the reviewer runs in is trusted, so the args are
         // the profile's with the worktree filled in.
         let args = &starts(&herdr)[0].1;
-        assert!(args.starts_with(&gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/home-review-1")), "{args:?}");
+        assert!(args.starts_with(&gear_herdr::render_args(&cfg().profiles["codex"].unattended_args, "/fake-worktrees/p-review-1")), "{args:?}");
         assert!(args.iter().any(|s| s.starts_with("developer_instructions=")), "{args:?}");
     }
 
@@ -2780,7 +2977,7 @@ review = [
         // one worktree, on the seat's own branch, cut at the integration branch
         assert_eq!(
             worktrees(&herdr),
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
 
         // The shell reports the checkout: the reviewer starts.
@@ -2797,7 +2994,7 @@ review = [
         // still one worktree, on the review branch, cut at the candidate
         assert_eq!(
             worktrees(&herdr),
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
 
         // one agent, the reviewer's kind, on the review model
@@ -2811,7 +3008,7 @@ review = [
                     "check_for_update_on_startup=false".to_string(),
                     // T-76: the reviewer's worktree is the folder it runs in.
                     "-c".to_string(),
-                    "projects={\"/fake-worktrees/home-review-1\"={trust_level=\"trusted\"}}".to_string(),
+                    "projects={\"/fake-worktrees/p-review-1\"={trust_level=\"trusted\"}}".to_string(),
                     "-c".to_string(),
                     gear_herdr::profile::render_rules(&[gear_herdr::profile::CODEX_RULES_ARG.to_string()], &std::path::Path::new(&cfg().db_path).parent().unwrap().join("rules/review.md").to_string_lossy(), "")[0].clone(),
                     "-m".to_string(),
@@ -2833,7 +3030,7 @@ review = [
         assert!(text.contains("the goal"), "{text}");
         assert!(text.contains("the accept criteria"), "{text}");
         assert!(text.contains("abc1234"), "{text}");
-        assert!(text.contains("dev..abc1234"), "{text}");
+        assert!(text.contains("git diff dev...abc1234"), "{text}");
         // The rules come from the binary, not from a file of the gear repo
         // (T-30): the packet names `gear --skill review` and no `ops/` path.
         assert!(text.contains("gear --skill review"), "{text}");
@@ -3137,7 +3334,7 @@ review = [
                     created: T0,
                 })?;
                 // The first job recorded the seat's worktree path.
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
                 Ok(())
             })
             .unwrap();
@@ -3215,7 +3412,7 @@ review = [
             .unwrap();
 
         store.write(|tx| {
-            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
             tx.insert_round(&gear_store::NewRound {
                 key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
                 seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
@@ -3281,7 +3478,7 @@ review = [
                     handover_id: None,
                     created: T0,
                 })?;
-                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+                tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
                 Ok(())
             })
             .unwrap();
@@ -3318,7 +3515,7 @@ review = [
         let worktrees_after_first = worktrees(&herdr);
         assert_eq!(
             worktrees_after_first,
-            vec![("home/review-1".to_string(), "dev".to_string())]
+            vec![("p/review-1".to_string(), "dev".to_string())]
         );
         // The job's agent is named after its task.
         let names: Vec<String> = herdr
@@ -3399,7 +3596,7 @@ review = [
         // checkout is on the last job's review branch, not on the seat's).
         assert_eq!(worktrees(&herdr), worktrees_after_first, "one worktree in total");
         assert!(
-            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("home-review-1"))),
+            herdr.calls.iter().any(|call| matches!(call, Call::WorktreeOpenPath { path, .. } if path.ends_with("p-review-1"))),
             "reopened by path: {:?}",
             herdr.calls
         );
@@ -3532,7 +3729,7 @@ review = [
             .unwrap();
 
         store.write(|tx| {
-            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/home-review-1")?;
+            tx.set_meta(&path_key("p:review-1"), "/fake-worktrees/p-review-1")?;
             tx.insert_round(&gear_store::NewRound {
                 key: gear_store::RoundKey { project: "p".into(), task: "T-1".into(), attempt: 1, role: "review".into() },
                 seat: "p:review-1".into(), generation: 1, cli: "codex".into(), model: None, start_at: T0,
@@ -3593,12 +3790,15 @@ review = [
         assert_eq!(report.started, vec!["p:review-1".to_string()]);
         let (repo, branch, base, label) = created_worktree(&herdr);
         assert_eq!(repo, "/repo/web", "the worktree is in the task's repo");
-        assert_eq!(branch, "home/review-1");
+        assert_eq!(branch, "p/review-1");
         assert_eq!(base, "web-dev", "the repo's own integration branch");
         assert_eq!(label, "p-review-1-web", "the label names the repo");
         // The packet asks for the diff against that repo's integration branch.
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `web-dev..abc1234`"), "{packet}");
+        assert!(
+            packet.contains("Diff to review: `git diff web-dev...abc1234` (three dots: the change since the merge base)"),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3618,7 +3818,12 @@ review = [
         assert_eq!(repo, "/repo/web");
         assert_eq!(base, "original-base");
         let packet = store.read(|tx| packet_text(tx, "p:review-1", "T-1", 1)).unwrap();
-        assert!(packet.contains("Diff to review: `original-base..abc1234`"), "{packet}");
+        assert!(
+            packet.contains(
+                "Diff to review: `git diff original-base...abc1234` (three dots: the change since the merge base)"
+            ),
+            "{packet}"
+        );
     }
 
     #[test]
@@ -3633,7 +3838,7 @@ profile = "opencode"
 "#;
         let mut store = world(&config);
         // Isolated repo doors prevent the fake's branch-only map from letting
-        // root's home/review-1 stand in for web's checkout. Distinct paths and
+        // root's p/review-1 stand in for web's checkout. Distinct paths and
         // panes also make a checkout in the wrong repo observable.
         let mut web = FakeHerdr::new();
         let mut root = FakeHerdr::new();
@@ -3642,7 +3847,7 @@ profile = "opencode"
             (&mut root, "/root-review-1", "root:p1"),
         ] {
             door.add_shell(pane);
-            door.add_worktree("home/review-1", path, pane);
+            door.add_worktree("p/review-1", path, pane);
         }
         for (n, lane, door, path, pane, repo, base) in [
             (1, "heat", &mut web, "/web-review-1", "web:p1", "/repo/web", "web-dev"),
@@ -3657,11 +3862,16 @@ profile = "opencode"
             assert!(door.calls.iter().any(|call| matches!(call,
                 Call::WorktreeOpen { repo: got, .. } if got == repo)));
             let packet = store.read(|tx| packet_text(tx, "p:review-1", &format!("T-{n}"), 1)).unwrap();
-            assert!(packet.contains(&format!("Diff to review: `{base}..abc1234`")), "{packet}");
+            assert!(
+                packet.contains(&format!(
+                    "Diff to review: `git diff {base}...abc1234` (three dots: the change since the merge base)"
+                )),
+                "{packet}"
+            );
             release_review_job(&mut store, n);
             // The real checkout is now on the job branch. Remove the fake's
             // anchor lookup and register that branch at the unchanged path.
-            assert!(matches!(door.worktree_remove("wt-home-review-1"), Outcome::Ok(())));
+            assert!(matches!(door.worktree_remove("wt-p-review-1"), Outcome::Ok(())));
             door.add_shell(pane);
             door.add_worktree(&format!("review/t{n}"), path, pane);
         }
@@ -3708,7 +3918,7 @@ profile = "opencode"
         crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Released);
         herdr.add_shell("child:p1");
-        herdr.add_worktree("home/review-1", "/child-review", "child:p1");
+        herdr.add_worktree("p/review-1", "/child-review", "child:p1");
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 14).unwrap();
         assert_eq!(report.started, vec!["p:review-1"]);
         let calls = REVIEW_GIT_CALLS.with(|calls| calls.borrow().clone());
@@ -4028,9 +4238,11 @@ profile = "opencode"
 const REVIEW_NUDGE_BUDGET: i64 = 3;
 
 /// Reviewers that stopped before handing in their verdict are told to go on
-/// (L-53). The signal is Herdr's own state — the agent is idle while its job
-/// (a verdict for the attempt it reviews) is not done — whatever stopped it: a
-/// server error ("model at capacity"), a dropped connection, a pause. Screen
+/// (L-53). The same holds for a direction check whose result is not in
+/// (T-245): its attempt is Started, its job `running`, and the seat is idle.
+/// The signal is Herdr's own state — the agent is idle while its job is not
+/// done — whatever stopped it: a server error ("model at capacity"), a dropped
+/// connection, a pause. Screen
 /// text only rules out the cases a nudge cannot fix (quota, auth). After
 /// [`REVIEW_NUDGE_BUDGET`] nudges the seat is returned as flagged, which opens
 /// the captain's stall item.
@@ -4073,7 +4285,17 @@ pub(crate) fn nudge_flag_current(tx: &Tx<'_>, project: &str, seat_id: &str, now:
     let Some(seat) = tx.get_seat(seat_id)? else { return Ok(false) };
     let Some(task) = seat.task_id.as_deref() else { return Ok(false) };
     let Some(attempt) = tx.attempts_of_task(project, task)?.into_iter().last() else { return Ok(false) };
-    if attempt.state != gear_model::AttemptState::Submitted || tx.get_review_verdict(project, task, attempt.n)?.is_some() { return Ok(false) }
+    // A direction seat is flagged on its own job, as a review seat is (T-245).
+    if direction_seat(tx, project, task, attempt.n, &seat)? {
+        let running = tx.get_meta(&direction_key(project, task, attempt.n))?
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .is_some_and(|job| job["state"] == "running");
+        let handed_in = tx.direction_results_of_attempt(project, task, attempt.n)?.iter()
+            .any(|m| m.sender == seat_id && m.sender_gen == seat.generation);
+        if !running || handed_in { return Ok(false) }
+    } else if attempt.state != gear_model::AttemptState::Submitted || tx.get_review_verdict(project, task, attempt.n)?.is_some() {
+        return Ok(false)
+    }
     let progress = review_progress(tx, project, &seat, task, attempt.n, now)?;
     let ops: Vec<_> = tx.ops_of_seat_kind(seat_id, OpKind::Deliver)?.into_iter()
         .filter(|op| op.task.as_deref() == Some(task) && op.attempt == Some(attempt.n)).collect();
@@ -4105,8 +4327,25 @@ pub fn nudge_stopped_reviewers(
             let Some(attempt) = tx.attempts_of_task(project, &task)?.into_iter().last() else {
                 return Ok(None);
             };
-            if direction_seat(tx, project, &task, attempt.n, seat)? { return Ok(None) }
-            if attempt.state != gear_model::AttemptState::Submitted
+            // A direction check is nudged on its own job (T-245): its attempt
+            // is Started, not Submitted, so the review test below is not the
+            // one that applies. The signal is the same — the seat is idle while
+            // its job is not done: the job must still be `running`, and this
+            // seat and generation must have handed no result in.
+            let direction = direction_seat(tx, project, &task, attempt.n, seat)?;
+            if direction {
+                let running = tx.get_meta(&direction_key(project, &task, attempt.n))?
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .is_some_and(|job| job["state"] == "running");
+                if !running {
+                    return Ok(None); // starting, or done
+                }
+                let handed_in = tx.direction_results_of_attempt(project, &task, attempt.n)?.iter()
+                    .any(|m| m.sender == seat.id && m.sender_gen == seat.generation);
+                if handed_in {
+                    return Ok(None);
+                }
+            } else if attempt.state != gear_model::AttemptState::Submitted
                 || tx.get_review_verdict(project, &task, attempt.n)?.is_some()
             {
                 return Ok(None);
@@ -4147,10 +4386,17 @@ pub fn nudge_stopped_reviewers(
                 ref_msg: None,
                 plan_version: None,
                 payload: serde_json::json!({
-                    "text": format!(
-                        "You are idle and your verdict on {task} is not in. If you never got your review packet (it can be lost right after a start), here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in the verdict with the `gear send --kind review` command from the packet.\n\n{}",
-                        packet_text(tx, &seat.id, &task, attempt.n)?
-                    ),
+                    "text": if direction {
+                        format!(
+                            "You are idle and your direction check on {task} is not in. If you never got your packet, here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in with the `gear send --kind result --direction` command from the packet.\n\n{}",
+                            packet_text(tx, &seat.id, &task, attempt.n)?
+                        )
+                    } else {
+                        format!(
+                            "You are idle and your verdict on {task} is not in. If you never got your review packet (it can be lost right after a start), here it is again — start from it. If you had started, continue where you stopped (a server error such as \"model at capacity\", or a pause), then hand in the verdict with the `gear send --kind review` command from the packet.\n\n{}",
+                            packet_text(tx, &seat.id, &task, attempt.n)?
+                        )
+                    },
                     "nudge": used + 1,
                 }),
                 created: now,

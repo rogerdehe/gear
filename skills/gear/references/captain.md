@@ -9,6 +9,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    **A project that already runs** (its own CI, its own instruction files, its own habits) gets an adoption before this sheet, not GEAR's defaults: `gear --skill adopt` — archive the instruction layer, name exemplars and no-go patterns, measure the gate, decide keep/replace/drop. Its analysis fills the sheet below, and the first voyage is the adoption voyage.
 2. **Agree with the user** — you propose, the user confirms:
    - the goal and the voyage (milestone): its `done:` sentence, its `bar:`, its `eta:` as a style ("quick landing" or "do it properly");
+   - the scope, from the voyage's backlog: what the user placed in this voyage is decided; every other item is a candidate and leaves the kickoff settled — taken, postponed to the next voyage's backlog (with the reason), or dropped (the reason goes in `# Decisions`). An item already postponed twice is taken or dropped now;
    - the repos this voyage changes: the skeleton lists what it found, but take only the repos the voyage touches — a repo joins the config in a later voyage, when it is needed;
    - the lanes: name, duty, owned paths (relative to the lane's repo), the repo it works in, agent kind (`<project>-<duty>` names). Lanes follow the work, not the repos: a repo with more work gets more lanes, each owning its own paths, and a repo with little work may get none of its own. The sheet's lane count and `[quota].lanes` agree before the user sees it: `init` refuses a quota below the lanes configured, and a larger one leaves lanes the project does not have;
    - the model chain per role, by full model id (`lanes`: fast; `review`: a different, stronger model — a reviewer never runs the writer's model). An entry may name its own CLI and its start args instead of the plain id, for a model another CLI serves better — the `[models]` example below shows that form in `review`;
@@ -27,7 +28,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    - **Then the kickoff sheet**, one list of lines: goal, done, the chosen bar, eta style, repos, lanes with their repo, models with full ids, quota policy. The user says "confirm", or writes what to change in their own words; apply the changes and show the sheet again until it is confirmed. Never repeat the bar as a separate choice next to a sheet that already contains it.
 
    Start nothing before the sheet is confirmed. These are the only questions of the voyage; the next one is when the voyage lands.
-4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Re-apply the config the same way after every change. Then apply the plan:
+4. **Write the config** at `gear/gear.toml` (start from `gear admin kickoff`'s skeleton) and the first plan at `gear/voyages/M1.md`, then register the project yourself, from the repository: `GEAR_ADMIN=1 gear admin init gear/gear.toml` (the confirmed sheet is the user's consent). Check it with `gear admin init --check gear/gear.toml` until it passes; that starts nothing. Re-apply the config the same way after every change. Then apply the plan:
 
    ```toml
    [project]
@@ -78,7 +79,7 @@ You are the captain of one GEAR project. You plan, decide and answer; you do not
    [conventions]
    integration = "dev"
    release = "main"
-   gate = "make test"          # the project's own build+test, run before every merge (default: cargo)
+   gate = "make test"          # the project's own build+test, run before every merge (no default: name it)
    ```
 
    ```bash
@@ -96,6 +97,8 @@ One plan file per voyage, edited in place: `gear/voyages/<milestone>.md`.
 ```bash
 gear plan apply gear/voyages/M1.md
 ```
+
+**The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): a Herdr tab running `gear board` in the project's repository, restarted if one from an earlier voyage is still open, and check it shows this project and this voyage.
 
 After a successful apply GEAR rewrites the file: `base=` becomes the applied version, each `## NEW` header gets its id (`## T-<n>`), and `# Verdicts` is removed. Re-applying it changes nothing. One wrong section, field or value rejects the whole draft (`BAD_FORMAT`, with the line) and nothing is written. When the voyage lands, the file is its record; the next voyage gets a new file.
 

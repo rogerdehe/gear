@@ -648,6 +648,25 @@ impl Store {
         Ok(store)
     }
 
+    /// Open an **existing** database for reading only (T-256): `gear admin
+    /// init --check` reads the other projects' configs to see whether two
+    /// projects would cut the same branch names, and that check writes
+    /// nothing — it creates no file, applies no schema and migrates nothing.
+    /// A database of another schema version is read as it is.
+    pub fn open_read_only(path: &Path) -> GearResult<Store> {
+        let conn = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(map_sqlite)?;
+        let store = Store { conn };
+        store
+            .conn
+            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+            .map_err(map_sqlite)?;
+        Ok(store)
+    }
+
     /// In-memory database for tests (schema applied).
     pub fn open_in_memory() -> GearResult<Store> {
         let conn = Connection::open_in_memory().map_err(map_sqlite)?;
@@ -2316,6 +2335,21 @@ impl<'s> Tx<'s> {
         Ok(())
     }
 
+    /// Empty a voyage's departure: a milestone that lost every task no longer
+    /// has one, so a reused milestone id starts its clock when its new tasks
+    /// come (T-239). `upsert_voyage` cannot do this: it COALESCEs the columns.
+    pub fn clear_voyage_departure(
+        &self, project: &str, milestone: &str,
+    ) -> GearResult<()> {
+        self.tx.execute(
+            "UPDATE voyages
+             SET departure=NULL, departure_tasks=NULL, departure_estimate_min=NULL
+             WHERE project=?1 AND milestone=?2",
+            params![project, milestone],
+        ).map_err(map_sqlite)?;
+        Ok(())
+    }
+
     /// One milestone's voyage, if it has one.
     pub fn get_voyage(&self, project: &str, milestone: &str) -> GearResult<Option<VoyageRow>> {
         let row: Option<VoyageRow> = self
@@ -2484,7 +2518,7 @@ impl<'s> Tx<'s> {
         Ok(verdicts)
     }
 
-    // ---- v6: the M4 store API (§1 and §13.1 of ops/plan/m4-design.md)
+    // ---- v6: the M4 store API (§1 and §13.1 of gear/voyages/M4/design.md)
 
     /// The session the attempt ran in (§3): written at check-in and again at
     /// hand-in, when the agent may have compacted or been restarted.

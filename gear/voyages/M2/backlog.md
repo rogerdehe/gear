@@ -1,0 +1,48 @@
+# M2 backlog (ideas, not yet tasks)
+
+- A lane's `result` should not be a captain action item once the engine starts the reviewer (it rings the captain for nothing); make it an information line, and ring the captain only for the review verdict / failed merge.
+- T-5 review R2-1 (accepted start repeated after crash + agent exit while down), R2-3 (quota lowered mid-tick).
+- T-12 review: failed-merge retry/duplicate items, remote cleanup errors, Unknown merge ops of cancelled tasks, Executing before the gate.
+- T-17 review: R2 slot freed one tick late, R3 exit keys repeated after a restart.
+- Deletion pass after M1 (old manual scripts and ledger, Python-era design docs, duplicate notes, dead code).
+- T-13 review R2-1: a review item the captain deferred (Waiting) survives settlement.
+- T-7 review R1 (lane runs dry again: alert waits for the 10-minute window), R2 (deferring an alert creates another item).
+- Hand-in check: `gear send --kind result` refuses a candidate that does not contain current origin/dev (lanes skip the rule under rework: T-13, T-15).
+- T-17 review R5: cancel during a reviewer's start keeps its slot (Starting seats skipped by release).
+- Captain can scope an automatic rework (today the engine hands the lane every finding, including ones the captain would log).
+- T-18 review #4 (restart adoption types shell text into a running reviewer), #5 (re-review does not resume the reviewer's session).
+- **Captain quota (user, 2026-10-23, must be in M2).** Today nothing handles it; lanes would keep developing with no captain to steer — risky. Shape to work out in M2:
+  - Detect: never from conversation text (it may quote quota words). Read only the agent's status line, e.g. Claude Code's bottom bar `5h 1% ↻01:10 · 7d 64%` (window usage and reset time); per-kind in the profile.
+  - While the captain is out: each lane finishes its current batch (hands in), then gets no new task; reviews and merges may finish (no captain judgement needed). Shown on the board.
+  - Reset: the captain's reset period is agreed at kickoff (e.g. 5 h, or read from the status line); at reset the engine wakes the captain ("your quota is back — run `gear`") and dispatch resumes after the captain has looked.
+- Lane quota "wait 5 h for reset": in M1 via T-15 (park until now + quota_reset_h, resume the same session) — check it really works live once T-15 lands.
+- **Fresh lane sessions (root of a lane running out of context).** Long-lived lanes keep one session for every task; after 8 tasks and many rework rounds board was at 62% and asked to stop. At a task boundary (no started attempt, all handed in) and above a context threshold (OpenCode bar `620.2K (62%)`, per-kind in the profile), the engine exits the agent and starts a NEW session in the same pane (env kept), then dispatches. Captain did this by hand once for board (2026-10-23); the first delivery to the new session was lost (known OpenCode fact: the first prompt right after start can vanish) — the engine must confirm it or wait for readiness.
+- Plugin-center listing (user, 2026-10-23): later, once GEAR runs well on a few real projects. Model: smarzban/herdr-file-viewer (prebuilt releases + fetch-or-build, docs, version cadence, platform coverage). M1 already installs with `herdr plugin install rogerdehe/gear`.
+- Queue order check (for T-24): a lane's queue must not rank a later milestone's task ahead of an open task of the current milestone; the engine warns the captain (the captain mis-ranked M2's T-20 ahead of M1's T-26 on 2026-10-23).
+- **Engine-driven model switch (head of M2).** Start lanes without --standalone (it exited on its own) and set the model through `/model` in the agent, verified on the status bar (what ops/bin/switch-model.sh did by hand), per kind in the profile.
+- T-18 round 3 (logged, not reworked): restart between checkout intent and submit strands a review; re-review does not resume the reviewer's session; a start intent may adopt a wrong-kind occupant; the warm-build proof in the report can pass without a cache.
+- Snapshot wording: `runtime · idle` means "no task in progress", not "agent idle" (the agent was working) — show the agent's Herdr state and the task state separately.
+- Stale captain items re-alert (from T-23 v2): an open captain action item older than captain_item_stale_min becomes urgent and rings again once per period; snapshot shows count and oldest age.
+- T-22 bug: a task added to an old milestone without a voyage row fails with NOT NULL voyages.done instead of being grandfathered.
+- **Store schema version (M2, high).** Stamp the schema version in meta; a binary with another version refuses to write (or migrates up, never down). Needed for users upgrading too. Lanes run their builds/tests with GEAR_DB unset (a lane's dev build created an old table in the production store, L-59).
+- T-30 review logged: F3 complete plan example + review-conclusion reference, F4 keep bar separate from done in the verdict rule, F5 review branch delivery convention in review.md.
+- Quota detection reads stale lines: after a switch the old 2056 errors stay on screen and the engine parks working lanes. Match only output newer than the last switch, or only while the agent is idle after the error (fix with T-33).
+- T-21 round 2 (captain passed): a missing findings path with spaces is stored as text instead of BAD_FORMAT (reviewer said P0; two coincidences, no data loss).
+- Review text in the store is a WORKING copy for the rework loop; git (gear/voyages/<M>/reviews/T-n.md merged with the task, earlier rounds in its history) is the long-term record. After a task is done and merged, drop the store's copy and keep only the path (sizes 2026-10-23: 20 reviews = 121 KB, store 1.4 MB).
+- T-23 review logged: F3 cap escalation durable + keep logged info; F4 blocking ids in duplicate checks.
+- **Voyage time accounting (user, M2).** Per task and per voyage: dev time (attempt start→hand-in), review time (hand-in→verdict), settlement wait (verdict→captain decision), rework rounds and their time, merge time — from attempts, review_verdicts, operations. Shown in the voyage report and used in the retrospective (e.g. T-12 took 5 attempts).
+  Needs explicit timestamps per attempt (delivered, started, handed in, verdict, settled, merged): today `updated` is overwritten at settlement, so review time cannot be computed.
+
+## Added 2026-10-23 (user)
+- M2 starts as a new voyage: every agent (lanes and reviewers) starts fresh, through the skill's kickoff (captain, lanes, models, quota, bar) — an iteration, not a continuation.
+- Voyage end: one popup asks the user whether to reclaim the long-lived lanes (end is a boundary like kickoff, not mid-run).
+- One canonical plan file: the captain edits a single plan file in place (the CLI default `plan.draft.md`); history lives in git and the store's plan versions; no numbered `plan-vN.md` copies. Delete gear/voyages/plan-v*.md at M1 close and say so in the skill.
+- T-26 review R2-R4 (cut under FASTEST): the skill-install label, "own checks" wording, init's engine-start timing.
+- The engine's merge step (T-12) runs git and the build gate inside the tick: while it merges, no lane is fed and no reviewer starts. Run it beside the tick.
+- T-34 review R1-R4 (cut under FASTEST): `## NEW` in free text is rewritten; a compact header `<!--gear-plan ... base=N-->` loses `-->`; extra spaces in `##  NEW`; `# Verdicts<tab>` survives. Each fails loudly on the next apply.
+- T-32 review R3-R5 (cut): trust-file key not TOML-escaped; `exit_command` not in configurable profiles; a `trusted = false` entry is taken as trust.
+- Static lane binding: a ready task waits behind its lane's current task while another lane is idle (T-23 behind T-33). The engine could offer such a task to an idle lane that may own its paths.
+- T-23 review F3 (escalation repeats its info every tick), F4 (blocking ids not part of a verdict's identity): logged.
+- T-32 review R7: concurrent trust registrations of the same path append duplicate tables; exit_command in the grok profile has no caller (remove or use).
+- v0.1.0 install test: `gear admin kickoff` skeleton header still says `GEAR_DB=… gear admin init gear.toml` (should be `gear admin init gear/gear.toml`, no GEAR_DB); `gear --version` is missing. Not tested: `herdr plugin install rogerdehe/gear` itself (this machine links the checkout) and a live first engine start for a new project.
+- Retirement is not finished by the engine: `retire <lane>` only stops new work (Retiring). At M1's end the captain closed the three lanes by hand (`herdr worktree remove`, not forced; all clean) and set the seats Retired in the store. The engine should finish it: wait for the lane's open attempt, close its pane, remove its worktree through Herdr, mark it Retired. With the voyage-end question to the user (reclaim the lanes or keep them).

@@ -33,7 +33,7 @@ fn idle(seat: &SeatRow) -> SeatObs {
 #[test]
 fn helpers() {
     assert_eq!(packet_ref("T-7"), "`gear --show T-7`");
-    assert_eq!(task_branch("heat", "T-7"), "heat/t7");
+    assert_eq!(task_branch(gear_model::branch::TASK_BRANCH, "p", "heat", "T-7"), "heat/t7");
 }
 
 #[test]

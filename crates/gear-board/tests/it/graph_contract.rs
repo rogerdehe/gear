@@ -1,5 +1,5 @@
 //! T-157: the graph view of the board (design §8.1, the prototype of
-//! `ops/plan/m4-board`).
+//! `gear/voyages/M4/board`).
 //!
 //! The fixture is the prototype's fake data: the tasks of the lanes, their
 //! dependencies, the rounds and the merges.

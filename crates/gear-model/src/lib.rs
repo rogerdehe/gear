@@ -8,6 +8,7 @@
 //! `transition` accepts it. The transition tables use exhaustive `match`, so
 //! adding a state forces every table to be revisited at compile time.
 
+pub mod branch;
 pub mod ctx;
 pub mod error;
 pub mod state;

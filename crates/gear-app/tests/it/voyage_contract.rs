@@ -201,8 +201,8 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     assert_eq!(voyage.done.as_deref(), Some("users install v2"));
 }
 
-/// R3 (review): the captain's snapshot shows the voyage that has work, even
-/// when three earlier milestones exist without any.
+/// R3 (review) of T-22, narrowed by T-246: the snapshot lists only the
+/// voyage with open work, and names no other.
 #[test]
 fn the_snapshot_shows_the_voyage_that_has_work() {
     let mut s = world();
@@ -220,7 +220,44 @@ fn the_snapshot_shows_the_voyage_that_has_work() {
     let page = home::build(&mut s, &env, Some(&fp), NOW + 10).unwrap();
     assert!(page.text.contains("Voyage M4 voyage M4"), "{}", page.text);
     assert!(page.text.contains("done: M4 done"), "{}", page.text);
-    assert!(page.text.contains("+1 more voyages"), "{}", page.text);
+    let snapshot = &page.text[page.text.find("SNAPSHOT").expect("the snapshot")..];
+    assert!(!snapshot.contains("Voyage M3 voyage M3"), "only the voyage with work: {snapshot}");
+    assert!(!page.text.contains("more voyages"), "every voyage is its own: {}", page.text);
+}
+
+/// T-246: each voyage is independent. A voyage that landed is not listed with
+/// the one that carries the work, and nothing is counted across them.
+#[test]
+fn the_snapshot_shows_only_the_current_voyage() {
+    let mut s = world();
+    // M1 departed earlier and landed: its only task is done.
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: the first voyage\ndone: it ships\nbar: stable\neta: 4h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, first, "r1", NOW - 7200).unwrap();
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-1")?.expect("the task");
+        task.state = TaskState::Done;
+        tx.update_task(&task)
+    })
+    .unwrap();
+    // M2 departs later with one done and one ready task.
+    let second = "<!-- gear-plan project=p base=1 -->\n# Milestone M2: the second voyage\ndone: it ships too\nbar: stable\neta: 8h\n# Queue\n## NEW [must] lane=heat milestone=M2\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\n## NEW [should] lane=heat milestone=M2\ngoal: C\naccept: c\nestimate: 30\ndeps: T-2\n";
+    run(&mut s, second, "r2", NOW - 60).unwrap();
+    s.write(|tx| {
+        let mut task = tx.get_task("p", "T-2")?.expect("the task");
+        task.state = TaskState::Done;
+        tx.update_task(&task)
+    })
+    .unwrap();
+
+    let (env, fp) = cap();
+    let page = home::build(&mut s, &env, Some(&fp), NOW).unwrap();
+    let snapshot = &page.text[page.text.find("SNAPSHOT").expect("the snapshot")..];
+    // The voyage line of M2, the landed M1 nowhere, and no count of the rest.
+    assert!(snapshot.contains("Voyage M2 the second voyage"), "{snapshot}");
+    assert!(!snapshot.contains("Voyage M1"), "the landed voyage is history: {snapshot}");
+    assert!(!page.text.contains("more voyages"), "{}", page.text);
+    // The totals are the current voyage's two tasks, not all three.
+    assert!(snapshot.contains("SNAPSHOT 2 tasks · 1 done"), "{snapshot}");
 }
 
 /// T-39: one shared five-line report precedes the snapshot and inbox, with a
@@ -401,4 +438,44 @@ fn historical_departure_scope_uses_the_original_plan() {
     let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
     assert_eq!(reports[0].scope_min, Some(330));
     assert_eq!(reports[0].departure_scope_min, Some(60));
+}
+
+/// T-239: a milestone emptied of its tasks keeps no departure, so a reused id
+/// starts its clock when its new tasks come — and its departure scope is those
+/// new tasks' estimates, not the earlier voyage's plan.
+#[test]
+fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
+    let mut s = world();
+    // M1 departs at NOW with two tasks of 30m each.
+    run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (Some(NOW), Some(2), Some(60))
+    );
+
+    // The trial is moved to M0: M1 loses every task and with them its departure.
+    let moved = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M0\n## T-2 [should] lane=heat milestone=M0\n";
+    run(&mut s, moved, "r2", NOW + 100).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (None, None, None),
+        "a milestone with no task has no departure"
+    );
+    // M0, which now holds the tasks, departed on this apply.
+    let voyage = s.read(|tx| tx.get_voyage("p", "M0")).unwrap().unwrap();
+    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 100), Some(2)));
+
+    // The real voyage reuses M1: its departure is its own first task, not the
+    // trial's, and its scope is the new tasks' estimates.
+    let reuse = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: delivery v0.2.0\ndone: users install v0.2.0\nbar: block only loop breaks\neta: 3h\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: C\naccept: c\nestimate: 45\ndeps: -\n";
+    run(&mut s, reuse, "r3", NOW + 200).unwrap();
+    let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (Some(NOW + 200), Some(1), Some(45)),
+        "the reused id starts when its new tasks come"
+    );
+    assert_eq!(voyage.title, "delivery v0.2.0");
 }

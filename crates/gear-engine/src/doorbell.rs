@@ -51,7 +51,8 @@ pub struct DoorbellAction {
     pub generation: i64,
     pub pane_id: String,
     /// One line, no message bodies, e.g.
-    /// "GEAR: 2 item(s) waiting for you (1 urgent): M-3 M-7. Run `gear` now."
+    /// "GEAR: 2 item(s) waiting for you (1 urgent): M-3 M-7. Run the command
+    /// `gear` (no arguments) in your own shell; it shows only your items."
     pub text: String,
     /// The message ids this doorbell is about (evidence target for confirmation).
     pub covers: Vec<String>,
@@ -70,7 +71,7 @@ pub struct DoorbellAction {
 /// others wait for idle, as before. An idle agent is told about everything.
 ///
 /// One action per ringing input, in input order. `covers` = the ids named, in
-/// order. Text = [`text`]: the ids, and "Run `gear` now."
+/// order. Text = [`text`]: the ids, and the exact command to run.
 pub fn decide(inputs: &[DoorbellInput], cooldown_s: i64, now: Ts) -> Vec<DoorbellAction> {
     inputs
         .iter()
@@ -121,17 +122,21 @@ pub fn reaches_while_working(
 /// The one-line doorbell text.
 ///
 /// With a task (`no_task` false):
-/// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run `gear` now.`
+/// `GEAR: <n> item(s) waiting for you[ (<urgent> urgent)]: <ids>. Run the command `gear` (no arguments) in your own shell; it shows only your items.`
 ///
 /// Without a task (design §10.4 — a lane with no open attempt):
-/// `GEAR: <n> item(s) for you: <ids>. Run gear, answer them, then end your turn. You have no task now: do not continue earlier work.`
+/// `GEAR: <n> item(s) for you: <ids>. Run the command `gear` (no arguments) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.`
+///
+/// The command is always spelled out, because the backticks are lost as soon as
+/// the text is pasted or shown: "Run gear now" reads as a command `gear now`
+/// (T-248).
 ///
 /// Never message bodies.
 pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
     let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
     if no_task {
         return format!(
-            "GEAR: {} item(s) for you: {}. Run gear, answer them, then end your turn. You have no task now: do not continue earlier work.",
+            "GEAR: {} item(s) for you: {}. Run the command `gear` (no arguments) in your own shell, answer them, then end your turn. You have no task now: do not continue earlier work.",
             items.len(),
             ids.join(" ")
         );
@@ -143,7 +148,7 @@ pub fn text(items: &[DoorbellItem], no_task: bool) -> String {
         String::new()
     };
     format!(
-        "GEAR: {} item(s) waiting for you{urgent}: {}. Run `gear` now.",
+        "GEAR: {} item(s) waiting for you{urgent}: {}. Run the command `gear` (no arguments) in your own shell; it shows only your items.",
         items.len(),
         ids.join(" ")
     )

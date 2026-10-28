@@ -1,0 +1,140 @@
+<!-- gear-plan project=gear base=280 -->
+# Goal
+GEAR runs a pi lane as well as an OpenCode one, notices when a reviewer's Codex quota is spent, and fixes the trial's batch-2 problems that break a rework loop, stop reviews or blind the captain.
+
+# Milestone M3.1: pi lanes, and the trial's batch-2 fixes
+done: (1) a pi lane on opencode-go/deepseek-v4.1-flash, started by the engine, takes a task, hands it in, and it is reviewed and merged with no hand fix; (2) a reviewer whose Codex quota is spent is switched to opencode-go/deepseek-v4-pro and the review finishes; (3) the batch-2 fixes in gear/voyages/M3.1/backlog.md items 1-7 and 9 are merged, each with its test; (4) v0.3.2 is released
+bar: DELIVERABLE (user's choice): an error in normal use is fixed; edge cases are logged, not reworked; rework rounds are capped
+eta: 3h
+
+# Decisions
+- 2026-10-26 M3.1 kickoff confirmed by the user ("确认"): goal and done above; bar DELIVERABLE; quick landing; lanes hull (crates/gear-engine/) and deck (everything else) on OpenCode minimax-cn/MiniMax-M3.1-Flash, fallback opencode-go/deepseek-v4.1-flash; one reviewer, Codex gpt-6.1-sol first, opencode-go/deepseek-v4-pro once Codex's quota is spent (3% weekly left at kickoff); after the pi support lands, one lane becomes a pi lane on opencode-go/deepseek-v4.1-flash, to compare. The user's confirmation of the sheet was taken as consent for the one config re-apply (config v14) run with GEAR_ADMIN=1.
+- 2026-10-26 pi on this machine: v1.4.0, default model opencode-go/deepseek-v4.1-flash (user), @aliou/pi-guardrails set to block, never ask (path writes outside the workspace except temp; sudo, force pushes, gh writes, root/home deletes, disk commands auto-denied), pi-lens 4.4.5 for LSP/lint/type feedback, Herdr's pi integration installed. No web access and no sub-agents (user agreed): a lane's sub-agents are agents GEAR cannot see.
+- 2026-10-26 Time-box (user: a small iteration, not hours of waiting): eta 3h holds. At the halfway station, whatever cannot land in the remaining time is cut to M4, in this order: T-123 (OpenCode identity proof), T-122 (no env vars), T-117 (all-tail item). The pi switch happens between tasks as soon as T-113 and T-114 land: deck becomes the pi lane, hull stays on OpenCode.
+- tail: -
+- 2026-10-26 The deck → pi switch was agreed at kickoff and carries its consent for the config re-apply with GEAR_ADMIN=1 (user: align at the start, never ask for decisions mid-voyage). It runs as soon as T-114 lands.
+- station M-2234: cut — projected 348m against eta 3h, deck holds 200m of queue alone; T-123 and T-122 (the first two in the agreed cut order) move to M4 now, not at halfway. T-117 stays on hull, which has room.
+- station M-2259: time-box — 88m of 3h gone, 8 tasks left (~75m of lane work in parallel) but one reviewer runs reviews one by one; from now one rework round per task at most, and at 150m every task not yet handed in moves to M4. T-117 stays: hull is halfway through it.
+
+- station M-2260: time-box — the time-box set at M-2259 two minutes ago holds; nothing new.
+- 2026-10-26 Codex's weekly quota reset to 100% (user) before it ran out: done clause (2) cannot be seen live in M3.1; it is shown by T-115's profile test (the spent-limit screen is a quota stop) and the engine's existing review fallback tests. The live observation moves to M4.
+- 2026-10-26 T-115 review F2: the engine never applies `on_quota.review` (apply_quota_policy skips non-lane seats), so a spent Codex reviewer stays on Codex. That is an engine change of ~40m that does not fit before the 150m cut: moved to M4. Done clause (2) is not met in M3.1; T-115 lands only the markers (F1 fixed).
+- station M-2277: cut — 135m gone, 45m to eta and the release needs ~15m; T-120 (plan hygiene) and T-121 (admin stop waits for merges) are not started and move to M4 now. Kept: T-115 and T-117 reworks, T-124, T-125 (hull, small). T-119 landed on pi: done clause (1) is met.
+- 2026-10-26 T-117 attempt 2 failed only on a merge conflict with T-116 (behavior passed review). A conflict-only round is allowed past the one-rework cap; the captain checks the conflict resolution itself and passes it without a third review.
+- 2026-10-26 T-115 attempt 2 went past its rework and wired the reviewer quota fallback in the engine (774 lines, in hull's crate). Cause: the engine still ran a binary built before T-118, so the packet showed the review but not the captain's rework text (B02-06, the bug T-118 fixes). Engine rebuilt and restarted. The change is kept and judged by its review: if it passes, done clause (2) is shown by its tests, and the M4 item is dropped.
+- 2026-10-26 User: two bugs are fixed in M3.1, not M4: (a) the engine held a core (95% CPU, the merge pass scanned every op once per passed task) — fixed by the captain in 90e58a2 on the user's order, tests pass; (b) a captain dies too easily: a Codex captain in app-server daemon mode fails the real-pane proof, and recovery took a handover from the user's shell, a new generation and env edits. The user starts a captain with plain `claude` or `codex` and nothing else. T-126 (deck) makes that work.
+- station M-2287: move — the eta is passed (193m). v0.3.2 ships now (pi lanes, reviewer quota fallback, Codex daemon identity, the engine CPU fix). M3.1 goes on for v0.3.3 with the user's two must-fix items: T-126 (a captain from plain `claude`/`codex` with one command) and the test-time red line (gear/CONVENTIONS.md: the whole suite under 300 s, 60 s passes): T-127 (engine tests, hull) and T-128 (every other crate, deck after T-126). T-124 and T-125 stay on hull.
+- 2026-10-26 User: every lane runs on pi from now on (to test pi more); hull leaves OpenCode between tasks (retire after T-125's hand-in, config re-apply with kind pi, user's consent given in chat). Reviewers stay on Codex.
+- 2026-10-26 User: an urgent message must reach a lane at once; the doorbell that waits for an idle lane is a design flaw (deck worked for an hour with 5 unread captain instructions). The user: it goes to M4 as a must-fix; T-129 is cancelled in M3.1 and moved there whole.
+- 2026-10-26 User, corrected: it must be fixed before M4, in M3.1 if it can; it is back in M3.1 as a new task for hull right after T-127 (T-129 stays cancelled).
+- station M-2323: keep course — v0.3.3 holds only the user's must-fix items: T-126 (passed, merging), T-127, T-128, T-130, and T-124. Release as soon as they land; the captain does T-126's live check right after its merge.
+- 2026-10-26 User: skill additions with great care; before the release and again at the end of M3.1, the captain reviews every skill text it added in M3.1 by subtraction.
+- 2026-10-26 The machine stalled (macOS syspolicyd livelock): four builds and test runs at once (nextest starts one process per test) flooded it with first-run checks of new binaries, and processes killed while waiting for that check (GEAR's /bin/ps per ancestor, the captain's timeout probes, Herdr calls to a fresh gear) left dead requests it kept retrying. Recovered without a reboot (stuck launches cleared, syspolicyd restarted by pid). Herdr is in Developer Tools, but the running servers predate it: the user restarts the orch session. T-131 and T-132 are done before any lane runs builds again.
+- 2026-10-26 User: no machine-wide lock or cap on builds; lanes build and test in parallel. The stall's root is removed at the system level: the Herdr server runs under SSH, so /usr/libexec/sshd-keygen-wrapper and sshd-session were added to Developer Tools and the session restarted; 20 never-run binaries then caused no syspolicyd check. Lanes released.
+
+
+- 2026-10-26 User: use all four lanes. Two more pi lanes: keel (engine doorbell and naming: T-130, T-134) and mast (gear-app, gear-cli, skills: T-131, T-133); hull keeps the rest of the engine (T-127, T-124), deck the other crates and scripts (T-128, T-132). Config v19.
+- tail: mast hull deck keel
+- station M-2365: cut — T-124 (the flaky rereview test) moves to M4: T-127 is rewriting the engine's tests and is likely to settle it; the voyage lands after T-127, T-132, T-134 and T-130's rework, then v0.3.4.
+- station M-2395: keep course — only T-127's rework is left; the captain drafts v0.3.4 and reviews the skill texts added in M3.1 meanwhile.
+- Voyage report (2026-10-26): shipped v0.3.2 (pi lanes, Codex quota stop and reviewer fallback, Codex daemon identity, the engine CPU fix, dead temp seats, rework packets, no self-ring), v0.3.3 (`gear captain take`, no GEAR_CTX needed, worktree reuse) and v0.3.4 (messages reach a working lane, names kept, no `ps` on every call, `- release`, the suite from ~265 s serial to 37 s with no test over 10 s). Time: 518 m against an eta of 3 h (2.9x); the scope grew by the user's must-fix items (the dying captain, the engine CPU, test time, the machine stall) and four tasks were cut (T-120, T-121, T-122, T-123 to M4; T-124 to M4). Rework: T-115, T-116, T-117 (twice), T-127, T-130, T-133, T-134 one round each.
+- Done sentence, honestly: (1) met — deck on pi took T-119, handed it in, it was reviewed and merged with no hand fix (switching a lane to pi needed a hand-removed worktree, now fixed by T-125); (2) met in code and tests only — the reviewer fallback landed with T-115, but Codex's quota reset before it ran out, so it was never seen live (M4); (3) not fully met — batch-2 items 1-7 and 9 landed except the plan-hygiene, admin-stop, no-env and OpenCode-proof items cut to M4 (no-env came back as `gear captain take`); (4) met — v0.3.2, then v0.3.3 and v0.3.4.
+- Lessons of this voyage: 25 (consent once at kickoff), 26 (rebuild after a merged engine fix), 27 (never flood the machine, never kill a program while it starts); the macOS stall is closed at the system level (Developer Tools for the SSH launch chain).
+- station M-2402: land
+# Queue
+## T-113 [now] lane=deck milestone=M3.1 required
+goal: GEAR knows the pi agent. In gear-herdr's profiles add kind `pi`: its start args (`--model <provider>/<id>`, `--thinking` from the chain entry's args if given), its exit (find the real key or command on pi 1.4.0, e.g. `/quit` or ctrl+c twice, from `pi --help` and a live run in a scratch pane you close again), its busy marker and its quota/auth/rate-limit markers (take the exact texts from pi's own output: run `pi -p` against a bad model or key in a scratch dir to see them), and the guardrails block text (@aliou/pi-guardrails `permission-gate` / `path-access` deny lines) as a marker the engine can show the captain. `gear admin install-skill --agent pi` writes the skill where pi 1.4.0 loads skills (check its docs: `~/.pi/agent/skills/<name>/SKILL.md` or the documented path), and `init` accepts a lane or temp of kind `pi`. A `skills/gear/references/agents/pi.md` reference like the other agents' (how GEAR drives it, what a stop looks like), short.
+accept: Profile tests with the captured texts; install-skill writes the pi path (scratch HOME); init accepts kind pi; the reference exists and `gear --skill agent:pi` prints it. A live check recorded in the report: pi started in a scratch pane runs `gear --version` from its bash tool and the exit leaves a shell. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-114 [now] lane=hull milestone=M3.1 required
+goal: The engine starts and switches a pi lane. Onboarding a lane whose chain entry runs on `pi` starts `pi --model <provider>/<id>` in the worktree (no OpenCode session API, no [models.switch] labels for pi); a quota stop on pi moves to the next chain entry by exiting pi and starting it again on the next model (pi has no model picker GEAR drives), with the lane's task delivered again in the new session. The real-pane identity proof (T-104) must hold for pi: check on a live pi that its bash tool's ancestry reaches the pane, and if it does not, treat pi like the OpenCode service case. Write against deck's `pi` profile names (kind `pi`, its exit and markers) as the interface; merge dev in when deck's task lands.
+accept: Engine tests with a fake Herdr: a pi lane starts with `--model`, a quota marker on pi restarts it on the next model and redelivers the task, an exhausted chain parks it. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-115 [now] lane=deck milestone=M3.1 required
+goal: A reviewer whose Codex quota is spent is seen as on quota. Codex's profile has no quota markers today, so a spent weekly limit looks like an idle reviewer. Take the exact texts from the installed codex binary (`strings "$(command -v codex)" | grep -i -E "usage limit|hit your|rate limit|try again"`) and add the quota markers for the spent limit (not the "only N% left" warning, which is not a stop) to the codex profile, so the engine's existing quota policy (`review = "fallback"`) moves the review to opencode-go/deepseek-v4-pro.
+accept: Profile test: the spent-limit screen text is a quota stop, the "weekly limit: only 3% left" warning line is not. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-116 [must] lane=hull milestone=M3.1 required
+goal: A dead temp seat frees its slot (trial B02-04). A reviewer seat that runs no reviewer — unknown, void binding, or never started — is released and never counts toward `[quota].temps`; the count of temps in use never exceeds the quota (the trial saw `temps 4/2` with no reviewer running). A detached worktree answer from Herdr without a `branch` field is read as detached, not as "worktree reply is incomplete" that left the seat unknown.
+accept: Engine tests: an unknown temp seat is released and a new review starts in its slot; temps in use never exceed the quota; a detached worktree reply opens the review. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-117 [must] lane=hull milestone=M3.1 required
+goal: When every lane is in the tail while required tasks remain, the captain hears it once (trial B02-08: a captain put every lane in the tail during a dependency wait, which turned their idle warnings off, and forgot). One info item per such state, naming the lanes and the ready or waiting required tasks; clearing the tail or the tasks ending closes it.
+accept: Engine test: all lanes tailed with a required task left → one item; a second tick adds none; clearing the tail resolves it. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-118 [must] lane=deck milestone=M3.1 required
+goal: A rework packet leads with this round's rework (trial B02-06: a lane read the first round's report, found nothing and handed in the same candidate). `gear --show T-n` for an attempt after a fail opens with `## Rework (attempt n, from the review of attempt n-1)` and the captain's rework text; older review reports follow under `## Earlier reviews (history)`. `gear send --kind result` refuses a candidate equal to a failed attempt's candidate of the same task, saying which attempt failed on it.
+accept: Tests: a packet after a fail shows the rework first and the old review as history; a result with the failed candidate is refused, a new candidate passes. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-119 [must] lane=deck milestone=M3.1 required
+goal: A reply never rings its own sender (trial B02-03): the captain answering an item it raised itself (a self-sent note or wait) got a reply addressed to itself and a fresh doorbell with no new fact. In mail.rs a reply whose recipient is its own sender is stored as the item's note and never delivered.
+accept: Test: the captain resolves or waits on its own item → no message to the captain, no doorbell; replies to other seats unchanged. `cargo test --workspace` passes.
+estimate: 15
+deps: -
+
+## T-127 [must] lane=hull milestone=M3.1 required
+goal: The engine's tests fit the user's test-time red line (gear/CONVENTIONS.md "Test time": the whole `cargo test --workspace` under 300 s, 60 s passes, 30 s good). Measure each engine test binary (`cargo test -p gear-engine -- -Z unstable-options --report-time` is nightly only, so time the lib and the `it` binary with `time`, and find the slowest tests by running filtered groups). Known causes: merge.rs retries sleep for real with a doubling backoff (RETRY_BACKOFF_S = 2, up to 30 s): make the backoff a field of EngineCfg (default as today) so tests run it at 0; the unit tests in merge.rs poll a worker thread with sleep loops (deadline 120 s, a 500 ms sleep at line ~3487): wait on the worker's result instead; git fixtures built per test: build them once per file. No test may sleep on the wall clock. Do this first, before T-124 and T-125.
+accept: `time cargo test -q -p gear-engine` (build excluded, run twice, report both) is under 30 s on an idle machine, and the report lists the before and after time of each engine test binary and the five slowest tests before and after. No assertion is weakened or deleted. `scripts/test.sh` passes once (parallel; no test over 10 s added).
+estimate: 30
+deps: -
+
+
+## T-130 [must] lane=keel milestone=M3.1 required
+goal: A message for a lane reaches it while it works. Today the engine rings a lane only when it is idle, so a lane busy for long stretches never sees the captain's instructions (M3.1: deck had 5 unread instructions for an hour). In the engine's doorbell: an `--urgent` message, and every captain instruction for a lane whose agent queues input while working (pi, claude), is typed in at once with `herdr agent prompt` even when the agent is working (these agents queue it and read it after the current step); for agents that do not queue input (opencode, codex) an urgent message is typed in at once too, and a normal one waits for idle as today. The doorbell text names the message ids and says "run `gear` now". One doorbell per message, never repeated for the same message. The send itself delivers (user): `gear send --urgent` and every captain instruction to a lane whose agent queues input (pi, claude) type the doorbell into the recipient's pane with `herdr agent prompt` inside the `gear send` call, before it returns, and record that doorbell so the engine does not ring again; if Herdr fails, the send still stores the message and the engine rings on its next tick.
+accept: Engine tests with a fake Herdr: a working pi lane gets a captain instruction's doorbell in the same tick; a working codex lane gets an urgent one at once and a normal one only when idle; no second doorbell for the same message. A CLI test with a fake Herdr: `gear send --urgent` to a working lane prompts its pane before returning and the next engine tick sends no second doorbell; a Herdr failure leaves the message stored and rung by the engine. `scripts/test.sh` passes once (parallel; no test over 10 s added).
+estimate: 20
+deps: -
+
+## T-125 [must] lane=hull milestone=M3.1 required
+goal: A lane registered again reuses its home worktree. Retiring a lane closes its pane but keeps its worktree (`<herdr worktrees>/<project>/home-<lane>`); when the config registers it again, onboarding called `herdr worktree create` for the same path and failed with "already exists", leaving the seat in needs-check (M3.1, deck → pi). Onboarding finds an existing worktree of the lane's home branch or path (`herdr worktree list`) and opens it (`herdr worktree open --path`), creating one only when there is none.
+accept: Engine test with a fake Herdr: a retired lane registered again whose worktree exists is opened, not created, and comes online; a lane with no worktree still gets one created. `scripts/test.sh` passes once (parallel).
+estimate: 20
+deps: -
+
+## T-126 [must] lane=deck milestone=M3.1 required
+goal: A captain is started with plain `claude` or `codex` in any pane and becomes the captain with one command; it never dies of its environment. In crates/gear-app (identity.rs, captain.rs, Env) and crates/gear-cli. First, the captain's own fix (already on dev, keep it): Codex daemon mode passes like OpenCode. Codex's TUI in the pane is a client and its tools run in the shared `codex app-server` daemon, outside every pane (same shape as `opencode serve`). The exception in identity.rs `observe` that keeps the claim when the caller runs in no pane and the claimed pane's agent is `opencode` covers `codex` too (one list of such kinds); require_seat still checks the binding; a caller that runs in another pane is still refused. Second, No GEAR_CTX needed: when GEAR_CTX is unset, the caller's pane is its real pane (ancestry) or else HERDR_PANE_ID, or else, for a caller in no pane, the one pane of the session whose agent is of a daemon kind and is bound to a seat... resolve it as: the seat whose active binding is on that pane gives project, seat and generation (the same GearCtx the env would have). GEAR_CTX stays an override. GEAR_DB defaults to ~/.local/state/gear/gear.db as today. Third, `gear captain take`: run by an agent in the project's checkout (project from the cwd, as `handover` does from the user's terminal). The caller's pane is found as in (2), or, for a caller in no pane, the only pane of the session that hosts an agent of a daemon kind bound to no seat. The pane must host an agent and must not be bound to a lane or reviewer seat. The captain seat is rebound to that pane at a new generation (reuse handover's rebind), old bindings voided, and one urgent item tells the captain seat (and so the user) which pane took it and which pane it left. It works whether the old captain's pane is gone or not. `gear` from the new captain then prints the home page with no env var set. The skill (skills/gear/SKILL.md and references/captain.md): "To become a project's captain, start your CLI in any pane, cd to the project and run `gear captain take`." The error for a caller in no pane says its tools run outside every pane and names `gear captain take`.
+accept: Tests with a fake Herdr: a caller in no pane claiming a Codex pane is that seat; a Claude caller in no pane is refused; a caller with no GEAR_CTX in a bound pane is that seat, in an unbound pane anonymous; `captain take` from a fresh Codex pane with no env rebinds the captain at generation+1 and writes one urgent item, from a lane's pane it is refused, with the old captain pane gone it still works. A live check in the report: in a scratch pane run plain `codex` (or `claude`), have it run `gear captain take` on a scratch project, then `gear` shows `captain · generation n`. `scripts/test.sh` passes once (parallel; no test over 10 s added).
+estimate: 50
+deps: -
+
+## T-128 [must] lane=deck milestone=M3.1 required
+goal: Every crate except gear-engine fits the user's test-time red line (gear/CONVENTIONS.md "Test time"). Time each test binary of gear-app, gear-cli, gear-store, gear-herdr, gear-board, gear-forge, gear-model; find the slowest tests (real git fixtures per test, process spawns, sleeps such as in gear-board/tests/it/board_contract.rs, gear-forge, gear-cli fixtures_contract.rs) and make them fast: fixtures built once per file, time injected, no wall-clock sleep, no network. Start right after T-126.
+accept: `time cargo test -q --workspace --exclude gear-engine` (build excluded, twice) is under 30 s on an idle machine; the report lists before and after per binary and the five slowest tests before and after. No assertion is weakened or deleted. `scripts/test.sh` passes once (parallel; no test over 10 s added).
+estimate: 30
+deps: -
+
+## T-131 [must] lane=mast milestone=M3.1 required
+goal: `gear` never starts an external program to learn its own ancestry. `parent_of` in crates/gear-app/src/identity.rs runs `/bin/ps -o ppid= -p <pid>` once per ancestor on every call; when the system is slow to launch programs these `ps` pile up stuck, `gear` hangs, its callers kill it, and that fed the macOS syspolicyd stall of 2026-10-26. On macOS read the parent pid in process with `libc::proc_pidinfo(pid, PROC_PIDTBSDINFO, ...)` (`proc_bsdinfo.pbi_ppid`); Linux keeps reading `/proc/<pid>/stat`; no `Command` anywhere in the identity path. Check the rest of gear-app and gear-cli for any other external program started on every `gear` call and replace it the same way, or list it in the report.
+accept: A test that the ancestry of the test process itself is found in process (its own parent pid matches `std::os::unix::process::parent_id()`); `grep -n "Command::new" crates/gear-app/src/identity.rs` finds nothing; the report lists every external program a plain `gear` call still starts (expected: none). `scripts/test.sh` passes once.
+estimate: 20
+deps: -
+
+## T-132 [must] lane=deck milestone=M3.1 required
+goal: Builds and test runs are as fast as they can be, with every lane building and testing in parallel (user: no machine-wide lock or cap; parallel lanes are the point). The macOS check that stalled the machine is gone at the system level (Herdr's SSH launch chain is in Developer Tools: 20 never-run binaries caused no check). (1) `[profile.dev]` and `[profile.test]` in Cargo.toml use `debug = "line-tables-only"`: smaller binaries, faster links. (2) Measure and report: the suite's build and run time with `cargo nextest` (one process per test) against `cargo test` (one process per binary), each from a warm cache, and make scripts/test.sh use the one that is faster end to end; keep its per-test times and the over-10 s warning either way.
+accept: The report has the build and run times before and after (1), and nextest against cargo test; scripts/test.sh uses the faster one and still prints each test's time and warns over 10 s. `scripts/test.sh` passes once.
+estimate: 30
+deps: -
+
+## T-133 [must] lane=mast milestone=M3.1 required
+goal: A held lane can be released from the plan. `- hold <lane> reason=…` puts a lane in Held, but no Staff verb takes it out: `- retry` refuses a Held seat ("only a lane in NeedsCheck or Unknown is retried"), so the captain had to edit the store (M3.1 machine recovery). Add `- release <lane>` (Held → back to the state the engine onboards or continues from: Queued if its agent is gone, Active if it still runs), applied and removed like the other Staff lines; captain.md's Staff list names it in one line.
+accept: Tests: hold then release brings the lane back and it gets its next task; release of a lane that is not held is refused with a clear reason. `scripts/test.sh` passes once.
+estimate: 15
+deps: -
+
+## T-134 [must] lane=keel milestone=M3.1 required
+goal: Every seat's agent keeps its Herdr name. Herdr clears an agent's name when it re-detects the occupant (a Herdr server restart, a CLI that changes its session), and after the M3.1 restart the captain and both lanes showed as unnamed, so `herdr agent prompt gear-deck` failed. Each engine tick, for every seat with an active binding (captain, lanes, reviewers), when Herdr shows the bound pane's agent with no name or another name, rename it to the seat's name (`<project>-captain`, `gear-<lane>` as today, the reviewer's current name) with `herdr agent rename <pane> <name>`; a name taken by another pane is reported once to the captain, never stolen. `gear captain take` names the new captain's agent the same way. Delivery must never fail on a cleared name: Herdr's agent_prompt refuses a pane whose agent has no name ("agent wA8:p1 is not an active named agent"; hull, deck and keel all lost their first deliveries to it in M3.1), so before every prompt, doorbell or key send to a seat's pane the engine makes sure the agent carries the seat's name and renames it first when it does not.
+accept: Engine test with a fake Herdr: an unnamed lane agent is renamed in one tick; a correctly named one gets no call; a name held by another pane gives one item and no rename. a delivery to a pane whose agent lost its name renames it and then delivers in the same tick. `scripts/test.sh` passes once.
+estimate: 15
+deps: -

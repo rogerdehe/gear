@@ -5,11 +5,15 @@
 
 use gear_app::admin::init_with_home;
 use gear_app::config;
+use gear_app::draft::parse;
+use gear_app::identity::Fingerprint;
+use gear_app::plan::apply;
 use gear_app::Env;
-use gear_model::{ErrorCode, SeatRole, SeatState};
+use gear_model::{ErrorCode, GearCtx, SeatRole, SeatState};
 use gear_store::Store;
 
 const T0: i64 = 1_800_000_000;
+const CAP_PANE: &str = "w2:p1";
 
 const HEAT: &str = r#"
 [[lanes]]
@@ -51,6 +55,10 @@ profile = "codex"
 lanes = [{lane_models}]
 review = ["gpt-6.1-sol"]
 on_quota = {{ lanes = "wait", review = "wait" }}
+
+[conventions]
+# T-255: the gate has no default; every project names its own.
+gate = "make test"
 "#
     )
 }
@@ -62,6 +70,34 @@ fn config() -> String {
 
 fn admin() -> Env {
     Env { ctx: None, pane_id: None, admin: true }
+}
+
+/// A plan with one NEW task on `lane`, applied by the captain.
+fn apply_task_on(
+    s: &mut Store,
+    lane: &str,
+    base: i64,
+    request_id: &str,
+) -> gear_app::plan::ApplyResult {
+    let text = format!(
+        "<!-- gear-plan project=harbor base={base} -->\n# Queue\n## NEW [must] lane={lane}\ngoal: G\naccept: a\nestimate: 30\ndeps: -\n"
+    );
+    let draft = parse(&text).unwrap();
+    let env = Env {
+        ctx: Some(GearCtx {
+            project: "harbor".into(),
+            seat: "captain".into(),
+            generation: 1,
+        }),
+        pane_id: Some(CAP_PANE.into()),
+        admin: false,
+    };
+    let fp = Fingerprint {
+        pane_id: CAP_PANE.into(),
+        kind: Some("codex".into()),
+        session_ref: None,
+    };
+    apply(s, &env, Some(&fp), None, &draft, &text, request_id, T0 + 3).unwrap()
 }
 
 #[test]
@@ -150,33 +186,72 @@ fn a_retired_lane_may_be_dropped() {
     assert!(s.read(|tx| tx.get_seat("harbor:pricing")).unwrap().is_some());
 }
 
-/// T-54: a retired lane that is in the new config is registered again — a new
-/// voyage may reuse the name — and the engine onboards it once more.
+/// T-247: a retired lane that is in the config stays retired through a
+/// re-apply — a config change starts no agent — and a task that names it is
+/// what brings it back.
 #[test]
-fn a_retired_lane_in_the_new_config_is_registered_again() {
+fn a_retired_lane_stays_retired_until_a_task_names_it() {
     let mut s = Store::open_in_memory().unwrap();
-    init_with_home(&mut s, &admin(), &config(),Some(crate::skill_home()), T0).unwrap();
+    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), T0).unwrap();
     s.write(|tx| {
         tx.set_seat_generation("harbor:heat", 1)?;
         tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)
     })
     .unwrap();
 
-    // The lane "heat" is in the new config again.
-    let again = config_with(&format!("{HEAT}{PRICING}"), "\"minimax-cn/MiniMax-M3.1-Flash\"");
-    init_with_home(&mut s, &admin(), &again,Some(crate::skill_home()), T0 + 2).unwrap();
-
+    // The lane "heat" is in the new config again: a re-apply alone (here the
+    // model chain changed) does not register it again.
+    let again = config_with(HEAT, "\"deepseek/deepseek-flash\"");
+    init_with_home(&mut s, &admin(), &again, Some(crate::skill_home()), T0 + 2).unwrap();
     let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
-    assert_eq!(heat.state, SeatState::Queued, "the engine onboards it again");
-    assert_eq!(heat.state_reason.as_deref(), Some("registered again"));
-    // The seat is the same one: its generation and its history stay.
+    assert_eq!(heat.state, SeatState::Retired, "a re-apply starts no agent");
+    assert_eq!(heat.state_reason.as_deref(), Some("reclaimed"));
     assert_eq!(heat.generation, 1);
     assert_eq!(heat.role, SeatRole::Lane);
 
-    // A lane that is not retired keeps its state.
-    let pricing = s.read(|tx| tx.get_seat("harbor:pricing")).unwrap().unwrap();
-    assert_eq!(pricing.state, SeatState::Queued);
-    assert_eq!(pricing.state_reason.as_deref(), Some("registered"));
+    // A NEW task that names the lane brings it back.
+    let applied = apply_task_on(&mut s, "heat", 0, "r1");
+    assert!(
+        applied.staffed.contains(&"start heat".to_string()),
+        "{:?}",
+        applied.staffed
+    );
+    let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
+    assert_eq!(heat.state, SeatState::Queued, "the engine onboards it again");
+    assert_eq!(heat.state_reason.as_deref(), Some("a task names it again"));
+    // The seat is the same one: its generation and its history stay.
+    assert_eq!(heat.generation, 1);
+    assert_eq!(heat.role, SeatRole::Lane);
+}
+
+/// T-247: a retired lane that is not in the config stays retired whatever its
+/// tasks: only the captain brings such a lane back, by putting it back in the
+/// config.
+#[test]
+fn a_retired_lane_out_of_the_config_stays_retired() {
+    let mut s = Store::open_in_memory().unwrap();
+    init_with_home(&mut s, &admin(), &config(), Some(crate::skill_home()), T0).unwrap();
+    s.write(|tx| {
+        tx.set_seat_generation("harbor:heat", 1)?;
+        tx.set_seat_state("harbor:heat", SeatState::Retired, Some("reclaimed"), T0 + 1)
+    })
+    .unwrap();
+
+    // The retired lane leaves the config: a new voyage starts with new lanes.
+    let fewer = config_with(PRICING, "\"minimax-cn/MiniMax-M3.1-Flash\"");
+    init_with_home(&mut s, &admin(), &fewer, Some(crate::skill_home()), T0 + 2).unwrap();
+    assert_eq!(s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap().state, SeatState::Retired);
+
+    // A NEW task names it, and it stays retired all the same.
+    let applied = apply_task_on(&mut s, "heat", 0, "r1");
+    assert!(
+        !applied.staffed.iter().any(|line| line == "start heat"),
+        "{:?}",
+        applied.staffed
+    );
+    let heat = s.read(|tx| tx.get_seat("harbor:heat")).unwrap().unwrap();
+    assert_eq!(heat.state, SeatState::Retired);
+    assert_eq!(heat.state_reason.as_deref(), Some("reclaimed"));
 }
 
 #[test]

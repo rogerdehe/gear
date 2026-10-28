@@ -43,6 +43,10 @@ enum Cmd {
         /// Draw the open tasks as a dependency tree.
         #[arg(long)]
         deps: bool,
+        /// The project to show. Without it the caller's own project is shown,
+        /// and with no caller every project in the store.
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
     },
     /// Captain: the queue of the project (design §8.3) — what every lane
     /// does now, why an idle lane is idle, and what it has left.
@@ -263,7 +267,13 @@ enum FrictionOp {
 #[derive(Subcommand, Debug)]
 enum AdminOp {
     /// Register a project, or apply a changed config to a registered one.
-    Init { config: std::path::PathBuf },
+    Init {
+        config: std::path::PathBuf,
+        /// Validate the config and change nothing: no store, no Herdr, no
+        /// engine (T-228).
+        #[arg(long)]
+        check: bool,
+    },
     /// Print what this machine offers, for the captain's kickoff proposal.
     Kickoff,
     /// Write the GEAR skill where an agent CLI loads its skills.
@@ -281,7 +291,11 @@ fn main() {
     // without touching the user's home (design/13: a read-only command writes
     // nothing).
     let cli = Cli::parse();
-    default_store_path();
+    // T-228 (review F1): `admin init --check` validates a config and changes
+    // nothing, and that includes the directories of the default store.
+    if !checks_a_config(&cli.cmd) {
+        default_store_path();
+    }
     let code = match run(cli) {
         Ok(()) => 0,
         Err(e) => {
@@ -290,6 +304,11 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// True for the read-only validation `gear admin init --check`.
+fn checks_a_config(cmd: &Option<Cmd>) -> bool {
+    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
@@ -358,7 +377,7 @@ fn run(cli: Cli) -> GearResult<()> {
                 cmd_import_issues(path, label, cli.json)
             }
         },
-        Some(Cmd::Board { deps }) => cmd_board(deps, cli.json),
+        Some(Cmd::Board { deps, project }) => cmd_board(deps, project.as_deref(), cli.json),
         Some(Cmd::Queue { json }) => cmd_queue(json),
         Some(Cmd::Report { op }) => match op {
             ReportOp::Time { task, voyage } => cmd_report_time(task, voyage, cli.json),
@@ -366,7 +385,9 @@ fn run(cli: Cli) -> GearResult<()> {
         },
         Some(Cmd::Run) => cmd_run(),
         Some(Cmd::Friction(c)) => cmd_friction(c, cli.json),
-        Some(Cmd::Admin { op: AdminOp::Init { config } }) => cmd_admin_init(&config, cli.json),
+        Some(Cmd::Admin { op: AdminOp::Init { config, check } }) => {
+            cmd_admin_init(&config, check, cli.json)
+        }
         Some(Cmd::Admin { op: AdminOp::Kickoff }) => cmd_admin_kickoff(cli.json),
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
             cmd_admin_install_skill(&agent, cli.json)
@@ -392,20 +413,25 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   the store, and a kickoff runs before the project exists (the review of
 ///   T-10). `--skill` and `--help` never get here.
 /// - `captain handover` moves a seat's binding: it must not start an engine
-///   (T-104).
+///   (T-104);
+/// - `admin init --check` only validates a config: it reads the store's other
+///   projects for the branch check but writes nothing, so there is nothing to
+///   keep moving (T-228, T-256).
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
-    !matches!(
-        cmd,
+    match cmd {
+        None => true,
+        Some(Cmd::Admin { op: AdminOp::Init { check, .. } }) => !check,
         Some(Cmd::Run)
-            | Some(Cmd::Admin { op: AdminOp::Stop })
-            | Some(Cmd::Admin { op: AdminOp::Kickoff })
-            | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
-            | Some(Cmd::Board { .. })
-            | Some(Cmd::Report { .. })
-            | Some(Cmd::Whoami)
-            | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
-            | Some(Cmd::Captain { .. })
-    )
+        | Some(Cmd::Admin { op: AdminOp::Stop })
+        | Some(Cmd::Admin { op: AdminOp::Kickoff })
+        | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
+        | Some(Cmd::Board { .. })
+        | Some(Cmd::Report { .. })
+        | Some(Cmd::Whoami)
+        | Some(Cmd::Plan { op: PlanOp::ImportIssues { .. } })
+        | Some(Cmd::Captain { .. }) => false,
+        Some(_) => true,
+    }
 }
 
 /// Build `gear_app::Env` from GEAR_CTX / HERDR_PANE_ID / GEAR_ADMIN.
@@ -469,7 +495,49 @@ fn refuse_first_registration_by_an_agent(env: &gear_app::Env) -> GearResult<()> 
 /// is checked before anything is read; which seat may act on it is decided by
 /// `gear_app::admin::init`, against the project the config names. The store is
 /// `GEAR_DB`.
-fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
+///
+/// With `--check` (T-228) it only validates the config: `GEAR_ADMIN` is not
+/// needed, no store is written, nothing starts, and the command says what it
+/// read (`config ok: project <id>, <n> lanes, <m> reviewers`). Its
+/// cross-project branch check (T-256) reads an existing store, never creates
+/// one, and says so when there is none.
+fn cmd_admin_init(config: &std::path::Path, check_only: bool, json: bool) -> GearResult<()> {
+    // T-228: `--check` validates the config and changes nothing — no
+    // GEAR_ADMIN, no store, no Herdr, no engine.
+    if check_only {
+        let text = read_config(config)?;
+        let parsed = gear_app::admin::check(&text, None)?;
+        // T-256: another project of this store on the same repository is a
+        // branch clash, reported before anything is registered. The store is
+        // only read, and only when it exists already: a check creates nothing.
+        match other_projects()? {
+            Some(others) => {
+                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &others) {
+                    return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
+                }
+            }
+            None => eprintln!("cross-project check skipped: no store"),
+        }
+        let lanes = parsed.lanes.len();
+        let reviewers = parsed.quota.temps;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "project": parsed.project.id,
+                    "lanes": lanes,
+                    "reviewers": reviewers,
+                })
+            );
+        } else {
+            println!(
+                "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
+                parsed.project.id
+            );
+        }
+        return Ok(());
+    }
     let env = env_from_process()?;
     if !env.admin {
         return Err(GearError::new(
@@ -477,9 +545,7 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
             "`gear admin init` needs GEAR_ADMIN=1: the user's own shell, or the captain's pane",
         ));
     }
-    let text = std::fs::read_to_string(config).map_err(|e| {
-        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot read {}: {e}", config.display()))
-    })?;
+    let text = read_config(config)?;
     let mut store = open_store()?;
     // A project that is not registered yet is created by its captain, never by
     // another project's seat (T-100); a seat may re-apply its own project's
@@ -534,6 +600,52 @@ fn cmd_admin_init(config: &std::path::Path, json: bool) -> GearResult<()> {
         }
     }
     Ok(())
+}
+
+/// Read the config a command was given, as `BadFormat` when it cannot be read.
+fn read_config(config: &std::path::Path) -> GearResult<String> {
+    std::fs::read_to_string(config).map_err(|e| {
+        GearError::new(
+            gear_model::ErrorCode::BadFormat,
+            format!("cannot read {}: {e}", config.display()),
+        )
+    })
+}
+
+/// The other projects of the store this `gear` call would use — `(id,
+/// config_toml)` — for the branch check of `admin init --check` (T-256), or
+/// `None` when there is no store to read: none at the path, or no `HOME` to
+/// find the default one under. The path is `GEAR_DB` when the caller names
+/// one, else the default store of this session — resolved with
+/// [`default_store_in`], never with [`default_store_path`], which creates the
+/// directory. Only an existing store is opened, and read-only: a check creates
+/// no file, applies no schema and migrates nothing (T-228).
+fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
+    let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let Some(home) = std::env::var_os("HOME") else {
+                return Ok(None);
+            };
+            let socket = std::env::var("HERDR_SOCKET_PATH").ok();
+            default_store_in(&std::path::PathBuf::from(home), socket.as_deref())
+        }
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut store = gear_store::Store::open_read_only(&path)?;
+    store
+        .read(|tx| {
+            let mut others = Vec::new();
+            for id in tx.project_ids()? {
+                if let Some(row) = tx.get_project(&id)? {
+                    others.push((row.id, row.config_toml));
+                }
+            }
+            Ok(others)
+        })
+        .map(Some)
 }
 
 /// Open the store at GEAR_DB (agents) or the admin target (design/14).
@@ -809,10 +921,30 @@ fn cmd_plan_show(task: &str) -> GearResult<()> {
     Ok(())
 }
 
-fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
+/// `gear board [--deps] [--project <id>]`: the read-only plan board.
+///
+/// `--project` names the project to show and wins over the caller's own: a
+/// pane bound to no seat (the user's own board tab) has no caller, so without
+/// the flag the board shows every project in the store (T-249).
+fn cmd_board(deps: bool, project: Option<&str>, json: bool) -> GearResult<()> {
     let env = env_from_process()?;
     let mut store = open_store()?;
     let mut herdr = open_herdr().ok();
+    // A project that is not registered is refused before the board starts: a
+    // typo must not draw an empty or, worse, a wrong board.
+    if let Some(id) = project {
+        let found = store.read(|tx| tx.get_project(id))?;
+        if found.is_none() {
+            let registered = store.read(|tx| tx.project_ids())?;
+            return Err(GearError::new(
+                gear_model::ErrorCode::NoTarget,
+                format!(
+                    "no project {id} in this store; registered: {}",
+                    registered.join(", ")
+                ),
+            ));
+        }
+    }
     // The caller's seat, when it has one: a captain in a pane sees its own
     // project's board without a GEAR_CTX (T-126).
     let env = match herdr.as_mut() {
@@ -820,9 +952,12 @@ fn cmd_board(deps: bool, json: bool) -> GearResult<()> {
         None => env,
     };
     let opts = gear_board::Options {
-        // The caller's project; without a caller (the user's own shell) the
-        // board shows every project in the store.
-        project: env.ctx.as_ref().map(|ctx| ctx.project.clone()),
+        // The project named on the command line, else the caller's; without
+        // either (the user's own shell) the board shows every project in the
+        // store.
+        project: project
+            .map(str::to_string)
+            .or_else(|| env.ctx.as_ref().map(|ctx| ctx.project.clone())),
         // The engine's lock file sits next to the database.
         db: std::env::var_os(gear_model::ctx::ENV_DB).map(std::path::PathBuf::from),
         json,
@@ -1572,7 +1707,7 @@ fn run_plan(
         )
     })?;
     // After a successful apply: the captain hears about a lane that would
-    // stand idle (T-58, ops/lessons.md 7a) and about the lanes his own tail
+    // stand idle (T-58, gear/voyages/M2.1/lessons.md 7a) and about the lanes his own tail
     // silences (B5: a lane that gets no warning is not a mystery). Printed
     // only — the apply itself is unchanged.
     // The warnings the captain reads: the apply's own (design §7.2: a decision
@@ -1776,7 +1911,11 @@ fn hand_in_reply(
         .and_then(|row| row.lane)
         .or_else(|| env.ctx.as_ref().map(|ctx| ctx.seat.clone()))
         .unwrap_or_default();
-    let branch = gear_app::base::task_branch(&lane, task);
+    // The branch is the project's own template (T-252); a project whose config
+    // cannot be read keeps the name GEAR uses.
+    let conventions =
+        gear_app::config::conventions_or_default(store, &project).unwrap_or_default();
+    let branch = gear_app::base::task_branch(&conventions, &project, &lane, task);
     Ok(Some(format!(
         "Handed in. End your turn: the next task comes by itself; do not push to {branch} again."
     )))
@@ -4637,7 +4776,12 @@ path="api"
 
     #[test]
     fn a_failed_herdr_leaves_the_message_stored_and_the_engine_rings_it() {
-        let (mut store, mut herdr) = working_world("codex", AgentStatus::Working);
+        // T-241 rework: the fake injects exactly one refusal, and an urgent
+        // doorbell to a *working* lane now spends it on the Escape that cuts the
+        // turn (the five ops.rs tests assert that order). This test is about the
+        // refused prompt and its recovery, so the lane is idle here: no Escape
+        // is sent, and the refusal lands on the prompt itself.
+        let (mut store, mut herdr) = working_world("codex", AgentStatus::Idle);
         herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse { code: "agent_blocked".into() });
         run_send(
             &mut store,

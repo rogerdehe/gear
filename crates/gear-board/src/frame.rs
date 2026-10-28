@@ -1,7 +1,7 @@
 //! The frame of the new board (design §8.1): the title, the time and tasks
 //! bars, the five tabs, the views and the overlay panel.
 //!
-//! The prototype of `ops/plan/m4-board` is the contract for the layout, the
+//! The prototype of `gear/voyages/M4/board` is the contract for the layout, the
 //! views, the keys and the wording; the data comes from the store.
 //!
 //! The frame is drawn on a **canvas** of the size of the terminal: every row
@@ -598,9 +598,15 @@ fn ratio_color(ratio: f64) -> Color {
 fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
     let mut rows = Vec::new();
     let mut tokens_total = 0;
+    let mut cache_total = 0;
     let mut cost_total = 0.0;
     let mut unknown = 0;
     let tasks = token_tasks(project);
+    // A project without `[prices]` priced none of its rounds: the cost column
+    // then says nothing at all, and the total names the missing prices once,
+    // instead of a `?` in every cell and a dollar sum that does not exist
+    // (the user, 2026-10-28).
+    let priced = tasks.iter().any(|(_, task)| task.cost_usd.is_some());
     let width = lane_width(tasks.iter().map(|(lane, _)| *lane), 6, 1);
     for (index, (lane, task)) in tasks.into_iter().enumerate() {
         let picked = index == selected;
@@ -614,24 +620,37 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
         // The tokens and the cost are unknown when no round counted them
         // (F5): they are not a measured zero.
         let tokens = task.tokens;
+        let cache_read = task.cache_read;
         let cost = task.cost_usd;
         if tokens.is_none() {
             unknown += 1;
         } else {
             tokens_total += tokens.unwrap_or(0);
         }
-        if cost.is_none() {
-            unknown += 1;
-        } else {
-            cost_total += cost.unwrap_or(0.0);
+        if let Some(cache_read) = cache_read {
+            cache_total += cache_read;
+        }
+        // Without prices there is no cost to be unknown: the count of the
+        // unknown parts then counts the tokens only.
+        if priced {
+            if cost.is_none() {
+                unknown += 1;
+            } else {
+                cost_total += cost.unwrap_or(0.0);
+            }
         }
         let tokens_text = match tokens {
             Some(tokens) => format!("{}k", tokens / 1000),
             None => "?".to_string(),
         };
+        let cache_text = match cache_read {
+            Some(cache_read) => format!("{}k", cache_read / 1000),
+            None => "?".to_string(),
+        };
         let cost_text = match cost {
             Some(cost) => format!("${cost:>6.2}"),
-            None => "      ?".to_string(),
+            None if priced => "      ?".to_string(),
+            None => String::new(),
         };
         let row_style = Style::PLAIN.reversed_if(picked);
         rows.push(
@@ -642,14 +661,19 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
                 .push(format!("{estimate:>4}m{actual:>5}m"), row_style)
                 .push(format!("{ratio:>7.1}x"), Style::fg(ratio_color(ratio)))
                 .push(
-                    format!("{:>8}{tokens_text:>9}  {cost_text}", task.stored_rounds),
+                    format!(
+                        "{:>8}{tokens_text:>9}{cache_text:>9}  {cost_text}",
+                        task.stored_rounds
+                    ),
                     row_style,
                 ),
         );
     }
     let mut total = format!(
-        "so far: {:.1}M tokens, ${cost_total:.2}",
-        tokens_total as f64 / 1_000_000.0
+        "so far: {:.1}M tokens, {:.1}M cache reads, {}",
+        tokens_total as f64 / 1_000_000.0,
+        cache_total as f64 / 1_000_000.0,
+        if priced { format!("${cost_total:.2}") } else { "no prices set".to_string() }
     );
     if unknown > 0 {
         // The total is what is known: the unknown parts are named (F5).
@@ -659,8 +683,8 @@ fn view_tokens(project: &ProjectBoard, selected: usize) -> ViewRows {
     ViewRows {
         heading: Line::styled(
             format!(
-                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}",
-                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cost"
+                "  {:<7}{:<width$}{:>5}{:>6}{:>8}{:>8}{:>9}{:>9}{:>9}",
+                "task", "lane", "est", "act", "ratio", "rounds", "tokens", "cache", "cost"
             ),
             Style::fg(Color::Dim),
         ),

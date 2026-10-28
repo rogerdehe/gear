@@ -73,20 +73,11 @@ pub fn init_with_home(
         ));
     }
 
-    // 2. parse and validate the config; every issue is reported at once.
-    let config = config::parse(config_text)?;
-    let issues = config::validate(&config);
-    if !issues.is_empty() {
-        let detail = issues
-            .iter()
-            .map(|issue| format!("{}: {}", issue.field, issue.problem))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(GearError::new(
-            ErrorCode::BadFormat,
-            format!("the config has {} issue(s): {detail}", issues.len()),
-        ));
-    }
+    // 2. everything that needs no store: the config itself, the profiles and
+    //    the GEAR skills (`check`, T-228). The other projects of the branch
+    //    check (T-256) are this store's, so `register`/`re_register` read them
+    //    inside the transaction, before any write.
+    let config = check(config_text, home)?;
 
     let project_id = config.project.id.clone();
 
@@ -118,6 +109,42 @@ pub fn init_with_home(
                 ));
             }
         }
+    }
+
+    store.write(|tx| {
+        match tx.get_project(&project_id)? {
+            // The project is registered: the config changes.
+            Some(project) => re_register(tx, &project, &config, config_text, now),
+            // The project is new: it is registered.
+            None => register(tx, &config, config_text, now),
+        }
+    })
+}
+
+/// The checks `init` makes before it touches the store (T-228): the config's
+/// shape and every issue at once, each seat's profile, and the GEAR skill of
+/// every kind the project can start. A caller that only wants to validate its
+/// `gear.toml` runs this: it opens no store, reaches no Herdr and starts
+/// nothing. The caller-context checks (`init`'s step 2b) need the store and
+/// stay there, and the cross-project branch check (T-256) is [`branch_clash`],
+/// which the caller feeds its own projects.
+pub fn check(
+    config_text: &str,
+    home: Option<&std::path::Path>,
+) -> GearResult<config::ProjectConfig> {
+    // Parse and validate the config; every issue is reported at once.
+    let config = config::parse(config_text)?;
+    let issues = config::validate(&config);
+    if !issues.is_empty() {
+        let detail = issues
+            .iter()
+            .map(|issue| format!("{}: {}", issue.field, issue.problem))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(GearError::new(
+            ErrorCode::BadFormat,
+            format!("the config has {} issue(s): {detail}", issues.len()),
+        ));
     }
 
     // Every seat's profile must resolve against the table (built-ins + the
@@ -220,14 +247,7 @@ pub fn init_with_home(
         }
     }
 
-    store.write(|tx| {
-        match tx.get_project(&project_id)? {
-            // The project is registered: the config changes.
-            Some(project) => re_register(tx, &project, &config, config_text, now),
-            // The project is new: it is registered.
-            None => register(tx, &config, config_text, now),
-        }
-    })
+    Ok(config)
 }
 
 /// `gear admin init` behind the seat proof (T-104).
@@ -299,6 +319,83 @@ fn prove_captain(
     result
 }
 
+/// The branch check of a registration (T-256), against every other project of
+/// the store.
+fn check_other_projects(tx: &Tx<'_>, config: &config::ProjectConfig) -> GearResult<()> {
+    match branch_clash(config, &other_projects(tx)?) {
+        Some(problem) => Err(GearError::new(ErrorCode::BadFormat, problem)),
+        None => Ok(()),
+    }
+}
+
+/// Every project of the store as `(id, config_toml)` (T-256).
+fn other_projects(tx: &Tx<'_>) -> GearResult<Vec<(String, String)>> {
+    let mut others = Vec::new();
+    for id in tx.project_ids()? {
+        if let Some(row) = tx.get_project(&id)? {
+            others.push((row.id, row.config_toml));
+        }
+    }
+    Ok(others)
+}
+
+/// The problem of two projects cutting the same branch names on one repository
+/// (T-256), or `None` when they cannot collide.
+///
+/// `others` are the store's projects as `(id, config_toml)`; one that does not
+/// parse is skipped, since it says nothing about the branches it cuts. A
+/// project of `others` that works in one of this config's repositories
+/// (canonicalized, the text when it does not exist) meets this config's
+/// branches, so this config's task, review and seat branch templates must name
+/// `{project}`: two fleets in one Herdr session then keep `hull/t12` and
+/// `review/t12` to themselves.
+pub fn branch_clash(
+    config: &config::ProjectConfig,
+    others: &[(String, String)],
+) -> Option<String> {
+    let ours = repo_paths(config);
+    for (other_id, other_text) in others {
+        if *other_id == config.project.id {
+            continue;
+        }
+        let Ok(other) = config::parse(other_text) else {
+            continue;
+        };
+        let theirs = repo_paths(&other);
+        let Some(path) = ours.iter().find(|path| theirs.contains(path)) else {
+            continue;
+        };
+        let conventions = &config.conventions;
+        let templated = [
+            &conventions.task_branch,
+            &conventions.review_branch,
+            &conventions.seat_branch,
+        ]
+        .iter()
+        .all(|template| template.contains("{project}"));
+        if templated {
+            continue;
+        }
+        return Some(format!(
+            "project {other_id} also works in {path}: put {{project}} in conventions.task_branch, review_branch and seat_branch so the two projects' branches cannot collide"
+        ));
+    }
+    None
+}
+
+/// A config's repo paths, each canonicalized to compare two configs that name
+/// one repository differently; a path that does not exist stays its text.
+fn repo_paths(config: &config::ProjectConfig) -> Vec<String> {
+    config
+        .repos()
+        .into_iter()
+        .map(|repo| match std::fs::canonicalize(&repo.path) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(_) => repo.path,
+        })
+        .collect()
+}
+
 /// First registration: the project row and one seat per role. The captain is
 /// bound Active as generation 1 (T-63): it is the user's running agent in
 /// `captain.pane`. The lanes stay Queued — the engine onboards them.
@@ -309,6 +406,7 @@ fn register(
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = config.project.id.clone();
+    check_other_projects(tx, config)?;
 
     tx.insert_project(&ProjectRow {
         id: project_id.clone(),
@@ -387,13 +485,15 @@ fn register(
 ///   naming the field;
 /// - the project row takes the new config text, the next config version and
 ///   the new quotas;
+/// - a lower `[quota] temps` retires the temp seats it no longer allows, the
+///   newest ones and every Active or Starting seat staying (T-237);
 /// - a lane that is not registered yet becomes a Queued seat (generation 0) —
 ///   the engine onboards it;
 /// - a registered lane keeps its seat: its generation, state and bindings stay,
 ///   only its profile follows the config;
-/// - a **retired** lane that is in the new config is registered again: it goes
-///   back to Queued ("registered again"), so the engine onboards it once more
-///   (T-54).
+/// - a **retired** lane stays retired, even when it is in the new config
+///   (T-247): a re-apply starts no agent; a Ready task that names the lane is
+///   what brings it back, in `plan::apply_queue`.
 ///
 /// The plan, the tasks and the attempts are untouched: a config change is not
 /// a plan change.
@@ -405,6 +505,7 @@ fn re_register(
     now: Ts,
 ) -> GearResult<InitResult> {
     let project_id = project.id.clone();
+    check_other_projects(tx, config)?;
 
     // The session the project lives in does not change mid-run.
     if config.project.herdr_session != project.herdr_session {
@@ -469,6 +570,11 @@ fn re_register(
     row.quota_includes_captain = config.quota.includes_captain;
     tx.update_project(&row)?;
 
+    // A lower `[quota] temps` retires the reviewer seats it no longer allows
+    // (T-237): the extra temp seats of an older, larger quota each hold their
+    // own worktree, and the engine rotates through all of them.
+    retire_excess_temps(tx, &project_id, config.quota.temps, now)?;
+
     // The decision log (design §7.4): a config change is GEAR's own entry.
     {
         let voyage = crate::plan::current_voyage(tx, &project_id)?;
@@ -514,17 +620,10 @@ fn re_register(
                 if seat.profile != lane.profile {
                     tx.set_seat_profile(&seat_id, &lane.profile)?;
                 }
-                // A retired lane that is in the new config is registered again:
-                // a new voyage may reuse the name, and the engine onboards
-                // the seat once more (T-54).
-                if seat.state == SeatState::Retired {
-                    tx.set_seat_state(
-                        &seat_id,
-                        SeatState::Queued,
-                        Some("registered again"),
-                        now,
-                    )?;
-                }
+                // A retired lane stays retired through any re-apply (T-247):
+                // a config change is not a reason to start an agent again. A
+                // Ready task that names the lane brings it back (see
+                // `plan::apply_queue`).
             }
             // A new lane is registered Queued; the engine onboards it.
             None => {
@@ -557,6 +656,55 @@ fn re_register(
         config_version: version,
         seats,
     })
+}
+
+/// Retire the temp seats a lower `[quota] temps` no longer allows (T-237).
+///
+/// The quota is the number of reviewer seats the project keeps. A seat that is
+/// Active or Starting holds a working reviewer: it is never retired and it
+/// takes a slot. The idle seats — Released or Standby — fill the slots that are
+/// left, newest `state_since` first (their worktrees are the warm ones), and
+/// every idle seat past them goes: a Released one (no agent left) becomes
+/// Retired, a Standby one (its agent and pane are still there) becomes
+/// Releasing, so the engine's own release path closes the pane and the next
+/// config apply retires it.
+fn retire_excess_temps(tx: &Tx<'_>, project: &str, quota: u32, now: Ts) -> GearResult<()> {
+    let seats: Vec<SeatRow> = tx
+        .seats_of_project(project)?
+        .into_iter()
+        .filter(|seat| seat.role == SeatRole::Temp && seat.state != SeatState::Retired)
+        .collect();
+    if seats.len() as i64 <= i64::from(quota) {
+        return Ok(());
+    }
+
+    // The working reviewers hold their slots; the idle ones take the rest.
+    let working = seats
+        .iter()
+        .filter(|seat| matches!(seat.state, SeatState::Active | SeatState::Starting))
+        .count();
+    let slots = usize::try_from(quota).unwrap_or(usize::MAX);
+    let room = slots.saturating_sub(working);
+    let mut idle: Vec<&SeatRow> = seats
+        .iter()
+        .filter(|seat| matches!(seat.state, SeatState::Released | SeatState::Standby))
+        .collect();
+    // The newest seats fill the slots; the id breaks a tie so the choice is
+    // the same on every run.
+    idle.sort_by(|a, b| b.state_since.cmp(&a.state_since).then_with(|| a.id.cmp(&b.id)));
+
+    let reason = format!("temps quota lowered to {quota}");
+    for seat in idle.into_iter().skip(room) {
+        // A Standby reviewer still has its agent: Releasing is the transition
+        // that lets the engine close its pane (Temp has no Standby -> Retired).
+        let state = if seat.state == SeatState::Standby {
+            SeatState::Releasing
+        } else {
+            SeatState::Retired
+        };
+        tx.set_seat_state(&seat.id, state, Some(&reason), now)?;
+    }
+    Ok(())
 }
 
 /// Note that `who` may start the CLI `kind` (T-83): once per kind, the first

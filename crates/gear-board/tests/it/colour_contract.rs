@@ -1,4 +1,4 @@
-//! The colours of the board (the prototype of `ops/plan/m4-board`), the
+//! The colours of the board (the prototype of `gear/voyages/M4/board`), the
 //! NO_COLOR switch, and the lane-name column that grows with the longest
 //! lane name.
 

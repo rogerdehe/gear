@@ -31,6 +31,7 @@ mod reviewer_mail_contract;
 mod seats_contract;
 mod settle_review_contract;
 mod tasks_contract;
+mod temps_quota_contract;
 mod time_contract;
 mod time_report_contract;
 mod verdict_item_contract;

@@ -839,18 +839,23 @@ pub struct Price { pub input: f64, pub output: f64, pub cache_read: f64, pub cac
 pub struct RoundUsage { pub usage: Usage, pub cost_source: &'static str }
 
 /// Count a round without persistence; suitable for live board and report reads.
-/// Any missing session makes the entire token count unknown. A missing price
-/// makes the complete cost unknown while preserving the token totals.
+/// A session whose log cannot be read is skipped: pi may open a session and
+/// replace it at once, so a file that was never written says nothing about the
+/// round. The token count is unknown only when no session was readable at all.
+/// A missing price makes the complete cost unknown while preserving the token
+/// totals.
 pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default_model: Option<&str>, prices: &std::collections::BTreeMap<String, Price>) -> Option<RoundUsage> {
     if sessions.is_empty() { return None }
     let mut seen = HashSet::new();
+    let mut readable = 0usize;
     let mut total = Usage {input:0,output:0,cache_read:0,cache_write:0,reasoning:0,cost_usd:None,records:0};
     let (mut cost, mut any_cost, mut known, mut priced) = (0.0, false, true, false);
     for session in sessions {
         if !seen.insert(session) { continue }
-        let u = usage(log, session, from, to)?;
+        let Some(u) = usage(log, session, from, to) else { continue };
+        let Some(records) = usage_records(log, session, from, to) else { continue };
+        readable += 1;
         total.input += u.input; total.output += u.output; total.cache_read += u.cache_read; total.cache_write += u.cache_write; total.reasoning += u.reasoning; total.records += u.records;
-        let records = usage_records(log, session, from, to)?;
         let mut check = Usage {input:0,output:0,cache_read:0,cache_write:0,reasoning:0,cost_usd:None,records:0};
         for record in records {
             let u = record.usage;
@@ -875,6 +880,7 @@ pub fn round_usage(log: UsageLog, sessions: &[String], from: Ts, to: Ts, default
         // later rather than combining tokens and cost from different snapshots.
         if check != u { return None }
     }
+    if readable == 0 { return None }
     let cost_source = if any_cost && known { total.cost_usd = Some(cost); if priced { "prices" } else { "agent" } } else { "none" };
     Some(RoundUsage {usage:total,cost_source})
 }

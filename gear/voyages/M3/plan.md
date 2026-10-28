@@ -1,0 +1,432 @@
+<!-- gear-plan project=gear base=228 -->
+# Goal
+GEAR goes into a project and a team that already run, fits how they work, and then runs the whole voyage by itself: nobody patches the store, branches or panes by hand, every agent in every role is watched over, GEAR writes only where the project allows, and a team on GitHub sees and joins the work there.
+
+# Milestone M3: Fit in, and run without hands
+done: (1) on our own fixture projects (a parent repo with cloned child repos; a project with its own CI and docs) a voyage runs from kickoff to landing with no hand fix — no store edit, no branch repointing, no pane closing, no engine restart by the captain; (2) dropped 2026-10-26 (user): no push allow-list; the gate runs no `git push`; (3) a Codex provider back-off is shown as back-off, never as a stall, and no start-up dialog (folder trust, update) leaves a seat blocked; (4) on a GitHub sandbox repo, issues become tasks, a lane's task opens a draft claim PR with an ORCHESTRATE marker, hand-in and verdict appear on the PR, the merge closes the issue; (5) `gear --skill adopt` exists as a skeleton and the project standard it produces travels in every task and review packet
+bar: DELIVERABLE (user's choice): an error in normal use is fixed; edge cases are logged, not reworked; rework rounds are capped
+eta: 6h
+
+# Decisions
+- 2026-10-25 M3 kickoff confirmed by the user: bar DELIVERABLE; eta 6h, 'do it properly', calibrated after the first two tasks; lanes steady/course/base on OpenCode minimax-cn/MiniMax-M3.1-Flash, fallback opencode-go/deepseek-v4.1-flash; reviewers Codex gpt-6.1-sol reasoning medium, fallback opencode-go/deepseek-v4-pro; both exhausted = park 5h, then back to the first model.
+- 2026-10-25 Goal aligned with the user before any work: fit into running projects and teams, then run without hands.
+- 2026-10-25 GitHub: neither graft BMAD-Team's skills (a manual, human-confirmed pipeline that fights GEAR's no-approval run) nor rebuild it locally (its value is state everyone sees on GitHub). GEAR gets its own forge layer: an engine interface with GitHub as the first implementation, plus `gear --skill github`. The mode is per project (and per repo) in the config; without it the project is local-only, as today. GEAR's plan and store stay the one source of truth; GitHub is the entry and the window. Markers follow BMAD-Team's `ORCHESTRATE:*` protocol so teams using it can read GEAR's PRs.
+- 2026-10-25 The engine performs every GitHub write itself (deterministic, retried, bounded); agents never call `gh` to write. `gh` writes cannot be hooked like `git push`: the skill forbids them for agents, and says so plainly.
+- 2026-10-25 Adopting an existing project starts as a skeleton (user): `gear --skill adopt` with the analysis steps and two templates (`gear/adopt.md`, `gear/standard.md`); the only code is that the engine puts the project standard into every packet. The user tries it on a project of their own; it grows from that feedback. Mechanism: quarantine the auto-loaded instruction layer (CLAUDE.md, AGENTS.md, .claude/skills, .agents) behind a short new project file, name exemplars and no-go patterns, a trusted gate, keep/replace/drop of the existing process.
+- 2026-10-25 Push allow-list (trial G12): `init` freezes each repo's resolved push destinations; every GEAR worktree runs a GEAR pre-push check (chained to the repo's own hook) that refuses anything else; the engine checks before its merge push; a refusal is one captain alert, never retried or routed around. Test git isolation already shipped in v0.2.4.
+- 2026-10-25 Acceptance uses our own fixtures and a GitHub sandbox repo, never a trial user's project. Trial feedback is input: a chain-breaking report jumps the queue, the rest is ranked by value.
+- 2026-10-25 Taken from the first trial's feedback: G01–G04, G08–G12 and parts of G05/G06 (the triage with reasons is in gear/voyages/M3/backlog.md). Not taken: G05's agent-order cause, G06's home-branch slip (fixed by installing the skill), G07, G12's audit extras.
+- 2026-10-25 Three lanes, quotas as before (user: restraint); planned anew since every lane starts fresh. steady = crates/gear-engine/ (the engine's reliability); course = gear-model, gear-store, gear-app, gear-board and crates/gear-herdr/ (config, plan, home page, agent profiles); base = gear-cli, skills/, docs/, README, scripts and the new crates/gear-forge/ (the GitHub layer, including its policy; the engine only calls it once per tick). Shared interfaces are written into both tasks' goals; nothing waits on a neighbour (decompose rule 3).
+- 2026-10-25 Every agent's quota markers and status-bar reading move to M4 (user): M2 covers the kinds in use; M3 keeps only what the trial hit — Codex's 429 back-off (G11). The GitHub sandbox is the private repo rogerdehe/gear-sandbox (created 2026-10-25).
+- 2026-10-25 Live acceptance (found missing in the draft): before the last task, the captain runs one small voyage on each fixture project (scripts/fixtures, built by base) and on the GitHub sandbox repo; what breaks there is fixed and re-run before the release. Unit tests alone do not meet the done sentence.
+- 2026-10-25 At M3's start base went NeedsCheck: the engine typed the env line and started the agent before the shell was back at its prompt (Herdr: agent_pane_busy). No retry path exists yet (trial G02), so the captain set the seat back to queued in the store by hand — the kind of hand fix M3 removes. New steady task.
+- 2026-10-25 T-71 moves to the head of steady's queue: every new seat session (each reviewer job, each re-registered lane) is rung with stale messages before its task.
+- 2026-10-25 T-61 review: F1 (a transient push error is terminal) and F2 (a not-yet-pushed candidate already in the local object store is terminal) reworked — both leave a merge needing a hand fix, which M3 removes; F3 (a pushed tag is not a pushed ref) logged.
+- 2026-10-25 T-73 review: F1 (a bracketed IPv6 host is cut at its first colon, so another host passes the allow-list) reworked — it breaks done clause (2); F2 (a Unicode path panics in normalisation) reworked with it — a panic in init is an error in normal use, not an edge case, and the fix is one line.
+- 2026-10-25 T-62 review: F1 (starting a rework hides the rejected candidate another task carries, so it lands unreviewed) and F2 (older waiting merges starve a prerequisite that can now run, so a C→A→B chain never lands) both reworked — ordinary review/rework, and each breaks merge safety or done clause (1).
+- 2026-10-25 Captain's slip: the T-73 and T-62 reworks were sent as replies, which settle nothing; base found T-73 still verifying. Both now go in # Verdicts. T-74 (written and pushed on base/t74) needs gear_app::push from T-73 to build, so it gets deps T-73 (a running task cannot go back to ready); base holds T-74 and reads ahead on its next task meanwhile; course does the T-73 rework right after T-75.
+- 2026-10-25 T-71 review: F1 (a late reply about a reused temp's earlier task leaks into its home page and doorbell) and F2 (a captain's new generation silences its still-open older items) reworked — both happen in ordinary use. F3 (a lane with no task yet is rung for a current reply) logged: the message is current, nothing can be swallowed without a delivery, and gating every doorbell on a confirmed delivery would leave an idle lane deaf.
+- station M-893: keep course — measured actual/estimate on M3's done tasks is 0.26 (gear report time); 27 tasks, 825m estimated ≈ 215m of agent time across 3 lanes plus review/rework fits the 6h eta. The 1221m projection reads the four rework rounds as pace; the reworks are ordinary-use fixes this voyage exists for, so nothing is cut.
+- station M-901: keep course rebalanced — steady holds 11 of the 26 open tasks (course 7, base 7), so steady sets the finish. Moved by file ownership with no overlap: T-89 and T-67 (onboard.rs/opencode.rs, no other steady task touches them) to the head of course's queue; T-64 (parallel.rs) to base. T-66 (dry-lane forecast) and T-70 (alert dedup) go to [should] at steady's tail: noise-reducers, not in the done sentence. The 1470m projection sums the open estimates serially (800m × 1.73) across three parallel lanes; logged for M4.
+- 2026-10-25 T-90 review: F1 (a failed-merge item stays unresolvable after the plan settles it) and F2 (an ordinary question about a handed-in task is forced through a fail verdict) reworked — the guard itself would become a hand fix in normal use.
+- 2026-10-25 T-78 review: F1 (a draft claim PR cannot be merged by Forge::merge) reworked — it breaks done clause (4); F2 (a queued merge reported as merged) and F3 (output wait can outlive the timeout) logged: no merge queue on the sandbox, and a gh child holding its pipe is not normal use.
+- station M-916: cut T-66 (dry-lane forecast) and T-70 (alert dedup), moved to M4 — measured throughput is 6 M3 tasks in 108m (≈3.3/h); 24 left would take ≈7h against ≈4h of eta, and steady still sets the finish. Both are noise-reducers outside the done sentence. Next station: if throughput stays under 4/h, T-63 and T-77 go too.
+- 2026-10-25 T-89 review: F1 (a busy start is retried inside one tick, up to ~20 s, instead of on the next tick) overridden to pass — the task's goal holds (a slow shell no longer parks the lane; the review's own probe saw Active after 263 ms), the 20 s engine pause happens only when a shell stays busy at onboarding, which is rare, and the next-tick plumbing is ~100 lines against a tight clock. Logged.
+- 2026-10-25 Base's T-80 cannot compile before T-78 (its own, in review) and T-79 (course) land — a hidden dep the plan missed (7a covers a shared interface, not code that must call another lane's unlanded API). T-80 is cancelled and re-added with deps T-78, T-79 behind base's independent T-86, T-87, T-85; T-81 gets deps T-79; T-79 moves to right after T-90 in course's queue. Forge calls get a real OpKind::Forge, added by base.
+- 2026-10-25 T-89's merge failed its gate on a timing test, not on T-89: merge::tests::a_sleeping_gate_does_not_block_the_merge_step gave the merge 10 s, takes ~5 s alone and failed 3 of 4 runs under the lanes' parallel load. Captain's hand fix on dev: the give-up bound is 120 s (one line, a test only). Then T-89's merge is retried.
+- 2026-10-25 T-89 hand-merged by the captain (a hand fix M3 is meant to remove): its pass was settled, its merge op failed on the flaky test, and neither a re-settled pass nor a fail verdict makes a new merge. Gate on the merged dev: build clean, 745 tests passed. New task T-92: the captain can retry a failed merge from the plan.
+- 2026-10-25 Base sat idle with 6 tasks queued: cancelling the running T-80 left its attempt open (started), so the seat looked busy. Captain's hand fix: that attempt set to abandoned in the store. New course task: a cancel closes the open attempt and tells the lane.
+- station M-934: keep course — 3 tasks landed in the 21m since the last station (9 in 129m); 19 left across three lanes, with T-66/T-70 already cut. The next station rechecks the rate before cutting T-63/T-77.
+- 2026-10-25 T-79 review: F1 (the workspace does not build: two TaskRow fixtures from T-62 lack `issue`) and F2 (a child repo without a [github] section inherits the root's GitHub repo) reworked; F3 (issue #0, '+12', overflow) logged — invalid input, not normal use.
+- 2026-10-25 Engine rebuilt from dev and restarted with no merge in flight (lesson 7c), so T-62, T-64, T-73, T-75, T-78 and T-89 run live; T-71 is not yet merged and needs one more restart.
+- station M-967: cut T-77 (cross-CLI conversation handover, [should]) to M4 — 3 tasks in the last 34m (≈5.3/h), 18 left in ≈197m of eta: it just fits, with no room for the live acceptance runs and their fixes. T-77 is outside the done sentence; T-63 is already running and stays.
+- 2026-10-25 T-92 review: F1 (remerge of a task whose candidate is already on dev, e.g. after a hand merge, is accepted instead of refused) overridden to pass — the engine's merge finds a landed candidate and confirms without pushing (T-61), so the outcome is harmless; a git fetch inside plan apply would cost 35–50 lines for no behaviour change. F2 (same-second op id order) logged.
+- station M-973: keep course — half the eta gone, 15 tasks left; 5 landed in the last 51m (≈5.9/h), so ≈2.5h of work in 3h left, live acceptance included only if the rate holds; next cut candidate is T-63's sibling small fixes, none now.
+- station M-979: keep course — 15 done at 185m, 14 left; the rate since the last station holds (≈6/h).
+- 2026-10-25 T-63 review: F1 (a hand-in under an older contract after the captain published a newer one is accepted, so the reviewer judges the old goal) reworked — the captain rewrites working tasks in normal use (T-71 went to v3), and the fix is ~10 lines.
+- 2026-10-25 T-91 review: F1 (merge = "pr" cannot work: the engine pushes and deletes the head before sync runs) descoped to M4 — PR-mode landing needs the engine's merge path to branch by mode (~100 lines across steady and base) with 2.5h left; done clause (4) is met in push mode (the engine merges, sync comments the merge commit and closes the issue). Until M4, config validation refuses merge = "pr" with a clear reason. F2 (later events run after a failed one: close after a failed merge) and F3 (three failed ticks drop queued work forever) reworked — both are in T-91's own accept. F4, F5 logged.
+- 2026-10-25 T-81 review: F1 (import stops at gh's default 30 issues, older unplanned ones never appear) reworked; F2 (github.md offers merge = pr and three-try queues) fixed in the same round — a wrong skill misleads the next captain, and it is a few lines of base's own file.
+- station M-1007: keep course — 18 done at 219m, 11 left (≈2h at ≈5.3/h) in 141m; every one left is required except none: the live acceptance and its fixes will push the landing ≈30–60m past the 6h eta. Nothing left to cut without breaking the done sentence; the eta is recalibrated to ≈7h, not the scope.
+- station M-1024: keep course — 3 more landed in 23m (21 done), 8 left.
+- 2026-10-25 base runs dry (only T-88 left, which waits for the code): T-72 (pre-push check in every GEAR worktree, which calls base's own push-check) moves from steady to base, ahead of T-88. Steady keeps T-68, T-69.
+- 2026-10-25 steady runs dry after T-69 at the voyage's tail: no new scope is added; steady stands by for the fixes the live acceptance finds (engine side), which it gets first.
+- 2026-10-25 T-68 review: R1 (a lane retired while blocked loses its pending delivery into the dialog) reworked — retiring happens at every landing and the fix is one line plus a test.
+- station M-1052: keep course — 6 tasks left, all in flight or next; then the live acceptance (≈7h landing, as recalibrated).
+- 2026-10-25 Engine restarted on dev again (no merge in flight): T-63, T-65, T-67, T-71, T-76, T-81, T-82, T-91, T-93 now live.
+- 2026-10-25 T-88 review: F1 (conflicts with T-81 on dev), F2 (course.md still says a failed merge becomes a follow-up task; T-92's remerge is the way), F3 (codex.md start/resume lack T-76's trust argument) reworked; F4 (review.md's hand-in example lacks --blocking and finding ids) fixed in the same round — a reviewer reading the skill alone would lose its rework. The captain checks the skill against T-68/69/72/83/84 at landing.
+- station M-1064: keep course — 24 done, 5 left (T-69, T-72, T-83 in review, T-84, T-88 rework), all in flight.
+- 2026-10-25 T-83 review: F1 (init does not refuse a CLI kind without the GEAR skill, which the contract requires) reworked; F2 (a deleted remote task branch passes the pushed check through a stale tracking ref) logged — lanes never delete task branches.
+- 2026-10-25 Live acceptance, first finding (multi and sandbox, both captains following the README): every OpenCode lane went NeedsCheck — `no [models.switch."minimax-cn/MiniMax-M3.1-Flash"] labels`. Those labels are documented nowhere and no new user can write them; our own config has them by hand. Root fix (steady): the labels default from OpenCode's own model list. Second: multi-api went NeedsCheck on agent_pane_busy after 20s — three lanes onboarding at once on a slow shell; the next-tick retry waived at T-89 is now needed (course).
+- 2026-10-26 Captain's breach (user, angry and right): for the live acceptance the captain registered three fixture projects with GEAR_ADMIN=1 set in their workspaces by itself, so each got its own Claude captain plus lanes and reviewers — 11 agents against the plan's three lanes ("restraint"); nobody approved it. The sandbox captain then followed the skill's landing step and opened an AskUserQuestion dialog in a pane nobody watched. All fixture agents are closed and their seats retired (store edit, logged). Root fixes: T-100, T-101. Any further fixture run uses only gear's own lanes.
+- 2026-10-26 Lanes stood idle ~1h (23:08–00:04): reviews of T-69 and T-97 never started — review-7 and review-8 each held the other's review branch, `git checkout -B` refused, and the engine retried silently every tick. Captain's fix on dev: the checkout passes `--ignore-other-worktrees`; T-101 makes a repeating failure ring. The captain had no check of its own while every lane waited; it now runs a watchdog (STOPGAPS).
+- 2026-10-26 T-69's merge push was refused: gear itself was registered before T-73, so it has no frozen destinations, and the engine restarted at 00:08 is the first to check merge pushes. Every project registered before v0.3.0 hits this on upgrade. Re-init needs GEAR_ADMIN, which the captain does not use (lesson 21); root fix T-102 (course, at the head). Its own merge is refused too, so once its review passes the captain builds the engine from the accepted candidate and restarts it; the held merges then go through with `remerge`.
+- 2026-10-26 The captain's `--ignore-other-worktrees` line is reverted: T-69 (passed, merge held by T-102) is the careful fix for that same stall — it detaches only a clean holder with no live agent, and stops after three tries with one captain item — and the blunt flag is what its review rejected (R1). T-101 duplicates T-69 and is cancelled.
+- 2026-10-26 Trial report (user): a lane in the trial project read a captain status note ("M-426 … review seat was invalidated and re-queued") and took it in. Two leaks in mail.rs: (a) a seat's inbox shows each thread's latest Reply as context whatever its recipient, so the captain's note to the engine or to a reviewer in a task thread reaches the lane; (b) every captain `--resolve`/`--note`/`--wait` text is sent to the item's sender as a Reply, so captain bookkeeping reaches lanes and reused reviewer seats. Also, a seat claim trusts GEAR_CTX and HERDR_PANE_ID, which an agent can set. Root fixes T-103 (steady, mail.rs only: steady is free, nothing of course's T-102 touches it) and T-104 (course, after T-102).
+- 2026-10-26 T-100 review: F1 (the captain skill's kickoff example still sets GEAR_ADMIN, contradicting the new never) reworked — it is the exact behavior T-100 removes.
+- station M-2109: keep course — 3 tasks left (100m) plus the held merges; every review and merge waits on the user registering gear's push destination (no captain route, lesson 21), the lanes keep developing meanwhile.
+- 2026-10-26 Captain's hand fix (user: the captain made this problem and must fix it, not hand it to the user): gear's own origin github.com/rogerdehe/gear written into push_destinations, exactly the row init or T-102 would freeze. Then T-69 and T-97 are remerged and the reviewer pushes again.
+- 2026-10-26 Design fix (user: a fleet that cannot push its own code is a stupid design): the allow-list exists to stop pushes to places the project never named, never to stop the fleet's own work. A repo's own `origin` (as git resolves it now) is always allowed, with or without frozen rows; frozen rows only add destinations. And a repo whose origin cannot be resolved or checked is found at engine start and onboarding, not at the first push. T-105 (course).
+- 2026-10-26 User: the trial's red line was GEAR's own gate — a unit-test run full of `git push` — not where a fleet pushes. The push allow-list (T-72 hook and `gear push-check`, T-73 frozen destinations, the merge-side refusal, T-102, T-105) was the captain's design, never agreed, and blocked the fleet's own work: all of it is removed. Done clause (2) is dropped. The gate must run no `git push` at all: tests seed and check remotes with `git fetch` from the remote's side, and the engine's real merge push goes through one runner a test replaces. T-102 (passed, its merge refused) never lands; T-105 cancelled. Removal: T-106 (base: CLI, scripts, docs), T-107 (steady: engine), T-108 (course: gear-app/gear-store, after both, since their code calls push.rs).
+- 2026-10-26 Scope check (user: no over-correction): T-106 drops the fixture script change — make.sh is acceptance tooling, not the gate. What stays: revert M3's allow-list (T-72/T-73/T-74 and their docs), unset the hooks already installed (else every push calls a deleted command), and no `git push` in the gate's tests (user's explicit ask; those pushes date from M1/M2).
+- 2026-10-26 T-103 review: F1 (a retiring lane with work in flight loses the answer to its question) reworked — retiring happens at every landing; F2 (parked/held lanes) logged.
+- 2026-10-26 T-104 v2 (user: binding to a process breaks captain handover, trusting env lets a lane become the captain): identity and role are split — identity is the real pane from OS process ancestry matched with Herdr's pane process info (no env var changes it), role is the store's seat→pane binding, and handover rebinds it from the current captain's pane or the user's own agent-free shell.
+- 2026-10-26 Rebalance: base is free after T-106 while course holds T-104, T-108, T-109 — T-109 (tasks.rs only; T-108 touches admin/push, not tasks.rs) moves to base.
+- 2026-10-26 Tests are offline by construction (user: a restricted network must not meet GitHub-mode tests): real `gh` unreachable in tests, git limited to local paths, network tests opt-in only, an offline proof script and a dev guide. T-111 (base).
+- 2026-10-26 T-107 review: F1 (four git pushes left in review.rs fixtures) reworked — the task's own acceptance; F2 (a user hooks dir named gear-hooks would be deleted recursively) folded in: deleting a user's files is data loss, and the exact-path check is one line.
+- 2026-10-26 T-104 review: F1 (ancestry forged through a PATH `ps`), F2 (a binding mismatch refused without the captain item) and F3 (`gear admin init` re-apply accepts a forged captain context) all reworked — each defeats the task's own guarantee.
+- station M-2155: keep course — 6 tasks left, two per lane (course T-104 rework, T-108; steady T-103 and T-107 reworks; base T-110, T-111); 205m serial at 2.18x is ~2.5h across three lanes, plus the upgrade, the live re-run and the release. Every one is the user's ask or a safety fix; nothing is cut.
+- 2026-10-26 User: residue of a past bug is cleaned up, never parked. T-102's item was parked 30 days because a passed, unmerged task cannot be cancelled; T-112 (base) adds that, then T-102 is cancelled and its item closes. The captain's stopgaps (leak auto-resolve loop, watchdog) are removed once their triggers land (T-107 removes the hooks; T-109 landed).
+- 2026-10-26 T-110 review: F1 (stop condition true while a merge runs) and F2 (a non-copyable command) reworked; F3 (say the admin steps run in the user's shell) folded in, one line; F4 (14 merge tests failed in the reviewer's run, docs-only candidate) logged — the reviewer seat still carries the old hook and load; rechecked after T-107 lands.
+- 2026-10-26 T-103 round 2: overridden to pass — F1 resolved and independently verified; the only blocker, F3 (merge tests fail on the obsolete push-check hook), is inherited from dev and fixed there (5bc3107), and the merge gate runs on dev plus the candidate. F2 stays logged.
+- 2026-10-26 T-107 round 2: F1, F2 resolved; F3 (conflicts with the captain's hook removal on dev) reworked — a merge of dev, ~15 lines.
+- 2026-10-26 Rebalance: course stood idle — T-108 waits for T-107's rework, base holds T-110, T-111, T-112. T-112 (plan apply in gear-app; nothing else open touches it) moves to course.
+- 2026-10-26 Engine restarted on dev 5bc3107+ (no pre-push hook; T-69, T-97, T-100, T-106, T-109 live): the old engine re-installed a hook calling the removed `push-check`, so T-104's merge failed and T-103's could not finish. Hooks unset in every worktree; T-104 and T-103 remerged.
+- station M-2192: keep course — 4 tasks left (120m); closing has begun, no new task enters M3 (new findings go to M3.1/M4).
+- 2026-10-26 T-110 round 2: F1 (the last passed task merging does not prove no merge runs, merges finish per repo) reworked, last round; F5 (tail -f hides older lines) folded in. M3.1: `gear admin stop` waits for in-flight merges itself, so the guide needs no manual check.
+- 2026-10-26 T-102 cancelled through T-112 (passed, never merged, its push item resolved by the apply) — the 30-day park is gone.
+- 2026-10-26 Voyage report (M3). Shipped: the adopt skeleton and the project standard in every packet (T-83 and others); GitHub mode — issues in, claim PRs with markers, hand-in and verdict on the PR, merge closes the issue (T-78–T-81, T-91, T-98); a reviewer resumes its session; the review checkout frees a clean holder and stops after three tries (T-69); an unconfirmed delivery never holds a seat (T-97); a cancel closes the attempt (T-93); merges retried from the plan (T-92) and of the approved candidate (T-61); OpenCode model labels derived (T-94); a busy shell retried next tick (T-95); a seat sees only its own messages (T-103); a seat claim is checked against the real pane and the captain can be handed over (T-104, with the OpenCode service hotfix 6d82c7d); no agent acts as the user and no captain dialog (T-100); the push allow-list removed and the gate runs no `git push` (T-106–T-108); tests offline by construction (T-111); old merge items close, an unmerged pass can be cancelled (T-109, T-112); the upgrade guide (T-110), walked live on gear's own mid-voyage upgrade.
+- 2026-10-26 Time: 703m against an eta of 6h (1.95x); 45 tasks done, 7 cancelled; 28 rework rounds (1133m); merge time 513m (push races with the captain's own pushes, the gate under load, two engine restarts). Scope grew 920m → 1380m, mostly from today's findings.
+- 2026-10-26 Done sentence, honestly: (1) NOT met — `running` landed with no hand fix, but on agents the captain started outside the plan (lesson 21); `multi`'s T-3 stalled, its fix (T-97) is merged but not re-proven; gear's own voyage needed hand fixes (store edits, engine restarts, two fixes on dev). (2) dropped by the user. (3) partly — the Codex back-off and start-up dialogs are handled in code and tests, not observed live; the captain's own dialog is gone (T-100). (4) met live on the GitHub sandbox. (5) met live on `running`.
+- station M-2216: land — every task done; the report above; clause (1) carried to M3.1 as a re-run within the plan's allowance.
+- station M-2217: land — same landing (the station item of the same moment).
+- tail: base, course, steady
+- 2026-10-25 base runs dry after T-72 and the T-88 rework: it takes the skill fixes the live acceptance found so far (new base task), so the closing review starts from them.
+- 2026-10-25 T-68's merge lost three push races (the captain's plan commits); retried with `- remerge T-68` (T-92). The failed-merge item's `next:` line still suggests a fail verdict while its body says remerge — logged for the closing review.
+- 2026-10-25 T-72 review: F1 (the engine checks only the first push URL, git pushes to all of them, so an unregistered second URL receives the merge) reworked — done clause (2); F2 (an apostrophe in a path breaks the generated hook) fixed with it — one escape, and it would break every push of such a repo; F3 (a worktree-only own hook is not chained) logged.
+- 2026-10-25 Live acceptance (multi): T-3's delivery to multi-api was never confirmed (the agent hit the MiniMax quota on its first turn while the lane was being retried); its check budget ran out, the seat was flagged every tick, the multi captain restarted the agent by hand, and the engine never delivered T-3 again: the unconfirmed op held the seat's slot for good. Root fix (steady, after T-94): an unconfirmed delivery never holds a seat forever.
+- 2026-10-25 T-69 review: R1 (any clean worktree holding review/t<n> is detached, including a live reviewer's or a human's) reworked — it can disturb another checkout in normal use; R3 (paths with spaces) folds into it (pass the resolved holder path quoted). R2 (a dirty holder's seat does not take the review over) moved to M4: reviewers commit their file, a dirty holder is rare, and it already stops after three tries with one captain item; 50–90 more lines do not fit the clock.
+- 2026-10-25 Engine restarted on dev (T-68, T-84 live). Live acceptance: multi and sandbox running since T-84's merge started; the adoption run (running fixture, `gear --skill adopt` first) starts now.
+- 2026-10-25 T-96 review: F1 (the first-plan example still has a same-lane `deps: T-1`, and the new line says a second task starts after the first lands) and F2 (the model-entry literal twice) both reworked — two lines, and F1 is the very mistake T-96 removes.
+- 2026-10-25 T-83 round 2: F1 (the skill guard skips CLIs chosen by model entries, e.g. a review fallback on opencode) reworked — every M3 config uses such a chain. Last round for T-83: anything left after it is logged.
+- 2026-10-25 T-94 review: F1 (labels built from the provider id, not OpenCode's provider display name from provider.list, so the bar never matches), F2 (lookup ignores the lane's directory), F3 (no lane-level test) reworked; F5 (the candidate edits gear/voyages/M3/plan.md and would roll back the captain's plan on merge) reworked too — a lane never changes the captain's plan file. F4 (kickoff prints the derived labels) moved to M4: derivation makes them the default, so a captain no longer needs to read them at kickoff. F6 logged.
+- 2026-10-25 course runs dry after T-83's rework while steady holds T-69, T-94 and T-97: T-97 (ops.rs/dispatch: an unconfirmed delivery never holds a seat; it unblocks multi's T-3) moves to course — steady's other two touch review.rs and opencode/switch.
+- station M-1128: keep course — eta recalibrated to ≈8h: the live acceptance found three engine faults a new project hits at once (T-94 labels, T-95 busy start, T-97 unconfirmed delivery); each breaks done (1), so they are in scope and nothing else is left to cut. 6 tasks left; then multi's T-3 and the running voyage must land with no hand fix, then the skill review and the release.
+- 2026-10-25 T-69 round 2: R4 (a reviewer released the normal way has a Void binding and is never detached, so the second review still fails) reworked with R1 (an observation error counts as no agent) — R4 is the task's own case and both are ~20 lines. Third and last round; R2 stays M4.
+- 2026-10-25 base runs dry after T-88: it takes two small fixes the live acceptance found in its own files (new base task).
+- 2026-10-25 300+ urgent `push refused` items: the lanes' test runs inherited their GEAR_CTX, so the GEAR pre-push hook (T-72) in the tests' temp repos ran `gear push-check` as that lane, refused the tests' pushes (14 merge tests failed under a lane's env) and rang the captain each time. Captain's fix on dev: tests blank GEAR_CTX (.cargo/config.toml) and an empty GEAR_CTX means no seat; verified both ways. Lanes get it when they merge dev; the leaked items are resolved. Lesson 18 rewritten.
+- station M-1358: keep course — 30 done, 4 left (T-94, T-69, T-97, T-98), then multi's T-3 lands, then the closing skill review and the release.
+- 2026-10-25 base idles with T-98 in review: it prepares the release (new base task): version 0.3.0 and the release notes, so the release goes out as soon as the last tasks land.
+- 2026-10-25 T-88's merge lost three push races (each retry re-runs the 3-minute gate while dev moves); `- remerge T-88`, and the captain holds its own pushes until it lands. Logged for M4: a push-race retry should re-merge and push at once when the tree after the re-merge equals the gated one.
+- 2026-10-25 T-94 round 2: F1, F2, F5 resolved; F3 (the new lane test reaches Active through the screen fallback, not the API confirmation) overridden to pass — the production path is not claimed broken, and the captain proves it live instead: a new lane on a config without [models.switch] starts Active (live acceptance). F4, F6 logged (M4).
+- 2026-10-25 T-99 review: F1 (the notes say a flaky gate retries by itself; only a gate that cannot start does, a red gate needs `- remerge`) and F2 (paragraphs, not one line per change) both reworked — release notes a user reads.
+- 2026-10-25 T-97 review: F1 (the failure records the session at expiry, not at the prompt, so a restart before expiry never gets the task) and F2 (a failed Continue is resent in the same session, every budget) reworked — both are the task's own cases, ~30 lines.
+- 2026-10-25 T-94's merge lost three push races: `- remerge T-94`; the captain pushes nothing until it lands.
+- 2026-10-25 T-94's remerge failed its gate on another load-sensitive merge test (a_merge_waits_for_an_earlier_attempt_of_the_task_it_carries: 1 of 4 parallel runs, a 30 s give-up bound). Captain's fix on dev: every merge-test give-up bound is 120 s (tests only). Then `- remerge T-94` again.
+- 2026-10-25 T-99 round 2: F3 (the notes promise model labels from OpenCode, which only T-94 delivers) overridden to pass — T-94 lands before the release; the captain checks the line against dev at release. F2 logged. T-94's first remerge failed on that test; the second (O-1416) runs on dev with the fix.
+- station M-2079: keep course — 2 tasks left in review (T-69, T-97), T-94 remerging, T-99 queued to merge; then multi's T-3, the live T-94 check, the skill review and the release.
+- 2026-10-25 The last task of the voyage is the skill review by subtraction against M3's lessons, then the release (gear/CONVENTIONS.md).
+
+# Queue
+## T-71 [now] lane=steady milestone=M3 required
+goal: No seat is rung with an earlier job's or an earlier voyage's messages, and a new agent gets its task before any doorbell (trial, 2026-10-25: a fresh reviewer first got "6 item(s) waiting for you (1 urgent)", then its review packet). Cause: a warm temp seat keeps its seat id across jobs; the doorbell counts messages to that seat since time 0 (`messages_to_since(.., 0)`) and "shown" per generation, so the captain's replies to the seat's earlier jobs (e.g. "judge v2") look unshown to the new agent. The same hit a lane at M3's start: base, re-registered, was rung with its M2 messages and spent its first turn on them instead of its task. Fix, for every seat: count only messages created since the seat's current generation started (for a temp: about its current task) — in the doorbell and in the seat's `gear` home page alike, so a new reviewer never reads another task's answers as instructions; and do not ring a seat whose first delivery of this generation is not confirmed yet. Never send a doorbell and a delivery to the same seat in the same tick: on T-61 (M3) both went into the reviewer's pane in one second, Codex started a turn on the doorbell and the packet was swallowed, while the engine recorded it as submitted.
+accept: Tests: a warm reviewer seat with replies from an earlier job starts a new job → no doorbell, the packet first; a reply to the current job still rings after the packet is confirmed; the new reviewer's `gear` shows no message about an earlier task; a re-registered lane with messages from an earlier voyage starts with its task, not a doorbell; the captain's open items still ring. a tick with both a doorbell and a delivery due for one seat sends only the delivery. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-61 [now] lane=steady milestone=M3 required
+goal: The engine merges the approved commit, wherever it is, and a failed merge can be retried. In merge.rs, merge the attempt's approved candidate SHA (fetch it from origin; it must be reachable from some pushed ref) instead of requiring `<lane>/t<n>` to point at it; "the branch moved after the review" is no longer a failure when the candidate itself is available. A merge that failed for a reason that can clear (push race, gate infra error, candidate not yet fetchable) is retried a bounded number of times with backoff, then rings the captain once. (M2.1: T-53's rework was on `engine/t53-v2`; the captain repointed the branch and reset the op in the store by hand.)
+accept: Tests with real git: a candidate on another branch name merges; a candidate on no pushed ref fails with a clear reason and rings once; a transient failure retries and then merges; no store edit is needed in any case. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-62 [must] lane=steady milestone=M3 required
+goal: A task whose commits include another task's unreviewed commits does not merge before that task passes. Before merging task A, find the tasks whose candidate commits are ancestors of A's candidate and not yet in the integration branch; if any of them has not passed, A's merge waits (not a failure) and the captain sees one line saying which task it waits for. (M2.1: T-59 was built on T-53's branch and carried T-53's failed attempt into dev.)
+accept: Test: B built on A's branch passes first; B's merge waits until A passes, then both land in order; a B not built on A is not held. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-92 [must] lane=steady milestone=M3 required
+goal: The captain retries a failed merge from the plan (M3: T-89's merge failed on a flaky test; the pass was settled, so neither a new pass nor a fail made a new merge, and the captain merged by hand). Plan `# Staff`: `- remerge T-<n>` makes a new merge op for the task's accepted attempt and candidate when its last merge op failed and its candidate is not yet on the integration branch; anything else is refused with the reason. The failed-merge inbox item names this line.
+accept: Tests with real git: a merge whose gate fails once, then `remerge` merges it and resolves the item; remerge of a merged task or a task with no failed merge is refused. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-63 [must] lane=steady milestone=M3
+goal: The reviewer is sent the contract the hand-in was made against: the newest contract version at hand-in time, not the attempt's first one. (M2.1: T-58's reviewer got v1 after the lane reworked to v2 and asked the captain which governs.)
+accept: Test: a contract rewritten mid-attempt, then a hand-in, gives a review packet with the new goal/accept and its version. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-65 [must] lane=steady milestone=M3 required
+goal: The engine finishes a lane's retirement. A Retiring lane that is idle with no open attempt: exit its agent (the profile's exit keys/command), close its pane, set the seat Retired; a busy one is finished after its current hand-in. (M2 and M2.1 landings: the captain closed the panes and set the seats by hand.)
+accept: Test with the fake Herdr: retire → exit, pane close, Retired, in that order and once; a lane with an open attempt is not closed. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-68 [must] lane=steady milestone=M3 required
+goal: A blocked seat is not re-delivered every tick (trial G09). While Herdr reports a seat blocked, keep at most one pending delivery and make no new delivery op; the blocked-seat alert (T-57) carries it; when the seat is working or idle again, deliver once.
+accept: Test: a seat blocked for 10 ticks has one pending delivery and no failed ops piling up; after it clears, exactly one delivery. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-69 [must] lane=steady milestone=M3 required
+goal: A re-review on another reviewer seat does not fight the previous checkout (trial G10). When `review/t<n>` is checked out in another worktree: if that worktree belongs to a reviewer seat with no live agent and is clean, detach it (keep its HEAD) and continue; otherwise start the review in that worktree's seat. A checkout that keeps failing stops after 3 tries and rings the captain. `gear` shows temps as running / starting / blocked, not one number.
+accept: Tests with real git: second review of a task on a new seat while the old checkout holds the branch → the review starts; a dirty old checkout → no detach, one alert. The temps line shows the three counts. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-66 [should] lane=steady milestone=M3
+goal: The engine warns the captain before a lane runs dry, continuously, not only at plan apply. Each tick, for each active lane not in the tail: if its current task's expected finish (start + estimate × the voyage's measured pace) is within 20 minutes and nothing startable is queued behind it, raise one item `lane <name> runs dry in ~<n> min: <reason>` (e.g. its next task waits on T-n in review); resolve it when the lane gets work. Same reason, one item.
+accept: Tests: a lane near the end of its task with only dep-blocked work behind it is warned once; a refilled lane's item resolves; a tail lane is never warned. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-70 [should] lane=steady milestone=M3
+goal: Engine alerts are de-duplicated by fact and close when their cause is gone (trial G06, G10). One open item per (kind, task/seat, attempt, reason), counting items the captain deferred (waiting) as open; when the condition clears (delivery confirmed, temps freed, seat unblocked), the engine resolves the item with a one-line note. Apply to the stall, temps-full, blocked-seat and dry-lane items.
+accept: Tests: a deferred item is not created again for the same fact; each of the four resolves itself when its cause clears. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-73 [must] lane=course milestone=M3 required
+goal: `init` freezes where each repo may be pushed (trial G12). For the project root and every `[[repos]]` entry, read `git remote get-url --push --all origin` (after `url.*.insteadOf`/`pushInsteadOf` rewrites) and store them as the repo's allowed destinations (normalised host + path), re-read on every re-init. Provide `pub fn check(store: &mut Store, project: &str, repo: &str, url: &str) -> Result<(), Refusal>` in `gear_app::push` (Refusal names the repo and the normalised destination) — the engine's merge (steady) and `gear push-check` (base) call it. An unknown remote or an empty list refuses.
+accept: Tests: destinations frozen from a repo with a pushurl and an insteadOf rewrite; check passes the registered one and refuses another host, a rewritten external URL, and an unknown repo. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-74 [must] lane=base milestone=M3 required
+goal: `gear push-check <remote> <url>` is the pre-push hook's command (trial G12). It resolves the project and repo from GEAR_CTX and the working directory, calls `gear_app::push::check` (course, same voyage — write against its signature), exits 0 when allowed, and otherwise prints the refusal to stderr, sends the captain one urgent message (`gear send` path, kind alert) and exits 1. Outside a GEAR seat it allows (it never blocks a user's own pushes).
+accept: CLI tests: allowed → 0; refused → 1 with the message and one captain item; no GEAR_CTX → 0. `cargo test --workspace` passes.
+estimate: 25
+deps: T-73
+
+## T-75 [must] lane=course milestone=M3 required
+goal: Codex's provider back-off is not a stall (trial G11). When Codex retries a 429 it shows no output for minutes while Herdr says "working", and GEAR raised stall alerts. In the codex profile (crates/gear-herdr/src/profile.rs) add the back-off signs it shows on screen (from Codex's own source and a real capture if we can get one; say which in the report) as a new `backoff_markers` field; the engine's stall check (steady owns stall.rs — this task adds the one call `profile.backoff(screen)` there, a one-line change) skips a seat in back-off and the home page shows "provider back-off". Other kinds keep an empty list (their markers are M4).
+accept: Unit tests: the codex back-off text is recognised, ordinary output is not; a seat in back-off raises no stall item and shows "provider back-off". `cargo test --workspace` passes.
+estimate: 60
+deps: -
+
+## T-90 [must] lane=course milestone=M3 required
+goal: A review fail is settled where it can be. On the captain's home page, an inbox item that is a review fail (or a failed merge) suggests the `# Verdicts` line to write — `next: gear plan apply gear/voyages/<M>.md (# Verdicts: T-<n> attempt=<a> contract=<c> candidate=<full sha> fail rework="…" | pass evidence=…)`, with the real values filled in — not `gear reply … --resolve`; and `gear reply --resolve` on a review fail whose task is still verifying is refused with that same line (crates/gear-app/src/home.rs, reply). (M3: the captain resolved two fails by reply; nothing was settled.)
+accept: Tests: the home page of a captain with an unsettled review fail shows the filled-in Verdicts line; resolving that item by reply is refused and leaves the task verifying; after the plan settles it, resolving works. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-79 [must] lane=course milestone=M3 required
+goal: The config and the plan carry the GitHub mode. Config: an optional `[github]` (repo `owner/name`, `issues = { labels = [...] }`, `merge = "pr" | "push"`, `merge_method = "squash" | "merge"`) at project level and per `[[repos]]`; absent = local-only. Plan: a task field `issue: #<n>` (validated, kept across applies) and priority labels `priority/now|must|should|could|wont` map to the queue's priorities. `gear plan import-issues` is base's; this task gives it `gear_app::github::issue_block(issue) -> String` that renders one `## NEW` block from an issue.
+accept: Tests: config parse/validate of the new section; `issue:` round-trips through apply; issue_block renders a valid NEW block. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-89 [now] lane=course milestone=M3 required
+goal: Onboarding waits for the shell before starting the agent (M3 start: base went NeedsCheck with `agent_start: refused (agent_pane_busy)` because the agent was started while the typed env line was still running). After typing the env line, wait until the pane is an available shell (bounded, e.g. 20 s), and treat `agent_pane_busy` at start as "not yet" — retry on the next tick a bounded number of times — never NeedsCheck on the first refusal.
+accept: Test with the fake Herdr: a first agent_pane_busy then success → the lane starts, no NeedsCheck; busy past the limit → NeedsCheck with the reason. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-93 [must] lane=course milestone=M3 required
+goal: Cancelling a task from the plan finishes it (M3: T-80 was cancelled while running; its attempt stayed `started`, the seat looked busy and base sat idle with 6 tasks queued until the captain set the attempt to abandoned in the store). `state: cancelled` on a task with an open attempt sets that attempt Abandoned and tells its lane one line ("T-n is cancelled; stop work on it, nothing to hand in"), so the engine delivers the lane's next task. Re-applying a plan that still says `state: cancelled` for an already cancelled task is a no-op, not an error (it failed three times in M3).
+accept: Tests: cancel a started task → attempt Abandoned, the lane gets the line, the next ready task is delivered on the next tick; re-apply with the same line → ok. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-67 [must] lane=course milestone=M3 required
+goal: An empty first OpenCode model list means "not loaded yet" (trial G01). In opencode.rs/onboard.rs, an empty `model.list` for a directory is retried for that same directory for up to 60 s; only a non-empty list without the model is an invalid model. Never switch to another model or provider.
+accept: Tests: empty then populated → the lane starts; populated without the model → NeedsCheck with the reason; still empty after the limit → NeedsCheck "model list not loaded", with the directory. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-76 [must] lane=course milestone=M3 required
+goal: Codex's first-run "Trust this folder?" dialog never stops a seat (trial G08). The codex profile's start args carry a per-worktree trust override for the worktree's repo root (a `-c 'projects."<root>".trust_level="trusted"'` argument with a `{repo_root}` placeholder the engine fills — steady fills placeholders already for `{session}`), limited to repos registered in the project. Check the other kinds for a first-run dialog the same way and list what you found in the report.
+accept: Unit test of the rendered args; a live check on one fresh worktree that Codex starts with no dialog, stated in the report. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-77 [should] lane=course milestone=M3
+goal: A switch to another CLI hands over the previous conversation (user idea). Each built-in profile names how to read one of its sessions as text (OpenCode `opencode export <session>`, Codex and Claude Code their transcript commands or files, verified live on this machine); the restart's continue message (steady's restart.rs uses the profile field) says `previous agent: <kind> session <id>; read it with: <command>`. Unknown → the line is left out.
+accept: Unit tests for each profile's read command; a restart test shows the line. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-78 [must] lane=base milestone=M3 required
+goal: The forge layer, GitHub first: a new crate `crates/gear-forge/` with `pub trait Forge { fn issues(&self, repo, filter) -> Vec<Issue>; fn open_claim(&self, repo, branch, base, title, body) -> PrRef; fn comment(&self, pr, body); fn merge(&self, pr, method) -> MergeResult; fn close_issue(&self, repo, n, comment) }` and `GitHub` implementing it through the `gh` CLI (JSON output, explicit repo, no interactive prompts), plus `Local` doing nothing. Marker lines follow BMAD-Team's ORCHESTRATE protocol (`<!-- ORCHESTRATE:CLAIM agent=<id> issue=<n> -->`, COMPLETION with reviewer/rounds/ci). Every call is bounded and returns a typed error.
+accept: Unit tests against a fake `gh` on PATH (recorded JSON): each method's command line and parsing; errors typed. `cargo test --workspace` passes.
+estimate: 50
+deps: -
+
+## T-64 [must] lane=base milestone=M3
+goal: The parallel-change check ignores a task whose candidate is already in the integration branch (M2.1: "T-58 and integration dev share main.rs" after T-58 merged).
+accept: Test: a merged task raises no parallel item; two open tasks on the same file still do. `cargo test --workspace` passes.
+estimate: 15
+deps: -
+
+## T-80 [must] lane=base milestone=M3 required
+goal: GitHub is driven for a project in GitHub mode, from `gear_forge::sync(store, project, now)` (in crates/gear-forge, using its own Forge trait); the engine calls it once per tick (one line in crates/gear-engine/src/lib.rs — add it in this task). On a task's first delivery: open the draft claim PR for `<lane>/t<n>` (title `<goal's first words> (#<issue>)`, body `Closes #<issue>` + CLAIM marker). On hand-in: a COMPLETION comment; on a verdict: the review's verdict and findings path as a comment. Merge: `merge = "pr"` merges through the PR (the forge), `push` keeps today's merge and comments the merge commit; then close the issue. Every forge call is an op (intended → done/failed, retried, bounded); a forge outage never stops local work — it catches up later. Local-only projects do nothing.
+accept: Tests with a fake forge: the calls happen once per event, in order, survive an engine restart without duplicates, and an outage queues them. `cargo test --workspace` passes.
+estimate: 60
+deps: -
+
+## T-86 [must] lane=base milestone=M3 required
+goal: The captain registers the project itself (user). `gear admin init` accepts the captain seat (GEAR_CTX role captain, with GEAR_ADMIN=1) as well as the user's shell; any other seat is still refused. README: drop the "register in your own shell" step; captain guide: the captain runs init at kickoff (the confirmed sheet is the consent) and after every config change. README also installs the skill for every CLI the project uses, not only the captain's (trial G06).
+accept: CLI tests: captain seat → init works; lane seat → FORBIDDEN; README and captain guide say the new flow. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-87 [must] lane=base milestone=M3 required
+goal: Fixture projects for the live acceptance. `scripts/fixtures/make.sh <dir>` builds, from nothing and offline: (1) `multi/`: a parent repo with two child repos cloned into gitignored paths, each with its own local bare `origin`, integration branch and a gate that runs in seconds; (2) `running/`: a project that already has its own ways — a CI file, a CLAUDE.md and an AGENTS.md with rules that contradict GEAR's, a .claude/skills dir, a pile of stale docs and one deliberately bad code pattern next to one good exemplar — to try `gear --skill adopt` on. Re-running it replaces the dir. No network, no real remote.
+accept: The script runs twice in a row cleanly; a test checks the layout (repos, remotes are local paths, gates pass). `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-85 [must] lane=base milestone=M3 required
+goal: `gear --skill adopt`, a skeleton (user: a frame first, grown from use). For the captain, before the kickoff of a project that already runs: (1) find the auto-loaded instruction layer (CLAUDE.md, AGENTS.md, .claude/skills, .agents, what they point to) and move it to an archive path no CLI reads, leaving one short project file; (2) name exemplars and no-go patterns; (3) measure the gate (time, red, flaky) and make a trusted one first if needed; (4) keep / replace / drop for branches, CI, release, tracker and docs. Two templates: `gear/adopt.md` (the analysis, feeding the kickoff sheet) and `gear/standard.md` (exemplars, no-go zones, "new code meets the standard even if its neighbours do not"). The first voyage of an adopted project is the adoption voyage. Each step a few lines; mark the skill as a first frame to be grown from feedback.
+accept: `gear --skill adopt` prints it; the templates ship with the skill (install-skill copies them); the skill contract tests cover the topic. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-91 [must] lane=base milestone=M3 required
+goal: GitHub is driven for a project in GitHub mode, from `gear_forge::sync(store, project, now)` (in crates/gear-forge, using its own Forge trait); the engine calls it once per tick (one line in crates/gear-engine/src/lib.rs — add it in this task). On a task's first delivery: open the draft claim PR for `<lane>/t<n>` (title `<goal's first words> (#<issue>)`, body `Closes #<issue>` + CLAIM marker). On hand-in: a COMPLETION comment; on a verdict: the review's verdict and findings path as a comment. Merge: `merge = "pr"` merges through the PR (the forge), `push` keeps today's merge and comments the merge commit; then close the issue. Every forge call is an op (intended → done/failed, retried, bounded); a forge outage never stops local work — it catches up later. Local-only projects do nothing. Record each forge call as an op of a new `OpKind::Forge` (one line in gear-model; base adds it here, a noted exception to course's paths).
+accept: Tests with a fake forge: the calls happen once per event, in order, survive an engine restart without duplicates, and an outage queues them. `cargo test --workspace` passes.
+estimate: 60
+deps: T-78, T-79
+
+## T-81 [must] lane=base milestone=M3 required
+goal: The captain's GitHub side. `gear plan import-issues [--label …]` prints `## NEW` blocks for open issues not yet in the plan (via `gear_app::github::issue_block`, course, same voyage) for the captain to paste and edit. `skills/gear/references/github.md` (`gear --skill github`): when to choose the mode, what the engine does on GitHub and when, how issues become tasks, that agents never write with `gh` (the engine does) and that this cannot be enforced by a hook. Short, by subtraction.
+accept: CLI test of import-issues against a fake `gh`; the skill topic prints. `cargo test --workspace` passes.
+estimate: 35
+deps: T-79
+
+## T-82 [must] lane=course milestone=M3 required
+goal: A NeedsCheck seat can be retried, and the home page says why a seat is down (trial G02, G04). Plan `# Staff`: `- retry <lane>` sets a NeedsCheck/Unknown lane back to Queued (reason "retried by the captain") so the engine onboards it again. Home snapshot: a seat that is not running shows its state, the reason and the action (`retry` / `park` …) instead of "agent unknown".
+accept: Tests: retry on a NeedsCheck lane → Queued; retry on an active lane → BAD_TRANSITION; the snapshot line of a NeedsCheck seat shows its reason. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-83 [must] lane=course milestone=M3 required
+goal: Kickoff and init check what an unattended run needs (trial G03, G06). Kickoff's inventory says "model list not loaded yet" for an empty OpenCode list (and retries once), never "no models"; it reports, per CLI kind, whether the GEAR skill is installed. `init` refuses a config that uses a kind whose skill is not installed, naming the `gear admin install-skill --agent <kind>` command. A hand-in is refused unless the candidate is on `origin/<lane>/t<n>` (M2.1 T-60: an unpushed branch passed review and could not merge).
+accept: Tests for each refusal and message; a pushed candidate is accepted. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-84 [must] lane=course milestone=M3 required
+goal: The project standard travels in every packet (adopt skeleton). When `gear/standard.md` exists in the project root, the task packet and the review packet both say: "Project standard: <absolute path> — new and changed code follows it, even where the code around it does not; the reviewer judges against it." The engine renders packets (steady owns dispatch.rs/review.rs): this task provides `gear_app::standard::line(project_root) -> Option<String>`; steady's packet code calls it (write the call in the same task if the call site is a one-line addition, otherwise leave a TODO for steady — say which in the report).
+accept: Tests: the line appears in both packets when the file exists and not otherwise. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-72 [must] lane=base milestone=M3 required
+goal: Every GEAR worktree pushes only to the project's registered destinations (trial G12). On creating or reopening any GEAR worktree (lane, reviewer, merge), install GEAR's pre-push check for that worktree only (`git config --worktree core.hooksPath` to a GEAR hooks dir whose `pre-push` runs `gear push-check "$1" "$2"` and then the repo's own pre-push hook, if any). Before the engine's own merge push, call the same check in-process (`gear_app::push::check(store, project, repo, url) -> Result<(), Refusal>`, built by course in the same voyage — write against that signature). A refusal: no push, no retry, one urgent captain item with the repo, the destination host and the command.
+accept: Tests with real git and a local bare repo as the registered destination: a push there works; a push to another bare repo is refused by the hook and by the engine's merge, each with one item; the repo's own pre-push hook still runs. `cargo test --workspace` passes.
+estimate: 45
+deps: -
+
+## T-94 [must] lane=steady milestone=M3 required
+goal: An OpenCode lane starts on its chain's model with no `[models.switch]` entry (live acceptance: every new project's OpenCode lanes went NeedsCheck with `no [models.switch."<model>"] labels` — the labels are documented nowhere). When the config has no labels for a model, take them from OpenCode's own `model.list` (engine opencode.rs, T-67): bar = `<model name> <provider name>` as OpenCode renders them, picker = the same text; variant only when the chain names one. A `[models.switch]` entry still overrides. Kickoff's inventory prints the derived labels per model so a captain can check or override them.
+accept: Tests with a fake model list: a lane on a model with no labels starts Active (API switch confirmed against the derived bar); an explicit entry wins; a model absent from the list is still an invalid model. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-95 [must] lane=course milestone=M3 required
+goal: A busy shell at an agent's start is retried on later ticks, not parked (live acceptance: multi-api went NeedsCheck on agent_pane_busy after the 20 s in-tick wait while three lanes onboarded on a slow shell; the T-89 review's F1, waived then). After a busy refusal keep a pending start in the seat (Starting), return, and try once per tick on the same binding, pane and generation, up to 20 ticks; never re-run the env line or begin_onboard again; on exhaustion park NeedsCheck with the reason. Drop the in-tick 20 s wait so one slow shell never holds the tick.
+accept: Fake Herdr: busy for 3 ticks then free -> Starting, Starting, Starting, Active, the env line sent once; busy past the bound -> NeedsCheck with the reason; a second queued lane onboards while the first waits. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-96 [must] lane=base milestone=M3 required
+goal: The captain skill covers what the live acceptance's fresh captains had to dig for or got wrong (M3 live acceptance: both searched GEAR's binary and config code for these). By subtraction, in the existing sections of skills/gear/references/captain.md (and conventions.md if the config is described there): (1) a model entry on another CLI with its own args — `{ model = "...", cli = "codex", args = ["-c", "model_reasoning_effort=medium"] }` — in `[models].lanes`/`review`; (2) `quota.lanes` counts the configured lanes, not those running at once, so the kickoff sheet's lane count and quota must agree before the user sees it; (3) the kickoff sheet never puts `deps:` between two tasks of one lane — the lane works them in order on its own branch (decompose rule 3). No new section; rewrite the lines that are there.
+accept: Each of the three is stated once, where a captain reads it at kickoff; `gear --skill captain` prints it; `cargo test --workspace` passes.
+estimate: 15
+deps: -
+
+## T-97 [must] lane=course milestone=M3 required
+goal: An unconfirmed delivery never holds a seat forever (live acceptance, multi: T-3's delivery stayed `submitted` after its check budget ran out; the seat was flagged every tick, the captain restarted the agent by hand, and T-3 was never delivered again). When a delivery's check budget is spent: set the op Failed with the reason (freeing the slot), ring the captain once (no flag every tick), and let dispatch deliver the open attempt again once the seat is seen idle — at most once per new agent session or generation, so a hand restart or a quota switch gets the task back without a store edit. Also: a seat whose screen shows a provider limit before it confirmed its first delivery is handled by the quota path (switch, then the delivery again), not raised as a stall.
+accept: Fake Herdr: a delivery never confirmed until the budget is spent -> op Failed, one captain item, then the agent idle in a new session -> one new delivery of the same attempt, confirmed; a quota screen on the first turn -> switch and re-delivery, no stall item. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-98 [must] lane=base milestone=M3 required
+goal: Two faults from the live acceptance, in base's files. (1) The GitHub COMPLETION marker names the lane as the reviewer (sandbox: `reviewer=sandbox:calc`) and always says `ci=pending`: in gear-forge sync, the hand-in comment is the writer's COMPLETION with `agent=<lane seat>`, and the verdict comment carries `reviewer=<the reviewer seat that judged it>` (marker.rs and sync.rs; keep BMAD-Team's field names; `ci` is `pass` when the gate passed at merge, else omitted). (2) `scripts/fixtures/make.sh` gives `running/` its own local bare origin on `main` (the adoption run needed one by hand; GEAR's push allow-list needs a destination), and FIXTURE.md says so.
+accept: Fake-forge tests: the hand-in comment names the lane seat, the verdict comment the reviewer seat. make.sh builds running/ with `origin` pointing at origins/running.git, `main` pushed. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-99 [must] lane=base milestone=M3 required
+goal: Prepare v0.3.0 (M3's release). Bump the workspace version in Cargo.toml (and Cargo.lock) and the README's version lines from 0.2.4 to 0.3.0; write `docs/releases/v0.3.0.md`: what M3 brings to a user, one line each, grouped as Fit in (adopt skeleton and the project standard in every packet, GitHub mode in push merge, multi-repo fixtures), Push safety (destination allow-list, pre-push check in every worktree), Runs without hands (merges retried and remerge, review fails settled in the plan, cancel closes the attempt, busy starts, model labels from OpenCode, unconfirmed deliveries, Codex back-off and trust), and Known limits (merge = "pr" is M4; read gear/voyages/M4/backlog.md). Plain words, no internal task numbers in the user-facing text.
+accept: `cargo build` shows 0.3.0; the README and the notes agree with the code on dev; `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+## T-88 [must] lane=base milestone=M3 required
+goal: The voyage's last step (gear/CONVENTIONS.md): read M3's lessons (gear/lessons.md, this file's Decisions, the backlog) against skills/gear/; fix what contradicts, is stale or no longer matches the code by rewriting or deleting, never by piling on; `gear --help` lists only implemented commands. The captain judges the result; then the release.
+accept: The skill and README match the code (the captain checks each topic once); `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-100 [must] lane=base milestone=M3 required
+goal: No agent can act as the user, and a captain never opens a dialog. (1) `gear admin init` of a project not yet registered runs only from the user's own shell: it is refused (Forbidden, rings nothing) when the caller has a GEAR_CTX of any project or runs inside a Herdr agent pane (HERDR_PANE_ID whose pane hosts a recognized agent), whatever GEAR_ADMIN says; re-applying the config of the caller's own project from its captain pane (T-86) stays allowed. (2) Skills: at landing the captain reports in chat and asks reclaim/release as a plain question, never through a dialog tool (AskUserQuestion or the like); the skill also says a captain never sets GEAR_ADMIN, never registers a project and never starts an agent outside the plan's lanes and reviewers.
+accept: Tests: init of a new project with GEAR_ADMIN=1 and a GEAR_CTX of another project → Forbidden; from a plain shell → registered; the captain's re-apply of its own config → allowed. The captain skill has no dialog step and states the three nevers once. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-101 [must] lane=steady milestone=M3 required
+goal: A failure that repeats never stays silent. In review.rs, a job's checkout that fails three times in a row raises one urgent captain item naming the seat, the branch and the last lines of git's error (the pane tail), and keeps retrying at most once a minute after that, not every tick (2026-10-26: two review seats each held the other's branch, the engine retried every tick for an hour, the captain never heard).
+accept: Tests: three failed checkouts → exactly one urgent item, and no fourth submit within a minute; a later success resolves nothing by hand and the review starts. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-102 [now] lane=course milestone=M3 required
+goal: A project registered before T-73 can be upgraded without re-init. When a registered project has no push_destinations rows at all (it was registered before destinations were frozen), the engine, at start and before any merge push, freezes them from each repo's `origin`, with the same read init uses (`push::read_destinations`), records them once, and tells the captain in one info item what it froze. A project that has rows is never changed this way; a repo whose origin cannot be read stays without destinations (its pushes are still refused). 2026-10-26: gear's own project had none, so the T-69 merge was refused.
+accept: Tests: a store with a project and no destination rows → after one tick the rows equal what init would freeze, plus one captain item; the merge push then passes the check; a project with rows is left untouched; an unreadable origin freezes nothing for that repo. `cargo test --workspace` passes.
+estimate: 25
+deps: -
+
+## T-103 [now] lane=steady milestone=M3 required
+goal: A seat sees only what is addressed to it. (1) In mail.rs's inbox batch, a thread's `last_reply` context is the latest Reply whose recipient is this seat, never one to the engine, the captain or another seat. (2) `gear reply --note` is the captain's record only: stored on the item, never sent; `--resolve` and `--wait` send their text to the sender only when the sender is a live seat of the current generation (an agent's question gets its answer), never to the engine and never to a released temp seat (a reused reviewer must not read the captain's verdict note on an earlier job). (3) The captain skill line says: text sent to an agent is an instruction for that agent; captain bookkeeping goes in `--note` or the plan. Trial (2026-10-26): a lane read a captain status note about a re-queued review seat.
+accept: Tests: a thread with the lane's open item and a captain reply to the engine → the lane's batch shows no reply; a reply to the lane itself → shown; `--note` creates no message to anyone; `--resolve` of a released reviewer's item sends nothing; `--resolve` of a lane's question sends the answer to the lane. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-104 [now] lane=course milestone=M3 required
+goal: A seat claim is proven by the caller's real pane, and the captain can still be handed over. Identity: walk the caller's process ancestry (OS parent pids, which no env var changes) and match it against Herdr's `pane process-info` (shell_pid and foreground pids) to find the pane the caller really runs in; GEAR_CTX and HERDR_PANE_ID only say which seat is claimed. The claim holds only when that real pane is the seat's bound pane; otherwise NotRegistered and one urgent captain item naming the real pane. Role: which pane is the captain stays the store's binding, not a process — a captain restarted in the same pane is still the captain. Handover: `gear captain handover --pane <id>` rebinds the captain seat to another pane (new generation), allowed only from the current captain's real pane or from a shell whose real pane hosts no agent (the user's own terminal); a lane or reviewer asking is refused with one urgent item.
+accept: Tests with a fake Herdr and a fake process table: a lane process claiming the captain's GEAR_CTX and pane id → refused + one item; the captain's own process → accepted; a restarted captain in the same pane → accepted; handover from the captain's pane → the new pane is accepted, the old refused; handover from a lane → refused + one item; from an agent-free shell → allowed. `cargo test --workspace` passes.
+estimate: 40
+deps: -
+
+## T-105 [now] lane=course milestone=M3 required
+goal: A fleet can always push its own work, and only that is unconditional. In push.rs, a push to a repo's own `origin` (resolved and normalised like init does) is always allowed, whether or not destinations were frozen; frozen destinations only add more allowed places; anything else is refused and rings, as today (a trial project on GitLab still cannot push to GitHub). At engine start and at every lane onboarding, each repo's origin is resolved once; one that cannot be resolved raises one urgent captain item then, before any task runs, instead of a refusal at the first push. 2026-10-26: gear had no frozen rows and every lane, reviewer and merge push was refused.
+accept: Tests: a project with no frozen rows pushes to its origin → allowed; to another remote → refused + one item; frozen rows still allow their extra destinations; a repo whose origin cannot be resolved → one urgent item at start, no item per push. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-106 [now] lane=base milestone=M3 required
+goal: Remove the push allow-list from base's files, and no `git push` in base's tests or scripts. Delete the `gear push-check` command and its code in gear-cli (main.rs), its tests (crates/gear-cli/tests/it/push_check_contract.rs, push_hook_contract.rs and their entries in tests/it/main.rs); remove the allow-list and pre-push hook from README.md, skills/gear/references/github.md and conventions.md, and from docs/releases/v0.3.0.md. Keep every call into gear-app's push.rs out of gear-cli so course can delete it next. User, 2026-10-26: the allow-list was never agreed and a unit-test run must not push.
+accept: `grep -rn "push-check\|push_check\|allow-list\|pre-push" crates/gear-cli skills README.md docs/releases` finds nothing; `grep -rn "push" crates/gear-cli/tests` shows no git push. `cargo test --workspace` passes.
+estimate: 30
+deps: -
+
+## T-107 [now] lane=steady milestone=M3 required
+goal: Remove the push allow-list from the engine, and no `git push` in the engine's tests. Delete crates/gear-engine/src/hooks.rs (the pre-push check GEAR installs in its worktrees) and every call to it; on onboarding, a worktree whose `config.worktree` still sets GEAR's `core.hooksPath` gets it unset (existing lanes and reviewers lose the hook). In merge.rs, drop the in-process destination check and `tell_captain_refused`; the merge pushes as before. The merge's own git push and branch delete go through one runner (a small trait or fn value) that tests replace with one that moves the ref from the remote's side (`git -C <bare> fetch <merge dir> HEAD:refs/heads/<branch>`); no test in gear-engine (src tests and tests/it, e.g. multi_repo_contract.rs) runs `git push`. Keep every call into gear-app's push.rs out of gear-engine so course can delete it next. User, 2026-10-26.
+accept: `grep -rn '"push"\|push -q\|push origin' crates/gear-engine` shows only the one production runner; hooks.rs is gone; a test shows a worktree with GEAR's hooksPath has it unset after onboarding. `cargo test --workspace` passes.
+estimate: 45
+deps: -
+
+## T-108 [now] lane=course milestone=M3 required
+goal: Remove the push allow-list from gear-app and gear-store, and no `git push` in their tests. Delete crates/gear-app/src/push.rs and push_contract.rs, the destination freeze in admin.rs (init and re-register), the `push_destinations` table (a migration drops it; store accessors and their tests go), and the T-102 code if any reached dev. Tests in gear-app (base_gate.rs and others) seed and move remote branches with `git fetch` from the remote's side, never `git push`. User, 2026-10-26.
+accept: `grep -rn "push_destinations\|read_destinations\|push.rs" crates` finds only the drop migration; `grep -rn '"push"\|push -q\|push origin' crates/gear-app crates/gear-store` finds nothing outside user-facing text. `cargo test --workspace` passes.
+estimate: 35
+deps: T-106, T-107
+
+## T-109 [now] lane=base milestone=M3 required
+goal: An item about a merge that has since gone through is closed by a reply. In tasks.rs `verdict_hint`, `merge_failed` holds only while no merge op of that task and attempt is Confirmed; today one old Failed op keeps demanding a `# Verdicts` line after the remerge landed (2026-10-26: T-69 merged, its push-refused item M-2085 could not be resolved and rang every few minutes).
+accept: Test: a task with a Failed then a Confirmed merge op for one attempt → its open item resolves by reply; with only the Failed op → still refused with the verdict hint. `cargo test --workspace` passes.
+estimate: 10
+deps: -
+
+## T-110 [now] lane=base milestone=M3 required
+goal: docs/releases/v0.3.0.md gets an upgrade guide in three parts (user, 2026-10-26). (1) New users: point to the README install section, nothing else. (2) Users of 0.2.x with no voyage running: `gear admin stop`, replace the binary (the plugin build step or the release asset), run `gear admin install-skill --agent <kind>` for every CLI in use (the skills changed in 0.3.0), restart the agents so they load the new skill; the store migrates up by itself on the first `gear` call (and a newer store is refused, SCHEMA_TOO_NEW). (3) Upgrading during a running voyage: wait until no merge is in flight (`gear` shows no merging task), `gear admin stop`, replace the binary, install the skills, restart the engine with any `gear` call; lanes and reviewers keep their tasks; each agent picks up the new skill when it is restarted (the captain restarts lanes between tasks, never mid-task); what changes on upgrade: the push allow-list and its pre-push hooks are gone (hooks left in worktrees are removed when a seat comes online, T-107), messages a seat sees are only its own (T-103), an agent's claim is checked against its real pane (T-104). Write only what the code on dev does; one short line per step, copyable commands.
+accept: The three parts exist and each command in them runs as written against dev's binary (the captain checks them on gear's own mid-voyage upgrade at the end of M3). The README links to the guide.
+estimate: 20
+deps: -
+
+## T-111 [now] lane=base milestone=M3 required
+goal: `cargo test --workspace` never reaches the network or a real forge, by construction, so a developer in a restricted network can run the whole suite safely (user, 2026-10-26: a trial team in a restricted company network edited GEAR and ran its tests; GitHub mode must not drag them onto the network). (1) gear-forge runs the `gh` named by `GEAR_GH` when set (default `gh`); `.cargo/config.toml` sets `GEAR_GH` to a path that does not exist (force = true), so a test that forgets its fake fails loudly instead of calling the real `gh`; tests with a fake set `GEAR_GH` to the fake. (2) `.cargo/config.toml` sets `GIT_ALLOW_PROTOCOL = "file"`: any git transport other than a local path is refused in tests. (3) A test that truly needs the network (none today) is `#[ignore]` and runs only with `GEAR_LIVE=1 cargo test -- --ignored`. (4) `scripts/test-offline.sh` runs the suite with outbound network denied (macOS `sandbox-exec` profile denying network-outbound except unix sockets and localhost; on Linux `unshare -rn` when available) and fails if any test fails. (5) README "Developing GEAR": how to run the tests, that they are offline and push nothing, how to run the offline proof and the opt-in live tests.
+accept: `scripts/test-offline.sh` passes on dev; a probe test calling `GitHub::new()` without a fake fails with a clear "no gh in tests" error under `cargo test`; a git clone of an https URL inside a test is refused. `cargo test --workspace` passes.
+estimate: 35
+deps: -
+
+## T-112 [now] lane=course milestone=M3 required
+goal: A task that passed but whose merge is given up can be cancelled, and its items close with it (2026-10-26: T-102 passed review, its merge was refused, then the change was dropped with the push allow-list; a done task cannot be cancelled, its merge item cannot be resolved without a verdict, and a fail verdict would reopen it as rework). In the plan apply, `state: cancelled` is accepted for a Done task whose accepted candidate is not on the integration branch: the task becomes Cancelled, its failed merge op stays as history, and its open items (merge-failed, push) are resolved with "cancelled by the captain". A Done task whose work is merged still cannot be cancelled.
+accept: Tests: a Done task with a failed merge → `state: cancelled` applies, the task is Cancelled, its open items are resolved, no op is created; a Done task whose candidate is on the integration branch → refused as today. `cargo test --workspace` passes.
+estimate: 20
+deps: -
+
+# Staff

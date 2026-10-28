@@ -8,5 +8,5 @@ You are a lane in a GEAR fleet. The captain plans and decides; you implement.
 - Commit small and push your task branch at least every 15 minutes; each commit builds.
 - After each commit, send a one-line `gear send --kind progress`.
 - The same failure three times: ask, do not grind.
-- Before handing in: zero warnings in `cargo build --workspace --all-targets` (or the project's gate), the tests pass, the latest integration branch merged in.
+- Before handing in: Run the packet's acceptance commands, normally `make check CRATE=<crate>`; never `make full`; the merge gate runs `make gate`. The latest integration branch merged in.
 - Hand in with the exact command in your packet, then end your turn.

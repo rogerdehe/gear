@@ -363,7 +363,9 @@ pub struct TempsSection {
     pub profile: String,
 }
 
-/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3.
+/// Defaults: integration "dev", release "main", staging "" (none), review_max_rounds 3,
+/// the branches GEAR itself uses (T-252), gate "" (none: a project names its
+/// own gate, T-255).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Conventions {
@@ -372,8 +374,20 @@ pub struct Conventions {
     pub staging: String,
     pub review_max_rounds: u32,
     /// What the engine runs in its integration worktree after a merge, before
-    /// it pushes (T-12).
+    /// it pushes (T-12). No default (T-255): GEAR cannot know another stack's
+    /// build + test command, so the project names its own — a `[[repos]]`
+    /// entry may name its gate instead.
     pub gate: String,
+    /// The branch a task's work goes on (T-252): a template with `{project}`,
+    /// `{lane}` and `{n}` filled in. Default `{lane}/t{n}`.
+    pub task_branch: String,
+    /// The branch a task is reviewed on (T-252), expanded like
+    /// `task_branch`. Default `review/t{n}`.
+    pub review_branch: String,
+    /// The branch of a seat's own worktree (T-252), with `{project}` and
+    /// `{seat}` filled in: the merge worktree is seat `merge`, so Herdr names
+    /// the worktree `<project>-<seat>`. Default `{project}/{seat}`.
+    pub seat_branch: String,
 }
 
 impl Default for Conventions {
@@ -383,10 +397,16 @@ impl Default for Conventions {
             release: "main".to_string(),
             staging: String::new(),
             review_max_rounds: 3,
-            gate: "cargo build --workspace --all-targets && cargo test --workspace".to_string(),
+            gate: String::new(),
+            task_branch: gear_model::branch::TASK_BRANCH.to_string(),
+            review_branch: gear_model::branch::REVIEW_BRANCH.to_string(),
+            seat_branch: gear_model::branch::SEAT_BRANCH.to_string(),
         }
     }
 }
+
+/// The finding for a project that does not name its gate (T-255).
+const GATE_MISSING: &str = "name the command the merge gate runs in the integration worktree; it must exit non-zero on any failure (e.g. `make gate`, `go test ./...`)";
 
 /// What to do when an agent stops on a provider limit (17 §0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
@@ -682,6 +702,20 @@ pub fn latest(store: &mut Store, project: &str) -> GearResult<ProjectConfig> {
     parse(&row.config_toml)
 }
 
+/// The project's `[conventions]` for a reader that only needs the branch names
+/// the engine cuts (T-252): the defaults when the project's config text is
+/// empty (a store written before a config was stored) or does not parse. A
+/// name is never a gate — the merge is checked on the candidate, not on the
+/// branch it came from — so a reader here never stops a hand-in over it.
+pub fn conventions_or_default(store: &mut Store, project: &str) -> GearResult<Conventions> {
+    let row = store.read(|tx| tx.get_project(project))?;
+    Ok(row
+        .filter(|row| !row.config_toml.trim().is_empty())
+        .and_then(|row| parse(&row.config_toml).ok())
+        .map(|config| config.conventions)
+        .unwrap_or_default())
+}
+
 /// The profile table of a project (T-31): `base` (the built-ins) with the
 /// project's `[profiles.<name>]` on top — a field left out keeps the value the
 /// profile already has. A name that is not a built-in starts from the
@@ -733,6 +767,13 @@ pub fn profile_table(
 /// - every `[[repos]]` path: relative to `project.repo` (not absolute, no `..`);
 /// - every `[[repos]]` gate: not empty and no TODO; its integration and
 ///   release: non-empty and different (its own, else `[conventions]`'s);
+/// - a gate: no default (T-255), so `conventions.gate` must be named unless
+///   every repo the project runs work in has its own — a repo without one (the
+///   root among them, when a lane works there or it is the whole project) runs
+///   `conventions.gate`; `conventions.gate` is not left as a TODO either;
+/// - a gate (`conventions.gate` or a repo's own) that pipes into another
+///   command without `pipefail` (T-242): the pipeline's exit status is its last
+///   command's, so a failure in an earlier stage can pass;
 /// - a lane's `repo` names one of the `[[repos]]` entries;
 /// - `conventions.integration` and `release` non-empty and different; `staging`
 ///   if non-empty differs from both;
@@ -743,8 +784,35 @@ pub fn profile_table(
 /// - a non-empty `models.review` holds at least one model different from every
 ///   lane's primary (`models[0]`, else `models.lanes[0]`), so the reviewer
 ///   never runs the model it reviews;
-/// - `models.quota_reset_h ≥ 1`.
+/// - `models.quota_reset_h ≥ 1`;
+/// - an entry whose CLI is `claude` (its own, else the kind of the seat that
+///   runs it) names a bare model id or alias, never `provider/model` (T-235).
 /// Empty chains are valid: models are not managed by GEAR then.
+/// The finding for a gate that pipes without `pipefail` (T-242).
+const GATE_PIPE: &str = "the gate pipes into another command, so its exit status is the last command's and a failure can pass: drop the pipe or start with `set -o pipefail;`";
+
+/// A gate that pipes into another command reports only that command's exit
+/// status: a failure in an earlier stage passes (T-242). `||` is not a pipe,
+/// and `pipefail` makes the pipeline report the failing stage.
+fn gate_pipes_without_pipefail(gate: &str) -> bool {
+    if gate.contains("pipefail") {
+        return false;
+    }
+    let bytes = gate.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'|' {
+            if bytes.get(index + 1) == Some(&b'|') {
+                index += 2;
+                continue;
+            }
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
 
@@ -762,13 +830,37 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         }
     }
 
-    // ---- the gate runs before every merge: it must be the project's own
-    // build + test command, never left as the skeleton's TODO.
-    if cfg.conventions.gate.trim().is_empty() || cfg.conventions.gate.contains("TODO") {
+    // ---- the gate runs before every merge in the integration worktree, and
+    // it is the project's own command: GEAR ships no default (T-255), because
+    // a default that fits one stack's build leaves another project with a
+    // gate that cannot run. A `[[repos]]` entry may name its own gate; the
+    // root repo, and every entry without one, run `conventions.gate`, so when
+    // that is empty the project must still name a gate for them. The root
+    // counts only when it is the whole project, or when a lane works in it
+    // (a lane without `repo`, or naming a repo that is not there): with no
+    // work of its own it never runs a gate (M-4220).
+    if cfg.conventions.gate.contains("TODO") {
         issues.push(issue(
             "conventions.gate",
             "conventions.gate must be your build + test command (it runs before every merge)".to_string(),
         ));
+    }
+    let gate_missing = cfg.conventions.gate.trim().is_empty();
+    let repo_without_own_gate = cfg
+        .repos
+        .iter()
+        .any(|repo| repo.gate.as_deref().is_none_or(|gate| gate.trim().is_empty()));
+    let root_has_work = cfg.repos.is_empty()
+        || cfg.lanes.iter().any(|lane| {
+            lane.repo
+                .as_deref()
+                .is_none_or(|name| !cfg.repos.iter().any(|repo| repo.name == name))
+        });
+    if gate_missing && (root_has_work || repo_without_own_gate) {
+        issues.push(issue("conventions.gate", GATE_MISSING.to_string()));
+    }
+    if gate_pipes_without_pipefail(&cfg.conventions.gate) {
+        issues.push(issue("conventions.gate", GATE_PIPE.to_string()));
     }
 
     // ---- quota policy: a fallback needs a next model (L-74). A one-model
@@ -1010,6 +1102,9 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
                     "the gate must be the repo's own build + test command (it runs before every merge in that repo)".to_string(),
                 ));
             }
+            if gate_pipes_without_pipefail(gate) {
+                issues.push(issue(&format!("repos.{}.gate", repo.name), GATE_PIPE.to_string()));
+            }
         }
     }
 
@@ -1049,6 +1144,65 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
             issues.push(issue(
                 "conventions.staging",
                 format!("the staging branch must differ from {other:?}"),
+            ));
+        }
+    }
+
+    // ---- the branch templates (T-252): the branch names GEAR cuts and
+    // checks. A template is expanded with its placeholders; anything else stays
+    // a literal brace and git refuses the branch, so each is checked here — on
+    // a sample — rather than when a lane cannot push.
+    let templates: [(&str, &str, &str, &[&str]); 3] = [
+        // the field, the template, the placeholder it must name, the ones it
+        // may name
+        (
+            "conventions.task_branch",
+            &conventions.task_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.review_branch",
+            &conventions.review_branch,
+            "n",
+            &["project", "lane", "n"],
+        ),
+        (
+            "conventions.seat_branch",
+            &conventions.seat_branch,
+            "seat",
+            &["project", "seat"],
+        ),
+    ];
+    let mut usable = [false; 3];
+    for (index, (field, template, required, allowed)) in templates.iter().enumerate() {
+        let sample = if *required == "seat" {
+            gear_model::branch::expand_seat(template, SAMPLE_PROJECT, SAMPLE_SEAT)
+        } else {
+            gear_model::branch::expand(template, SAMPLE_PROJECT, SAMPLE_LANE, SAMPLE_TASK)
+        };
+        usable[index] =
+            branch_template_issues(field, template, required, allowed, &sample, &mut issues);
+    }
+    if usable[0] && usable[1] {
+        let task = gear_model::branch::expand(
+            &conventions.task_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        let review = gear_model::branch::expand(
+            &conventions.review_branch,
+            SAMPLE_PROJECT,
+            SAMPLE_LANE,
+            SAMPLE_TASK,
+        );
+        if task == review {
+            issues.push(issue(
+                "conventions.review_branch",
+                format!(
+                    "the review branch {review:?} is the same name as the task branch: a task needs a branch for its work and another for its review"
+                ),
             ));
         }
     }
@@ -1121,6 +1275,33 @@ pub fn validate(cfg: &ProjectConfig) -> Vec<ConfigIssue> {
         ));
     }
 
+    // ---- the claude CLI takes a bare model id or alias, never a
+    // `provider/model` one (T-235): `anthropic/claude-sonnet-5-5` is refused
+    // by the CLI itself, which costs a review round to find out. The CLI of
+    // an entry is its own, else the kind of the seat that runs it.
+    let lane_kinds: Vec<&str> = cfg.lanes.iter().map(|lane| lane.kind.trim()).collect();
+    let temps_kinds: Vec<&str> = cfg
+        .temps
+        .iter()
+        .map(|temps| temps.kind.trim())
+        .collect();
+    claude_model_issues("models.lanes", &models.lanes, &lane_kinds, &mut issues);
+    claude_model_issues("models.review", &models.review, &temps_kinds, &mut issues);
+    claude_model_issues(
+        "models.captain",
+        &models.captain,
+        &[cfg.captain.kind.trim()],
+        &mut issues,
+    );
+    for (index, lane) in cfg.lanes.iter().enumerate() {
+        claude_model_issues(
+            &format!("lanes[{index}].models"),
+            &lane.models,
+            &[lane.kind.trim()],
+            &mut issues,
+        );
+    }
+
     // ---- the GitHub mode (T-79): absent = local-only, so there is nothing
     // to check then; present = it must name a repo.
     if let Some(github) = &cfg.github {
@@ -1181,6 +1362,98 @@ fn issue(field: &str, problem: String) -> ConfigIssue {
     }
 }
 
+/// The sample a branch template is expanded with to check it (T-252): one
+/// project, one lane, one seat, one task.
+const SAMPLE_PROJECT: &str = "p";
+const SAMPLE_LANE: &str = "l";
+const SAMPLE_SEAT: &str = "s";
+const SAMPLE_TASK: &str = "T-1";
+
+/// The placeholders `template` names, filled in or not.
+fn placeholders(template: &str) -> Vec<&str> {
+    let mut names = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        names.push(&after[..close]);
+        rest = &after[close + 1..];
+    }
+    names
+}
+
+/// Check one branch template (T-252): it must name `required`, it may name only
+/// `allowed`, and its sample expansion must be a branch name git takes. Returns
+/// whether the template is usable.
+fn branch_template_issues(
+    field: &str,
+    template: &str,
+    required: &str,
+    allowed: &[&str],
+    sample: &str,
+    issues: &mut Vec<ConfigIssue>,
+) -> bool {
+    let filled: Vec<String> = allowed.iter().map(|name| format!("{{{name}}}")).collect();
+    let names = placeholders(template);
+    if let Some(unknown) = names.iter().find(|name| !allowed.contains(name)) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} names {{{unknown}}}: GEAR fills in {}",
+                filled.join(", ")
+            ),
+        ));
+        return false;
+    }
+    if !names.contains(&required) {
+        issues.push(issue(
+            field,
+            format!(
+                "the template {template:?} has no {{{required}}}: each one needs its own branch"
+            ),
+        ));
+        return false;
+    }
+    if let Some(problem) = branch_name_problem(sample) {
+        issues.push(issue(
+            field,
+            format!("the template {template:?} names the branch {sample:?}: {problem}"),
+        ));
+        return false;
+    }
+    true
+}
+
+/// What is wrong with `name` as a branch name, or `None` when git takes it
+/// (T-252): letters, digits, '.', '_', '-' and '/' only, no leading '/', '-'
+/// or '.', no ".." or "//", and no trailing '/' or ".lock".
+fn branch_name_problem(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return Some("a branch name must not be empty".to_string());
+    }
+    if name.starts_with(['/', '-', '.']) {
+        return Some("a branch name must not start with '/', '-' or '.'".to_string());
+    }
+    if name.contains("..") || name.contains("//") {
+        return Some("a branch name must not contain \"..\" or \"//\"".to_string());
+    }
+    if name.ends_with('/') {
+        return Some("a branch name must not end with '/'".to_string());
+    }
+    if name.ends_with(".lock") {
+        return Some("a branch name must not end with \".lock\"".to_string());
+    }
+    match name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/')))
+    {
+        Some(bad) => Some(format!(
+            "a branch name holds only letters, digits, '.', '_', '-' and '/', not {bad:?}"
+        )),
+        None => None,
+    }
+}
+
 /// Project and lane names: `[a-z][a-z0-9-]*` (conventions 17 §2).
 fn is_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -1237,6 +1510,34 @@ fn chain_problem(chain: &[ModelEntry]) -> Option<String> {
         seen.push(key);
     }
     None
+}
+
+/// T-235: the claude CLI takes a bare model id or alias
+/// (`claude-sonnet-5-5`), never a `provider/model` one. An entry's CLI is the
+/// one it names, else the kind of the seat that runs it (a lane's kind, the
+/// temps seat's, the captain's); a chain shared by several seats is checked
+/// against every one of their kinds.
+fn claude_model_issues(
+    field: &str,
+    chain: &[ModelEntry],
+    kinds: &[&str],
+    issues: &mut Vec<ConfigIssue>,
+) {
+    for entry in chain {
+        let claude = match entry.cli() {
+            Some(cli) => cli == "claude",
+            None => kinds.iter().any(|kind| *kind == "claude"),
+        };
+        let model = entry.model();
+        if claude && model.contains('/') {
+            issues.push(issue(
+                field,
+                format!(
+                    "the claude CLI takes a bare model id such as claude-sonnet-5-5, not {model}"
+                ),
+            ));
+        }
+    }
 }
 
 /// The chain a lane runs on (T-35): its own entries when it names any, else

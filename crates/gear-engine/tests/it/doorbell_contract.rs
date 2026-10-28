@@ -34,7 +34,7 @@ fn rings_an_idle_seat_with_something_to_show() {
             seat: "p:captain".into(),
             generation: 2,
             pane_id: "w1:p1".into(),
-            text: "GEAR: 1 item(s) waiting for you: M-1. Run `gear` now.".into(),
+            text: "GEAR: 1 item(s) waiting for you: M-1. Run the command `gear` (no arguments) in your own shell; it shows only your items.".into(),
             covers: vec!["M-1".into()],
         }]
     );
@@ -52,7 +52,7 @@ fn urgent_count_and_covers_order_without_duplicates() {
     assert_eq!(out[0].covers, vec!["M-3", "M-1", "M-7"]);
     assert_eq!(
         out[0].text,
-        "GEAR: 3 item(s) waiting for you (1 urgent): M-3 M-1 M-7. Run `gear` now."
+        "GEAR: 3 item(s) waiting for you (1 urgent): M-3 M-1 M-7. Run the command `gear` (no arguments) in your own shell; it shows only your items."
     );
 }
 
@@ -96,7 +96,7 @@ fn a_working_seat_is_rung_at_once_for_an_at_once_message() {
 
     let out = decide(&[working], 90, NOW);
     assert_eq!(out.len(), 1, "typed while the agent works");
-    assert_eq!(out[0].text, "GEAR: 1 item(s) waiting for you (1 urgent): M-4. Run `gear` now.");
+    assert_eq!(out[0].text, "GEAR: 1 item(s) waiting for you (1 urgent): M-4. Run the command `gear` (no arguments) in your own shell; it shows only your items.");
 }
 
 #[test]
@@ -143,13 +143,13 @@ fn at_once_rule_names_the_two_ways_a_message_arrives_while_working() {
 }
 
 #[test]
-fn the_text_names_every_id_and_says_run_gear_now() {
+fn the_text_names_every_id_and_the_command_to_run() {
     let items = vec![
         DoorbellItem { id: "M-12".into(), urgent: false, at_once: false },
         DoorbellItem { id: "M-13".into(), urgent: false, at_once: false },
     ];
     let said = text(&items, false);
     assert!(said.contains("M-12") && said.contains("M-13"), "{said}");
-    assert!(said.contains("Run `gear` now."), "{said}");
+    assert!(said.contains("Run the command `gear` (no arguments) in your own shell; it shows only your items."), "{said}");
     assert!(!said.contains('\n'), "one line: {said}");
 }
