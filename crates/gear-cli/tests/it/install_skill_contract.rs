@@ -30,7 +30,11 @@ fn skills_dir(home: &Path, agent: &str) -> PathBuf {
     match agent {
         "claude" => home.join(".claude").join("skills").join("gear"),
         "codex" => home.join(".codex").join("skills").join("gear"),
-        "opencode" => home.join(".config").join("opencode").join("skills").join("gear"),
+        "opencode" => home
+            .join(".config")
+            .join("opencode")
+            .join("skills")
+            .join("gear"),
         "grok" => home.join(".grok").join("skills").join("gear"),
         // T-113: pi's agent directory is `~/.pi/agent`; its user skills live
         // in `<agent-dir>/skills` (pi 1.4.0, docs/configuration.md).
@@ -41,7 +45,9 @@ fn skills_dir(home: &Path, agent: &str) -> PathBuf {
 
 /// The skill file of the repo, the source of the installed text.
 fn repo_skill(rel: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/gear").join(rel);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../skills/gear")
+        .join(rel);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
@@ -94,7 +100,10 @@ fn an_unknown_agent_is_bad_format() {
     let o = gear(&home, &["admin", "install-skill", "--agent", "emacs"]);
     assert_eq!(o.status.code(), Some(1));
     let e = stderr(&o);
-    assert!(e.starts_with("ERROR BAD_FORMAT: unknown agent \"emacs\""), "{e}");
+    assert!(
+        e.starts_with("ERROR BAD_FORMAT: unknown agent \"emacs\""),
+        "{e}"
+    );
     assert!(e.contains("claude"), "{e}");
     // Nothing was written.
     assert!(!home.join(".claude").exists(), "{}", home.display());

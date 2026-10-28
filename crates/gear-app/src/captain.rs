@@ -81,16 +81,21 @@ pub fn handover(
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::StaleGeneration,
-                format!("the captain of {project} has no binding at generation {}", seat.generation),
+                format!(
+                    "the captain of {project} has no binding at generation {}",
+                    seat.generation
+                ),
             )
         })?;
 
     // 3. Who asks: an agent may hand the captain over only from the captain's
     //    own pane; a shell with no agent in its pane is the user's terminal.
-    let asker = match herdr
-        .agent_get(&real)
-        .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("cannot read pane {real}: {}", e.0)))?
-    {
+    let asker = match herdr.agent_get(&real).map_err(|e| {
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot read pane {real}: {}", e.0),
+        )
+    })? {
         Some(_info) if real == binding.pane_id => Asker::Captain,
         Some(info) => {
             // A lane or a reviewer asking for the captain's seat.
@@ -110,7 +115,12 @@ pub fn handover(
     //    a running CLI, it never starts one.
     let new_agent = herdr
         .agent_get(pane)
-        .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("cannot read pane {pane}: {}", e.0)))?
+        .map_err(|e| {
+            GearError::new(
+                ErrorCode::BadFormat,
+                format!("cannot read pane {pane}: {}", e.0),
+            )
+        })?
         .ok_or_else(|| {
             GearError::new(
                 ErrorCode::BadFormat,
@@ -122,11 +132,23 @@ pub fn handover(
         .clone()
         .filter(|kind| !kind.is_empty())
         .unwrap_or_else(|| config.captain.kind.clone());
-    let session_ref = new_agent.agent_session.as_ref().map(|session| session.value.clone());
+    let session_ref = new_agent
+        .agent_session
+        .as_ref()
+        .map(|session| session.value.clone());
 
     // 5. Rebind: a new generation, the old bindings voided, the seat still the
     //    captain (role and profile stay; only the pane moves).
-    let generation = rebind(store, &captain, &seat, pane, &kind, session_ref, &config, now)?;
+    let generation = rebind(
+        store,
+        &captain,
+        &seat,
+        pane,
+        &kind,
+        session_ref,
+        &config,
+        now,
+    )?;
 
     Ok(Handover {
         project,
@@ -192,7 +214,10 @@ pub fn take(
     let project = match named {
         Some(name) => {
             if store.read(|tx| tx.get_project(name))?.is_none() {
-                return Err(GearError::new(ErrorCode::NoTarget, format!("no project {name:?}: {}", project_list(store, herdr)?)));
+                return Err(GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("no project {name:?}: {}", project_list(store, herdr)?),
+                ));
             }
             name.to_string()
         }
@@ -252,7 +277,16 @@ pub fn take(
     let from = store
         .read(|tx| tx.get_binding(&captain, seat.generation))?
         .map(|binding| binding.pane_id);
-    let generation = rebind(store, &captain, &seat, &pane, &kind, session_ref, &config, now)?;
+    let generation = rebind(
+        store,
+        &captain,
+        &seat,
+        &pane,
+        &kind,
+        session_ref,
+        &config,
+        now,
+    )?;
 
     // 5. One urgent item to the captain seat (the pane that just took it, so
     //    the user reads it on the captain's home page).
@@ -292,7 +326,15 @@ pub fn take(
         &crate::config::agent_name(&project, "captain"),
     );
 
-    Ok(Taken { project, captain, from, to: pane, generation, kind, named })
+    Ok(Taken {
+        project,
+        captain,
+        from,
+        to: pane,
+        generation,
+        kind,
+        named,
+    })
 }
 
 /// The one rebind a handover and a `captain take` share (T-104, T-126): a new
@@ -413,8 +455,12 @@ fn project_list(store: &mut Store, herdr: &mut dyn HerdrRead) -> GearResult<Stri
     for id in store.read(|tx| tx.project_ids())? {
         let captain = format!("{id}:captain");
         let pane = store.read(|tx| {
-            let Some(seat) = tx.get_seat(&captain)? else { return Ok(None) };
-            Ok(tx.get_binding(&captain, seat.generation)?.map(|b| b.pane_id))
+            let Some(seat) = tx.get_seat(&captain)? else {
+                return Ok(None);
+            };
+            Ok(tx
+                .get_binding(&captain, seat.generation)?
+                .map(|b| b.pane_id))
         })?;
         let state = match &pane {
             Some(pane) => match herdr.agent_get(pane) {

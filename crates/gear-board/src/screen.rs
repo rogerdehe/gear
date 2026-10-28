@@ -71,7 +71,11 @@ impl Terminal {
 impl Keys for Terminal {
     fn next_event(&mut self, timeout: Duration) -> Option<Event> {
         self.saved?;
-        let mut fds = libc::pollfd { fd: self.stdin, events: libc::POLLIN, revents: 0 };
+        let mut fds = libc::pollfd {
+            fd: self.stdin,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
         // SAFETY: `fds` is one pollfd we own; the call only waits.
         let ready = unsafe { libc::poll(&mut fds, 1, millis) };
@@ -147,7 +151,10 @@ impl Terminal {
                 break;
             }
             // The arrows and the shift-tab end after their last letter.
-            if matches!(out.as_bytes(), [b'[', b'A'] | [b'[', b'B'] | [b'[', b'C'] | [b'[', b'D'] | [b'[', b'Z']) {
+            if matches!(
+                out.as_bytes(),
+                [b'[', b'A'] | [b'[', b'B'] | [b'[', b'C'] | [b'[', b'D'] | [b'[', b'Z']
+            ) {
                 break;
             }
         }

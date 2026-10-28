@@ -29,7 +29,15 @@ fn world(status: AgentStatus) -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "pi", T0)?;
             tx.insert_task(&TaskRow {
                 repo: None,
@@ -132,7 +140,9 @@ fn a_done_pi_gets_its_task_whatever_its_screen_says() {
     let mut w = world(AgentStatus::Done);
     w.herdr.set_screen(LANE_PANE, "Working tree clean");
     // This freshly onboarded session needs no /new, but still goes through preparation.
-    w.store.write(|tx| tx.set_meta("engine.session_fresh.p:heat", "1")).unwrap();
+    w.store
+        .write(|tx| tx.set_meta("engine.session_fresh.p:heat", "1"))
+        .unwrap();
 
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
@@ -176,7 +186,10 @@ fn a_working_agent_gets_only_at_once_messages() {
 
     let said = w.herdr.prompts_to(LANE_PANE);
     assert_eq!(said.len(), 1, "only the at-once message: {said:?}");
-    assert!(said[0].contains(&urgent), "the urgent one is typed: {said:?}");
+    assert!(
+        said[0].contains(&urgent),
+        "the urgent one is typed: {said:?}"
+    );
     assert!(!said[0].contains(&normal), "the normal one waits: {said:?}");
 }
 
@@ -189,95 +202,233 @@ fn tick_doorbells_wait_for_blocked_and_allow_only_urgent_for_unknown() {
         let urgent = captain_message(&mut w, MsgKind::Instruction, true, T0 + 2);
         tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
         let prompts = w.herdr.prompts_to(LANE_PANE);
-        if status == AgentStatus::Blocked { assert!(prompts.is_empty(), "{prompts:?}"); }
-        else { assert_eq!(prompts.len(),1); assert!(prompts[0].contains(&urgent)); assert!(!prompts[0].contains(&normal)); }
+        if status == AgentStatus::Blocked {
+            assert!(prompts.is_empty(), "{prompts:?}");
+        } else {
+            assert_eq!(prompts.len(), 1);
+            assert!(prompts[0].contains(&urgent));
+            assert!(!prompts[0].contains(&normal));
+        }
     }
 }
 
 #[test]
 fn sender_doorbells_check_blocked_and_unknown_live() {
     for (status, urgent, should_prompt) in [
-        (AgentStatus::Blocked,true,false), (AgentStatus::Blocked,false,false),
-        (AgentStatus::Unknown,true,true), (AgentStatus::Unknown,false,false),
+        (AgentStatus::Blocked, true, false),
+        (AgentStatus::Blocked, false, false),
+        (AgentStatus::Unknown, true, true),
+        (AgentStatus::Unknown, false, false),
     ] {
-        let mut w=world(status);
-        w.herdr.add_agent_named(LANE_PANE,"pi",status,"p-heat");
-        let message=captain_message(&mut w,MsgKind::Instruction,urgent,T0+1);
-        let result=gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&message,urgent,T0+2).unwrap();
-        assert_eq!(result.is_some(),should_prompt,"{status:?} urgent={urgent}");
-        assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),usize::from(should_prompt));
+        let mut w = world(status);
+        w.herdr.add_agent_named(LANE_PANE, "pi", status, "p-heat");
+        let message = captain_message(&mut w, MsgKind::Instruction, urgent, T0 + 1);
+        let result = gear_engine::ops::deliver_doorbell_now(
+            &mut w.store,
+            &mut w.herdr,
+            "p",
+            "p:heat",
+            1,
+            &message,
+            urgent,
+            T0 + 2,
+        )
+        .unwrap();
+        assert_eq!(
+            result.is_some(),
+            should_prompt,
+            "{status:?} urgent={urgent}"
+        );
+        assert_eq!(
+            w.herdr.prompts_to(LANE_PANE).len(),
+            usize::from(should_prompt)
+        );
     }
 }
 
 #[test]
 fn intended_delivery_waits_for_live_ready_state_and_is_not_duplicated() {
-    let mut w=world(AgentStatus::Idle);
-    w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Idle,"p-heat");
-    let seat=w.store.read(|tx|tx.get_seat("p:heat")).unwrap().unwrap();
-    let op=w.store.write(|tx| gear_engine::dispatch::intend_dispatch(tx,"p",&[(seat,gear_engine::dispatch::Action::Assign{task:"T-1".into()})],T0+1)).unwrap().remove(0);
-    for (at,status) in [(10,AgentStatus::Working),(20,AgentStatus::Unknown),(30,AgentStatus::Blocked)] {
-        w.herdr.set_status(LANE_PANE,status);
-        tick(&mut w.store,&mut w.herdr,&w.cfg,T0+at).unwrap();
-        assert!(w.herdr.prompts_to(LANE_PANE).is_empty(),"{status:?}");
-        let ops=deliveries(&mut w); assert_eq!(ops.len(),1); assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,OpState::Intended);
+    let mut w = world(AgentStatus::Idle);
+    w.herdr
+        .add_agent_named(LANE_PANE, "pi", AgentStatus::Idle, "p-heat");
+    let seat = w.store.read(|tx| tx.get_seat("p:heat")).unwrap().unwrap();
+    let op = w
+        .store
+        .write(|tx| {
+            gear_engine::dispatch::intend_dispatch(
+                tx,
+                "p",
+                &[(
+                    seat,
+                    gear_engine::dispatch::Action::Assign { task: "T-1".into() },
+                )],
+                T0 + 1,
+            )
+        })
+        .unwrap()
+        .remove(0);
+    for (at, status) in [
+        (10, AgentStatus::Working),
+        (20, AgentStatus::Unknown),
+        (30, AgentStatus::Blocked),
+    ] {
+        w.herdr.set_status(LANE_PANE, status);
+        tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + at).unwrap();
+        assert!(w.herdr.prompts_to(LANE_PANE).is_empty(), "{status:?}");
+        let ops = deliveries(&mut w);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].id, op.id);
+        assert_eq!(ops[0].state, OpState::Intended);
     }
-    w.herdr.set_status(LANE_PANE,AgentStatus::Done);
-    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+40).unwrap();
-    assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),1);
+    w.herdr.set_status(LANE_PANE, AgentStatus::Done);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 40).unwrap();
+    assert_eq!(w.herdr.prompts_to(LANE_PANE).len(), 1);
     assert!(w.herdr.prompts_to(LANE_PANE)[0].contains("New task T-1"));
-    let ops=deliveries(&mut w); assert_eq!(ops.len(),1); assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,OpState::Submitted);
+    let ops = deliveries(&mut w);
+    assert_eq!(ops.len(), 1);
+    assert_eq!(ops[0].id, op.id);
+    assert_eq!(ops[0].state, OpState::Submitted);
 }
 
 #[test]
 fn intended_doorbell_rechecks_eligibility_when_status_changes() {
-    for (status,urgent,allowed) in [(AgentStatus::Blocked,true,false),(AgentStatus::Unknown,true,true),(AgentStatus::Unknown,false,false),(AgentStatus::Working,false,true)] {
-        let mut w=world(AgentStatus::Idle);
-        w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Idle,"p-heat");
-        let message=captain_message(&mut w,MsgKind::Instruction,urgent,T0+1);
-        let action=gear_engine::doorbell::DoorbellAction { project:"p".into(),seat:"p:heat".into(),generation:1,pane_id:LANE_PANE.into(),text:format!("GEAR: {message}"),covers:vec![message] };
-        let op=w.store.write(|tx|gear_engine::ops::intend_doorbells(tx,&[action],T0+2)).unwrap().remove(0);
-        w.herdr.set_status(LANE_PANE,status);
-        gear_engine::ops::execute_intended(&mut w.store,&mut w.herdr,"p",T0+3).unwrap();
-        assert_eq!(w.herdr.prompts_to(LANE_PANE).len(),usize::from(allowed),"{status:?} urgent={urgent}");
-        let ops=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
-        assert_eq!(ops[0].id,op.id); assert_eq!(ops[0].state,if allowed {OpState::Submitted} else {OpState::Failed});
+    for (status, urgent, allowed) in [
+        (AgentStatus::Blocked, true, false),
+        (AgentStatus::Unknown, true, true),
+        (AgentStatus::Unknown, false, false),
+        (AgentStatus::Working, false, true),
+    ] {
+        let mut w = world(AgentStatus::Idle);
+        w.herdr
+            .add_agent_named(LANE_PANE, "pi", AgentStatus::Idle, "p-heat");
+        let message = captain_message(&mut w, MsgKind::Instruction, urgent, T0 + 1);
+        let action = gear_engine::doorbell::DoorbellAction {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            pane_id: LANE_PANE.into(),
+            text: format!("GEAR: {message}"),
+            covers: vec![message],
+        };
+        let op = w
+            .store
+            .write(|tx| gear_engine::ops::intend_doorbells(tx, &[action], T0 + 2))
+            .unwrap()
+            .remove(0);
+        w.herdr.set_status(LANE_PANE, status);
+        gear_engine::ops::execute_intended(&mut w.store, &mut w.herdr, "p", T0 + 3).unwrap();
+        assert_eq!(
+            w.herdr.prompts_to(LANE_PANE).len(),
+            usize::from(allowed),
+            "{status:?} urgent={urgent}"
+        );
+        let ops = w
+            .store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
+            .unwrap();
+        assert_eq!(ops[0].id, op.id);
+        assert_eq!(
+            ops[0].state,
+            if allowed {
+                OpState::Submitted
+            } else {
+                OpState::Failed
+            }
+        );
     }
 }
 
-
 #[test]
 fn refused_nonurgent_sender_doorbell_cannot_starve_a_later_urgent_one() {
-    let mut w=world(AgentStatus::Unknown);
-    w.herdr.add_agent_named(LANE_PANE,"pi",AgentStatus::Unknown,"p-heat");
-    w.store.write(|tx| { let mut task=tx.get_task("p","T-1")?.unwrap(); task.state=TaskState::Draft; tx.update_task(&task) }).unwrap();
-    let normal=captain_message(&mut w,MsgKind::Instruction,false,T0+1);
-    assert!(gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&normal,false,T0+2).unwrap().is_none());
-    let old=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
-    assert_eq!(old.len(),1); assert_eq!(old[0].state,OpState::Failed);
-    assert!(w.store.read(|tx|tx.slot_ops("p:heat")).unwrap().is_empty());
-    let urgent=captain_message(&mut w,MsgKind::Instruction,true,T0+3);
-    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+10).unwrap();
-    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+20).unwrap();
-    let prompts=w.herdr.prompts_to(LANE_PANE);
-    assert_eq!(prompts.len(),1,"{prompts:?}"); assert!(prompts[0].contains(&urgent)); assert!(!prompts[0].contains(&normal));
-    w.store.write(|tx|tx.insert_view(&gear_store::ViewRecord {project:"p".into(),seat:"p:heat".into(),generation:1,ts:T0+21,shown_msgs:vec![urgent.clone()],shown_ops:vec![],shown_task:None,shown_attempt:None,shown_contract:None})).unwrap();
-    w.herdr.set_status(LANE_PANE,AgentStatus::Done);
-    tick(&mut w.store,&mut w.herdr,&w.cfg,T0+30).unwrap();
-    let prompts=w.herdr.prompts_to(LANE_PANE);
-    assert_eq!(prompts.len(),2,"{prompts:?}"); assert!(prompts[1].contains(&normal));
+    let mut w = world(AgentStatus::Unknown);
+    w.herdr
+        .add_agent_named(LANE_PANE, "pi", AgentStatus::Unknown, "p-heat");
+    w.store
+        .write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Draft;
+            tx.update_task(&task)
+        })
+        .unwrap();
+    let normal = captain_message(&mut w, MsgKind::Instruction, false, T0 + 1);
+    assert!(gear_engine::ops::deliver_doorbell_now(
+        &mut w.store,
+        &mut w.herdr,
+        "p",
+        "p:heat",
+        1,
+        &normal,
+        false,
+        T0 + 2
+    )
+    .unwrap()
+    .is_none());
+    let old = w
+        .store
+        .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
+        .unwrap();
+    assert_eq!(old.len(), 1);
+    assert_eq!(old[0].state, OpState::Failed);
+    assert!(w.store.read(|tx| tx.slot_ops("p:heat")).unwrap().is_empty());
+    let urgent = captain_message(&mut w, MsgKind::Instruction, true, T0 + 3);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
+    let prompts = w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(prompts[0].contains(&urgent));
+    assert!(!prompts[0].contains(&normal));
+    w.store
+        .write(|tx| {
+            tx.insert_view(&gear_store::ViewRecord {
+                project: "p".into(),
+                seat: "p:heat".into(),
+                generation: 1,
+                ts: T0 + 21,
+                shown_msgs: vec![urgent.clone()],
+                shown_ops: vec![],
+                shown_task: None,
+                shown_attempt: None,
+                shown_contract: None,
+            })
+        })
+        .unwrap();
+    w.herdr.set_status(LANE_PANE, AgentStatus::Done);
+    tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 30).unwrap();
+    let prompts = w.herdr.prompts_to(LANE_PANE);
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert!(prompts[1].contains(&normal));
 }
-
 
 #[test]
 fn naming_and_observation_failures_leave_the_doorbell_for_retry() {
-    for unreadable in [false,true] {
-        let mut w=world(AgentStatus::Idle);
-        let message=captain_message(&mut w,MsgKind::Instruction,true,T0+1);
-        if unreadable { w.herdr.observe_fails=true; }
-        else { w.herdr.inject_next=Some(gear_herdr::fake::Inject::Refuse {code:"rename-failed".into()}); }
-        assert!(gear_engine::ops::deliver_doorbell_now(&mut w.store,&mut w.herdr,"p","p:heat",1,&message,true,T0+2).unwrap().is_none());
-        let ops=w.store.read(|tx|tx.ops_of_seat_kind("p:heat",OpKind::Doorbell)).unwrap();
-        assert_eq!(ops.len(),1); assert_eq!(ops[0].state,OpState::Intended,"unreadable={unreadable}");
+    for unreadable in [false, true] {
+        let mut w = world(AgentStatus::Idle);
+        let message = captain_message(&mut w, MsgKind::Instruction, true, T0 + 1);
+        if unreadable {
+            w.herdr.observe_fails = true;
+        } else {
+            w.herdr.inject_next = Some(gear_herdr::fake::Inject::Refuse {
+                code: "rename-failed".into(),
+            });
+        }
+        assert!(gear_engine::ops::deliver_doorbell_now(
+            &mut w.store,
+            &mut w.herdr,
+            "p",
+            "p:heat",
+            1,
+            &message,
+            true,
+            T0 + 2
+        )
+        .unwrap()
+        .is_none());
+        let ops = w
+            .store
+            .read(|tx| tx.ops_of_seat_kind("p:heat", OpKind::Doorbell))
+            .unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].state, OpState::Intended, "unreadable={unreadable}");
         assert!(w.herdr.prompts_to(LANE_PANE).is_empty());
     }
 }

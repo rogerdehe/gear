@@ -17,15 +17,17 @@ mod deps;
 pub mod frame;
 pub mod graph;
 pub mod idle;
-pub mod style;
 mod screen;
+pub mod style;
 pub mod voyage;
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
+use gear_model::{
+    ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts,
+};
 use gear_store::{BindingStatus, SeatRow, Store, Tx};
 
 use crate::frame::Tab;
@@ -394,7 +396,10 @@ pub fn build(store: &mut Store, opts: &Options, now: Ts) -> GearResult<Board> {
 /// Build from an observation obtained before opening the read transaction.
 /// None means observation failed; an empty slice means no agents were seen.
 pub fn build_with_agents(
-    store: &mut Store, opts: &Options, now: Ts, agents: Option<&[AgentInfo]>,
+    store: &mut Store,
+    opts: &Options,
+    now: Ts,
+    agents: Option<&[AgentInfo]>,
 ) -> GearResult<Board> {
     let engine = EngineState::probe(opts.db.as_deref());
     let projects = store.read(|tx| {
@@ -402,7 +407,9 @@ pub fn build_with_agents(
             Some(id) => vec![id.clone()],
             None => tx.project_ids()?,
         };
-        ids.iter().map(|id| project_with_agents(tx, id, now, agents)).collect()
+        ids.iter()
+            .map(|id| project_with_agents(tx, id, now, agents))
+            .collect()
     })?;
     Ok(Board { engine, projects })
 }
@@ -415,10 +422,16 @@ pub fn project(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<ProjectBoard> 
 
 /// The shared project model with an optional read-only Herdr snapshot.
 pub fn project_with_agents(
-    tx: &Tx<'_>, project: &str, now: Ts, agents: Option<&[AgentInfo]>,
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+    agents: Option<&[AgentInfo]>,
 ) -> GearResult<ProjectBoard> {
     let row = tx.get_project(project)?.ok_or_else(|| {
-        GearError::new(ErrorCode::NoTarget, format!("project {project} is not registered"))
+        GearError::new(
+            ErrorCode::NoTarget,
+            format!("project {project} is not registered"),
+        )
     })?;
     let seats = tx.seats_of_project(project)?;
     let tasks = tx.tasks_of_project(project)?;
@@ -443,11 +456,16 @@ pub fn project_with_agents(
 
     // Keep active empty lanes visible, but never recreate a retired lane
     // from a historical task assignment below.
-    let retired: std::collections::BTreeSet<_> = seats.iter()
+    let retired: std::collections::BTreeSet<_> = seats
+        .iter()
         .filter(|seat| seat.role == SeatRole::Lane && seat.state == SeatState::Retired)
-        .map(|seat| seat.name.as_str()).collect();
+        .map(|seat| seat.name.as_str())
+        .collect();
     let mut lanes = Vec::new();
-    for seat in seats.iter().filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired) {
+    for seat in seats
+        .iter()
+        .filter(|seat| seat.role == SeatRole::Lane && seat.state != SeatState::Retired)
+    {
         lanes.push(LaneBoard {
             lane: seat.name.clone(),
             agent_state: observed_agent_state(tx, seat, agents, &backoff)?,
@@ -572,7 +590,9 @@ pub fn project_with_agents(
     // Why each lane is idle (design §8.2) and what it has left.
     for lane in &mut lanes {
         let reason = idle::idle_reason(tx, project, &lane.lane, now)?;
-        lane.idle_text = reason.as_ref().map(|reason| idle::describe(reason, tx, project));
+        lane.idle_text = reason
+            .as_ref()
+            .map(|reason| idle::describe(reason, tx, project));
         lane.idle = reason;
         lane.done_count = lane
             .tasks
@@ -662,8 +682,10 @@ pub fn project_with_agents(
             }
             let seat = tx.get_seat(&op.seat)?;
             let live = seat.as_ref().is_some_and(|seat| {
-                matches!(seat.state, SeatState::Active | SeatState::Standby | SeatState::Starting)
-                    && seat.generation == op.generation
+                matches!(
+                    seat.state,
+                    SeatState::Active | SeatState::Standby | SeatState::Starting
+                ) && seat.generation == op.generation
             });
             if live {
                 unconfirmed_deliveries += 1;
@@ -679,7 +701,10 @@ pub fn project_with_agents(
     // The oldest first: the delivery that waits longest is the one that may be
     // a lane that never started.
     unconfirmed.sort_by(|left, right| {
-        right.age_s.cmp(&left.age_s).then_with(|| left.op.cmp(&right.op))
+        right
+            .age_s
+            .cmp(&left.age_s)
+            .then_with(|| left.op.cmp(&right.op))
     });
 
     let voyages = voyage::reports(tx, project, now)?;
@@ -699,10 +724,14 @@ pub fn project_with_agents(
         voyages,
         workload,
         project: project.to_string(),
-        captain_quota: tx.captain_quota(project)?.filter(|state| !state.resumed).map(|state| CaptainQuotaBoard {
-            reset_at: state.reset_at, remaining_s: (state.reset_at - now).max(0),
-            awaiting_view: state.wake_op.is_some(),
-        }),
+        captain_quota: tx
+            .captain_quota(project)?
+            .filter(|state| !state.resumed)
+            .map(|state| CaptainQuotaBoard {
+                reset_at: state.reset_at,
+                remaining_s: (state.reset_at - now).max(0),
+                awaiting_view: state.wake_op.is_some(),
+            }),
         totals,
         lanes,
         deps,
@@ -736,9 +765,15 @@ pub fn integration_overlaps_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Ove
     let prefix = format!("parallel:{project}:");
     let mut overlaps = Vec::new();
     for key in tx.meta_keys_with_prefix(&prefix)? {
-        let Some(rest) = key.strip_prefix(&prefix) else { continue };
-        let Some((repo, task)) = split_overlap_key(rest) else { continue };
-        let Some(raw) = tx.get_meta(&key)? else { continue };
+        let Some(rest) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((repo, task)) = split_overlap_key(rest) else {
+            continue;
+        };
+        let Some(raw) = tx.get_meta(&key)? else {
+            continue;
+        };
         // A cleared key shows nothing: the scan clears it when the overlap
         // is gone.
         if raw.trim().is_empty() {
@@ -755,9 +790,7 @@ pub fn integration_overlaps_of(tx: &Tx<'_>, project: &str) -> GearResult<Vec<Ove
             files,
         });
     }
-    overlaps.sort_by(|left, right| {
-        (&left.task, &left.repo).cmp(&(&right.task, &right.repo))
-    });
+    overlaps.sort_by(|left, right| (&left.task, &left.repo).cmp(&(&right.task, &right.repo)));
     Ok(overlaps)
 }
 
@@ -805,7 +838,12 @@ fn overlap_value(raw: &str) -> (Vec<String>, Option<String>) {
             let files = value
                 .get("files")
                 .and_then(serde_json::Value::as_array)
-                .map(|files| files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect())
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(|file| file.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             let integration = value
                 .get("integration")
@@ -814,13 +852,19 @@ fn overlap_value(raw: &str) -> (Vec<String>, Option<String>) {
             (files, integration)
         }
         Ok(serde_json::Value::Array(files)) => (
-            files.iter().filter_map(|file| file.as_str().map(str::to_string)).collect(),
+            files
+                .iter()
+                .filter_map(|file| file.as_str().map(str::to_string))
+                .collect(),
             None,
         ),
         Ok(serde_json::Value::String(file)) => (vec![file], None),
         // A plain value: the shared files, separated by commas.
         _ => (
-            raw.split(',').map(|file| file.trim().to_string()).filter(|file| !file.is_empty()).collect(),
+            raw.split(',')
+                .map(|file| file.trim().to_string())
+                .filter(|file| !file.is_empty())
+                .collect(),
             None,
         ),
     }
@@ -872,38 +916,73 @@ fn down_seat(seat: &gear_store::SeatRow) -> Option<DownSeat> {
 /// A seat whose provider is in a back-off says so before anything else
 /// (T-75): it waits for the provider, and that is not a stall.
 fn observed_agent_state(
-    tx: &Tx<'_>, seat: &gear_store::SeatRow, agents: Option<&[AgentInfo]>, backoff: &[String],
+    tx: &Tx<'_>,
+    seat: &gear_store::SeatRow,
+    agents: Option<&[AgentInfo]>,
+    backoff: &[String],
 ) -> GearResult<&'static str> {
     if backoff.iter().any(|waiting| waiting == &seat.id) {
         return Ok("provider back-off");
     }
-    let Some(agents) = agents else { return Ok("unknown"); };
-    let Some(binding) = tx.get_binding(&seat.id, seat.generation)?
+    let Some(agents) = agents else {
+        return Ok("unknown");
+    };
+    let Some(binding) = tx
+        .get_binding(&seat.id, seat.generation)?
         .filter(|binding| binding.status == BindingStatus::Active)
-    else { return Ok("unknown"); };
-    let Some(agent) = agents.iter().find(|agent| agent.pane_id == binding.pane_id && agent.agent.is_some())
-    else { return Ok("missing"); };
+    else {
+        return Ok("unknown");
+    };
+    let Some(agent) = agents
+        .iter()
+        .find(|agent| agent.pane_id == binding.pane_id && agent.agent.is_some())
+    else {
+        return Ok("missing");
+    };
     if agent.agent.as_deref() != Some(binding.kind.as_str())
-        || binding.session_ref.as_deref().is_some_and(|expected|
-            agent.agent_session.as_ref().map(|session| session.value.as_str()) != Some(expected))
+        || binding.session_ref.as_deref().is_some_and(|expected| {
+            agent
+                .agent_session
+                .as_ref()
+                .map(|session| session.value.as_str())
+                != Some(expected)
+        })
     {
         return Ok("unknown");
     }
     Ok(match agent.agent_status {
-        AgentStatus::Idle => "idle", AgentStatus::Working => "working",
-        AgentStatus::Blocked => "blocked", AgentStatus::Done => "done",
+        AgentStatus::Idle => "idle",
+        AgentStatus::Working => "working",
+        AgentStatus::Blocked => "blocked",
+        AgentStatus::Done => "done",
         AgentStatus::Unknown => "unknown",
     })
 }
 
 /// Shared snapshot/board wording: agent state and task state have separate labels.
 pub fn lane_line(lane: &LaneBoard) -> String {
-    let current = lane.tasks.iter().find(|task| task.state == TaskState::Running)
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Waiting))
-        .or_else(|| lane.tasks.iter().find(|task| task.state == TaskState::Verifying));
-    let current = current.map(|task| format!("{} {}", task.id, state_word(task.state)))
+    let current = lane
+        .tasks
+        .iter()
+        .find(|task| task.state == TaskState::Running)
+        .or_else(|| {
+            lane.tasks
+                .iter()
+                .find(|task| task.state == TaskState::Waiting)
+        })
+        .or_else(|| {
+            lane.tasks
+                .iter()
+                .find(|task| task.state == TaskState::Verifying)
+        });
+    let current = current
+        .map(|task| format!("{} {}", task.id, state_word(task.state)))
         .unwrap_or_else(|| "no current task".into());
-    let queued = lane.tasks.iter().filter(|task| task.state == TaskState::Ready).count();
+    let queued = lane
+        .tasks
+        .iter()
+        .filter(|task| task.state == TaskState::Ready)
+        .count();
     match &lane.down {
         // A seat that is not running says why, and how it gets back (T-82):
         // the state, the reason, the plan line — never a bare "agent unknown".
@@ -919,7 +998,10 @@ pub fn lane_line(lane: &LaneBoard) -> String {
             }
             format!("{line} · {current} · {queued} queued")
         }
-        None => format!("{} · agent {} · {} · {} queued", lane.lane, lane.agent_state, current, queued),
+        None => format!(
+            "{} · agent {} · {} · {} queued",
+            lane.lane, lane.agent_state, current, queued
+        ),
     }
 }
 
@@ -977,14 +1059,20 @@ fn project_lines(project: &ProjectBoard, view: View) -> Vec<String> {
         } else {
             format!("out — reset in {} min", (quota.remaining_s + 59) / 60)
         };
-        lines.push(format!("Captain quota: {status}; new tasks paused, current work/reviews/merges continue"));
+        lines.push(format!(
+            "Captain quota: {status}; new tasks paused, current work/reviews/merges continue"
+        ));
     }
     match view {
         View::Lanes => {
             if !project.lanes.is_empty() {
                 lines.push(String::new());
                 for lane in &project.lanes {
-                    lines.push(format!("Lane {}{}", lane_line(lane), lane_measures(&lane.rework)));
+                    lines.push(format!(
+                        "Lane {}{}",
+                        lane_line(lane),
+                        lane_measures(&lane.rework)
+                    ));
                     for task in &lane.tasks {
                         lines.push(format!("  {} {}", task.id, state_word(task.state)));
                     }
@@ -1043,12 +1131,7 @@ fn dep_line(node: &DepNode) -> String {
 
 /// The minutes a task took: from its first attempt to its merge, or until
 /// now when it is not merged yet.
-fn actual_min_of(
-    tx: &Tx<'_>,
-    project: &str,
-    task: &str,
-    now: Ts,
-) -> GearResult<Option<i64>> {
+fn actual_min_of(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Option<i64>> {
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
     let merged = times.iter().filter_map(|(_, times)| times.merged).max();
@@ -1089,7 +1172,8 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
         {
             return Ok(None);
         }
-        total += round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
+        total +=
+            round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
     }
     Ok((!rounds.is_empty()).then_some(total))
 }
@@ -1128,7 +1212,11 @@ fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).
-fn decisions_of(tx: &Tx<'_>, project: &str, voyage: Option<&str>) -> GearResult<Vec<DecisionBoard>> {
+fn decisions_of(
+    tx: &Tx<'_>,
+    project: &str,
+    voyage: Option<&str>,
+) -> GearResult<Vec<DecisionBoard>> {
     let Some(voyage) = voyage else {
         return Ok(Vec::new());
     };
@@ -1205,15 +1293,21 @@ fn workload_voyage(
 fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
     let mut readings = Vec::new();
     for key in tx.meta_keys_with_prefix("quota.reading.")? {
-        let Some(raw) = tx.get_meta(&key)? else { continue };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let Some(raw) = tx.get_meta(&key)? else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
         let mut windows = Vec::new();
         for window in value
             .get("windows")
             .and_then(serde_json::Value::as_array)
             .unwrap_or(&Vec::new())
         {
-            let Some(name) = window.get("name").and_then(serde_json::Value::as_str) else { continue };
+            let Some(name) = window.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
             windows.push(QuotaWindow {
                 name: name.to_string(),
                 used_percent: window
@@ -1276,7 +1370,10 @@ fn lane_measures(rework: &Rework) -> String {
             rework.handed_in,
             human_age(age)
         ),
-        None => format!(" · rework {}/{} · no task yet", rework.rejected, rework.handed_in),
+        None => format!(
+            " · rework {}/{} · no task yet",
+            rework.rejected, rework.handed_in
+        ),
     }
 }
 
@@ -1374,7 +1471,10 @@ pub fn to_json(board: &Board) -> GearResult<String> {
         .collect();
     let doc = serde_json::json!({ "engine": board.engine.as_str(), "projects": projects });
     serde_json::to_string(&doc).map_err(|e| {
-        GearError::new(ErrorCode::BadFormat, format!("cannot serialize the board: {e}"))
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot serialize the board: {e}"),
+        )
     })
 }
 
@@ -1383,7 +1483,12 @@ pub fn to_json(board: &Board) -> GearResult<String> {
 /// Without a terminal — a pipe, a test — the board is printed once and the
 /// command returns: a full-screen view must not hang a caller that cannot
 /// see it. [`run_with`] draws the frames.
-pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Option<&mut dyn HerdrRead>) -> GearResult<()> {
+pub fn run(
+    store: &mut Store,
+    opts: &Options,
+    out: &mut dyn Write,
+    mut herdr: Option<&mut dyn HerdrRead>,
+) -> GearResult<()> {
     if opts.json || !screen::is_terminal() {
         let agents = herdr.as_mut().and_then(|herdr| herdr.agents().ok());
         let board = build_with_agents(store, opts, now_ts(), agents.as_deref())?;
@@ -1435,7 +1540,8 @@ pub fn run_with(
                 );
                 screen::draw(out, &text).map_err(write_error)?;
                 let deadline = std::time::Instant::now() + opts.refresh;
-                let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
+                let _ =
+                    keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
                 continue;
             }
         };
@@ -1443,7 +1549,8 @@ pub fn run_with(
         // shrank, or a key pressed at its end, does not lose the selection.
         let rows = frame::view(&board, tab, selected).rows.len();
         selected = selected.min(rows.saturating_sub(1));
-        let text = frame::canvas(&board, tab, selected, panel.as_deref(), keys.size()).ansi(opts.color);
+        let text =
+            frame::canvas(&board, tab, selected, panel.as_deref(), keys.size()).ansi(opts.color);
         first = false;
         screen::draw(out, &text).map_err(write_error)?;
         let deadline = std::time::Instant::now() + opts.refresh;
@@ -1452,7 +1559,9 @@ pub fn run_with(
             if now >= deadline {
                 break;
             }
-            let Some(event) = keys.next_event(deadline - now) else { continue };
+            let Some(event) = keys.next_event(deadline - now) else {
+                continue;
+            };
             if panel.is_some() {
                 // Any key closes the panel (the prototype): the board's own
                 // keys come after it.
@@ -1562,14 +1671,20 @@ fn open_panel(
     tab: frame::Tab,
     selected: usize,
 ) -> GearResult<Option<Vec<style::Line>>> {
-    let Some(project) = board.projects.first() else { return Ok(None) };
+    let Some(project) = board.projects.first() else {
+        return Ok(None);
+    };
     match tab {
-        frame::Tab::Now | frame::Tab::Workload => Ok(project.lanes.get(selected).map(|lane| {
-            frame::styled_lane_panel(lane, frame::lane_color_of(project, &lane.lane))
-        })),
+        frame::Tab::Now | frame::Tab::Workload => Ok(project
+            .lanes
+            .get(selected)
+            .map(|lane| frame::styled_lane_panel(lane, frame::lane_color_of(project, &lane.lane)))),
         frame::Tab::Graph => {
-            let Some(task) = project.graph.get(selected) else { return Ok(None) };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
+            let Some(task) = project.graph.get(selected) else {
+                return Ok(None);
+            };
+            let rows =
+                store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
         frame::Tab::Tokens => {
@@ -1579,7 +1694,8 @@ fn open_panel(
             let Some((_, task)) = tasks.get(selected) else {
                 return Ok(None);
             };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
+            let rows =
+                store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
             Ok(Some(rows))
         }
         _ => Ok(None),
@@ -1592,7 +1708,12 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
         let size = (screen::DEFAULT_WIDTH, screen::DEFAULT_ROWS);
-        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
+        writeln!(
+            out,
+            "{}",
+            frame::frame(board, tab_of(opts.view), 0, None, size)
+        )
+        .map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }
@@ -1644,7 +1765,11 @@ mod tests {
         std::fs::write(&path, "1234\n").unwrap();
         assert_eq!(EngineState::probe(Some(&db)), EngineState::Down);
         // The engine holds its lock while it runs.
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         file.try_lock().unwrap();
         assert_eq!(EngineState::probe(Some(&db)), EngineState::Running);
     }

@@ -59,7 +59,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         Ok(())
     })
@@ -82,15 +90,27 @@ fn world_with_cap(max_task_min: u32) -> Store {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
-fn run(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    text: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     run_at(s, text, rid, NOW)
 }
 
@@ -101,7 +121,16 @@ fn run_at(
     now: i64,
 ) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, rid, now)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        rid,
+        now,
+    )
 }
 
 fn new_block(estimate: u32) -> String {
@@ -120,7 +149,11 @@ fn a_new_block_over_the_default_cap_is_refused_and_nothing_is_written() {
     let mut s = world();
     let err = run(&mut s, &new_block(61), "r1").unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{}", err.detail);
-    assert!(err.detail.ends_with(&format!("NEW: {}", over_cap(61, 60))), "{}", err.detail);
+    assert!(
+        err.detail.ends_with(&format!("NEW: {}", over_cap(61, 60))),
+        "{}",
+        err.detail
+    );
     // Nothing was written: no task, no plan version.
     assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
@@ -144,13 +177,12 @@ fn a_project_may_plan_longer_tasks_with_its_own_max_task_min() {
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.estimate_min, Some(90));
 
-    let err = run(
-        &mut s,
-        &new_block(91).replace("base=0", "base=1"),
-        "r2",
-    )
-    .unwrap_err();
-    assert!(err.detail.ends_with(&format!("NEW: {}", over_cap(91, 90))), "{}", err.detail);
+    let err = run(&mut s, &new_block(91).replace("base=0", "base=1"), "r2").unwrap_err();
+    assert!(
+        err.detail.ends_with(&format!("NEW: {}", over_cap(91, 90))),
+        "{}",
+        err.detail
+    );
     assert_eq!(
         s.read(|tx| tx.tasks_of_project("p")).unwrap().len(),
         1,
@@ -169,7 +201,11 @@ fn raising_an_existing_task_over_the_cap_is_refused() {
     )
     .unwrap_err();
     assert_eq!(err.code, ErrorCode::BadFormat, "{}", err.detail);
-    assert!(err.detail.ends_with(&format!("T-1: {}", over_cap(61, 60))), "{}", err.detail);
+    assert!(
+        err.detail.ends_with(&format!("T-1: {}", over_cap(61, 60))),
+        "{}",
+        err.detail
+    );
     // Nothing was written: the task keeps the estimate it had.
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.estimate_min, Some(30));
@@ -223,7 +259,10 @@ fn a_rework_estimate_over_the_cap_applies() {
     let task = s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap();
     assert_eq!(task.rework_estimate_min, Some(120));
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Rejected
     );
 }

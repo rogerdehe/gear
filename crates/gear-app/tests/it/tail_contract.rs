@@ -8,7 +8,9 @@
 
 use gear_app::draft::parse;
 use gear_app::identity::Fingerprint;
-use gear_app::plan::{apply, lane_in_tail, lane_in_tail_at, parse_rfc3339, tailed_lanes, tail_until};
+use gear_app::plan::{
+    apply, lane_in_tail, lane_in_tail_at, parse_rfc3339, tail_until, tailed_lanes,
+};
 use gear_app::tasks::{on_delivery_confirmed, settle, start_attempt, submit_result, Verdict};
 use gear_app::Env;
 use gear_model::{ErrorCode, GearCtx, SeatRole, TaskState};
@@ -21,7 +23,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         tx.insert_task(&TaskRow {
             project: "p".into(),
@@ -55,11 +65,19 @@ fn world() -> Store {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -75,7 +93,17 @@ fn apply_decisions(s: &mut Store, decisions: &[&str], rid: &str) -> gear_model::
     let lines: String = decisions.iter().map(|d| format!("- {d}\n")).collect();
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Decisions\n{lines}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, NOW).map(|_| ())
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        NOW,
+    )
+    .map(|_| ())
 }
 
 fn in_tail(s: &mut Store, lane: &str, now: i64) -> bool {
@@ -101,7 +129,10 @@ fn a_tail_until_a_task_ends_when_the_task_is_done() {
         tx.update_task(&task)
     })
     .unwrap();
-    assert!(!in_tail(&mut s, "heat", NOW), "the tail is over: the lane works again");
+    assert!(
+        !in_tail(&mut s, "heat", NOW),
+        "the tail is over: the lane works again"
+    );
 }
 
 /// B6: a tail that waits for a moment ends at that moment.
@@ -111,8 +142,14 @@ fn a_tail_until_a_time_ends_at_that_time() {
     // 2026-10-26T18:00:00Z is 1793037600 (seconds since the epoch).
     apply_decision(&mut s, "tail: heat until=2026-10-26T18:00:00Z", "r1").unwrap();
 
-    assert!(in_tail(&mut s, "heat", 1793037599), "a second before: still tailed");
-    assert!(!in_tail(&mut s, "heat", 1793037600), "the moment has come: the tail is over");
+    assert!(
+        in_tail(&mut s, "heat", 1793037599),
+        "a second before: still tailed"
+    );
+    assert!(
+        !in_tail(&mut s, "heat", 1793037600),
+        "the moment has come: the tail is over"
+    );
     assert_eq!(
         s.read(|tx| tail_until(tx, "p")).unwrap(),
         Some(gear_app::plan::TailUntil::At(1793037600))
@@ -137,7 +174,10 @@ fn a_tail_without_an_end_lasts_until_it_is_cleared() {
 #[test]
 fn the_tailed_lanes_are_named() {
     let mut s = world();
-    assert_eq!(s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(),
+        Vec::<String>::new()
+    );
 
     apply_decision(&mut s, "tail: heat until=T-1", "r1").unwrap();
     assert_eq!(
@@ -152,7 +192,10 @@ fn the_tailed_lanes_are_named() {
         tx.update_task(&task)
     })
     .unwrap();
-    assert_eq!(s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        s.write(|tx| tailed_lanes(tx, "p", NOW)).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 /// A tail that names an unknown lane, an unknown task or a broken time is
@@ -162,9 +205,17 @@ fn a_broken_tail_is_refused() {
     for (rid, decision, needle) in [
         ("a", "tail: nobody", "unknown lane nobody"),
         ("b", "tail: heat until=T-99", "unknown task T-99"),
-        ("c", "tail: heat until=tomorrow", "needs a task id or an RFC3339 time"),
+        (
+            "c",
+            "tail: heat until=tomorrow",
+            "needs a task id or an RFC3339 time",
+        ),
         ("d", "tail: heat until=T-1 until=T-2", "takes one `until=`"),
-        ("e", "tail: - until=T-1", "clears the tail, it takes no `until=`"),
+        (
+            "e",
+            "tail: - until=T-1",
+            "clears the tail, it takes no `until=`",
+        ),
     ] {
         let mut s = world();
         let error = apply_decision(&mut s, decision, rid).unwrap_err();
@@ -232,7 +283,9 @@ fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
     // The path the engine reads the tail through writes the end once.
     assert!(!s.write(|tx| lane_in_tail(tx, "p", "heat")).unwrap());
     assert_eq!(
-        s.read(|tx| tx.get_meta("lane-tail:p:heat")).unwrap().as_deref(),
+        s.read(|tx| tx.get_meta("lane-tail:p:heat"))
+            .unwrap()
+            .as_deref(),
         Some("0"),
         "the end is written"
     );
@@ -259,7 +312,9 @@ fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
         "the retained history does not revive the tail"
     );
     assert_eq!(
-        s.read(|tx| tx.get_meta("lane-tail:p:heat")).unwrap().as_deref(),
+        s.read(|tx| tx.get_meta("lane-tail:p:heat"))
+            .unwrap()
+            .as_deref(),
         Some("0"),
         "the lane stays untailed"
     );
@@ -292,7 +347,10 @@ fn a_tail_that_ended_is_not_revived_by_a_reopened_task() {
     })
     .unwrap();
     apply_decision(&mut s, "tail: heat until=T-2", "r3").unwrap();
-    assert!(in_tail(&mut s, "heat", NOW), "a new declaration is a new tail");
+    assert!(
+        in_tail(&mut s, "heat", NOW),
+        "a new declaration is a new tail"
+    );
 }
 
 /// The verdict the captain settles an attempt with.

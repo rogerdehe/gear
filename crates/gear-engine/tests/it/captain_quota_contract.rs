@@ -62,7 +62,8 @@ quota_reset_h = 1
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
             tx.insert_contract(&ContractRow {
                 project: "p".into(),
@@ -87,7 +88,9 @@ quota_reset_h = 1
     for kind in ["claude", "opencode", "codex"] {
         let mut profile = gear_herdr::builtin(kind).unwrap();
         profile.confirm_rounds = 1;
-        if kind == "opencode" { profile.new_session.clear(); }
+        if kind == "opencode" {
+            profile.new_session.clear();
+        }
         cfg.profiles.insert(kind.into(), profile);
     }
     (store, herdr, cfg)
@@ -193,7 +196,11 @@ fn current_work_can_continue_and_hand_in_but_the_next_task_waits() {
         })
         .unwrap();
     tick(&mut store, &mut herdr, &cfg, T0 + 30).unwrap();
-    assert_eq!(herdr.prompts_to(LANE).len(), 0, "the captain is on quota: the next task waits");
+    assert_eq!(
+        herdr.prompts_to(LANE).len(),
+        0,
+        "the captain is on quota: the next task waits"
+    );
     assert_eq!(
         store
             .read(|tx| tx.get_task("p", "T-2"))

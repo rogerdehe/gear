@@ -147,8 +147,26 @@ fn the_times_of_a_task_are_read_in_order() {
 
     let times = s.read(|tx| tx.attempt_times_of_task("p", "T-1")).unwrap();
     assert_eq!(times.len(), 2);
-    assert_eq!(times[0], (1, AttemptTimes { started: Some(T0 + 120), ..Default::default() }));
-    assert_eq!(times[1], (2, AttemptTimes { started: Some(T0 + 60), ..Default::default() }));
+    assert_eq!(
+        times[0],
+        (
+            1,
+            AttemptTimes {
+                started: Some(T0 + 120),
+                ..Default::default()
+            }
+        )
+    );
+    assert_eq!(
+        times[1],
+        (
+            2,
+            AttemptTimes {
+                started: Some(T0 + 60),
+                ..Default::default()
+            }
+        )
+    );
 }
 
 /// A database from before the times existed gains the columns when it is
@@ -188,7 +206,8 @@ fn an_older_database_gains_the_columns() {
         conn.execute(
             "UPDATE meta SET value=?1 WHERE key='schema_version'",
             [gear_store::OLDEST_VERSION.to_string()],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Opening it migrates it up: the columns are back and the rows are there.
@@ -196,13 +215,26 @@ fn an_older_database_gains_the_columns() {
     let voyage = s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap();
     assert_eq!(voyage.departure, Some(T0));
     assert_eq!(voyage.departure_estimate_min, None);
-    s.write(|tx| tx.set_voyage_departure_estimate("p", "M2", 30)).unwrap();
-    assert_eq!(s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().departure_estimate_min, Some(30));
+    s.write(|tx| tx.set_voyage_departure_estimate("p", "M2", 30))
+        .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M2"))
+            .unwrap()
+            .unwrap()
+            .departure_estimate_min,
+        Some(30)
+    );
     s.write(|tx| tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0 + 60))
         .unwrap();
     let times = s.read(|tx| tx.attempt_times("p", "T-1", 1)).unwrap();
     assert_eq!(times.started, Some(T0 + 60));
-    assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().task, "T-1");
+    assert_eq!(
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .task,
+        "T-1"
+    );
 }
 
 #[test]
@@ -213,7 +245,8 @@ fn departure_estimate_is_fixed_once() {
         tx.set_voyage_departure_estimate("p", "M2", 30)?;
         tx.set_voyage_departure_estimate("p", "M2", 90)?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap();
     assert_eq!(voyage.departure_estimate_min, Some(30));
 }

@@ -72,8 +72,12 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     if all_tailed && !required.is_empty() {
         if let Some(item) = open {
             let current = body(&tailed, &required);
-            if item.body != current { tx.update_message_body(project, &item.id, &current)?; }
-            if !announced { tx.set_meta(&active_key(project), "1")?; }
+            if item.body != current {
+                tx.update_message_body(project, &item.id, &current)?;
+            }
+            if !announced {
+                tx.set_meta(&active_key(project), "1")?;
+            }
             return Ok(None);
         }
         if announced && !crate::attention::due(tx, project, thread(), &captain.id, now)? {
@@ -112,7 +116,15 @@ fn watch_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     } else {
         "the tail is cleared"
     };
-    tx.update_message_state(project, &item.id, MsgState::Resolved, Some(reason), None, None, now)?;
+    tx.update_message_state(
+        project,
+        &item.id,
+        MsgState::Resolved,
+        Some(reason),
+        None,
+        None,
+        now,
+    )?;
     Ok(Some(Change::Closed))
 }
 
@@ -238,7 +250,10 @@ mod tests {
         let mut store = world(TaskState::Ready);
         tail(&mut store, &["heat", "wire"]);
 
-        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 1).unwrap(),
+            Some(Change::Opened)
+        );
         let open = open_items(&mut store);
         assert_eq!(open.len(), 1, "{open:?}");
         let item = &open[0];
@@ -255,26 +270,40 @@ mod tests {
         );
 
         // A second tick adds nothing.
-        assert_eq!(watch(&mut store, "p", T0 + 2).unwrap(), None, "one item per state");
+        assert_eq!(
+            watch(&mut store, "p", T0 + 2).unwrap(),
+            None,
+            "one item per state"
+        );
         assert_eq!(open_items(&mut store).len(), 1);
 
         // One lane out of the tail: the state ended, the item is resolved.
         store
             .write(|tx| tx.set_meta("lane-tail:p:wire", "0"))
             .unwrap();
-        assert_eq!(watch(&mut store, "p", T0 + 3).unwrap(), Some(Change::Closed));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 3).unwrap(),
+            Some(Change::Closed)
+        );
         let closed = items(&mut store);
         assert_eq!(closed.len(), 1, "no new item: the same one closed");
         assert_eq!(closed[0].state, MsgState::Resolved);
         assert!(
-            closed[0].result.as_deref().unwrap_or_default().contains("tail is cleared"),
+            closed[0]
+                .result
+                .as_deref()
+                .unwrap_or_default()
+                .contains("tail is cleared"),
             "{:?}",
             closed[0].result
         );
 
         // Every lane tailed again with the work still there: a new item.
         tail(&mut store, &["heat", "wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 4).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 4).unwrap(),
+            Some(Change::Opened)
+        );
         assert_eq!(open_items(&mut store).len(), 1);
         assert_eq!(items(&mut store).len(), 2, "the state began again");
     }
@@ -285,7 +314,10 @@ mod tests {
     fn no_required_task_left_closes_the_item() {
         let mut store = world(TaskState::Ready);
         tail(&mut store, &["heat", "wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 1).unwrap(),
+            Some(Change::Opened)
+        );
 
         store
             .write(|tx| {
@@ -293,12 +325,19 @@ mod tests {
                 task.state = TaskState::Done;
                 tx.update_task(&task)
             })
-        .unwrap();
-        assert_eq!(watch(&mut store, "p", T0 + 2).unwrap(), Some(Change::Closed));
+            .unwrap();
+        assert_eq!(
+            watch(&mut store, "p", T0 + 2).unwrap(),
+            Some(Change::Closed)
+        );
         let items = items(&mut store);
         assert_eq!(items[0].state, MsgState::Resolved);
         assert!(
-            items[0].result.as_deref().unwrap_or_default().contains("no required task"),
+            items[0]
+                .result
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no required task"),
             "{:?}",
             items[0].result
         );
@@ -322,7 +361,10 @@ mod tests {
             })
             .unwrap();
         tail(&mut store, &["wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 2).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 2).unwrap(),
+            Some(Change::Opened)
+        );
         let open = open_items(&mut store);
         assert!(open[0].body.contains("T-1 (waiting)"), "{}", open[0].body);
     }
@@ -352,20 +394,40 @@ mod tests {
     fn persistent_fact_rings_again_and_changed_fact_updates_same_item() {
         let mut store = world(TaskState::Ready);
         tail(&mut store, &["heat", "wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 1).unwrap(),
+            Some(Change::Opened)
+        );
         let original = open_items(&mut store).remove(0);
-        store.write(|tx| {
-            let mut task = tx.get_task("p", "T-1")?.unwrap();
-            task.state = TaskState::Waiting;
-            tx.update_task(&task)
-        }).unwrap();
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Waiting;
+                tx.update_task(&task)
+            })
+            .unwrap();
         watch(&mut store, "p", T0 + 2).unwrap();
         let updated = open_items(&mut store).remove(0);
         assert_eq!(updated.id, original.id);
         assert_ne!(updated.body, original.body);
-        store.write(|tx| tx.update_message_state("p", &updated.id, MsgState::Resolved, Some("seen"), None, None, T0 + 3)).unwrap();
+        store
+            .write(|tx| {
+                tx.update_message_state(
+                    "p",
+                    &updated.id,
+                    MsgState::Resolved,
+                    Some("seen"),
+                    None,
+                    None,
+                    T0 + 3,
+                )
+            })
+            .unwrap();
         assert_eq!(watch(&mut store, "p", T0 + 902).unwrap(), None);
-        assert_eq!(watch(&mut store, "p", T0 + 903).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 903).unwrap(),
+            Some(Change::Opened)
+        );
         assert_eq!(open_items(&mut store).len(), 1);
     }
 
@@ -377,18 +439,33 @@ mod tests {
     fn a_resolved_item_is_not_reopened_while_the_state_lasts() {
         let mut store = world(TaskState::Waiting);
         tail(&mut store, &["heat", "wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 1).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 1).unwrap(),
+            Some(Change::Opened)
+        );
         let item = open_items(&mut store).remove(0);
 
         // The captain resolves it — what `gear reply M-n --resolve` does.
         store
             .write(|tx| {
-                tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+                tx.update_message_state(
+                    "p",
+                    &item.id,
+                    MsgState::Resolved,
+                    Some("seen"),
+                    None,
+                    None,
+                    T0 + 2,
+                )
             })
             .unwrap();
 
         // The same state: no new item, nothing reported.
-        assert_eq!(watch(&mut store, "p", T0 + 3).unwrap(), None, "the same incident");
+        assert_eq!(
+            watch(&mut store, "p", T0 + 3).unwrap(),
+            None,
+            "the same incident"
+        );
         let all = items(&mut store);
         assert_eq!(all.len(), 1, "no second item: {all:?}");
         assert_eq!(all[0].state, MsgState::Resolved);
@@ -400,7 +477,10 @@ mod tests {
             .unwrap();
         assert_eq!(watch(&mut store, "p", T0 + 4).unwrap(), None);
         tail(&mut store, &["wire"]);
-        assert_eq!(watch(&mut store, "p", T0 + 5).unwrap(), Some(Change::Opened));
+        assert_eq!(
+            watch(&mut store, "p", T0 + 5).unwrap(),
+            Some(Change::Opened)
+        );
         let all = items(&mut store);
         assert_eq!(all.len(), 2, "the new state is one new item: {all:?}");
         assert_eq!(all[1].state, MsgState::Open);

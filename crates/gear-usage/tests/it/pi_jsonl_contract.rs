@@ -6,7 +6,14 @@ use serde_json::json;
 use crate::shared::{write_lines, T12, T13, T14};
 
 /// One assistant message of pi, with its usage.
-fn assistant(time: i64, input: i64, output: i64, cache_read: i64, cache_write: i64, cost: f64) -> serde_json::Value {
+fn assistant(
+    time: i64,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cost: f64,
+) -> serde_json::Value {
     json!({
         "type": "message",
         "timestamp": time,
@@ -26,7 +33,9 @@ fn assistant(time: i64, input: i64, output: i64, cache_read: i64, cache_write: i
 }
 
 fn session(dir: &std::path::Path, lines: &[serde_json::Value]) -> String {
-    write_lines(&dir.join("session.jsonl"), lines).to_string_lossy().into_owned()
+    write_lines(&dir.join("session.jsonl"), lines)
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[test]
@@ -83,14 +92,12 @@ fn a_log_that_cannot_be_read_is_unknown() {
         T14,
         dir.path(),
     );
-    assert!(usage.is_none(), "a file that is not there is unknown, not zero");
-    // The same through the door the callers use: the home of the user.
-    let usage = gear_usage::usage(
-        UsageLog::PiJsonl,
-        &missing.to_string_lossy(),
-        T12,
-        T14,
+    assert!(
+        usage.is_none(),
+        "a file that is not there is unknown, not zero"
     );
+    // The same through the door the callers use: the home of the user.
+    let usage = gear_usage::usage(UsageLog::PiJsonl, &missing.to_string_lossy(), T12, T14);
     assert!(usage.is_none(), "{usage:?}");
 }
 
@@ -146,10 +153,7 @@ fn the_context_of_the_last_record_is_its_input_with_the_cache() {
 fn a_time_in_milliseconds_is_read_as_a_time() {
     // pi writes its times in milliseconds; the reader takes both.
     let dir = tempfile::tempdir().unwrap();
-    let path = session(
-        dir.path(),
-        &[assistant(T12 * 1000, 10, 1, 0, 0, 0.0)],
-    );
+    let path = session(dir.path(), &[assistant(T12 * 1000, 10, 1, 0, 0, 0.0)]);
     let usage = usage_in(UsageLog::PiJsonl, &path, T12, T14, dir.path()).unwrap();
     assert_eq!(usage.records, 1, "{usage:?}");
     assert_eq!(usage.input, 10, "{usage:?}");
@@ -174,7 +178,10 @@ fn a_session_file_that_was_never_written_does_not_blank_the_round() {
     let dir = tempfile::tempdir().unwrap();
     let readable = session(
         dir.path(),
-        &[assistant(T12, 10, 1, 100, 0, 0.01), assistant(T13, 20, 2, 200, 5, 0.02)],
+        &[
+            assistant(T12, 10, 1, 100, 0, 0.01),
+            assistant(T13, 20, 2, 200, 5, 0.02),
+        ],
     );
     let missing = dir
         .path()
@@ -211,10 +218,7 @@ fn a_round_with_no_readable_session_is_unknown() {
 #[test]
 fn two_readable_sessions_are_summed() {
     let dir = tempfile::tempdir().unwrap();
-    let first = session(
-        dir.path(),
-        &[assistant(T12, 10, 1, 100, 0, 0.01)],
-    );
+    let first = session(dir.path(), &[assistant(T12, 10, 1, 100, 0, 0.01)]);
     let second_path = dir.path().join("other");
     let second = write_lines(
         &second_path.join("session.jsonl"),

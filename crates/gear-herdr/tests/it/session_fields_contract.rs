@@ -22,28 +22,40 @@ fn every_kind_of_the_table_has_its_session_fields() {
     let (new_session, compact, resume, log) = fields("pi");
     assert_eq!(new_session, "/new");
     assert_eq!(compact, "/compact");
-    assert_eq!(resume, Some(vec!["--session".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        resume,
+        Some(vec!["--session".to_string(), "{session}".to_string()])
+    );
     assert_eq!(log.as_deref(), Some("pi-jsonl"));
 
     // codex
     let (new_session, compact, resume, log) = fields("codex");
     assert_eq!(new_session, "/new");
     assert_eq!(compact, "/compact");
-    assert_eq!(resume, Some(vec!["resume".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        resume,
+        Some(vec!["resume".to_string(), "{session}".to_string()])
+    );
     assert_eq!(log.as_deref(), Some("codex-rollout"));
 
     // claude
     let (new_session, compact, resume, log) = fields("claude");
     assert_eq!(new_session, "/clear");
     assert_eq!(compact, "/compact");
-    assert_eq!(resume, Some(vec!["--resume".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        resume,
+        Some(vec!["--resume".to_string(), "{session}".to_string()])
+    );
     assert_eq!(log.as_deref(), Some("claude-jsonl"));
 
     // opencode
     let (new_session, compact, resume, log) = fields("opencode");
     assert_eq!(new_session, "/new");
     assert_eq!(compact, "/compact");
-    assert_eq!(resume, Some(vec!["-s".to_string(), "{session}".to_string()]));
+    assert_eq!(
+        resume,
+        Some(vec!["-s".to_string(), "{session}".to_string()])
+    );
     assert_eq!(log.as_deref(), Some("opencode-db"));
 }
 
@@ -114,7 +126,10 @@ fn the_codex_profile_exits_with_the_typed_command() {
     // command `/quit`, and no key is sent any more.
     let codex = builtin("codex").unwrap();
     assert_eq!(codex.exit_command.as_deref(), Some("/quit"));
-    assert!(codex.exit_keys.is_empty(), "no exit keys for codex any more");
+    assert!(
+        codex.exit_keys.is_empty(),
+        "no exit keys for codex any more"
+    );
 }
 
 #[test]

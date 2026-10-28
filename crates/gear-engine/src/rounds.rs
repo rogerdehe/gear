@@ -64,8 +64,7 @@ pub fn tick(
                 let Some(binding) = tx.get_binding(&seat.id, seat.generation)? else {
                     continue;
                 };
-                let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty())
-                else {
+                let Some(session) = binding.session_ref.as_deref().filter(|s| !s.is_empty()) else {
                     continue;
                 };
                 let Some(round) = tx.open_round_of_seat(&seat.id)? else {
@@ -97,7 +96,13 @@ pub fn tick(
         let rounds = store.read(|tx| tx.rounds_of_project(&project))?;
         for round in rounds {
             let Some(end) = round.end_at else { continue };
-            if now < end.saturating_add(60) || round.counted_at.is_some_and(|at| round.input.is_some() || now < at.saturating_add(60)) { continue }
+            if now < end.saturating_add(60)
+                || round
+                    .counted_at
+                    .is_some_and(|at| round.input.is_some() || now < at.saturating_add(60))
+            {
+                continue;
+            }
             let tokens = count_round(store, cfg, &round, now)?;
             store.write(|tx| {
                 tx.set_round_tokens(&key_of(&round), &tokens, now)?;
@@ -121,7 +126,10 @@ fn key_of(round: &gear_store::RoundRow) -> RoundKey {
 
 /// Record the owner of each session independently of the round's initial CLI.
 fn session_cli_key(key: &RoundKey, session: &str) -> String {
-    format!("round-session-cli:{}", serde_json::json!([key.project, key.task, key.attempt, key.role, session]))
+    format!(
+        "round-session-cli:{}",
+        serde_json::json!([key.project, key.task, key.attempt, key.role, session])
+    )
 }
 
 pub(crate) fn add_session(tx: &Tx<'_>, key: &RoundKey, session: &str, cli: &str) -> GearResult<()> {
@@ -135,65 +143,154 @@ fn label(round: &gear_store::RoundRow) -> String {
 }
 
 /// The open round of a seat, if it has one (the round it is working on).
-pub fn open_round(
-    tx: &Tx<'_>,
-    seat: &str,
-) -> GearResult<Option<gear_store::RoundRow>> {
+pub fn open_round(tx: &Tx<'_>, seat: &str) -> GearResult<Option<gear_store::RoundRow>> {
     tx.open_round_of_seat(seat)
 }
 
 /// Count a round without writing it. Reports can use this for an open round;
 /// its exclusive upper boundary is `now`. Unreadable logs remain unknown.
-pub fn count_round(store: &mut Store, cfg: &EngineCfg, round: &gear_store::RoundRow, now: Ts) -> GearResult<RoundTokens> {
-    let unknown = || RoundTokens { input:None, output:None, cache_read:None, cache_write:None, reasoning:None, cost_usd:None, cost_source:"none".into() };
-    let (seat, project) = store.read(|tx| Ok((tx.get_seat(&round.seat)?, tx.get_project(&round.project)?)))?;
-    let (Some(seat), Some(project)) = (seat, project) else { return Ok(unknown()) };
+pub fn count_round(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    round: &gear_store::RoundRow,
+    now: Ts,
+) -> GearResult<RoundTokens> {
+    let unknown = || RoundTokens {
+        input: None,
+        output: None,
+        cache_read: None,
+        cache_write: None,
+        reasoning: None,
+        cost_usd: None,
+        cost_source: "none".into(),
+    };
+    let (seat, project) =
+        store.read(|tx| Ok((tx.get_seat(&round.seat)?, tx.get_project(&round.project)?)))?;
+    let (Some(seat), Some(project)) = (seat, project) else {
+        return Ok(unknown());
+    };
     let config = project.config_toml.parse::<toml::Value>().ok();
     let resolve = |name: &str| {
-        let raw = config.as_ref().and_then(|c| c.get("profiles")).and_then(|p| p.get(name));
-        let mut profile = cfg.profiles.get(name).cloned().or_else(|| gear_herdr::builtin(name))
+        let raw = config
+            .as_ref()
+            .and_then(|c| c.get("profiles"))
+            .and_then(|p| p.get(name));
+        let mut profile = cfg
+            .profiles
+            .get(name)
+            .cloned()
+            .or_else(|| gear_herdr::builtin(name))
             .or_else(|| raw.map(|_| gear_herdr::Profile::for_new()))?;
         if let Some(raw) = raw {
-            if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() { profile = profile.patched(&patch, name); }
+            if let Ok(patch) = raw.clone().try_into::<gear_herdr::ProfilePatch>() {
+                profile = profile.patched(&patch, name);
+            }
         }
         Some(profile)
     };
-    if round.sessions.is_empty() { return Ok(unknown()) }
-    let owners = store.read(|tx| round.sessions.iter().map(|session| {
-        Ok((session.clone(), tx.get_meta(&session_cli_key(&key_of(round), session))?
-            .filter(|cli| !cli.is_empty()).unwrap_or_else(|| round.cli.clone())))
-    }).collect::<GearResult<Vec<_>>>())?;
+    if round.sessions.is_empty() {
+        return Ok(unknown());
+    }
+    let owners = store.read(|tx| {
+        round
+            .sessions
+            .iter()
+            .map(|session| {
+                Ok((
+                    session.clone(),
+                    tx.get_meta(&session_cli_key(&key_of(round), session))?
+                        .filter(|cli| !cli.is_empty())
+                        .unwrap_or_else(|| round.cli.clone()),
+                ))
+            })
+            .collect::<GearResult<Vec<_>>>()
+    })?;
     let end = round.end_at.unwrap_or(now).min(now);
     let mut prices = std::collections::BTreeMap::new();
-    if let Some(table) = config.as_ref().and_then(|c|c.get("prices")).and_then(toml::Value::as_table) {
+    if let Some(table) = config
+        .as_ref()
+        .and_then(|c| c.get("prices"))
+        .and_then(toml::Value::as_table)
+    {
         for (model, price) in table {
-            let rate = |key: &str| price.get(key).and_then(|n| n.as_float().or_else(|| n.as_integer().map(|i|i as f64)));
-            if let (Some(input),Some(output),Some(cache_read),Some(cache_write)) = (rate("input"),rate("output"),rate("cache_read"),rate("cache_write")) {
-                prices.insert(model.clone(), gear_usage::Price {input, output, cache_read, cache_write});
+            let rate = |key: &str| {
+                price
+                    .get(key)
+                    .and_then(|n| n.as_float().or_else(|| n.as_integer().map(|i| i as f64)))
+            };
+            if let (Some(input), Some(output), Some(cache_read), Some(cache_write)) = (
+                rate("input"),
+                rate("output"),
+                rate("cache_read"),
+                rate("cache_write"),
+            ) {
+                prices.insert(
+                    model.clone(),
+                    gear_usage::Price {
+                        input,
+                        output,
+                        cache_read,
+                        cache_write,
+                    },
+                );
             }
         }
     }
-    let mut groups: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
-    for (session, cli) in owners { groups.entry(cli).or_default().push(session); }
-    let mut total = RoundTokens { input:Some(0), output:Some(0), cache_read:Some(0), cache_write:Some(0), reasoning:Some(0), cost_usd:None, cost_source:"none".into() };
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (session, cli) in owners {
+        groups.entry(cli).or_default().push(session);
+    }
+    let mut total = RoundTokens {
+        input: Some(0),
+        output: Some(0),
+        cache_read: Some(0),
+        cache_write: Some(0),
+        reasoning: Some(0),
+        cost_usd: None,
+        cost_source: "none".into(),
+    };
     let (mut cost, mut any_cost, mut cost_known, mut priced) = (0.0, false, true, false);
     for (cli, sessions) in groups {
         // Keep custom profile behavior for the current CLI; use the original
         // CLI's profile for older sessions after a cross-CLI restart.
-        let profile = resolve(&seat.profile).filter(|p| p.kind == cli)
+        let profile = resolve(&seat.profile)
+            .filter(|p| p.kind == cli)
             .or_else(|| resolve(&cli).filter(|p| p.kind == cli));
-        let Some(log) = profile.as_ref().and_then(|p| p.usage_log.as_deref()).and_then(gear_usage::UsageLog::from_name) else { return Ok(unknown()) };
-        let model = if cli == round.cli { round.model.as_deref() } else { None };
-        let Some(result) = gear_usage::round_usage(log, &sessions, round.start_at, end, model, &prices) else { return Ok(unknown()) };
+        let Some(log) = profile
+            .as_ref()
+            .and_then(|p| p.usage_log.as_deref())
+            .and_then(gear_usage::UsageLog::from_name)
+        else {
+            return Ok(unknown());
+        };
+        let model = if cli == round.cli {
+            round.model.as_deref()
+        } else {
+            None
+        };
+        let Some(result) =
+            gear_usage::round_usage(log, &sessions, round.start_at, end, model, &prices)
+        else {
+            return Ok(unknown());
+        };
         let u = result.usage;
         *total.input.as_mut().unwrap() += u.input;
         *total.output.as_mut().unwrap() += u.output;
         *total.cache_read.as_mut().unwrap() += u.cache_read;
         *total.cache_write.as_mut().unwrap() += u.cache_write;
         *total.reasoning.as_mut().unwrap() += u.reasoning;
-        if let Some(value) = u.cost_usd { cost += value; any_cost = true; priced |= result.cost_source == "prices"; }
-        else if u.records > 0 { cost_known = false; }
+        if let Some(value) = u.cost_usd {
+            cost += value;
+            any_cost = true;
+            priced |= result.cost_source == "prices";
+        } else if u.records > 0 {
+            cost_known = false;
+        }
     }
-    if any_cost && cost_known { total.cost_usd = Some(cost); total.cost_source = if priced { "prices" } else { "agent" }.into(); }
+    if any_cost && cost_known {
+        total.cost_usd = Some(cost);
+        total.cost_source = if priced { "prices" } else { "agent" }.into();
+    }
     Ok(total)
 }

@@ -19,7 +19,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         Ok(())
     })
@@ -46,15 +54,28 @@ fn lift_the_cap(s: &mut Store, max_task_min: u32) {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
-fn run(s: &mut Store, text: &str, rid: &str, now: i64) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    text: &str,
+    rid: &str,
+    now: i64,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let draft = parse(text).unwrap();
     let (env, fp) = cap();
     apply(s, &env, Some(&fp), None, &draft, text, rid, now)
@@ -71,11 +92,17 @@ const FULL: &str = "done: users install v0.1.0 without Rust\nbar: block only loo
 
 #[test]
 fn the_milestone_block_fields_are_read() {
-    assert_eq!(milestone_parts("M1: delivery v0.1.0"), ("M1", "delivery v0.1.0"));
+    assert_eq!(
+        milestone_parts("M1: delivery v0.1.0"),
+        ("M1", "delivery v0.1.0")
+    );
     assert_eq!(milestone_parts("M2"), ("M2", ""));
     let (done, bar, eta) = milestone_fields(FULL);
     assert_eq!(done.as_deref(), Some("users install v0.1.0 without Rust"));
-    assert_eq!(bar.as_deref(), Some("block only loop breaks and data loss; log the rest"));
+    assert_eq!(
+        bar.as_deref(),
+        Some("block only loop breaks and data loss; log the rest")
+    );
     assert_eq!(eta.as_deref(), Some("8h"));
 }
 
@@ -117,31 +144,55 @@ fn a_voyage_is_stored_with_its_departure_and_shown() {
             Some("8h")
         )
     );
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(2)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW), Some(2))
+    );
 
     // The task packet shows it.
     let packet = s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap();
     assert!(packet.contains("Voyage M1 delivery v0.1.0"), "{packet}");
-    assert!(packet.contains("done: users install v0.1.0 without Rust"), "{packet}");
+    assert!(
+        packet.contains("done: users install v0.1.0 without Rust"),
+        "{packet}"
+    );
     assert!(packet.contains("bar: block only loop breaks"), "{packet}");
     assert!(packet.contains("eta 8h"), "{packet}");
-    assert!(packet.contains("departed 2027-01-15 with 2 tasks"), "{packet}");
+    assert!(
+        packet.contains("departed 2027-01-15 with 2 tasks"),
+        "{packet}"
+    );
 
     // The captain's home page shows it before the inbox.
     let (env, fp) = cap();
     let page = home::build(&mut s, &env, Some(&fp), NOW + 10).unwrap();
-    assert!(page.text.contains("Voyage M1 delivery v0.1.0"), "{}", page.text);
-    assert!(page.text.contains("done: users install v0.1.0 without Rust"), "{}", page.text);
+    assert!(
+        page.text.contains("Voyage M1 delivery v0.1.0"),
+        "{}",
+        page.text
+    );
+    assert!(
+        page.text
+            .contains("done: users install v0.1.0 without Rust"),
+        "{}",
+        page.text
+    );
 
     // A later apply updates the words but never moves the departure.
-    let later = plan(1, "done: users install v0.1.1 without Rust\nbar: keep only loop breaks\neta: 9h\n");
+    let later = plan(
+        1,
+        "done: users install v0.1.1 without Rust\nbar: keep only loop breaks\neta: 9h\n",
+    );
     run(&mut s, &later, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
         (voyage.done.as_deref(), voyage.eta.as_deref()),
         (Some("users install v0.1.1 without Rust"), Some("9h"))
     );
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(2)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW), Some(2))
+    );
 }
 
 #[test]
@@ -157,7 +208,10 @@ fn an_untouched_old_milestone_keeps_applying() {
     assert_eq!(tasks[0].state, TaskState::Ready);
     // The departure is recorded (the tasks exist); the words wait for a block.
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW), Some(1))
+    );
     assert_eq!((voyage.done, voyage.bar, voyage.eta), (None, None, None));
     let packet = s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap();
     assert!(packet.contains("Voyage M1"), "{packet}");
@@ -174,21 +228,34 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
     let block_only = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\ndone: users install it\nbar: block only loop breaks\neta: 8h\n";
     run(&mut s, block_only, "r1", NOW).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (None, None), "no task yet: no departure");
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (None, None),
+        "no task yet: no departure"
+    );
 
     // base 1: only the queue, one task on M1 — the milestone departs now.
     let first_task = "<!-- gear-plan project=p base=1 -->\n# Queue\n## NEW [must] lane=heat milestone=M1\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n";
     run(&mut s, first_task, "r2", NOW + 10).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
-    assert!(s.read(|tx| render_task_packet(tx, "p", "T-1")).unwrap().contains("with 1 tasks"));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW + 10), Some(1))
+    );
+    assert!(s
+        .read(|tx| render_task_packet(tx, "p", "T-1"))
+        .unwrap()
+        .contains("with 1 tasks"));
 
     // base 2: the block again plus a second task — the words update, the
     // departure stays.
     let more = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n## NEW [should] lane=heat milestone=M1\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n";
     run(&mut s, more, "r3", NOW + 20).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 10), Some(1)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW + 10), Some(1))
+    );
     assert_eq!(voyage.done.as_deref(), Some("users install v2"));
 }
 
@@ -213,7 +280,10 @@ fn editing_a_grandfathered_milestone_keeps_its_historical_departure() {
     let edit = "<!-- gear-plan project=p base=2 -->\n# Milestone M1: release v2\ndone: users install v2\nbar: keep it simple\neta: 9h\n# Queue\n";
     run(&mut s, edit, "r3", NOW + 200).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW), Some(1)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW), Some(1))
+    );
     assert_eq!(voyage.done.as_deref(), Some("users install v2"));
 }
 
@@ -237,8 +307,15 @@ fn the_snapshot_shows_the_voyage_that_has_work() {
     assert!(page.text.contains("Voyage M4 voyage M4"), "{}", page.text);
     assert!(page.text.contains("done: M4 done"), "{}", page.text);
     let snapshot = &page.text[page.text.find("SNAPSHOT").expect("the snapshot")..];
-    assert!(!snapshot.contains("Voyage M3 voyage M3"), "only the voyage with work: {snapshot}");
-    assert!(!page.text.contains("more voyages"), "every voyage is its own: {}", page.text);
+    assert!(
+        !snapshot.contains("Voyage M3 voyage M3"),
+        "only the voyage with work: {snapshot}"
+    );
+    assert!(
+        !page.text.contains("more voyages"),
+        "every voyage is its own: {}",
+        page.text
+    );
 }
 
 /// T-246: each voyage is independent. A voyage that landed is not listed with
@@ -269,8 +346,14 @@ fn the_snapshot_shows_only_the_current_voyage() {
     let page = home::build(&mut s, &env, Some(&fp), NOW).unwrap();
     let snapshot = &page.text[page.text.find("SNAPSHOT").expect("the snapshot")..];
     // The voyage line of M2, the landed M1 nowhere, and no count of the rest.
-    assert!(snapshot.contains("Voyage M2 the second voyage"), "{snapshot}");
-    assert!(!snapshot.contains("Voyage M1"), "the landed voyage is history: {snapshot}");
+    assert!(
+        snapshot.contains("Voyage M2 the second voyage"),
+        "{snapshot}"
+    );
+    assert!(
+        !snapshot.contains("Voyage M1"),
+        "the landed voyage is history: {snapshot}"
+    );
     assert!(!page.text.contains("more voyages"), "{}", page.text);
     // The totals are the current voyage's two tasks, not all three.
     assert!(snapshot.contains("SNAPSHOT 2 tasks · 1 done"), "{snapshot}");
@@ -301,28 +384,52 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
                 session_cli: None,
                 session_action: None,
                 sent_at: None,
-                project: "p".into(), task: "T-1".into(), n, seat: "p:heat".into(),
-                generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
-                state, candidate: Some("abc".into()), report: None, safe_point: None,
-                started: NOW + start * 60, updated: NOW + finish * 60,
+                project: "p".into(),
+                task: "T-1".into(),
+                n,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state,
+                candidate: Some("abc".into()),
+                report: None,
+                safe_point: None,
+                started: NOW + start * 60,
+                updated: NOW + finish * 60,
             })?;
             tx.set_attempt_time("p", "T-1", n, AttemptStep::Started, NOW + start * 60)?;
             tx.set_attempt_time("p", "T-1", n, AttemptStep::Settled, NOW + finish * 60)?;
         }
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     s.write(|tx| {
         tx.insert_message(&gear_store::NewMessage {
             meta: None,
-            project: "p".into(), thread: "question".into(), task: None, attempt: None,
-            sender: "p:heat".into(), sender_gen: 1, recipient: "p:captain".into(),
-            kind: gear_model::MsgKind::Question, urgent: false, body: "Review scope".into(),
-            reply_to: None, needs_ack: false, state: gear_model::MsgState::Open, created: NOW,
+            project: "p".into(),
+            thread: "question".into(),
+            task: None,
+            attempt: None,
+            sender: "p:heat".into(),
+            sender_gen: 1,
+            recipient: "p:captain".into(),
+            kind: gear_model::MsgKind::Question,
+            urgent: false,
+            body: "Review scope".into(),
+            reply_to: None,
+            needs_ack: false,
+            state: gear_model::MsgState::Open,
+            created: NOW,
         })?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     let now = NOW + 180 * 60;
-    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", now)).unwrap();
+    let reports = s
+        .read(|tx| gear_board::voyage::reports(tx, "p", now))
+        .unwrap();
     let report = &reports[0];
     assert_eq!(report.elapsed_min, Some(180));
     assert_eq!(report.pace(), Some(2.0));
@@ -337,7 +444,10 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     assert_eq!(lines.len(), 5);
     assert_eq!(lines[0], "Voyage M2 course · done: ship the voyage");
     assert_eq!(lines[1], "  elapsed 180m / eta 8h");
-    assert_eq!(lines[2], "  pace 2.00x · projected finish 360m from departure");
+    assert_eq!(
+        lines[2],
+        "  pace 2.00x · projected finish 360m from departure"
+    );
     assert_eq!(lines[3], "  scope now 150m / departure 60m");
     assert_eq!(lines[4], "  rework 1 round · slowest T-1 120m");
     let block = lines.join("\n");
@@ -352,12 +462,16 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     }
     let project = s.read(|tx| gear_board::project(tx, "p", now)).unwrap();
     assert_eq!(project.voyages, reports);
-    let board = gear_board::Board { engine: gear_board::EngineState::Running, projects: vec![project] };
+    let board = gear_board::Board {
+        engine: gear_board::EngineState::Running,
+        projects: vec![project],
+    };
     for view in [gear_board::View::Lanes, gear_board::View::Deps] {
         let text = gear_board::render(&board, view);
         assert!(text.contains(&block), "{text}");
     }
-    let json: serde_json::Value = serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_str(&gear_board::to_json(&board).unwrap()).unwrap();
     let json = &json["projects"][0]["voyages"][0];
     assert_eq!(json["pace"], 2.0);
     assert_eq!(json["projected_min"], 360);
@@ -367,7 +481,13 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
     // Editing today's estimate must not change the departure baseline.
     let edit = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat milestone=M2\nestimate: 120\n";
     run(&mut s, edit, "r3", now).unwrap();
-    assert_eq!(s.read(|tx| tx.get_voyage("p", "M2")).unwrap().unwrap().departure_estimate_min, Some(60));
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M2"))
+            .unwrap()
+            .unwrap()
+            .departure_estimate_min,
+        Some(60)
+    );
     // A running task may be the slowest, but cannot dilute completed-task pace.
     s.write(|tx| {
         let mut task = tx.get_task("p", "T-2")?.unwrap();
@@ -378,14 +498,27 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
             session_cli: None,
             session_action: None,
             sent_at: None,
-            project: "p".into(), task: "T-2".into(), n: 1, seat: "p:heat".into(),
-            generation: 1, contract_version: 1, adopted_version: 1, pending_update: None,
-            state: AttemptState::Started, candidate: None, report: None, safe_point: None,
-            started: NOW + 10 * 60, updated: now,
+            project: "p".into(),
+            task: "T-2".into(),
+            n: 1,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: AttemptState::Started,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: NOW + 10 * 60,
+            updated: now,
         })?;
         tx.set_attempt_time("p", "T-2", 1, AttemptStep::Started, NOW + 10 * 60)
-    }).unwrap();
-    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", now)).unwrap();
+    })
+    .unwrap();
+    let reports = s
+        .read(|tx| gear_board::voyage::reports(tx, "p", now))
+        .unwrap();
     assert_eq!(reports[0].slowest, Some(("T-2".into(), 170)));
     assert_eq!(reports[0].pace(), Some(1.0));
     assert_eq!(reports[0].projected_min, Some(270));
@@ -395,11 +528,16 @@ fn voyage_report_starts_home_and_matches_both_board_views() {
 fn voyage_report_keeps_unknowns_and_omits_finished_milestones() {
     let mut s = world();
     run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
-    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
+    let reports = s
+        .read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60))
+        .unwrap();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].pace(), None, "no completed measured task yet");
     assert_eq!(reports[0].projected_min, None);
-    assert_eq!(reports[0].slowest, None, "unstarted tasks have no elapsed span");
+    assert_eq!(
+        reports[0].slowest, None,
+        "unstarted tasks have no elapsed span"
+    );
     assert_eq!(reports[0].departure_scope_min, Some(60));
     s.write(|tx| {
         let mut a = tx.get_task("p", "T-1")?.unwrap();
@@ -409,9 +547,16 @@ fn voyage_report_keeps_unknowns_and_omits_finished_milestones() {
         b.estimate_min = None;
         tx.update_task(&b)?;
         Ok(())
-    }).unwrap();
-    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
-    assert_eq!(reports[0].pace(), None, "legacy completion has no measured time");
+    })
+    .unwrap();
+    let reports = s
+        .read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60))
+        .unwrap();
+    assert_eq!(
+        reports[0].pace(),
+        None,
+        "legacy completion has no measured time"
+    );
     assert_eq!(reports[0].scope_min, None, "unknown estimate is not zero");
     assert_eq!(reports[0].remaining_estimate_min, None);
     assert_eq!(reports[0].projected_min, None);
@@ -419,8 +564,12 @@ fn voyage_report_keeps_unknowns_and_omits_finished_milestones() {
         let mut b = tx.get_task("p", "T-2")?.unwrap();
         b.state = TaskState::Cancelled;
         tx.update_task(&b)
-    }).unwrap();
-    assert!(s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap().is_empty());
+    })
+    .unwrap();
+    assert!(s
+        .read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60))
+        .unwrap()
+        .is_empty());
 }
 
 /// A migrated voyage recovers its estimate from the departure plan, even when
@@ -430,31 +579,49 @@ fn historical_departure_scope_uses_the_original_plan() {
     let mut old = world();
     lift_the_cap(&mut old, 300);
     run(&mut old, &plan(0, FULL), "r1", NOW).unwrap();
-    let (tasks, contracts, mut voyage, mut history) = old.read(|tx| {
-        let tasks = tx.tasks_of_project("p")?;
-        let contracts = tasks.iter().map(|t| tx.get_contract("p", &t.id, 1)
-            .map(|c| c.unwrap())).collect::<gear_model::GearResult<Vec<_>>>()?;
-        Ok((tasks, contracts, tx.get_voyage("p", "M1")?.unwrap(), tx.get_plan("p", 1)?.unwrap()))
-    }).unwrap();
+    let (tasks, contracts, mut voyage, mut history) = old
+        .read(|tx| {
+            let tasks = tx.tasks_of_project("p")?;
+            let contracts = tasks
+                .iter()
+                .map(|t| tx.get_contract("p", &t.id, 1).map(|c| c.unwrap()))
+                .collect::<gear_model::GearResult<Vec<_>>>()?;
+            Ok((
+                tasks,
+                contracts,
+                tx.get_voyage("p", "M1")?.unwrap(),
+                tx.get_plan("p", 1)?.unwrap(),
+            ))
+        })
+        .unwrap();
     voyage.departure_estimate_min = None;
     // The old plan had no estimate field, but stated each estimate in its goal.
-    history.draft = history.draft.replace("estimate: 30\n", "")
+    history.draft = history
+        .draft
+        .replace("estimate: 30\n", "")
         .replace("goal: A", "goal: A. Estimate: 0.5h")
         .replace("goal: B", "goal: B. Estimate: 30m");
     let mut s = world();
     lift_the_cap(&mut s, 300);
     s.write(|tx| {
-        for task in &tasks { tx.insert_task(task)?; }
-        for contract in &contracts { tx.insert_contract(contract)?; }
+        for task in &tasks {
+            tx.insert_task(task)?;
+        }
+        for contract in &contracts {
+            tx.insert_contract(contract)?;
+        }
         tx.upsert_voyage(&voyage)?;
         tx.insert_plan(&history)
-    }).unwrap();
+    })
+    .unwrap();
     let edit = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-1 [must] lane=heat milestone=M1\nestimate: 300\n";
     run(&mut s, edit, "r2", NOW + 60).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(voyage.departure, Some(NOW));
     assert_eq!(voyage.departure_estimate_min, Some(60));
-    let reports = s.read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60)).unwrap();
+    let reports = s
+        .read(|tx| gear_board::voyage::reports(tx, "p", NOW + 60))
+        .unwrap();
     assert_eq!(reports[0].scope_min, Some(330));
     assert_eq!(reports[0].departure_scope_min, Some(60));
 }
@@ -469,7 +636,11 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     run(&mut s, &plan(0, FULL), "r1", NOW).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
-        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (
+            voyage.departure,
+            voyage.departure_tasks,
+            voyage.departure_estimate_min
+        ),
         (Some(NOW), Some(2), Some(60))
     );
 
@@ -478,13 +649,20 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     run(&mut s, moved, "r2", NOW + 100).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
-        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (
+            voyage.departure,
+            voyage.departure_tasks,
+            voyage.departure_estimate_min
+        ),
         (None, None, None),
         "a milestone with no task has no departure"
     );
     // M0, which now holds the tasks, departed on this apply.
     let voyage = s.read(|tx| tx.get_voyage("p", "M0")).unwrap().unwrap();
-    assert_eq!((voyage.departure, voyage.departure_tasks), (Some(NOW + 100), Some(2)));
+    assert_eq!(
+        (voyage.departure, voyage.departure_tasks),
+        (Some(NOW + 100), Some(2))
+    );
 
     // The real voyage reuses M1: its departure is its own first task, not the
     // trial's, and its scope is the new tasks' estimates.
@@ -492,7 +670,11 @@ fn an_emptied_milestone_loses_its_departure_and_a_reused_id_starts_again() {
     run(&mut s, reuse, "r3", NOW + 200).unwrap();
     let voyage = s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap();
     assert_eq!(
-        (voyage.departure, voyage.departure_tasks, voyage.departure_estimate_min),
+        (
+            voyage.departure,
+            voyage.departure_tasks,
+            voyage.departure_estimate_min
+        ),
         (Some(NOW + 200), Some(1), Some(45)),
         "the reused id starts when its new tasks come"
     );

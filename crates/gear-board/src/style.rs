@@ -48,16 +48,28 @@ pub struct Style {
 
 impl Style {
     /// No style: the terminal's own.
-    pub const PLAIN: Style = Style { fg: None, bold: false, reverse: false };
+    pub const PLAIN: Style = Style {
+        fg: None,
+        bold: false,
+        reverse: false,
+    };
 
     /// A colour.
     pub const fn fg(color: Color) -> Style {
-        Style { fg: Some(color), bold: false, reverse: false }
+        Style {
+            fg: Some(color),
+            bold: false,
+            reverse: false,
+        }
     }
 
     /// Bold, without a colour.
     pub const fn bold() -> Style {
-        Style { fg: None, bold: true, reverse: false }
+        Style {
+            fg: None,
+            bold: true,
+            reverse: false,
+        }
     }
 
     /// The same style, bold.
@@ -67,7 +79,10 @@ impl Style {
 
     /// The same style, in reverse video when `on`.
     pub const fn reversed_if(self, on: bool) -> Style {
-        Style { reverse: self.reverse || on, ..self }
+        Style {
+            reverse: self.reverse || on,
+            ..self
+        }
     }
 
     /// Does the style show anything on a space? Only reverse video does.
@@ -146,7 +161,8 @@ impl Line {
     /// The line with a text in a style after it.
     pub fn push(mut self, text: impl Into<String>, style: Style) -> Line {
         let text = text.into();
-        self.styles.extend(std::iter::repeat_n(style, text.chars().count()));
+        self.styles
+            .extend(std::iter::repeat_n(style, text.chars().count()));
         self.text.push_str(&text);
         self
     }

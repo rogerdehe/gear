@@ -227,7 +227,13 @@ fn world() -> Store {
                         session_action: None,
                         sent_at: None,
                     })?;
-                    tx.set_attempt_time("p", task.id, round, gear_store::AttemptStep::Started, started)?;
+                    tx.set_attempt_time(
+                        "p",
+                        task.id,
+                        round,
+                        gear_store::AttemptStep::Started,
+                        started,
+                    )?;
                     tx.set_attempt_time(
                         "p",
                         task.id,
@@ -236,7 +242,13 @@ fn world() -> Store {
                         started + task.actual * 60,
                     )?;
                     if let Some(merged) = task.merged {
-                        tx.set_attempt_time("p", task.id, round, gear_store::AttemptStep::Merged, merged)?;
+                        tx.set_attempt_time(
+                            "p",
+                            task.id,
+                            round,
+                            gear_store::AttemptStep::Merged,
+                            merged,
+                        )?;
                     }
                 }
             }
@@ -259,10 +271,10 @@ fn the_graph_has_the_columns_of_the_prototype() {
     assert_eq!(
         ids,
         vec![
-            "T-148", "T-150", "T-151", "T-143", "T-144", "T-141", "T-142", "T-139", "T-136", "T-135"
-        ]
-        // T-141 is being merged and T-142 waits for its verdict: they stand
-        // next to each other, in the order of the plan (review F2).
+            "T-148", "T-150", "T-151", "T-143", "T-144", "T-141", "T-142", "T-139", "T-136",
+            "T-135"
+        ] // T-141 is being merged and T-142 waits for its verdict: they stand
+          // next to each other, in the order of the plan (review F2).
     );
 
     let lines = lines(&tasks, &lanes, None);
@@ -367,9 +379,7 @@ fn a_dependency_is_marked_as_needed() {
 #[test]
 fn the_task_panel_lists_the_rounds_and_the_dependencies() {
     let mut store = world();
-    let panel = store
-        .read(|tx| panel(tx, "p", "T-139", T0))
-        .unwrap();
+    let panel = store.read(|tx| panel(tx, "p", "T-139", T0)).unwrap();
     let text = panel.join("\n");
     assert!(text.contains("T-139 · lane mast · done"), "{text}");
     assert!(text.contains("rebind a lane to another repo"), "{text}");
@@ -430,9 +440,7 @@ fn the_task_panel_uses_the_rounds_of_the_store_when_there_are_any() {
             )
         })
         .unwrap();
-    let panel = store
-        .read(|tx| panel(tx, "p", "T-141", T0))
-        .unwrap();
+    let panel = store.read(|tx| panel(tx, "p", "T-141", T0)).unwrap();
     let text = panel.join("\n");
     // The round of the store, with its time and its tokens.
     assert!(text.contains("dev   attempt 1"), "{text}");

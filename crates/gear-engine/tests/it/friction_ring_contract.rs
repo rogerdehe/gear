@@ -24,8 +24,14 @@ fn world() -> World {
     seed(&mut store);
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
-    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    cfg.profiles
+        .insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
     World { store, herdr, cfg }
 }
 
@@ -36,8 +42,14 @@ fn world_at(path: &std::path::Path) -> World {
     seed(&mut store);
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
-    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    cfg.profiles
+        .insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
     World { store, herdr, cfg }
 }
 
@@ -46,7 +58,15 @@ fn seed(store: &mut Store) {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "claude",
+                T0,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -71,12 +91,16 @@ fn report(store: &mut Store, task: &str, body: &str) -> String {
 
 /// The captain's items, oldest first.
 fn items(store: &mut Store) -> Vec<gear_store::MessageRow> {
-    store.read(|tx| tx.thread_messages("p", "friction")).unwrap()
+    store
+        .read(|tx| tx.thread_messages("p", "friction"))
+        .unwrap()
 }
 
 /// The captain's doorbell ops: one per prompt.
 fn doorbells(store: &mut Store) -> Vec<gear_store::OpRow> {
-    store.read(|tx| tx.ops_of_seat_kind("p:captain", gear_model::OpKind::Doorbell)).unwrap()
+    store
+        .read(|tx| tx.ops_of_seat_kind("p:captain", gear_model::OpKind::Doorbell))
+        .unwrap()
 }
 
 /// The captain's view of a message: it has seen it.
@@ -132,7 +156,11 @@ fn an_idle_captain_gets_one_item_naming_the_open_reports() {
     report(&mut w.store, "T-3", "the contract was unclear");
 
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert_eq!(report.friction, vec!["friction:opened".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:opened".to_string()],
+        "{report:?}"
+    );
     let open = items(&mut w.store);
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].state, MsgState::Open);
@@ -140,8 +168,7 @@ fn an_idle_captain_gets_one_item_naming_the_open_reports() {
     assert_eq!(open[0].kind, MsgKind::System);
     assert!(!open[0].urgent, "an information item");
     assert_eq!(
-        open[0].body,
-        "3 friction reports: F-1 F-2 F-3. Run gear friction.",
+        open[0].body, "3 friction reports: F-1 F-2 F-3. Run gear friction.",
         "{}",
         open[0].body
     );
@@ -159,7 +186,10 @@ fn a_captain_with_an_open_item_gets_no_ring() {
     captain_item(&mut w.store, T0);
 
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert!(report.friction.is_empty(), "the captain has work of its own: {report:?}");
+    assert!(
+        report.friction.is_empty(),
+        "the captain has work of its own: {report:?}"
+    );
     assert!(items(&mut w.store).is_empty());
 
     // The captain is idle again: the ring comes.
@@ -170,11 +200,23 @@ fn a_captain_with_an_open_item_gets_no_ring() {
                 .into_iter()
                 .find(|message| message.recipient == "p:captain")
                 .unwrap();
-            tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+            tx.update_message_state(
+                "p",
+                &item.id,
+                MsgState::Resolved,
+                Some("seen"),
+                None,
+                None,
+                T0 + 2,
+            )
         })
         .unwrap();
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3).unwrap();
-    assert_eq!(report.friction, vec!["friction:opened".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:opened".to_string()],
+        "{report:?}"
+    );
     assert_eq!(items(&mut w.store).len(), 1);
 }
 
@@ -183,16 +225,26 @@ fn a_new_report_updates_the_item() {
     let mut w = world();
     report(&mut w.store, "T-1", "the build took forever");
     tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert_eq!(items(&mut w.store)[0].body, "1 friction report: F-1. Run gear friction.");
+    assert_eq!(
+        items(&mut w.store)[0].body,
+        "1 friction report: F-1. Run gear friction."
+    );
 
     // A second report arrives while the item is open.
     report(&mut w.store, "T-2", "a missing tool");
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
-    assert_eq!(report.friction, vec!["friction:updated".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:updated".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1, "the same item, no second one: {all:?}");
     assert_eq!(all[0].state, MsgState::Open);
-    assert_eq!(all[0].body, "2 friction reports: F-1 F-2. Run gear friction.");
+    assert_eq!(
+        all[0].body,
+        "2 friction reports: F-1 F-2. Run gear friction."
+    );
 }
 
 #[test]
@@ -208,7 +260,11 @@ fn closing_every_report_closes_the_item() {
         .write(|tx| tx.close_friction("p", "F-1", "fixed the fixture", T0 + 2))
         .unwrap();
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 3).unwrap();
-    assert_eq!(report.friction, vec!["friction:updated".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:updated".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].state, MsgState::Open, "one report is still open");
@@ -219,12 +275,20 @@ fn closing_every_report_closes_the_item() {
         .write(|tx| tx.close_friction("p", "F-2", "lesson: read the docs", T0 + 4))
         .unwrap();
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
-    assert_eq!(report.friction, vec!["friction:closed".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:closed".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1, "no new item: the same one closed");
     assert_eq!(all[0].state, MsgState::Resolved);
     assert!(
-        all[0].result.as_deref().unwrap_or_default().contains("closed"),
+        all[0]
+            .result
+            .as_deref()
+            .unwrap_or_default()
+            .contains("closed"),
         "{:?}",
         all[0].result
     );
@@ -254,7 +318,11 @@ fn the_ring_waits_thirty_minutes_before_it_rings_again() {
 
     // Half an hour later the captain is told.
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
-    assert_eq!(report.friction, vec!["friction:opened".to_string()], "{report:?}");
+    assert_eq!(
+        report.friction,
+        vec!["friction:opened".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 2, "a new item after the window: {all:?}");
     assert_eq!(all[1].state, MsgState::Open);
@@ -316,13 +384,24 @@ fn a_resolved_item_rings_again_only_for_a_new_report() {
     // The captain resolves it by hand (what `gear reply M-n --resolve` does).
     w.store
         .write(|tx| {
-            tx.update_message_state("p", &first.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+            tx.update_message_state(
+                "p",
+                &first.id,
+                MsgState::Resolved,
+                Some("seen"),
+                None,
+                None,
+                T0 + 2,
+            )
         })
         .unwrap();
 
     // The cooldown is over, but no report is new: no second item.
     let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1801).unwrap();
-    assert!(tick_report.friction.is_empty(), "no new report, no ring: {tick_report:?}");
+    assert!(
+        tick_report.friction.is_empty(),
+        "no new report, no ring: {tick_report:?}"
+    );
     assert_eq!(items(&mut w.store).len(), 1, "no second item");
 
     // A restart does not forget what the captain has been told: the gate
@@ -331,19 +410,35 @@ fn a_resolved_item_rings_again_only_for_a_new_report() {
     let store = Store::open(&path).unwrap();
     let mut herdr = FakeHerdr::new();
     herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
-    cfg.profiles.insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
+    cfg.profiles
+        .insert("claude".to_string(), gear_herdr::builtin("claude").unwrap());
     let mut w = World { store, herdr, cfg };
     let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1802).unwrap();
-    assert!(tick_report.friction.is_empty(), "the state survives the restart: {tick_report:?}");
+    assert!(
+        tick_report.friction.is_empty(),
+        "the state survives the restart: {tick_report:?}"
+    );
     assert_eq!(items(&mut w.store).len(), 1, "no second item");
 
     // A new report rings once, and the item names every open report.
     report(&mut w.store, "T-2", "a missing tool");
     let tick_report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1803).unwrap();
-    assert_eq!(tick_report.friction, vec!["friction:opened".to_string()], "{tick_report:?}");
+    assert_eq!(
+        tick_report.friction,
+        vec!["friction:opened".to_string()],
+        "{tick_report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 2, "exactly one new item: {all:?}");
     assert_eq!(all[1].state, MsgState::Open);
-    assert_eq!(all[1].body, "2 friction reports: F-1 F-2. Run gear friction.");
+    assert_eq!(
+        all[1].body,
+        "2 friction reports: F-1 F-2. Run gear friction."
+    );
 }

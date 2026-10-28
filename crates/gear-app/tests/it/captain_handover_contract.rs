@@ -64,7 +64,15 @@ fn world(root: &Path) -> Store {
         let mut project = tx.get_project("p")?.unwrap();
         project.config_toml = config(root);
         tx.update_project(&project)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, LANE_PANE, "opencode", NOW)?;
         Ok(())
     })
@@ -87,7 +95,11 @@ fn herdr() -> FakeHerdr {
 
 fn env(seat: Option<&str>, gen: i64, pane: Option<&str>) -> Env {
     Env {
-        ctx: seat.map(|s| GearCtx { project: "p".into(), seat: s.into(), generation: gen }),
+        ctx: seat.map(|s| GearCtx {
+            project: "p".into(),
+            seat: s.into(),
+            generation: gen,
+        }),
         pane_id: pane.map(|p| p.to_string()),
         admin: false,
     }
@@ -102,29 +114,67 @@ fn a_handover_from_the_captains_pane_moves_the_binding() {
     let mut herdr = herdr();
     let captain = env(Some("captain"), 1, Some(CAP_PANE));
 
-    let done = handover(&mut s, &captain, &mut herdr, &CAP_CALLER, root.path(), NEW_PANE, NOW).unwrap();
+    let done = handover(
+        &mut s,
+        &captain,
+        &mut herdr,
+        &CAP_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap();
 
     assert_eq!(
-        (done.from.as_str(), done.to.as_str(), done.generation, done.asker),
+        (
+            done.from.as_str(),
+            done.to.as_str(),
+            done.generation,
+            done.asker
+        ),
         (CAP_PANE, NEW_PANE, 2, Asker::Captain)
     );
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
-    assert_eq!((seat.role, seat.generation, seat.state), (SeatRole::Captain, 2, SeatState::Active));
-    let new = s.read(|tx| tx.get_binding("p:captain", 2)).unwrap().unwrap();
-    assert_eq!((new.pane_id.as_str(), new.status, new.kind.as_str()), (NEW_PANE, BindingStatus::Active, "codex"));
-    let old = s.read(|tx| tx.get_binding("p:captain", 1)).unwrap().unwrap();
-    assert_eq!(old.status, BindingStatus::Void, "the old session cannot write");
+    assert_eq!(
+        (seat.role, seat.generation, seat.state),
+        (SeatRole::Captain, 2, SeatState::Active)
+    );
+    let new = s
+        .read(|tx| tx.get_binding("p:captain", 2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (new.pane_id.as_str(), new.status, new.kind.as_str()),
+        (NEW_PANE, BindingStatus::Active, "codex")
+    );
+    let old = s
+        .read(|tx| tx.get_binding("p:captain", 1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        old.status,
+        BindingStatus::Void,
+        "the old session cannot write"
+    );
 
     // The new pane is the captain now.
     let moved = env(Some("captain"), 2, Some(NEW_PANE));
-    let fp = observe(&moved, &mut herdr, &NEW_CALLER).unwrap().expect("the captain in its new pane");
-    let (ctx, _) = s.read(|tx| require_seat(tx, &moved, Some(&fp), None, None)).unwrap();
+    let fp = observe(&moved, &mut herdr, &NEW_CALLER)
+        .unwrap()
+        .expect("the captain in its new pane");
+    let (ctx, _) = s
+        .read(|tx| require_seat(tx, &moved, Some(&fp), None, None))
+        .unwrap();
     assert_eq!((ctx.seat.as_str(), ctx.generation), ("captain", 2));
 
     // The old pane still hosts the captain's old agent — and is refused.
     let stale = env(Some("captain"), 2, Some(CAP_PANE));
-    let fp = observe(&stale, &mut herdr, &CAP_CALLER).unwrap().expect("the old agent is still there");
-    let error = s.read(|tx| require_seat(tx, &stale, Some(&fp), None, None)).unwrap_err();
+    let fp = observe(&stale, &mut herdr, &CAP_CALLER)
+        .unwrap()
+        .expect("the old agent is still there");
+    let error = s
+        .read(|tx| require_seat(tx, &stale, Some(&fp), None, None))
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotRegistered, "{}", error.detail);
 }
 
@@ -137,13 +187,27 @@ fn a_handover_from_a_lane_is_refused_with_one_item() {
     let mut herdr = herdr();
     let lane = env(Some("heat"), 1, Some(LANE_PANE));
 
-    let error =
-        handover(&mut s, &lane, &mut herdr, &LANE_CALLER, root.path(), NEW_PANE, NOW).unwrap_err();
+    let error = handover(
+        &mut s,
+        &lane,
+        &mut herdr,
+        &LANE_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::Forbidden);
     assert!(error.detail.contains(LANE_PANE), "{}", error.detail);
-    assert!(error.detail.contains(CAP_PANE), "the captain's own pane: {}", error.detail);
+    assert!(
+        error.detail.contains(CAP_PANE),
+        "the captain's own pane: {}",
+        error.detail
+    );
 
-    let items = s.read(|tx| tx.thread_messages("p", "handover:w1:p2")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "handover:w1:p2"))
+        .unwrap();
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].urgent);
     assert!(items[0].body.contains(LANE_PANE), "{}", items[0].body);
@@ -151,8 +215,21 @@ fn a_handover_from_a_lane_is_refused_with_one_item() {
     // The captain did not move, and a repeat claim is one item.
     let seat = s.read(|tx| tx.get_seat("p:captain")).unwrap().unwrap();
     assert_eq!((seat.generation, seat.state), (1, SeatState::Active));
-    let _ = handover(&mut s, &lane, &mut herdr, &LANE_CALLER, root.path(), NEW_PANE, NOW + 1);
-    assert_eq!(s.read(|tx| tx.thread_messages("p", "handover:w1:p2")).unwrap().len(), 1);
+    let _ = handover(
+        &mut s,
+        &lane,
+        &mut herdr,
+        &LANE_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW + 1,
+    );
+    assert_eq!(
+        s.read(|tx| tx.thread_messages("p", "handover:w1:p2"))
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// The user's own terminal — a shell whose real pane hosts no agent — may hand
@@ -162,17 +239,48 @@ fn a_handover_from_the_users_own_shell_is_allowed() {
     let root = tempfile::tempdir().unwrap();
     let mut s = world(root.path());
     let mut herdr = herdr();
-    let user = Env { ctx: None, pane_id: None, admin: false };
+    let user = Env {
+        ctx: None,
+        pane_id: None,
+        admin: false,
+    };
 
-    let done = handover(&mut s, &user, &mut herdr, &USER_CALLER, root.path(), NEW_PANE, NOW).unwrap();
-    assert_eq!((done.asker, done.to.as_str(), done.generation), (Asker::UserShell, NEW_PANE, 2));
-    let new = s.read(|tx| tx.get_binding("p:captain", 2)).unwrap().unwrap();
+    let done = handover(
+        &mut s,
+        &user,
+        &mut herdr,
+        &USER_CALLER,
+        root.path(),
+        NEW_PANE,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (done.asker, done.to.as_str(), done.generation),
+        (Asker::UserShell, NEW_PANE, 2)
+    );
+    let new = s
+        .read(|tx| tx.get_binding("p:captain", 2))
+        .unwrap()
+        .unwrap();
     assert_eq!(new.pane_id, NEW_PANE);
 
     // A shell somewhere else: the project cannot be named.
     let elsewhere = tempfile::tempdir().unwrap();
-    let error = handover(&mut s, &user, &mut herdr, &USER_CALLER, elsewhere.path(), CAP_PANE, NOW + 1)
-        .unwrap_err();
+    let error = handover(
+        &mut s,
+        &user,
+        &mut herdr,
+        &USER_CALLER,
+        elsewhere.path(),
+        CAP_PANE,
+        NOW + 1,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
-    assert!(error.detail.contains("no registered project"), "{}", error.detail);
+    assert!(
+        error.detail.contains("no registered project"),
+        "{}",
+        error.detail
+    );
 }

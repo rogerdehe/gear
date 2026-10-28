@@ -150,7 +150,8 @@ pub struct UsageOverrides {
 impl UsageOverrides {
     /// The count of one round, when it was counted.
     pub fn get(&self, task: &str, attempt: i64, role: &str) -> Option<&Tokens> {
-        self.rounds.get(&(task.to_string(), attempt, role.to_string()))
+        self.rounds
+            .get(&(task.to_string(), attempt, role.to_string()))
     }
 
     /// The count of one round: the override of its stored numbers.
@@ -403,17 +404,18 @@ pub fn report_with(
         Some(voyage) => Some(work_of_with(tx, project, voyage, now, overrides)?),
         None => None,
     };
-    Ok(Report { project: project.to_string(), tasks, voyages, work })
+    Ok(Report {
+        project: project.to_string(),
+        tasks,
+        voyages,
+        work,
+    })
 }
 
 /// The estimate of a task: the plan's `estimate:` field, or — for a task that
 /// has none — the "Estimate: 2.5h" sentence in its goal (the rule the M2
 /// plan used while the field did not exist yet).
-fn estimate_of(
-    tx: &Tx<'_>,
-    project: &str,
-    task: &gear_store::TaskRow,
-) -> GearResult<Option<i64>> {
+fn estimate_of(tx: &Tx<'_>, project: &str, task: &gear_store::TaskRow) -> GearResult<Option<i64>> {
     gear_board::voyage::estimate_of(tx, project, task)
 }
 
@@ -650,12 +652,7 @@ pub struct LaneWork {
 /// - **elapsed without quota stops** = elapsed − fleet stopped.
 ///
 /// Read-only: nothing is written.
-pub fn work_of(
-    tx: &Tx<'_>,
-    project: &str,
-    milestone: &str,
-    now: Ts,
-) -> GearResult<VoyageWork> {
+pub fn work_of(tx: &Tx<'_>, project: &str, milestone: &str, now: Ts) -> GearResult<VoyageWork> {
     work_of_with(tx, project, milestone, now, &UsageOverrides::default())
 }
 
@@ -777,9 +774,7 @@ pub fn work_of_with(
         }
         // The idle time is the rest of the voyage's elapsed time.
         lane.idle_s = elapsed_s
-            .map(|elapsed| {
-                elapsed - lane.work_s - lane.quota_wait_s - lane.declared_wait_s
-            })
+            .map(|elapsed| elapsed - lane.work_s - lane.quota_wait_s - lane.declared_wait_s)
             .unwrap_or(0)
             .max(0);
         work.lanes.push(lane);
@@ -835,7 +830,10 @@ fn fleet_stopped(spans: &[(String, i64, i64)], lanes: usize) -> (i64, usize) {
     let mut per_seat: std::collections::BTreeMap<&str, Vec<(i64, i64)>> =
         std::collections::BTreeMap::new();
     for (seat, start, end) in spans {
-        per_seat.entry(seat.as_str()).or_default().push((*start, *end));
+        per_seat
+            .entry(seat.as_str())
+            .or_default()
+            .push((*start, *end));
     }
     for seat_spans in per_seat.values_mut() {
         seat_spans.sort_unstable();
@@ -891,7 +889,11 @@ pub fn voyage_work_line(work: &VoyageWork) -> String {
         work.milestone,
         hours(work.elapsed_min.unwrap_or(0) * 60),
         hours(work.fleet_stopped_min * 60),
-        if work.fleet_stops == 1 { "1 stop".to_string() } else { format!("{} stops", work.fleet_stops) },
+        if work.fleet_stops == 1 {
+            "1 stop".to_string()
+        } else {
+            format!("{} stops", work.fleet_stops)
+        },
         hours(work.elapsed_without_quota_min.unwrap_or(0) * 60)
     )
 }
@@ -1049,20 +1051,43 @@ mod tests {
                 base: None,
                 gate: None,
                 rework_estimate_min: None,
-                project: "p".into(), id: "T-1".into(), rank: 1, state: TaskState::Done,
-                priority: "must".into(), lane: Some("heat".into()), milestone: Some("M2".into()),
-                required: true, contract_version: 1, deps: vec![], followup_of: None, wait_on: None,
-                wait_cond: None, rework_note: None, estimate_min: Some(20),  issue: None,updated: T0,
+                project: "p".into(),
+                id: "T-1".into(),
+                rank: 1,
+                state: TaskState::Done,
+                priority: "must".into(),
+                lane: Some("heat".into()),
+                milestone: Some("M2".into()),
+                required: true,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(20),
+                issue: None,
+                updated: T0,
             })?;
             tx.insert_attempt(&AttemptRow {
                 session_ref: None,
                 session_cli: None,
                 session_action: None,
                 sent_at: None,
-                project: "p".into(), task: "T-1".into(), n: 1, seat: "p:heat".into(), generation: 1,
-                contract_version: 1, adopted_version: 1, pending_update: None,
-                state: AttemptState::Accepted, candidate: Some("abc".into()), report: None,
-                safe_point: None, started: T0, updated: T0,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 1,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: Some("abc".into()),
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
             })?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Delivered, T0)?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, T0 + 60)?;
@@ -1101,10 +1126,20 @@ mod tests {
                 session_cli: None,
                 session_action: None,
                 sent_at: None,
-                project: "p".into(), task: "T-1".into(), n: 2, seat: "p:heat".into(), generation: 1,
-                contract_version: 1, adopted_version: 1, pending_update: None,
-                state: AttemptState::Accepted, candidate: Some("def".into()), report: None,
-                safe_point: None, started: T0, updated: T0,
+                project: "p".into(),
+                task: "T-1".into(),
+                n: 2,
+                seat: "p:heat".into(),
+                generation: 1,
+                contract_version: 1,
+                adopted_version: 1,
+                pending_update: None,
+                state: AttemptState::Accepted,
+                candidate: Some("def".into()),
+                report: None,
+                safe_point: None,
+                started: T0,
+                updated: T0,
             })?;
             tx.set_attempt_time("p", "T-1", 2, AttemptStep::Started, T0 + 30 * 60)?;
             tx.set_attempt_time("p", "T-1", 2, AttemptStep::HandedIn, T0 + 45 * 60)?;
@@ -1118,7 +1153,11 @@ mod tests {
             .unwrap();
         let task = &report.tasks[0];
         assert_eq!(task.rework_rounds, 1);
-        assert_eq!(task.rework_min, Some(25), "the rework round ran from its start to its settle");
+        assert_eq!(
+            task.rework_min,
+            Some(25),
+            "the rework round ran from its start to its settle"
+        );
         // The dev time of the task is still the first round's.
         assert_eq!(task.dev(), Some(10));
     }
@@ -1127,9 +1166,15 @@ mod tests {
     /// the estimate of a task is the "Estimate: 2.5h" sentence in its goal.
     #[test]
     fn an_estimate_in_the_goal_is_read() {
-        assert_eq!(estimate_from_goal("Fix the thing. Estimate: 2.5h"), Some(150));
+        assert_eq!(
+            estimate_from_goal("Fix the thing. Estimate: 2.5h"),
+            Some(150)
+        );
         assert_eq!(estimate_from_goal("Fix the thing. Estimate: 90m"), Some(90));
-        assert_eq!(estimate_from_goal("Fix the thing. Estimate: 1 hour"), Some(60));
+        assert_eq!(
+            estimate_from_goal("Fix the thing. Estimate: 1 hour"),
+            Some(60)
+        );
         assert_eq!(estimate_from_goal("Fix the thing."), None);
         assert_eq!(estimate_from_goal("Fix the thing. Estimate: soon"), None);
     }

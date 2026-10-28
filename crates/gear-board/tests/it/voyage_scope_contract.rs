@@ -15,12 +15,24 @@ fn world(m1_left_open: bool) -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
             voyage(tx, "M1", NOW - 7200)?;
             voyage(tx, "M2", NOW - 3600)?;
             // M1: one task, done unless the fixture leaves it open.
-            let state = if m1_left_open { TaskState::Ready } else { TaskState::Done };
+            let state = if m1_left_open {
+                TaskState::Ready
+            } else {
+                TaskState::Done
+            };
             task(tx, "T-1", 1, "M1", state)?;
             // M2: one done, one ready.
             task(tx, "T-2", 2, "M2", TaskState::Done)?;
@@ -120,7 +132,10 @@ fn attempt(
 }
 
 fn board(store: &mut Store) -> gear_board::ProjectBoard {
-    let options = gear_board::Options { project: Some("p".into()), ..Default::default() };
+    let options = gear_board::Options {
+        project: Some("p".into()),
+        ..Default::default()
+    };
     gear_board::build(store, &options, NOW)
         .unwrap()
         .projects
@@ -138,16 +153,32 @@ fn the_board_counts_and_works_the_current_voyage_only() {
     assert_eq!(plan.totals.tasks, 2, "the tasks of M2: {:?}", plan.totals);
     assert_eq!(plan.totals.done, 1);
     // The Time & tokens view lists no task of M1.
-    let listed: Vec<&str> = token_tasks(&plan).iter().map(|(_, task)| task.id.as_str()).collect();
-    assert!(!listed.contains(&"T-1"), "no task of the landed voyage: {listed:?}");
-    assert!(listed.contains(&"T-2"), "the measured task of M2: {listed:?}");
+    let listed: Vec<&str> = token_tasks(&plan)
+        .iter()
+        .map(|(_, task)| task.id.as_str())
+        .collect();
+    assert!(
+        !listed.contains(&"T-1"),
+        "no task of the landed voyage: {listed:?}"
+    );
+    assert!(
+        listed.contains(&"T-2"),
+        "the measured task of M2: {listed:?}"
+    );
     // Nor does the lane line.
-    let lane = plan.lanes.iter().find(|lane| lane.lane == "hull").expect("the lane");
+    let lane = plan
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .expect("the lane");
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
     assert_eq!(ids, vec!["T-2", "T-3"], "the lane works M2 only");
     // The graph follows the same list.
     let graphed: Vec<&str> = plan.graph.iter().map(|task| task.id.as_str()).collect();
-    assert!(!graphed.contains(&"T-1"), "no task of the landed voyage: {graphed:?}");
+    assert!(
+        !graphed.contains(&"T-1"),
+        "no task of the landed voyage: {graphed:?}"
+    );
 }
 
 #[test]
@@ -156,7 +187,11 @@ fn a_task_left_open_on_a_landed_voyage_is_still_shown() {
     let plan = board(&mut store);
 
     // T-1 never finished: it is not history, it is a decision the captain owes.
-    let lane = plan.lanes.iter().find(|lane| lane.lane == "hull").expect("the lane");
+    let lane = plan
+        .lanes
+        .iter()
+        .find(|lane| lane.lane == "hull")
+        .expect("the lane");
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
     assert!(ids.contains(&"T-1"), "the open task of M1: {ids:?}");
 }

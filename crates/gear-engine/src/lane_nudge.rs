@@ -74,7 +74,10 @@ pub fn nudge_stopped_lanes(
             continue;
         }
         // A lane that waits for its provider is not stuck (T-75).
-        if obs.flags.contains(&gear_herdr::profile::ScreenFlag::Backoff) {
+        if obs
+            .flags
+            .contains(&gear_herdr::profile::ScreenFlag::Backoff)
+        {
             continue;
         }
         // A lane that waits for another task on purpose is not stopped (F4):
@@ -115,54 +118,66 @@ pub fn nudge_stopped_lanes(
                         && op.attempt == Some(attempt.attempt)
                 })
                 .collect();
-                let Some(last) = deliveries.last() else { continue };
-                // Never clone a packet that was not sent: an op that is still
-                // Intended (the captain is away) or Unknown may yet get
-                // through (F2).
-                if last.state != gear_model::OpState::Failed {
-                    continue;
-                }
-                // The retry is allowed once (F3): the marker says the first
-                // failure may still be retried; the retry itself is pending.
-                // The retry happens once: a delivery that already carries
-                // the marker was delivered again (F2, F3).
-                if deliveries
-                    .iter()
-                    .any(|op| op.payload.get("redeliver").is_some())
-                {
-                    continue;
-                }
-                let Some(text) = last.payload.get("text").and_then(|text| text.as_str()) else {
-                    continue;
-                };
-                let text = text.to_string();
-                store.write(|tx| {
-                    tx.insert_op(&NewOp {
-                        project: project.to_string(),
-                        seat: seat.id.clone(),
-                        generation: seat.generation,
-                        kind: OpKind::Deliver,
-                        task: Some(attempt.task.clone()),
-                        attempt: Some(attempt.attempt),
-                        ref_msg: None,
-                        plan_version: None,
-                        payload: serde_json::json!({ "text": text, "redeliver": 1 }),
-                        created: now,
-                    })?;
-                    tx.set_meta(&retry_marker(&seat.id, &attempt.task, attempt.attempt), "pending")?;
-
-                    Ok(())
-                })?;
-                nudged.push(seat.id.clone());
+            let Some(last) = deliveries.last() else {
+                continue;
+            };
+            // Never clone a packet that was not sent: an op that is still
+            // Intended (the captain is away) or Unknown may yet get
+            // through (F2).
+            if last.state != gear_model::OpState::Failed {
                 continue;
             }
+            // The retry is allowed once (F3): the marker says the first
+            // failure may still be retried; the retry itself is pending.
+            // The retry happens once: a delivery that already carries
+            // the marker was delivered again (F2, F3).
+            if deliveries
+                .iter()
+                .any(|op| op.payload.get("redeliver").is_some())
+            {
+                continue;
+            }
+            let Some(text) = last.payload.get("text").and_then(|text| text.as_str()) else {
+                continue;
+            };
+            let text = text.to_string();
+            store.write(|tx| {
+                tx.insert_op(&NewOp {
+                    project: project.to_string(),
+                    seat: seat.id.clone(),
+                    generation: seat.generation,
+                    kind: OpKind::Deliver,
+                    task: Some(attempt.task.clone()),
+                    attempt: Some(attempt.attempt),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "text": text, "redeliver": 1 }),
+                    created: now,
+                })?;
+                tx.set_meta(
+                    &retry_marker(&seat.id, &attempt.task, attempt.attempt),
+                    "pending",
+                )?;
+
+                Ok(())
+            })?;
+            nudged.push(seat.id.clone());
+            continue;
+        }
         // Never two deliveries in flight (the reviewer's rule, F2): a nudge
         // that would join another one is not sent.
         if store.read(|tx| delivery_in_flight(tx, &seat.id, now))? {
             continue;
         }
         // The nudges this attempt got, and the progress after them.
-        let used = nudges_used(store, project, &seat.id, &attempt.task, attempt.attempt, now)?;
+        let used = nudges_used(
+            store,
+            project,
+            &seat.id,
+            &attempt.task,
+            attempt.attempt,
+            now,
+        )?;
         if used >= LANE_NUDGE_BUDGET {
             // The captain hears about it, once.
             let fact = format!(
@@ -342,9 +357,10 @@ pub fn retry_failed(tx: &Tx<'_>, seat: &str, task: &str, attempt: i64) -> GearRe
 /// rule: a submitted delivery that is older than the cooldown does not block
 /// (it is exactly the case the nudge is for), anything else does.
 pub fn delivery_in_flight(tx: &Tx<'_>, seat: &str, now: Ts) -> GearResult<bool> {
-    Ok(tx.slot_ops(seat)?.into_iter().any(|op| {
-        !(op.state == gear_model::OpState::Submitted && now - op.created >= 30)
-    }))
+    Ok(tx
+        .slot_ops(seat)?
+        .into_iter()
+        .any(|op| !(op.state == gear_model::OpState::Submitted && now - op.created >= 30)))
 }
 
 /// The nudge of a lane that stopped, as the reviewer's path counts it.

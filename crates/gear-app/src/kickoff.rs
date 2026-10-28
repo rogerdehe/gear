@@ -137,7 +137,7 @@ fn is_executable(path: &std::path::Path) -> bool {
 }
 
 /// The models a kind can use, and the reason when it cannot list them.
-fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
+pub fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
     match kind {
         // OpenCode prints its model ids, one per line. An empty list right
         // after a start is "not loaded yet" (trial G03), never "no models":
@@ -158,7 +158,10 @@ fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
                         Vec::new(),
                         Some(format!("`opencode models` exited {}", out.status)),
                     ),
-                    Err(e) => (Vec::new(), Some(format!("cannot run `opencode models`: {e}"))),
+                    Err(e) => (
+                        Vec::new(),
+                        Some(format!("cannot run `opencode models`: {e}")),
+                    ),
                 };
                 if attempt == 0 {
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -205,9 +208,107 @@ fn models_of(kind: &str) -> (Vec<String>, Option<String>) {
     }
 }
 
+/// The configured model ids that the CLI running them does not list (T-315):
+/// a warning for the captain, never a refusal — a list can be not loaded yet
+/// or differ by machine (B8).
+///
+/// Every lane's chain, the review chain (only when the project names `[temps]`)
+/// and the captain chain are checked, in that order. An entry's CLI is the one
+/// it names, else the kind of the seat that runs it. `listed` runs a CLI (that
+/// can wait), so it is called once per CLI and its answer is kept.
+pub fn model_warnings(
+    config: &crate::config::ProjectConfig,
+    listed: &mut dyn FnMut(&str) -> (Vec<String>, Option<String>),
+) -> Vec<String> {
+    let mut asker = Asker {
+        listed,
+        answers: Vec::new(),
+        noted: Vec::new(),
+    };
+    let mut warnings = Vec::new();
+    for lane in &config.lanes {
+        let chain = crate::config::lane_chain(config, lane);
+        asker.check(
+            &format!("lane {}", lane.name),
+            &lane.kind,
+            chain,
+            &mut warnings,
+        );
+    }
+    if let Some(temps) = &config.temps {
+        asker.check(
+            "reviewers",
+            &temps.kind,
+            &config.models.review,
+            &mut warnings,
+        );
+    }
+    asker.check(
+        "captain",
+        &config.captain.kind,
+        &config.models.captain,
+        &mut warnings,
+    );
+    warnings
+}
+
+/// The model lists asked so far, and the CLIs whose "not checked" line is
+/// already said: one line per CLI, however many entries name it.
+struct Asker<'a> {
+    listed: &'a mut dyn FnMut(&str) -> (Vec<String>, Option<String>),
+    answers: Vec<(String, (Vec<String>, Option<String>))>,
+    noted: Vec<String>,
+}
+
+impl Asker<'_> {
+    /// The models `cli` lists, asking it the first time only.
+    fn models_of_cli(&mut self, cli: &str) -> (Vec<String>, Option<String>) {
+        if let Some((_, answer)) = self.answers.iter().find(|(asked, _)| asked == cli) {
+            return answer.clone();
+        }
+        let answer = (self.listed)(cli);
+        self.answers.push((cli.to_string(), answer.clone()));
+        answer
+    }
+
+    /// Check one chain: `who` is the seat the line names, and `seat_kind` the
+    /// kind that runs an entry naming no CLI.
+    fn check(
+        &mut self,
+        who: &str,
+        seat_kind: &str,
+        chain: &[crate::config::ModelEntry],
+        warnings: &mut Vec<String>,
+    ) {
+        for entry in chain {
+            let cli = entry.cli().unwrap_or(seat_kind);
+            let (models, note) = self.models_of_cli(cli);
+            if models.is_empty() {
+                // A CLI that prints none says nothing; a list that could not be
+                // read is worth one line per CLI.
+                if let Some(note) = note {
+                    if !self.noted.iter().any(|said| said == cli) {
+                        self.noted.push(cli.to_string());
+                        warnings.push(format!("model ids of {cli} not checked: {note}"));
+                    }
+                }
+                continue;
+            }
+            if !models.iter().any(|model| model == entry.model()) {
+                warnings.push(format!(
+                    "{who}: model {} is not among the models {cli} lists",
+                    entry.model()
+                ));
+            }
+        }
+    }
+}
+
 /// Where Codex keeps the models it knows.
 fn codex_cache() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join(".codex/models_cache.json")
 }
 
@@ -228,9 +329,8 @@ pub fn parse_opencode_models(text: &str) -> Vec<String> {
 
 /// The slugs of `~/.codex/models_cache.json` (`{"models": [{"slug": …}]}`).
 pub fn parse_codex_models(text: &str) -> GearResult<Vec<String>> {
-    let doc: serde_json::Value = serde_json::from_str(text).map_err(|e| {
-        GearError::new(ErrorCode::BadFormat, format!("models_cache.json: {e}"))
-    })?;
+    let doc: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| GearError::new(ErrorCode::BadFormat, format!("models_cache.json: {e}")))?;
     let models = doc
         .get("models")
         .and_then(|models| models.as_array())
@@ -411,11 +511,17 @@ pub fn skeleton(inventory: &Inventory) -> String {
 pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
     let lane = lane_kind(inventory);
     let captain = captain_kind(inventory);
-    let models: &[String] = lane.map(|installed| installed.models.as_slice()).unwrap_or(&[]);
+    let models: &[String] = lane
+        .map(|installed| installed.models.as_slice())
+        .unwrap_or(&[]);
     let lanes = lane_chain(models);
     let review = review_chain(models, &lanes);
-    let lane_kind = lane.map(|installed| installed.kind.as_str()).unwrap_or("TODO");
-    let captain_kind = captain.map(|installed| installed.kind.as_str()).unwrap_or("TODO");
+    let lane_kind = lane
+        .map(|installed| installed.kind.as_str())
+        .unwrap_or("TODO");
+    let captain_kind = captain
+        .map(|installed| installed.kind.as_str())
+        .unwrap_or("TODO");
 
     let chain = |models: &[String]| -> String {
         if models.is_empty() {
@@ -440,7 +546,12 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
 
     // Filled from where kickoff runs when it can (inside a Herdr pane, in the
     // project's repository); otherwise left as TODO.
-    let env_or_todo = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "TODO".into());
+    let env_or_todo = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "TODO".into())
+    };
     let session = env_or_todo("HERDR_SESSION");
     let pane = env_or_todo("HERDR_PANE_ID");
     let repo = root
@@ -469,7 +580,8 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         "[[lanes]]                     # one block per long-lived lane".to_string(),
         "name = \"lane-1\"               # [a-z][a-z0-9-]*; its duty is one sentence".to_string(),
         "duty = \"TODO: what this lane is for\"".to_string(),
-        "owns = [\"TODO/\"]               # the paths it writes; lanes must not overlap".to_string(),
+        "owns = [\"TODO/\"]               # the paths it writes; lanes must not overlap"
+            .to_string(),
         "not = []".to_string(),
         format!("kind = \"{lane_kind}\""),
         format!("profile = \"{lane_kind}\""),
@@ -488,7 +600,10 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         ));
         lines.push(pad(
             &format!("# name = \"{}\"", nested.name),
-            &format!("# [a-z][a-z0-9-]*; a lane binds to it with repo = \"{}\"", nested.name),
+            &format!(
+                "# [a-z][a-z0-9-]*; a lane binds to it with repo = \"{}\"",
+                nested.name
+            ),
         ));
         lines.push(pad(
             &format!("# path = \"{}\"", nested.path),
@@ -541,12 +656,27 @@ pub fn skeleton_for(inventory: &Inventory, root: Option<&Path>) -> String {
         ));
         lines.push(format!("# kind = \"{}\"", installed.kind));
         lines.push("# unattended_args = [\"--auto\"]   # required: no permission dialogs, or the agent stops".to_string());
-        lines.push("# busy_markers = []             # the screen text of a running turn".to_string());
-        lines.push("# quota_markers = []            # the screen text of a provider limit".to_string());
-        lines.push("# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string());
-        lines.push("# tail_lines = 16                # the lines of the screen that are matched".to_string());
-        lines.push("# confirm_rounds = 2             # consecutive observations before a flag counts".to_string());
-        lines.push("# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed".to_string());
+        lines.push(
+            "# busy_markers = []             # the screen text of a running turn".to_string(),
+        );
+        lines.push(
+            "# quota_markers = []            # the screen text of a provider limit".to_string(),
+        );
+        lines.push(
+            "# exit_keys = [\"ctrl+c\"]        # the keys that make it exit cleanly".to_string(),
+        );
+        lines.push(
+            "# tail_lines = 16                # the lines of the screen that are matched"
+                .to_string(),
+        );
+        lines.push(
+            "# confirm_rounds = 2             # consecutive observations before a flag counts"
+                .to_string(),
+        );
+        lines.push(
+            "# resume_args = [\"-s\", \"{session}\"]   # optional: how a session is resumed"
+                .to_string(),
+        );
     }
     lines.push(String::new());
     lines.join("\n")
@@ -572,7 +702,10 @@ pub fn to_json(inventory: &Inventory) -> GearResult<String> {
         "skeleton": skeleton(inventory),
     });
     serde_json::to_string(&doc).map_err(|e| {
-        GearError::new(ErrorCode::BadFormat, format!("cannot serialize the inventory: {e}"))
+        GearError::new(
+            ErrorCode::BadFormat,
+            format!("cannot serialize the inventory: {e}"),
+        )
     })
 }
 
@@ -689,5 +822,189 @@ fn current_root() -> Option<PathBuf> {
         None
     } else {
         Some(PathBuf::from(root))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{self, ProjectConfig};
+
+    /// A config for project `p`: one lane called `heat` on `lane_kind` running
+    /// `lane_models`, the review chain `review` on the temps seat (absent
+    /// without `temps_kind`), and the captain chain `captain` on `captain_kind`.
+    /// The chains are written as one TOML entry each, so a test reads the way
+    /// the config does.
+    fn project(
+        lane_kind: &str,
+        lane_models: &str,
+        temps_kind: Option<&str>,
+        review: &str,
+        captain_kind: &str,
+        captain: &str,
+    ) -> ProjectConfig {
+        let mut text = format!(
+            "[project]\nid = \"p\"\nherdr_session = \"s\"\nrepo = \"/tmp/p\"\n\
+             \n[quota]\nlanes = 1\ntemps = 1\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"{captain_kind}\"\nprofile = \"{captain_kind}\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"{lane_kind}\"\nprofile = \"{lane_kind}\"\nmodels = [{lane_models}]\n"
+        );
+        if let Some(temps_kind) = temps_kind {
+            text.push_str(&format!(
+                "\n[temps]\nkind = \"{temps_kind}\"\nprofile = \"{temps_kind}\"\n"
+            ));
+        }
+        text.push_str(&format!(
+            "\n[models]\nreview = [{review}]\ncaptain = [{captain}]\n"
+        ));
+        config::parse(&text).expect("a config")
+    }
+
+    /// T-315: a lane's model that its CLI does not list is a warning naming
+    /// the lane; a listed one says nothing.
+    #[test]
+    fn a_lane_model_its_cli_does_not_list_is_a_warning() {
+        let config = project(
+            "opencode",
+            "\"tok/listed\", \"tok/gone\"",
+            None,
+            "",
+            "codex",
+            "",
+        );
+        let warnings = model_warnings(&config, &mut |cli| {
+            assert_eq!(cli, "opencode", "the lane's own kind runs a plain entry");
+            (vec!["tok/listed".to_string()], None)
+        });
+        assert_eq!(
+            warnings,
+            vec!["lane heat: model tok/gone is not among the models opencode lists"]
+        );
+
+        let config = project("opencode", "\"tok/listed\"", None, "", "codex", "");
+        let warnings = model_warnings(&config, &mut |_| (vec!["tok/listed".to_string()], None));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// T-315: an entry that names a CLI is checked against that CLI's list,
+    /// not against the seat's kind.
+    #[test]
+    fn an_entry_naming_a_cli_is_checked_against_its_cli() {
+        let config = project(
+            "opencode",
+            "{ model = \"gpt-6.1-sol\", cli = \"codex\" }",
+            None,
+            "",
+            "codex",
+            "",
+        );
+        let warnings = model_warnings(&config, &mut |cli| match cli {
+            "codex" => (vec!["gpt-6.1-mini".to_string()], None),
+            other => panic!("asked {other}: the entry names codex"),
+        });
+        assert_eq!(
+            warnings,
+            vec!["lane heat: model gpt-6.1-sol is not among the models codex lists"]
+        );
+    }
+
+    /// T-315: a CLI that lists none but says why gives one "not checked" line,
+    /// however many entries name it.
+    #[test]
+    fn a_cli_that_cannot_list_says_so_once() {
+        let config = project(
+            "opencode",
+            "\"a/one\", \"a/two\", \"a/three\"",
+            None,
+            "",
+            "codex",
+            "",
+        );
+        let mut asked: Vec<String> = Vec::new();
+        let warnings = model_warnings(&config, &mut |cli| {
+            asked.push(cli.to_string());
+            (Vec::new(), Some("no model list from this CLI".to_string()))
+        });
+        assert_eq!(
+            warnings,
+            vec!["model ids of opencode not checked: no model list from this CLI"]
+        );
+        assert_eq!(asked, vec!["opencode"], "one line per CLI: asked once");
+    }
+
+    /// T-315: a CLI that lists none and says nothing (a CLI that prints none)
+    /// says nothing here either.
+    #[test]
+    fn a_cli_with_no_list_and_no_note_is_silent() {
+        let config = project("opencode", "\"a/one\"", None, "", "codex", "");
+        let warnings = model_warnings(&config, &mut |_| (Vec::new(), None));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// T-315: each CLI is asked once, across every lane, the review chain and
+    /// the captain chain.
+    #[test]
+    fn each_cli_is_asked_once_across_the_chains() {
+        let config = project(
+            "pi",
+            "\"tok/deep-1\"",
+            Some("pi"),
+            "\"tok/deep-1\"",
+            "codex",
+            "\"gpt-6.1-sol\"",
+        );
+        let mut asked: Vec<String> = Vec::new();
+        let warnings = model_warnings(&config, &mut |cli| {
+            asked.push(cli.to_string());
+            match cli {
+                "pi" => (vec!["tok/deep-1".to_string()], None),
+                "codex" => (vec!["gpt-6.1-sol".to_string()], None),
+                other => panic!("asked {other}, no chain names it"),
+            }
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(asked, vec!["pi", "codex"], "once per CLI");
+    }
+
+    /// T-315: the review chain's line names the reviewers, and a project
+    /// without `[temps]` has no review chain to check.
+    #[test]
+    fn the_review_chain_names_the_reviewers_and_needs_temps() {
+        let config = project(
+            "pi",
+            "\"tok/deep-1\"",
+            Some("pi"),
+            "\"tok/deep-2\"",
+            "codex",
+            "",
+        );
+        let warnings = model_warnings(&config, &mut |_| (vec!["tok/deep-1".to_string()], None));
+        assert_eq!(
+            warnings,
+            vec!["reviewers: model tok/deep-2 is not among the models pi lists"]
+        );
+
+        let config = project("pi", "\"tok/deep-1\"", None, "\"tok/deep-2\"", "codex", "");
+        let warnings = model_warnings(&config, &mut |_| (vec!["tok/deep-1".to_string()], None));
+        assert!(
+            warnings.is_empty(),
+            "no [temps], no review chain: {warnings:?}"
+        );
+    }
+
+    /// T-315: the captain chain's line names the captain.
+    #[test]
+    fn the_captain_chain_names_the_captain() {
+        let config = project("pi", "\"tok/deep-1\"", None, "", "codex", "\"gpt-6.1-sol\"");
+        let warnings = model_warnings(&config, &mut |cli| match cli {
+            "pi" => (vec!["tok/deep-1".to_string()], None),
+            "codex" => (vec!["gpt-6.1-mini".to_string()], None),
+            other => panic!("asked {other}"),
+        });
+        assert_eq!(
+            warnings,
+            vec!["captain: model gpt-6.1-sol is not among the models codex lists"]
+        );
     }
 }

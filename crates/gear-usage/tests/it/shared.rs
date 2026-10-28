@@ -35,8 +35,16 @@ fn civil(days: i64) -> (i64, u32, u32) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_position = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * month_position + 2) / 5 + 1;
-    let month = if month_position < 10 { month_position + 3 } else { month_position - 9 };
-    (if month <= 2 { year + 1 } else { year }, month as u32, day as u32)
+    let month = if month_position < 10 {
+        month_position + 3
+    } else {
+        month_position - 9
+    };
+    (
+        if month <= 2 { year + 1 } else { year },
+        month as u32,
+        day as u32,
+    )
 }
 
 /// Write the lines of a JSON file and give its path back.

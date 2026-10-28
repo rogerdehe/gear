@@ -84,8 +84,7 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
     // The item the engine opened, while it is still open.
     let item = match state.item.as_deref() {
         Some(id) => tx.get_message(project, id)?.filter(|message| {
-            matches!(message.state, MsgState::Open | MsgState::Waiting)
-                && message.thread == THREAD
+            matches!(message.state, MsgState::Open | MsgState::Waiting) && message.thread == THREAD
         }),
         None => None,
     };
@@ -102,7 +101,15 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
                 None,
                 now,
             )?;
-            write_state(tx, project, &State { at: state.at, item: None, listed: state.listed })?;
+            write_state(
+                tx,
+                project,
+                &State {
+                    at: state.at,
+                    item: None,
+                    listed: state.listed,
+                },
+            )?;
             return Ok(Some(Change::Closed));
         }
         // A report arrived while the item was open: its list changes.
@@ -114,7 +121,15 @@ fn ring_in(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Option<Change>> {
         // The reports the item names are the ones the captain has heard of.
         let listed = with_listed(&state.listed, &open);
         if listed != state.listed {
-            write_state(tx, project, &State { at: state.at, item: state.item, listed })?;
+            write_state(
+                tx,
+                project,
+                &State {
+                    at: state.at,
+                    item: state.item,
+                    listed,
+                },
+            )?;
         }
         return Ok(if changed { Some(Change::Updated) } else { None });
     }

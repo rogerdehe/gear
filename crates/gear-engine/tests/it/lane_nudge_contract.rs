@@ -72,7 +72,12 @@ fn nudges(s: &mut Store) -> Vec<String> {
         .unwrap()
         .into_iter()
         .filter(|op| op.payload.get("nudge").is_some())
-        .filter_map(|op| op.payload.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .filter_map(|op| {
+            op.payload
+                .get("text")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        })
         .collect()
 }
 
@@ -103,7 +108,10 @@ fn an_idle_lane_is_nudged_after_two_minutes() {
         nudges[0]
     );
     assert!(nudges[0].contains("model at capacity"), "{:?}", nudges[0]);
-    assert!(stall_items(&mut s).is_empty(), "the captain hears nothing yet");
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing yet"
+    );
 }
 
 #[test]
@@ -121,7 +129,12 @@ fn a_working_lane_is_not_nudged() {
 fn a_parked_lane_is_not_nudged() {
     let (mut s, mut h, c) = world();
     s.write(|tx| {
-        tx.set_seat_state("p:heat", SeatState::Parked, Some("until=2027-01-15T09:00:00Z"), T)
+        tx.set_seat_state(
+            "p:heat",
+            SeatState::Parked,
+            Some("until=2027-01-15T09:00:00Z"),
+            T,
+        )
     })
     .unwrap();
 
@@ -159,10 +172,19 @@ fn a_lane_that_keeps_stopping_ends_with_one_captain_item() {
         tick(&mut s, &mut h, &c, T + at).unwrap();
     }
     assert_eq!(nudges(&mut s).len(), 3, "{:?}", nudges(&mut s));
-    assert!(stall_items(&mut s).is_empty(), "the captain hears nothing yet: {:?}", stall_items(&mut s));
+    assert!(
+        stall_items(&mut s).is_empty(),
+        "the captain hears nothing yet: {:?}",
+        stall_items(&mut s)
+    );
 
     tick(&mut s, &mut h, &c, T + 490).unwrap();
-    assert_eq!(nudges(&mut s).len(), 3, "no fourth nudge: {:?}", nudges(&mut s));
+    assert_eq!(
+        nudges(&mut s).len(),
+        3,
+        "no fourth nudge: {:?}",
+        nudges(&mut s)
+    );
     let items = stall_items(&mut s);
     assert_eq!(items.len(), 1, "{items:?}");
     assert!(items[0].contains("heat"), "{items:?}");
@@ -183,7 +205,12 @@ fn a_nudge_waits_a_full_interval_before_the_next_one() {
 
     // The tick right after the nudge: nothing goes out.
     tick(&mut s, &mut h, &c, T + 131).unwrap();
-    assert_eq!(nudges(&mut s).len(), 1, "one nudge only: {:?}", nudges(&mut s));
+    assert_eq!(
+        nudges(&mut s).len(),
+        1,
+        "one nudge only: {:?}",
+        nudges(&mut s)
+    );
 
     // A full interval later: the next nudge.
     tick(&mut s, &mut h, &c, T + 260).unwrap();
@@ -210,7 +237,13 @@ fn a_delivery_in_flight_blocks_the_nudge() {
             payload: serde_json::json!({ "text": "the packet" }),
             created: T,
         })?;
-        tx.set_op_state("p", &op.id, gear_model::OpState::Unknown, Some("the engine stopped"), T)
+        tx.set_op_state(
+            "p",
+            &op.id,
+            gear_model::OpState::Unknown,
+            Some("the engine stopped"),
+            T,
+        )
     })
     .unwrap();
 
@@ -423,9 +456,18 @@ fn a_retry_that_fails_while_it_is_sent_opens_the_stall_item() {
         .filter(|op| op.payload.get("redeliver").is_some())
         .collect();
     assert_eq!(retries.len(), 1, "the packet goes out again once");
-    assert_eq!(retries[0].state, gear_model::OpState::Failed, "{:?}", retries[0]);
+    assert_eq!(
+        retries[0].state,
+        gear_model::OpState::Failed,
+        "{:?}",
+        retries[0]
+    );
     assert!(
-        retries[0].result.as_deref().unwrap_or("").contains("agent-gone"),
+        retries[0]
+            .result
+            .as_deref()
+            .unwrap_or("")
+            .contains("agent-gone"),
         "{:?}",
         retries[0].result
     );
@@ -437,7 +479,11 @@ fn a_retry_that_fails_while_it_is_sent_opens_the_stall_item() {
     let marker = s
         .read(|tx| tx.get_meta(&gear_engine::lane_nudge::retry_marker("p:heat", "T-1", 1)))
         .unwrap();
-    assert_eq!(marker.as_deref(), Some(""), "the marker is spent: {marker:?}");
+    assert_eq!(
+        marker.as_deref(),
+        Some(""),
+        "the marker is spent: {marker:?}"
+    );
 
     // And the item is not repeated.
     tick(&mut s, &mut h, &cfg, T + 160).unwrap();
@@ -451,24 +497,49 @@ fn a_failed_retry_followed_by_a_check_in_does_not_open_a_stall() {
     let (mut s, mut h, cfg) = failed_packet_world();
     tick(&mut s, &mut h, &cfg, T + 10).unwrap();
     let agents = gear_engine::observe::snapshot(&mut h).unwrap();
-    let observed = s.read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles)).unwrap();
+    let observed = s
+        .read(|tx| gear_engine::observe::reconcile(tx, &mut h, "p", &agents, &cfg.profiles))
+        .unwrap();
     gear_engine::lane_nudge::nudge_stopped_lanes(&mut s, "p", &observed, T + 130).unwrap();
     h.add_shell(LANE);
     gear_engine::ops::execute_intended(&mut s, &mut h, "p", T + 130).unwrap();
     h.add_agent(LANE, "opencode", AgentStatus::Idle);
-    s.write(|tx| tx.insert_view(&gear_store::ViewRecord {
-        project: "p".into(), seat: "p:heat".into(), generation: 1, ts: T + 135,
-        shown_msgs: vec![], shown_ops: vec![], shown_task: Some("T-1".into()),
-        shown_attempt: Some(1), shown_contract: Some(1),
-    })).unwrap();
+    s.write(|tx| {
+        tx.insert_view(&gear_store::ViewRecord {
+            project: "p".into(),
+            seat: "p:heat".into(),
+            generation: 1,
+            ts: T + 135,
+            shown_msgs: vec![],
+            shown_ops: vec![],
+            shown_task: Some("T-1".into()),
+            shown_attempt: Some(1),
+            shown_contract: Some(1),
+        })
+    })
+    .unwrap();
     h.set_status(LANE, AgentStatus::Working);
     for time in [140, 160, 1000] {
         tick(&mut s, &mut h, &cfg, T + time).unwrap();
         assert!(stall_items(&mut s).is_empty(), "stale stall at T+{time}");
-        assert_eq!(s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state, gear_model::AttemptState::Started);
+        assert_eq!(
+            s.read(|tx| tx.get_attempt("p", "T-1", 1))
+                .unwrap()
+                .unwrap()
+                .state,
+            gear_model::AttemptState::Started
+        );
     }
-    assert_eq!(s.read(|tx| tx.get_meta(&gear_engine::lane_nudge::retry_marker("p:heat", "T-1", 1))).unwrap().as_deref(), Some(""));
-    assert!(s.read(|tx| gear_engine::delivery::failed(tx, "p:heat")).unwrap().is_none());
+    assert_eq!(
+        s.read(|tx| tx.get_meta(&gear_engine::lane_nudge::retry_marker("p:heat", "T-1", 1)))
+            .unwrap()
+            .as_deref(),
+        Some("")
+    );
+    assert!(s
+        .read(|tx| gear_engine::delivery::failed(tx, "p:heat"))
+        .unwrap()
+        .is_none());
 }
 
 /// T-218: the same ordering with the default confirmation window: the

@@ -254,8 +254,12 @@ fn opencode_go(body: &str, now: Ts) -> Result<Reading, String> {
         .ok_or("the response of opencode-go has no usage")?;
     let mut windows = Vec::new();
     for name in ["rolling", "weekly", "monthly"] {
-        let Some(entry) = usage.get(name) else { continue };
-        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else { continue };
+        let Some(entry) = usage.get(name) else {
+            continue;
+        };
+        let Some(percent) = entry.get("percent").and_then(Value::as_f64) else {
+            continue;
+        };
         windows.push(Window {
             name: name.to_string(),
             used_percent: percent,
@@ -285,14 +289,22 @@ fn codex(session: &str, now: Ts, home: &Path) -> Result<Reading, String> {
         if value.get("type").and_then(Value::as_str) != Some("event_msg") {
             continue;
         }
-        let Some(payload) = value.get("payload") else { continue };
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
         if payload.get("type").and_then(Value::as_str) != Some("token_count") {
             continue;
         }
-        let Some(limits) = payload.get("rate_limits") else { continue };
+        let Some(limits) = payload.get("rate_limits") else {
+            continue;
+        };
         for name in ["primary", "secondary"] {
-            let Some(entry) = limits.get(name) else { continue };
-            let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else { continue };
+            let Some(entry) = limits.get(name) else {
+                continue;
+            };
+            let Some(used) = entry.get("used_percent").and_then(Value::as_f64) else {
+                continue;
+            };
             windows.push(Window {
                 name: name.to_string(),
                 used_percent: used,

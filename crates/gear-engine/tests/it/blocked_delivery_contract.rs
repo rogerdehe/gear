@@ -71,8 +71,11 @@ fn world(status: AgentStatus) -> World {
     herdr.add_agent(CAP, "opencode", AgentStatus::Idle);
     herdr.add_agent(LANE, "opencode", status);
     let mut cfg = EngineCfg::default();
-    cfg.profiles
-        .insert("opencode".into(), { let mut p = gear_herdr::builtin("opencode").unwrap(); p.new_session.clear(); p });
+    cfg.profiles.insert("opencode".into(), {
+        let mut p = gear_herdr::builtin("opencode").unwrap();
+        p.new_session.clear();
+        p
+    });
     World { store, herdr, cfg }
 }
 
@@ -114,7 +117,10 @@ fn a_blocked_seat_gets_no_delivery_and_one_after_it_clears() {
     ticks(&mut w, 0, 10);
 
     let ops = deliveries(&mut w);
-    assert!(ops.is_empty(), "session setup waits until the dialog clears: {ops:?}");
+    assert!(
+        ops.is_empty(),
+        "session setup waits until the dialog clears: {ops:?}"
+    );
     assert!(
         w.herdr.prompts_to(LANE).is_empty(),
         "nothing is typed into a blocked agent: {:?}",
@@ -170,7 +176,12 @@ fn a_retiring_blocked_lane_is_alerted_and_gets_no_delivery() {
     // The captain retires the lane while it is blocked.
     w.store
         .write(|tx| {
-            tx.set_seat_state("p:heat", SeatState::Retiring, Some("retired by the plan"), T0 + 2)
+            tx.set_seat_state(
+                "p:heat",
+                SeatState::Retiring,
+                Some("retired by the plan"),
+                T0 + 2,
+            )
         })
         .unwrap();
 
@@ -179,7 +190,10 @@ fn a_retiring_blocked_lane_is_alerted_and_gets_no_delivery() {
         tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15 * (n + 1)).unwrap();
     }
     let ops = deliveries(&mut w);
-    assert!(ops.is_empty(), "no delivery before the dialog clears: {ops:?}");
+    assert!(
+        ops.is_empty(),
+        "no delivery before the dialog clears: {ops:?}"
+    );
     let alerts = w
         .store
         .read(|tx| tx.thread_messages("p", "blocked:p:heat"))

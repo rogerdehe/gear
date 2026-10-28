@@ -25,7 +25,15 @@ fn world() -> World {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "claude", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "claude",
+                T0,
+            )?;
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p3", "opencode", T0)?;
             tx.insert_task(&TaskRow {
@@ -57,16 +65,24 @@ fn world() -> World {
     herdr.add_agent(CAP_PANE, "claude", AgentStatus::Idle);
     herdr.add_agent("w1:p2", "opencode", AgentStatus::Working);
     herdr.add_agent("w1:p3", "opencode", AgentStatus::Working);
-    let mut cfg = EngineCfg { tick_s: 4, cooldown_s: 30, doorbell_check_budget: 3, ..Default::default() };
+    let mut cfg = EngineCfg {
+        tick_s: 4,
+        cooldown_s: 30,
+        doorbell_check_budget: 3,
+        ..Default::default()
+    };
     for kind in ["claude", "opencode"] {
-        cfg.profiles.insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
+        cfg.profiles
+            .insert(kind.to_string(), gear_herdr::builtin(kind).unwrap());
     }
     World { store, herdr, cfg }
 }
 
 /// The captain's all-tail items, open and closed.
 fn items(store: &mut Store) -> Vec<gear_store::MessageRow> {
-    store.read(|tx| tx.thread_messages("p", "all-tail")).unwrap()
+    store
+        .read(|tx| tx.thread_messages("p", "all-tail"))
+        .unwrap()
 }
 
 fn tail(store: &mut Store, lane: &str, on: bool) {
@@ -83,7 +99,11 @@ fn every_lane_tailed_with_a_required_task_is_one_item_and_clearing_the_tail_clos
 
     // One tick: one item, naming the lanes and the required task.
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 1).unwrap();
-    assert_eq!(report.tail, vec!["all-tail:opened".to_string()], "{report:?}");
+    assert_eq!(
+        report.tail,
+        vec!["all-tail:opened".to_string()],
+        "{report:?}"
+    );
     let open = items(&mut w.store);
     assert_eq!(open.len(), 1, "{open:?}");
     assert_eq!(open[0].state, MsgState::Open);
@@ -100,12 +120,20 @@ fn every_lane_tailed_with_a_required_task_is_one_item_and_clearing_the_tail_clos
     // One lane out of the tail: the state ended, the same item is resolved.
     tail(&mut w.store, "wire", false);
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
-    assert_eq!(report.tail, vec!["all-tail:closed".to_string()], "{report:?}");
+    assert_eq!(
+        report.tail,
+        vec!["all-tail:closed".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 1, "no new item: the same one closed");
     assert_eq!(all[0].state, MsgState::Resolved);
     assert!(
-        all[0].result.as_deref().unwrap_or_default().contains("tail is cleared"),
+        all[0]
+            .result
+            .as_deref()
+            .unwrap_or_default()
+            .contains("tail is cleared"),
         "{:?}",
         all[0].result
     );
@@ -135,11 +163,19 @@ fn a_required_task_ending_closes_the_item() {
         })
         .unwrap();
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 5).unwrap();
-    assert_eq!(report.tail, vec!["all-tail:closed".to_string()], "{report:?}");
+    assert_eq!(
+        report.tail,
+        vec!["all-tail:closed".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all[0].state, MsgState::Resolved);
     assert!(
-        all[0].result.as_deref().unwrap_or_default().contains("no required task"),
+        all[0]
+            .result
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no required task"),
         "{:?}",
         all[0].result
     );
@@ -169,7 +205,15 @@ fn a_resolved_item_is_not_reopened_while_every_lane_stays_tailed() {
     // The captain resolves it (what `gear reply M-n --resolve` does).
     w.store
         .write(|tx| {
-            tx.update_message_state("p", &item.id, MsgState::Resolved, Some("seen"), None, None, T0 + 2)
+            tx.update_message_state(
+                "p",
+                &item.id,
+                MsgState::Resolved,
+                Some("seen"),
+                None,
+                None,
+                T0 + 2,
+            )
         })
         .unwrap();
 
@@ -187,7 +231,11 @@ fn a_resolved_item_is_not_reopened_while_every_lane_stays_tailed() {
     assert!(report.tail.is_empty(), "{report:?}");
     tail(&mut w.store, "wire", true);
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 15).unwrap();
-    assert_eq!(report.tail, vec!["all-tail:opened".to_string()], "{report:?}");
+    assert_eq!(
+        report.tail,
+        vec!["all-tail:opened".to_string()],
+        "{report:?}"
+    );
     let all = items(&mut w.store);
     assert_eq!(all.len(), 2, "the new state is one new item: {all:?}");
     assert_eq!(all[1].state, MsgState::Open);

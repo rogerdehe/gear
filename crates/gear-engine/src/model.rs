@@ -25,10 +25,7 @@ pub(crate) fn lane_primary<'a>(
 
 /// The chain a role runs on: the lane's own chain when it has one, else the
 /// role chain of the config (T-35). Empty entries are dropped.
-pub(crate) fn role_chain<'a>(
-    config: &'a ProjectConfig,
-    lane_name: &str,
-) -> Vec<&'a ModelEntry> {
+pub(crate) fn role_chain<'a>(config: &'a ProjectConfig, lane_name: &str) -> Vec<&'a ModelEntry> {
     let own = config
         .lanes
         .iter()
@@ -79,7 +76,8 @@ pub(crate) fn writer_model(config: &ProjectConfig, writer_seat: &str) -> Option<
 pub(crate) fn review_entry<'a>(
     config: &'a ProjectConfig,
     writer_model: Option<&str>,
-) -> Option<&'a ModelEntry> {    config
+) -> Option<&'a ModelEntry> {
+    config
         .models
         .review
         .iter()
@@ -197,7 +195,11 @@ mod tests {
             start.env,
             "export OPENCODE_CONFIG_CONTENT='{\"model\":\"minimax-cn/MiniMax-M3.1-Flash\"}'"
         );
-        assert!(start.args.is_empty(), "no --standalone (L-56): {:?}", start.args);
+        assert!(
+            start.args.is_empty(),
+            "no --standalone (L-56): {:?}",
+            start.args
+        );
     }
 
     #[test]
@@ -262,7 +264,11 @@ mod tests {
     /// T-35: the entry's arguments follow the model flag of its CLI.
     #[test]
     fn the_entry_arguments_follow_the_model_flag() {
-        let codex = entry("gpt-6.1-sol", Some("codex"), &["-c", "model_reasoning_effort=medium"]);
+        let codex = entry(
+            "gpt-6.1-sol",
+            Some("codex"),
+            &["-c", "model_reasoning_effort=medium"],
+        );
         assert_eq!(
             entry_args("codex", &codex).unwrap(),
             vec![

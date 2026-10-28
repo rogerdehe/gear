@@ -55,7 +55,6 @@ pub struct Filter {
     pub limit: u32,
 }
 
-
 /// A pull request, and the repo it lives in: a comment or a merge names the
 /// number and the repo, never the branch it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -26,7 +26,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
@@ -90,20 +98,8 @@ fn world() -> Store {
                 updated: departure,
             })?;
             tx.set_attempt_time("p", "T-1", 1, AttemptStep::Started, departure)?;
-            tx.set_attempt_time(
-                "p",
-                "T-1",
-                1,
-                AttemptStep::HandedIn,
-                departure + 44 * 60,
-            )?;
-            tx.set_attempt_time(
-                "p",
-                "T-1",
-                1,
-                AttemptStep::Merged,
-                departure + 44 * 60,
-            )?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::HandedIn, departure + 44 * 60)?;
+            tx.set_attempt_time("p", "T-1", 1, AttemptStep::Merged, departure + 44 * 60)?;
             // The round of the work, with its tokens and its cost (§4.3).
             let key = RoundKey {
                 project: "p".into(),
@@ -208,7 +204,10 @@ fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
     let board = board(&mut store);
     let text = frame(&board, Tab::Decisions, 0, None, (120, 40));
 
-    assert!(text.contains("DECISIONS MADE  (★ = worth a look at landing)"), "{text}");
+    assert!(
+        text.contains("DECISIONS MADE  (★ = worth a look at landing)"),
+        "{text}"
+    );
     // The starred decision is in full: the time, the star, the kind, what was
     // decided.
     assert!(text.contains("12:05"), "the time of the decision: {text}");
@@ -254,7 +253,10 @@ fn the_time_and_tokens_view_shows_the_work_of_every_task() {
         "the cache reads are not fresh tokens: {text}"
     );
     assert!(text.contains("512k"), "the fresh tokens: {text}");
-    assert!(text.contains("300k"), "the cache reads are shown apart: {text}");
+    assert!(
+        text.contains("300k"),
+        "the cache reads are shown apart: {text}"
+    );
     assert!(text.contains("$  0.31"), "the cost: {text}");
     // And the total of the voyage so far.
     assert!(
@@ -739,8 +741,16 @@ fn two_voyages_with_frictions(old_open: bool) -> Store {
             }
             // Each voyage: a task that is done and carries a report, and a
             // task that leaves the voyage open or finished.
-            let m4_rest = if old_open { TaskState::Ready } else { TaskState::Done };
-            let m5_rest = if old_open { TaskState::Done } else { TaskState::Ready };
+            let m4_rest = if old_open {
+                TaskState::Ready
+            } else {
+                TaskState::Done
+            };
+            let m5_rest = if old_open {
+                TaskState::Done
+            } else {
+                TaskState::Ready
+            };
             for (id, rank, milestone, with_friction) in [
                 ("T-1", 1, "M4", true),
                 ("T-2", 2, "M4", false),

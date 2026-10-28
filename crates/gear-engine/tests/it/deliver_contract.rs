@@ -40,7 +40,11 @@ fn texts_carry_no_screen_marker() {
         error_markers: Vec::new(),
         busy_markers: vec!["esc interrupt".into()],
         ratelimit_markers: vec!["rate limit".into()],
-        quota_markers: vec!["Session failed".into(), "Token Plan".into(), "usage limit reached".into()],
+        quota_markers: vec![
+            "Session failed".into(),
+            "Token Plan".into(),
+            "usage limit reached".into(),
+        ],
         quota_bar: None,
         auth_markers: vec!["Unauthorized".into()],
         backoff_markers: vec![],
@@ -63,16 +67,53 @@ fn texts_carry_no_screen_marker() {
 fn delivery_is_intended_then_executed() {
     let mut s = world();
     let text = continue_text("T-1", 1, "ops/tasks/T-1.md");
-    let ops = s.write(|tx| intend_deliveries(tx, &[DeliverAction { project: "p".into(), seat: "p:heat".into(),
-        generation: 1, task: "T-1".into(), attempt: 2, text: text.clone() }], T0)).unwrap();
+    let ops = s
+        .write(|tx| {
+            intend_deliveries(
+                tx,
+                &[DeliverAction {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    task: "T-1".into(),
+                    attempt: 2,
+                    text: text.clone(),
+                }],
+                T0,
+            )
+        })
+        .unwrap();
     assert_eq!(ops.len(), 1);
     let op = &ops[0];
-    assert_eq!((op.kind, op.state, op.task.as_deref(), op.attempt), (OpKind::Deliver, OpState::Intended, Some("T-1"), Some(2)));
+    assert_eq!(
+        (op.kind, op.state, op.task.as_deref(), op.attempt),
+        (OpKind::Deliver, OpState::Intended, Some("T-1"), Some(2))
+    );
     assert_eq!(op.payload["text"], text.as_str());
     // the attempt the delivery is for exists and is the seat's open attempt (T-44, T-47)
-    s.write(|tx| tx.insert_attempt(&gear_store::AttemptRow { session_ref: None, session_cli: None, session_action: None, sent_at: None, project: "p".into(), task: "T-1".into(), n: 2, seat: "p:heat".into(),
-        generation: 1, contract_version: 1, adopted_version: 1, pending_update: None, state: gear_model::AttemptState::Delivered,
-        candidate: None, report: None, safe_point: None, started: T0, updated: T0 })).unwrap();
+    s.write(|tx| {
+        tx.insert_attempt(&gear_store::AttemptRow {
+            session_ref: None,
+            session_cli: None,
+            session_action: None,
+            sent_at: None,
+            project: "p".into(),
+            task: "T-1".into(),
+            n: 2,
+            seat: "p:heat".into(),
+            generation: 1,
+            contract_version: 1,
+            adopted_version: 1,
+            pending_update: None,
+            state: gear_model::AttemptState::Delivered,
+            candidate: None,
+            report: None,
+            safe_point: None,
+            started: T0,
+            updated: T0,
+        })
+    })
+    .unwrap();
     let mut herdr = FakeHerdr::new();
     // The agent carries the seat's name (T-149: a delivery aims at the live
     // agent name; an agent that lost its name is renamed and the packet goes

@@ -133,9 +133,9 @@ pub fn queue(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Queue> {
                             .deps
                             .iter()
                             .find(|dep| {
-                                tasks
-                                    .iter()
-                                    .any(|other| &other.id == *dep && other.state != TaskState::Done)
+                                tasks.iter().any(|other| {
+                                    &other.id == *dep && other.state != TaskState::Done
+                                })
                             })
                             .cloned(),
                     })
@@ -192,7 +192,10 @@ fn working_of(
     let attempt = open.into_iter().find(|attempt| {
         matches!(
             attempt.state,
-            AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown
+            AttemptState::Delivered
+                | AttemptState::Started
+                | AttemptState::Stopped
+                | AttemptState::Unknown
         )
     });
     let Some(attempt) = attempt else {
@@ -209,12 +212,7 @@ fn working_of(
 /// The minutes a task took so far: its first start until its merge, or until
 /// now while it is still running (design §8.3: the actual minutes of a task
 /// that is in flight run to the clock, not to its last recorded step).
-fn actual_min_of(
-    tx: &Tx<'_>,
-    project: &str,
-    task: &str,
-    now: Ts,
-) -> GearResult<Option<i64>> {
+fn actual_min_of(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Option<i64>> {
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
     // A task that is still in flight has no merge yet: the clock runs to now.
@@ -278,11 +276,7 @@ fn lane_line(lane: &Lane) -> String {
         line.push_str(" · left 0");
         return line;
     }
-    line.push_str(&format!(
-        " · left {} ({}m)",
-        lane.left.len(),
-        lane.left_min
-    ));
+    line.push_str(&format!(" · left {} ({}m)", lane.left.len(), lane.left_min));
     if lane.working.is_some() {
         line.push_str(": ");
         let listed: Vec<String> = lane
@@ -322,5 +316,7 @@ fn reviewer_line(reviewer: &Reviewer) -> String {
 
 /// A number of minutes, or "-" when it is not known.
 fn minutes(value: Option<i64>) -> String {
-    value.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }

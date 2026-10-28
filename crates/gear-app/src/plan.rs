@@ -7,8 +7,13 @@ use crate::draft::{Draft, Priority, QueueItem, StaffItem};
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
 use gear_model::state::require_transition;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx};
+use gear_model::{
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState,
+    TaskState, Ts,
+};
+use gear_store::{
+    BindingStatus, ContractRow, NewMessage, PlanRow, RequestOutcome, Store, TaskRow, Tx,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
@@ -214,15 +219,7 @@ fn apply_queue(
                 index + 1
             ));
         }
-        record_decision(
-            tx,
-            project,
-            &voyage,
-            applied_version,
-            line,
-            decision,
-            now,
-        )?;
+        record_decision(tx, project, &voyage, applied_version, line, decision, now)?;
     }
 
     // Apply rebinds before taking the existing-task and config snapshots:
@@ -230,13 +227,32 @@ fn apply_queue(
     // rebind keeps the old config until the lane's attempts finish.
     let mut staffed: Vec<String> = Vec::new();
     for item in &draft.staff {
-        if let StaffItem::Rebind { lane, repo, owns, line } = item {
+        if let StaffItem::Rebind {
+            lane,
+            repo,
+            owns,
+            line,
+        } = item
+        {
             let waiting = request_rebind(tx, project, lane, repo, owns, *line)?;
-            let message = if waiting.is_empty() { format!("rebind {lane}: applied") }
-                else { format!("rebind {lane}: waits for {}", waiting.join(", ")) };
+            let message = if waiting.is_empty() {
+                format!("rebind {lane}: applied")
+            } else {
+                format!("rebind {lane}: waits for {}", waiting.join(", "))
+            };
             warnings.push(message.clone());
             staffed.push(message);
-            record_gear_decision(tx, project, &voyage, applied_version, "staff", &staff_text(item), None, &staff_text(item), now)?;
+            record_gear_decision(
+                tx,
+                project,
+                &voyage,
+                applied_version,
+                "staff",
+                &staff_text(item),
+                None,
+                &staff_text(item),
+                now,
+            )?;
             continue;
         }
     }
@@ -281,9 +297,9 @@ fn apply_queue(
     for (index, item) in draft.queue.iter().enumerate() {
         match &item.id {
             Some(id) => {
-                let task = existing.get(id).ok_or_else(|| {
-                    bad(item.line, format!("task {id} does not exist"))
-                })?;
+                let task = existing
+                    .get(id)
+                    .ok_or_else(|| bad(item.line, format!("task {id} does not exist")))?;
                 match item.state.as_deref() {
                     None => {}
                     Some("cancelled") => {
@@ -294,8 +310,8 @@ fn apply_queue(
                         // task whose accepted work never reached the
                         // integration branch (T-112): its merge was given up,
                         // and cancelling is how the captain drops it.
-                        let done_and_unmerged = task.state == TaskState::Done
-                            && cancellable.contains(id);
+                        let done_and_unmerged =
+                            task.state == TaskState::Done && cancellable.contains(id);
                         if !done_and_unmerged
                             && matches!(task.state, TaskState::Done | TaskState::Failed)
                         {
@@ -553,7 +569,12 @@ fn apply_queue(
                     let files_changed = item.evidence_files != contract.evidence_files;
                     let due_changed = item.evidence_due.map(i64::from) != contract.evidence_due_min;
                     let mechanical_changed = item.mechanical != contract.mechanical;
-                    if goal_changed || accept_changed || files_changed || due_changed || mechanical_changed {
+                    if goal_changed
+                        || accept_changed
+                        || files_changed
+                        || due_changed
+                        || mechanical_changed
+                    {
                         let version = task.contract_version + 1;
                         let next = ContractRow {
                             project: project.to_string(),
@@ -572,9 +593,18 @@ fn apply_queue(
                         if task.wait_on.take().is_some() {
                             task.wait_cond = None;
                             let pauses = tx.pauses_of_project(project)?;
-                            let seats: std::collections::BTreeSet<_> = tx.attempts_of_task(project, id)?.into_iter().filter(|a| matches!(a.state, AttemptState::Started | AttemptState::Stopped)).map(|a| a.seat).collect();
+                            let seats: std::collections::BTreeSet<_> = tx
+                                .attempts_of_task(project, id)?
+                                .into_iter()
+                                .filter(|a| {
+                                    matches!(a.state, AttemptState::Started | AttemptState::Stopped)
+                                })
+                                .map(|a| a.seat)
+                                .collect();
                             for seat in seats {
-                                if pauses.iter().any(|p| p.seat == seat && p.kind == "wait" && p.end_at.is_none()) {
+                                if pauses.iter().any(|p| {
+                                    p.seat == seat && p.kind == "wait" && p.end_at.is_none()
+                                }) {
                                     tx.close_pause(project, &seat, "wait", now)?;
                                 }
                             }
@@ -625,7 +655,9 @@ fn apply_queue(
     // in this transaction; a target already reached is skipped. `remerge` (T-92)
     // is not a seat: it queues a new merge op for a task whose merge failed.
     for item in &draft.staff {
-        if matches!(item, StaffItem::Rebind { .. }) { continue; }
+        if matches!(item, StaffItem::Rebind { .. }) {
+            continue;
+        }
         if let StaffItem::Remerge { task, .. } = item {
             remerge(tx, project, task, staff_line(item), now)?;
             // The decision log (design §7.4): a staff line is a decision.
@@ -675,7 +707,12 @@ fn apply_queue(
             continue;
         }
         let (lane, verb, target, reason) = match item {
-            StaffItem::Park { lane, until, until_task, .. } => {
+            StaffItem::Park {
+                lane,
+                until,
+                until_task,
+                ..
+            } => {
                 let reason = match (until, until_task) {
                     (Some(until), _) => format!("until={until}"),
                     (_, Some(task)) => format!("until-task={task}"),
@@ -695,7 +732,10 @@ fn apply_queue(
                 (lane, "retire", SeatState::Retiring, "retire".to_string())
             }
             StaffItem::Temp { .. } => {
-                return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"))
+                return Err(bad(
+                    staff_line(item),
+                    "`temp` staff lines are not in this cut",
+                ))
             }
             StaffItem::Remerge { .. } => unreachable!("remerge is applied above"),
             StaffItem::Retry { .. } => unreachable!("retry is applied above"),
@@ -704,12 +744,18 @@ fn apply_queue(
         };
         let seat_id = format!("{project}:{lane}");
         let seat = tx.get_seat(&seat_id)?.ok_or_else(|| {
-            bad(staff_line(item), format!("no seat {seat_id} in this project"))
+            bad(
+                staff_line(item),
+                format!("no seat {seat_id} in this project"),
+            )
         })?;
         if seat.role != SeatRole::Lane {
             return Err(bad(
                 staff_line(item),
-                format!("seat {seat_id} is a {} seat, staff lines name lanes", seat.role.as_str()),
+                format!(
+                    "seat {seat_id} is a {} seat, staff lines name lanes",
+                    seat.role.as_str()
+                ),
             ));
         }
         if seat.state == target {
@@ -868,10 +914,9 @@ fn apply_queue(
             if !lanes.contains(&seat.name) {
                 continue;
             }
-            if !tasks
-                .iter()
-                .any(|task| task.lane.as_deref() == Some(seat.name.as_str()) && task.state == TaskState::Ready)
-            {
+            if !tasks.iter().any(|task| {
+                task.lane.as_deref() == Some(seat.name.as_str()) && task.state == TaskState::Ready
+            }) {
                 continue;
             }
             tx.set_seat_state(
@@ -948,7 +993,9 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
         let merged = store.read(|tx| crate::tasks::require_merged_at(tx, &project, by))?;
         let _ = merged;
         let config = crate::config::latest(store, &project)?;
-        let lane = store.read(|tx| tx.get_task(&project, task))?.and_then(|row| row.lane);
+        let lane = store
+            .read(|tx| tx.get_task(&project, task))?
+            .and_then(|row| row.lane);
         let repo = match lane.as_deref() {
             Some(lane) => config.repo_of_lane(lane),
             None => config.root_repo(),
@@ -962,11 +1009,7 @@ fn require_integrated_by(store: &mut Store, draft: &Draft) -> GearResult<()> {
             &config.conventions.remote,
             &repo.integration,
         )?;
-        if !crate::base::contains(
-            std::path::Path::new(&repo.path),
-            candidate,
-            &reference,
-        )? {
+        if !crate::base::contains(std::path::Path::new(&repo.path), candidate, &reference)? {
             return Err(bad(
                 0,
                 format!(
@@ -1081,7 +1124,10 @@ fn on_integration(
         .map_err(|e| {
             bad(
                 0,
-                format!("cannot place {candidate} against {reference} in {}: {e}", repo.path),
+                format!(
+                    "cannot place {candidate} against {reference} in {}: {e}",
+                    repo.path
+                ),
             )
         })?;
     match placed.status.code() {
@@ -1101,12 +1147,7 @@ fn on_integration(
 /// Close the open merge items of a cancelled task (T-112): its failed merge and
 /// its push refusal are history, resolved "cancelled by the captain". Returns
 /// the message ids that were closed.
-fn resolve_merge_items(
-    tx: &Tx<'_>,
-    project: &str,
-    task: &str,
-    now: Ts,
-) -> GearResult<Vec<String>> {
+fn resolve_merge_items(tx: &Tx<'_>, project: &str, task: &str, now: Ts) -> GearResult<Vec<String>> {
     let mut resolved = Vec::new();
     for thread in [format!("merge-failed:{task}"), format!("push:{task}")] {
         for message in tx.thread_messages(project, &thread)? {
@@ -1117,10 +1158,7 @@ fn resolve_merge_items(
                 continue;
             }
             gear_model::state::require_transition(
-                gear_model::MsgState::can_transition(
-                    message.state,
-                    gear_model::MsgState::Resolved,
-                ),
+                gear_model::MsgState::can_transition(message.state, gear_model::MsgState::Resolved),
                 "message",
                 message.state.as_str(),
                 gear_model::MsgState::Resolved.as_str(),
@@ -1145,12 +1183,22 @@ fn resolve_merge_items(
 fn reject_sections(draft: &Draft) -> GearResult<()> {
     // Staff targets park/hold/retire are applied (T-55); temp workers are not
     // in this cut yet.
-    if let Some(item) = draft.staff.iter().find(|item| matches!(item, StaffItem::Temp { .. })) {
-        return Err(bad(staff_line(item), "`temp` staff lines are not in this cut"));
+    if let Some(item) = draft
+        .staff
+        .iter()
+        .find(|item| matches!(item, StaffItem::Temp { .. }))
+    {
+        return Err(bad(
+            staff_line(item),
+            "`temp` staff lines are not in this cut",
+        ));
     }
     if let Some(item) = draft.reviews.first() {
         let line = item.line;
-        return Err(bad(line, "the `# Review` section is not supported in this cut"));
+        return Err(bad(
+            line,
+            "the `# Review` section is not supported in this cut",
+        ));
     }
     Ok(())
 }
@@ -1171,83 +1219,194 @@ pub fn staff_line(item: &StaffItem) -> usize {
 
 /// A durable rebind request; the engine calls `reconcile_rebinds` each tick.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct RebindRequest { repo: String, owns: Vec<String> }
+struct RebindRequest {
+    repo: String,
+    owns: Vec<String>,
+}
 
-pub fn rebind_pending_key(seat: &str) -> String { format!("lane-rebind:{seat}") }
+pub fn rebind_pending_key(seat: &str) -> String {
+    format!("lane-rebind:{seat}")
+}
 
-fn rebind_config(tx: &Tx<'_>, project: &str, lane: &str, request: &RebindRequest, line: usize) -> GearResult<String> {
-    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+fn rebind_config(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    request: &RebindRequest,
+    line: usize,
+) -> GearResult<String> {
+    let row = tx
+        .get_project(project)?
+        .ok_or_else(|| bad(line, "project not found"))?;
     let current = crate::config::parse(&row.config_toml)?;
     if !current.repos.iter().any(|r| r.name == request.repo) {
         return Err(bad(line, format!("unknown repo {:?}", request.repo)));
     }
-    let mut value: toml::Value = row.config_toml.parse().map_err(|e| bad(line, format!("invalid config: {e}")))?;
-    let lanes = value.get_mut("lanes").and_then(toml::Value::as_array_mut).ok_or_else(|| bad(line, "project has no lanes"))?;
-    let entry = lanes.iter_mut().find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
-        .and_then(toml::Value::as_table_mut).ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
+    let mut value: toml::Value = row
+        .config_toml
+        .parse()
+        .map_err(|e| bad(line, format!("invalid config: {e}")))?;
+    let lanes = value
+        .get_mut("lanes")
+        .and_then(toml::Value::as_array_mut)
+        .ok_or_else(|| bad(line, "project has no lanes"))?;
+    let entry = lanes
+        .iter_mut()
+        .find(|l| l.get("name").and_then(toml::Value::as_str) == Some(lane))
+        .and_then(toml::Value::as_table_mut)
+        .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
     entry.insert("repo".into(), toml::Value::String(request.repo.clone()));
-    entry.insert("owns".into(), toml::Value::Array(request.owns.iter().cloned().map(toml::Value::String).collect()));
-    let text = toml::to_string(&value).map_err(|e| bad(line, format!("cannot serialize config: {e}")))?;
+    entry.insert(
+        "owns".into(),
+        toml::Value::Array(
+            request
+                .owns
+                .iter()
+                .cloned()
+                .map(toml::Value::String)
+                .collect(),
+        ),
+    );
+    let text =
+        toml::to_string(&value).map_err(|e| bad(line, format!("cannot serialize config: {e}")))?;
     let new = crate::config::parse(&text)?;
     let old_issues = crate::config::validate(&current);
-    if let Some(issue) = crate::config::validate(&new).into_iter().find(|issue| !old_issues.contains(issue)) {
+    if let Some(issue) = crate::config::validate(&new)
+        .into_iter()
+        .find(|issue| !old_issues.contains(issue))
+    {
         return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
     }
     Ok(text)
 }
 
-fn request_rebind(tx: &Tx<'_>, project: &str, lane: &str, repo: &str, owns: &[String], line: usize) -> GearResult<Vec<String>> {
+fn request_rebind(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    repo: &str,
+    owns: &[String],
+    line: usize,
+) -> GearResult<Vec<String>> {
     let seat_id = format!("{project}:{lane}");
-    let seat = tx.get_seat(&seat_id)?.ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
-    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired { return Err(bad(line, "rebind needs a non-retired lane")); }
-    if tx.get_meta(&format!("lane-rebind-applied:{seat_id}"))?.is_some_and(|v| !v.is_empty()) {
-        return Err(bad(line, format!("lane {lane} is still moving to its new worktree")));
+    let seat = tx
+        .get_seat(&seat_id)?
+        .ok_or_else(|| bad(line, format!("no seat {seat_id}")))?;
+    if seat.role != SeatRole::Lane || seat.state == SeatState::Retired {
+        return Err(bad(line, "rebind needs a non-retired lane"));
     }
-    let request = RebindRequest { repo: repo.into(), owns: owns.to_vec() };
+    if tx
+        .get_meta(&format!("lane-rebind-applied:{seat_id}"))?
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err(bad(
+            line,
+            format!("lane {lane} is still moving to its new worktree"),
+        ));
+    }
+    let request = RebindRequest {
+        repo: repo.into(),
+        owns: owns.to_vec(),
+    };
     rebind_config(tx, project, lane, &request, line)?; // validate before recording anything
-    // Include other lanes' pending targets as reservations. A conflicting
-    // pair must be refused in this transaction, not discovered repeatedly by
-    // the engine after both attempts finish.
-    let row = tx.get_project(project)?.ok_or_else(|| bad(line, "project not found"))?;
+                                                       // Include other lanes' pending targets as reservations. A conflicting
+                                                       // pair must be refused in this transaction, not discovered repeatedly by
+                                                       // the engine after both attempts finish.
+    let row = tx
+        .get_project(project)?
+        .ok_or_else(|| bad(line, "project not found"))?;
     let mut projected = crate::config::parse(&row.config_toml)?;
     let old_issues = crate::config::validate(&projected);
-    for other in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane && s.id != seat_id) {
-        let Some(raw) = tx.get_meta(&rebind_pending_key(&other.id))?.filter(|v| !v.is_empty()) else { continue };
-        let pending: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(line, format!("invalid pending rebind: {e}")))?;
-        let target = projected.lanes.iter_mut().find(|l| l.name == other.name)
-            .ok_or_else(|| bad(line, format!("pending lane {:?} is not configured", other.name)))?;
+    for other in tx
+        .seats_of_project(project)?
+        .into_iter()
+        .filter(|s| s.role == SeatRole::Lane && s.id != seat_id)
+    {
+        let Some(raw) = tx
+            .get_meta(&rebind_pending_key(&other.id))?
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        let pending: RebindRequest = serde_json::from_str(&raw)
+            .map_err(|e| bad(line, format!("invalid pending rebind: {e}")))?;
+        let target = projected
+            .lanes
+            .iter_mut()
+            .find(|l| l.name == other.name)
+            .ok_or_else(|| {
+                bad(
+                    line,
+                    format!("pending lane {:?} is not configured", other.name),
+                )
+            })?;
         target.repo = Some(pending.repo);
         target.owns = pending.owns;
     }
-    let target = projected.lanes.iter_mut().find(|l| l.name == lane)
+    let target = projected
+        .lanes
+        .iter_mut()
+        .find(|l| l.name == lane)
         .ok_or_else(|| bad(line, format!("lane {lane:?} is not configured")))?;
     target.repo = Some(request.repo.clone());
     target.owns = request.owns.clone();
-    if let Some(issue) = crate::config::validate(&projected).into_iter().find(|issue| !old_issues.contains(issue)) {
+    if let Some(issue) = crate::config::validate(&projected)
+        .into_iter()
+        .find(|issue| !old_issues.contains(issue))
+    {
         return Err(bad(line, format!("{}: {}", issue.field, issue.problem)));
     }
     let key = rebind_pending_key(&seat_id);
     let data = serde_json::to_string(&request).map_err(|e| bad(line, e))?;
-    if tx.get_meta(&key)?.is_some_and(|old| !old.is_empty() && old != data) {
-        return Err(bad(line, format!("lane {lane} already has a pending rebind")));
+    if tx
+        .get_meta(&key)?
+        .is_some_and(|old| !old.is_empty() && old != data)
+    {
+        return Err(bad(
+            line,
+            format!("lane {lane} already has a pending rebind"),
+        ));
     }
     tx.set_meta(&key, &data)?;
-    let mut waiting: Vec<_> = tx.open_attempts_of_seat(&seat_id)?.into_iter().map(|a| a.task).collect();
-    waiting.sort(); waiting.dedup();
-    if waiting.is_empty() { apply_rebind(tx, project, lane, &seat_id, &request)?; }
+    let mut waiting: Vec<_> = tx
+        .open_attempts_of_seat(&seat_id)?
+        .into_iter()
+        .map(|a| a.task)
+        .collect();
+    waiting.sort();
+    waiting.dedup();
+    if waiting.is_empty() {
+        apply_rebind(tx, project, lane, &seat_id, &request)?;
+    }
     Ok(waiting)
 }
 
-fn apply_rebind(tx: &Tx<'_>, project: &str, lane: &str, seat: &str, request: &RebindRequest) -> GearResult<()> {
-    let mut row = tx.get_project(project)?.ok_or_else(|| bad(0, "project not found"))?;
+fn apply_rebind(
+    tx: &Tx<'_>,
+    project: &str,
+    lane: &str,
+    seat: &str,
+    request: &RebindRequest,
+) -> GearResult<()> {
+    let mut row = tx
+        .get_project(project)?
+        .ok_or_else(|| bad(0, "project not found"))?;
     let old_config = crate::config::parse(&row.config_toml)?;
     let text = rebind_config(tx, project, lane, request, 0)?;
     // Legacy tasks created before repo snapshots keep the old target as well.
     let old = old_config.repo_of_lane(lane);
-    for mut task in tx.tasks_of_project(project)?.into_iter().filter(|t| t.lane.as_deref() == Some(lane) && t.repo.is_none()) {
+    for mut task in tx
+        .tasks_of_project(project)?
+        .into_iter()
+        .filter(|t| t.lane.as_deref() == Some(lane) && t.repo.is_none())
+    {
         task.repo = Some(old.path.clone());
-        if task.base.is_none() { task.base = Some(old.integration.clone()); }
-        if task.gate.is_none() { task.gate = Some(old.gate.clone()); }
+        if task.base.is_none() {
+            task.base = Some(old.integration.clone());
+        }
+        if task.gate.is_none() {
+            task.gate = Some(old.gate.clone());
+        }
         tx.update_task(&task)?;
     }
     row.config_toml = text;
@@ -1267,10 +1426,22 @@ fn apply_rebind(tx: &Tx<'_>, project: &str, lane: &str, seat: &str, request: &Re
 pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<String>> {
     store.write(|tx| {
         let mut changed = Vec::new();
-        for seat in tx.seats_of_project(project)?.into_iter().filter(|s| s.role == SeatRole::Lane) {
-            let Some(raw) = tx.get_meta(&rebind_pending_key(&seat.id))?.filter(|v| !v.is_empty()) else { continue };
-            if !tx.open_attempts_of_seat(&seat.id)?.is_empty() { continue; }
-            let request: RebindRequest = serde_json::from_str(&raw).map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
+        for seat in tx
+            .seats_of_project(project)?
+            .into_iter()
+            .filter(|s| s.role == SeatRole::Lane)
+        {
+            let Some(raw) = tx
+                .get_meta(&rebind_pending_key(&seat.id))?
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            if !tx.open_attempts_of_seat(&seat.id)?.is_empty() {
+                continue;
+            }
+            let request: RebindRequest = serde_json::from_str(&raw)
+                .map_err(|e| bad(0, format!("invalid pending rebind: {e}")))?;
             apply_rebind(tx, project, &seat.name, &seat.id, &request)?;
             changed.push(seat.name);
         }
@@ -1283,13 +1454,7 @@ pub fn reconcile_rebinds(store: &mut Store, project: &str) -> GearResult<Vec<Str
 /// the engine onboards it again — the captain's way back without an edit in
 /// the store (trial G02, G04). Any other state is a transition the seat cannot
 /// make: `BadTransition`.
-fn retry_lane(
-    tx: &Tx<'_>,
-    project: &str,
-    lane: &str,
-    line: usize,
-    now: Ts,
-) -> GearResult<()> {
+fn retry_lane(tx: &Tx<'_>, project: &str, lane: &str, line: usize, now: Ts) -> GearResult<()> {
     let seat_id = format!("{project}:{lane}");
     let seat = tx
         .get_seat(&seat_id)?
@@ -1323,7 +1488,10 @@ fn retry_lane(
         )
     })?;
     let rebind_key = format!("engine.rebind.{seat_id}");
-    if let Some(mut phase) = tx.get_meta(&rebind_key)?.and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()) {
+    if let Some(mut phase) = tx
+        .get_meta(&rebind_key)?
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    {
         if phase["phase"] == "exiting" {
             phase["phase"] = serde_json::Value::String("retry".into());
             tx.set_meta(&rebind_key, &phase.to_string())?;
@@ -1613,10 +1781,7 @@ fn release_reviewer(
 /// The project's config, read from the store: `None` when the project has no
 /// config yet (nothing to copy, and a reader that finds empty columns falls
 /// back to the lane's current config).
-fn project_config(
-    tx: &Tx<'_>,
-    project: &str,
-) -> GearResult<Option<crate::config::ProjectConfig>> {
+fn project_config(tx: &Tx<'_>, project: &str) -> GearResult<Option<crate::config::ProjectConfig>> {
     let Some(row) = tx.get_project(project)? else {
         return Ok(None);
     };
@@ -1640,9 +1805,9 @@ fn remerge(
     line: usize,
     now: Ts,
 ) -> GearResult<()> {
-    let task = tx.get_task(project, task_id)?.ok_or_else(|| {
-        bad(line, format!("no task {task_id} in this project"))
-    })?;
+    let task = tx
+        .get_task(project, task_id)?
+        .ok_or_else(|| bad(line, format!("no task {task_id} in this project")))?;
     let latest = tx
         .attempts_of_task(project, task_id)?
         .into_iter()
@@ -1659,7 +1824,10 @@ fn remerge(
         ));
     }
     let candidate = latest.candidate.clone().ok_or_else(|| {
-        bad(line, format!("{task_id} attempt {} has no candidate", latest.n))
+        bad(
+            line,
+            format!("{task_id} attempt {} has no candidate", latest.n),
+        )
     })?;
     // The task's merge ops, oldest first (the store has no query by task and
     // kind; the states are few).
@@ -1690,13 +1858,18 @@ fn remerge(
     let Some(last) = merges.into_iter().last() else {
         return Err(bad(
             line,
-            format!("{task_id} has no merge to retry: the engine queues one when its review passes"),
+            format!(
+                "{task_id} has no merge to retry: the engine queues one when its review passes"
+            ),
         ));
     };
     match last.state {
         gear_model::OpState::Failed => {}
         gear_model::OpState::Confirmed => {
-            return Err(bad(line, format!("{task_id} is already merged ({})", last.id)))
+            return Err(bad(
+                line,
+                format!("{task_id} is already merged ({})", last.id),
+            ))
         }
         state => {
             return Err(bad(
@@ -1723,7 +1896,11 @@ fn remerge(
     };
     tx.insert_op(&gear_store::NewOp {
         project: project.to_string(),
-        seat: if lane.is_empty() { format!("{project}:captain") } else { format!("{project}:{lane}") },
+        seat: if lane.is_empty() {
+            format!("{project}:captain")
+        } else {
+            format!("{project}:{lane}")
+        },
         generation: 1,
         kind: gear_model::OpKind::Merge,
         task: Some(task_id.to_string()),
@@ -1766,7 +1943,10 @@ fn contract_body(item: &QueueItem) -> String {
         body.push_str(&format!("accept: {accept}\n"));
     }
     if !item.evidence_files.is_empty() {
-        body.push_str(&format!("evidence-files: {}\n", item.evidence_files.join(", ")));
+        body.push_str(&format!(
+            "evidence-files: {}\n",
+            item.evidence_files.join(", ")
+        ));
     }
     if let Some(minutes) = item.evidence_due {
         body.push_str(&format!("evidence-due: {minutes}\n"));
@@ -1898,7 +2078,15 @@ mod tests {
         let mut s = Store::open_in_memory().unwrap();
         s.write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                NOW,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -1908,11 +2096,19 @@ mod tests {
     fn cap() -> (Env, Fingerprint) {
         (
             Env {
-                ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+                ctx: Some(GearCtx {
+                    project: "p".into(),
+                    seat: "captain".into(),
+                    generation: 1,
+                }),
                 pane_id: Some(CAP_PANE.into()),
                 admin: false,
             },
-            Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+            Fingerprint {
+                pane_id: CAP_PANE.into(),
+                kind: Some("codex".into()),
+                session_ref: None,
+            },
         )
     }
 
@@ -1938,15 +2134,27 @@ mod tests {
 
         let r = run(
             &mut s,
-            &draft_text(1, "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-due: 90\ndeps: -\n"),
+            &draft_text(
+                1,
+                "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-due: 90\ndeps: -\n",
+            ),
             "r2",
         )
         .unwrap();
 
         assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
-        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        let contract = s
+            .read(|tx| tx.get_contract("p", "T-1", 2))
+            .unwrap()
+            .unwrap();
         assert_eq!(contract.evidence_due_min, Some(90));
-        assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version, 2);
+        assert_eq!(
+            s.read(|tx| tx.get_task("p", "T-1"))
+                .unwrap()
+                .unwrap()
+                .contract_version,
+            2
+        );
     }
 
     #[test]
@@ -1961,13 +2169,19 @@ mod tests {
 
         let r = run(
             &mut s,
-            &draft_text(1, "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-files:\ndeps: -\n"),
+            &draft_text(
+                1,
+                "## T-1 [must] lane=heat\ngoal: A\naccept: a\nevidence-files:\ndeps: -\n",
+            ),
             "r2",
         )
         .unwrap();
 
         assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
-        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        let contract = s
+            .read(|tx| tx.get_contract("p", "T-1", 2))
+            .unwrap()
+            .unwrap();
         assert!(contract.evidence_files.is_empty(), "the files were cleared");
     }
 
@@ -1983,12 +2197,21 @@ mod tests {
         )
         .unwrap();
 
-        let contract = s.read(|tx| tx.get_contract("p", "T-1", 1)).unwrap().unwrap();
-        assert_eq!(contract.mechanical.as_deref(), Some("delete three dead fns"));
+        let contract = s
+            .read(|tx| tx.get_contract("p", "T-1", 1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            contract.mechanical.as_deref(),
+            Some("delete three dead fns")
+        );
 
         // `gear plan show` prints it as a field the captain can edit back in.
         let shown = s.read(|tx| show(tx, "p", "T-1")).unwrap();
-        assert!(shown.contains("mechanical: delete three dead fns"), "{shown}");
+        assert!(
+            shown.contains("mechanical: delete three dead fns"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -2012,18 +2235,31 @@ mod tests {
         .unwrap();
 
         assert_eq!(r.contract_changed, vec![("T-1".to_string(), 2)]);
-        let contract = s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap().unwrap();
+        let contract = s
+            .read(|tx| tx.get_contract("p", "T-1", 2))
+            .unwrap()
+            .unwrap();
         assert_eq!(contract.mechanical, None);
-        assert_eq!(s.read(|tx| tx.get_task("p", "T-1")).unwrap().unwrap().contract_version, 2);
+        assert_eq!(
+            s.read(|tx| tx.get_task("p", "T-1"))
+                .unwrap()
+                .unwrap()
+                .contract_version,
+            2
+        );
     }
 
     #[test]
     fn a_mechanical_field_without_a_reason_is_refused() {
-        let text = draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nmechanical:\ndeps: -\n");
+        let text = draft_text(
+            0,
+            "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\nmechanical:\ndeps: -\n",
+        );
         let err = parse(&text).unwrap_err();
         assert_eq!(err.code, ErrorCode::BadFormat);
         assert!(
-            err.detail.contains("`mechanical` needs the reason the gate alone proves this change"),
+            err.detail
+                .contains("`mechanical` needs the reason the gate alone proves this change"),
             "{}",
             err.detail
         );
@@ -2032,13 +2268,25 @@ mod tests {
     #[test]
     fn a_stale_base_is_reported_before_an_unsupported_section() {
         let mut s = world();
-        run(&mut s, &draft_text(0, "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n"), "r1").unwrap();
+        run(
+            &mut s,
+            &draft_text(
+                0,
+                "## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\n",
+            ),
+            "r1",
+        )
+        .unwrap();
 
         let text = "<!-- gear-plan project=p base=0 -->\n# Staff\n- temp R-4 task=T-1 profile=opencode-review\n";
         let draft = parse(text).unwrap();
         let (env, fp) = cap();
         let err = apply(&mut s, &env, Some(&fp), None, &draft, text, "r2", NOW).unwrap_err();
-        assert_eq!(err.code, ErrorCode::StaleVersion, "step 3 is checked before step 4");
+        assert_eq!(
+            err.code,
+            ErrorCode::StaleVersion,
+            "step 3 is checked before step 4"
+        );
     }
 }
 
@@ -2057,9 +2305,10 @@ pub fn voyage_line(voyage: &gear_store::VoyageRow) -> String {
         ),
     };
     match (voyage.departure, voyage.departure_tasks) {
-        (Some(departure), Some(tasks)) => {
-            line.push_str(&format!(" · departed {} with {tasks} tasks", utc_date(departure)))
-        }
+        (Some(departure), Some(tasks)) => line.push_str(&format!(
+            " · departed {} with {tasks} tasks",
+            utc_date(departure)
+        )),
         _ => line.push_str(" · not departed yet"),
     }
     line
@@ -2094,12 +2343,7 @@ pub fn lane_in_tail(tx: &Tx<'_>, project: &str, lane: &str) -> GearResult<bool> 
 
 /// The same, with the caller's clock, writing nothing: the read-only callers
 /// (the plan's own checks) see the tail as it is, without ending it.
-pub fn lane_in_tail_at(
-    tx: &Tx<'_>,
-    project: &str,
-    lane: &str,
-    now: Ts,
-) -> GearResult<bool> {
+pub fn lane_in_tail_at(tx: &Tx<'_>, project: &str, lane: &str, now: Ts) -> GearResult<bool> {
     lane_in_tail_now(tx, project, lane, now, false)
 }
 
@@ -2117,7 +2361,11 @@ fn lane_in_tail_now(
     now: Ts,
     write: bool,
 ) -> GearResult<bool> {
-    if tx.get_meta(&format!("lane-tail:{project}:{lane}"))?.as_deref() != Some("1") {
+    if tx
+        .get_meta(&format!("lane-tail:{project}:{lane}"))?
+        .as_deref()
+        != Some("1")
+    {
         return Ok(false);
     }
     if !tail_is_over(tx, project, now)? {
@@ -2138,7 +2386,11 @@ fn persist_tail_end(tx: &Tx<'_>, project: &str) -> GearResult<()> {
         if seat.role != SeatRole::Lane {
             continue;
         }
-        if tx.get_meta(&format!("lane-tail:{project}:{}", seat.name))?.as_deref() == Some("1") {
+        if tx
+            .get_meta(&format!("lane-tail:{project}:{}", seat.name))?
+            .as_deref()
+            == Some("1")
+        {
             lanes.push(seat.name);
         }
     }
@@ -2146,7 +2398,9 @@ fn persist_tail_end(tx: &Tx<'_>, project: &str) -> GearResult<()> {
         return Ok(());
     }
     lanes.sort();
-    let until = tx.get_meta(&format!("lane-tail-until:{project}"))?.unwrap_or_default();
+    let until = tx
+        .get_meta(&format!("lane-tail-until:{project}"))?
+        .unwrap_or_default();
     let declaration = tail_declaration(&lanes, &until);
     for lane in &lanes {
         tx.set_meta(&format!("lane-tail:{project}:{lane}"), "0")?;
@@ -2216,7 +2470,10 @@ fn tail_is_over(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<bool> {
         // task that failed can be reworked by a new attempt, but the wait is
         // over — the captain decides what happens next.
         TailUntil::Task(task) => Ok(match tx.get_task(project, &task)? {
-            Some(row) => matches!(row.state, TaskState::Done | TaskState::Failed | TaskState::Cancelled),
+            Some(row) => matches!(
+                row.state,
+                TaskState::Done | TaskState::Failed | TaskState::Cancelled
+            ),
             // A task that does not exist will never be done.
             None => true,
         }),
@@ -2324,8 +2581,16 @@ pub fn idle_lanes(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<IdleLan
         let current = lane_tasks
             .iter()
             .find(|task| task.state == TaskState::Running)
-            .or_else(|| lane_tasks.iter().find(|task| task.state == TaskState::Waiting))
-            .or_else(|| lane_tasks.iter().find(|task| task.state == TaskState::Verifying))
+            .or_else(|| {
+                lane_tasks
+                    .iter()
+                    .find(|task| task.state == TaskState::Waiting)
+            })
+            .or_else(|| {
+                lane_tasks
+                    .iter()
+                    .find(|task| task.state == TaskState::Verifying)
+            })
             .map(|task| task.id.clone());
         // The lane's queued tasks: the one it can start now, and the ones
         // that wait for a dependency that is not done.
@@ -2373,7 +2638,9 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
     // marker or revive a tail that has ended (T-191).
     let mut decls: Vec<TailDecl> = Vec::new();
     for decision in &draft.decisions {
-        let Some(rest) = decision.strip_prefix("tail:") else { continue; };
+        let Some(rest) = decision.strip_prefix("tail:") else {
+            continue;
+        };
         let mut lanes: BTreeSet<String> = BTreeSet::new();
         let mut until: Option<TailUntil> = None;
         for token in rest.split(|c: char| c.is_whitespace() || c == ',') {
@@ -2394,7 +2661,11 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
         }
         let seats = tx.seats_of_project(project)?;
         for name in &lanes {
-            if *name != "-" && !seats.iter().any(|s| s.role == SeatRole::Lane && s.name == *name) {
+            if *name != "-"
+                && !seats
+                    .iter()
+                    .any(|s| s.role == SeatRole::Lane && s.name == *name)
+            {
                 return Err(bad(1, format!("tail: unknown lane {name}")));
             }
         }
@@ -2426,13 +2697,23 @@ fn record_tail_decisions(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResul
     // must not revive a tail that has already ended: only a genuinely new
     // declaration resets it. The marker is read before this replay writes
     // anything — an earlier line in the retained history never clears it.
-    let spent_before = tx.get_meta(&format!("lane-tail-spent:{project}"))?.unwrap_or_default();
+    let spent_before = tx
+        .get_meta(&format!("lane-tail-spent:{project}"))?
+        .unwrap_or_default();
     let declaration = tail_declaration(&effective.lanes, &effective.until);
     let spent = spent_before == declaration;
     let seats = tx.seats_of_project(project)?;
     for seat in seats.iter().filter(|s| s.role == SeatRole::Lane) {
-        tx.set_meta(&format!("lane-tail:{project}:{}", seat.name),
-            if spent { "0" } else if effective.lanes.contains(&seat.name) { "1" } else { "0" })?;
+        tx.set_meta(
+            &format!("lane-tail:{project}:{}", seat.name),
+            if spent {
+                "0"
+            } else if effective.lanes.contains(&seat.name) {
+                "1"
+            } else {
+                "0"
+            },
+        )?;
     }
     if !spent {
         tx.set_meta(&format!("lane-tail-spent:{project}"), "")?;
@@ -2647,7 +2928,10 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
     }
     for (milestone, tasks) in counts {
         let voyage = tx.get_voyage(project, &milestone)?;
-        if voyage.as_ref().is_some_and(|v| v.departure.is_some() && v.departure_estimate_min.is_some()) {
+        if voyage
+            .as_ref()
+            .is_some_and(|v| v.departure.is_some() && v.departure_estimate_min.is_some())
+        {
             continue;
         }
         let history = departure_from_history(tx, project, &milestone)?;
@@ -2655,7 +2939,9 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
         let (departure, at_departure, estimate) = match history {
             Some(found) => found,
             None if !already_departed => {
-                let estimates = tx.tasks_of_project(project)?.iter()
+                let estimates = tx
+                    .tasks_of_project(project)?
+                    .iter()
                     .filter(|task| task.milestone.as_deref() == Some(&milestone))
                     .map(|task| gear_board::voyage::estimate_of(tx, project, task))
                     .collect::<GearResult<Vec<_>>>()?;
@@ -2700,13 +2986,22 @@ fn departure_from_history(
         let Ok(draft) = crate::draft::parse(&plan.draft) else {
             continue;
         };
-        let items: Vec<_> = draft.queue.iter()
-            .filter(|item| item.milestone.as_deref() == Some(milestone)).collect();
+        let items: Vec<_> = draft
+            .queue
+            .iter()
+            .filter(|item| item.milestone.as_deref() == Some(milestone))
+            .collect();
         if !items.is_empty() {
-            let estimate = items.iter().map(|item| {
-                item.estimate.map(i64::from).or_else(|| item.goal.as_deref()
-                    .and_then(gear_board::voyage::estimate_from_goal))
-            }).sum();
+            let estimate = items
+                .iter()
+                .map(|item| {
+                    item.estimate.map(i64::from).or_else(|| {
+                        item.goal
+                            .as_deref()
+                            .and_then(gear_board::voyage::estimate_from_goal)
+                    })
+                })
+                .sum();
             return Ok(Some((plan.applied, items.len() as i64, estimate)));
         }
     }
@@ -2784,7 +3079,10 @@ fn cancel_task(
             recipient: lane_seat,
             kind: MsgKind::Instruction,
             urgent: false,
-            body: format!("{} is cancelled; stop work on it, nothing to hand in", task.id),
+            body: format!(
+                "{} is cancelled; stop work on it, nothing to hand in",
+                task.id
+            ),
             reply_to: None,
             needs_ack: false,
             state: MsgState::Open,
@@ -2793,7 +3091,6 @@ fn cancel_task(
     }
     Ok(())
 }
-
 
 /// The voyage a plan is for: the last milestone block of the file (the
 /// current one). A plan with no milestone block — a decisions-only or
@@ -2810,8 +3107,14 @@ fn voyage_of(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<String> {
 pub fn current_voyage(tx: &Tx<'_>, project: &str) -> GearResult<String> {
     let mut latest: Option<(Ts, String)> = None;
     for voyage in tx.voyages_of_project(project)? {
-        let Some(departure) = voyage.departure else { continue };
-        if latest.as_ref().map(|(at, _)| departure > *at).unwrap_or(true) {
+        let Some(departure) = voyage.departure else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .map(|(at, _)| departure > *at)
+            .unwrap_or(true)
+        {
             latest = Some((departure, voyage.milestone));
         }
     }
@@ -2892,7 +3195,12 @@ fn record_gear_decision(
 fn staff_text(item: &StaffItem) -> String {
     match item {
         StaffItem::Temp { id, task, .. } => format!("temp {id} task={task}"),
-        StaffItem::Park { lane, until, until_task, .. } => match (until, until_task) {
+        StaffItem::Park {
+            lane,
+            until,
+            until_task,
+            ..
+        } => match (until, until_task) {
             (Some(until), _) => format!("park {lane} until={until}"),
             (_, Some(task)) => format!("park {lane} until-task={task}"),
             _ => format!("park {lane}"),
@@ -2902,7 +3210,9 @@ fn staff_text(item: &StaffItem) -> String {
         StaffItem::Retry { lane, .. } => format!("retry {lane}"),
         StaffItem::Release { name, .. } => format!("release {name}"),
         StaffItem::Remerge { task, .. } => format!("remerge {task}"),
-        StaffItem::Rebind { lane, repo, owns, .. } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
+        StaffItem::Rebind {
+            lane, repo, owns, ..
+        } => format!("rebind {lane} repo={repo} owns=[{}]", owns.join(", ")),
     }
 }
 
@@ -2920,7 +3230,12 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// The departure is fixed when the milestone gets its first task: the time of
 /// that apply (the tasks it creates are created then) and how many tasks the
 /// milestone holds. Later applies update the words but never move it.
-fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: Ts) -> GearResult<()> {
+fn record_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &crate::draft::Draft,
+    now: Ts,
+) -> GearResult<()> {
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
         let (done, bar, eta) = crate::draft::milestone_fields(body);
@@ -2965,7 +3280,11 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
 /// without milestone).
 /// A pending newer contract version is appended as `## Pending update: v<m>`.
 /// Missing task → `NoTarget`. Read-only.
-pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<String> {
+pub fn render_task_packet(
+    tx: &gear_store::Tx<'_>,
+    project: &str,
+    task: &str,
+) -> GearResult<String> {
     let row = tx.get_task(project, task)?.ok_or_else(|| {
         GearError::new(
             ErrorCode::NoTarget,
@@ -2982,7 +3301,8 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
         let seat_id = format!("{project}:{lane}");
         if let Some(open) = tx
             .open_attempts_of_seat(&seat_id)?
-            .into_iter().rfind(|candidate| candidate.task == task)
+            .into_iter()
+            .rfind(|candidate| candidate.task == task)
         {
             adopted = open.adopted_version;
             attempt_arg = open.n.to_string();
@@ -3127,11 +3447,7 @@ pub fn render_task_packet(tx: &gear_store::Tx<'_>, project: &str, task: &str) ->
 /// A review verdict and a captain verdict are the same kind of record — the
 /// findings of the round — so the highest of both is the round the task is
 /// in. `None` when nothing failed yet: a first hand-in is not a rework.
-fn failed_round_of(
-    tx: &gear_store::Tx<'_>,
-    project: &str,
-    task: &str,
-) -> GearResult<Option<i64>> {
+fn failed_round_of(tx: &gear_store::Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let mut failed: Option<i64> = None;
     let mut note = |attempt: i64, passed: bool| {
         if !passed {
@@ -3155,7 +3471,10 @@ mod tail_time_tests {
     fn parses() {
         assert_eq!(parse_rfc3339("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339("2026-10-26T18:00:00Z"), Some(1793037600));
-        assert_eq!(parse_rfc3339("2026-10-26T18:00:00+01:00"), Some(1793037600 - 3600));
+        assert_eq!(
+            parse_rfc3339("2026-10-26T18:00:00+01:00"),
+            Some(1793037600 - 3600)
+        );
         assert_eq!(parse_rfc3339("tomorrow"), None);
     }
 }

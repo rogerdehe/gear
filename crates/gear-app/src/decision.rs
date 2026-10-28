@@ -21,21 +21,8 @@
 
 /// The kinds a decision may have (§7.2).
 pub const KINDS: [&str; 15] = [
-    "scope",
-    "cut",
-    "split",
-    "override",
-    "logged",
-    "rework",
-    "estimate",
-    "staff",
-    "model",
-    "config",
-    "hand-fix",
-    "note",
-    "tail",
-    "station",
-    "user",
+    "scope", "cut", "split", "override", "logged", "rework", "estimate", "staff", "model",
+    "config", "hand-fix", "note", "tail", "station", "user",
 ];
 
 /// One decision of the log, as the captain wrote it.

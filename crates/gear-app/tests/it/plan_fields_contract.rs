@@ -70,7 +70,15 @@ fn world() -> Store {
         let mut project = testing::seed_project(tx, "p", "sess", NOW)?;
         project.config_toml = CONFIG.to_string();
         tx.update_project(&project)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         testing::seed_active_seat(tx, "p", "wire", SeatRole::Lane, "w1:p3", "opencode", NOW)?;
         Ok(())
@@ -82,24 +90,53 @@ fn world() -> Store {
 fn cap() -> (Env, Fingerprint) {
     (
         Env {
-            ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }),
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
             pane_id: Some(CAP_PANE.into()),
             admin: false,
         },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
 /// Apply a plan file (the captain's whole file, base and all).
-fn run(s: &mut Store, text: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    text: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(text).unwrap(), text, rid, NOW + 10)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        rid,
+        NOW + 10,
+    )
 }
 
 /// Apply a plan with the base the store holds.
-fn run_at(s: &mut Store, body: &str, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run_at(
+    s: &mut Store,
+    body: &str,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let base = s.read(|tx| tx.plan_version("p")).unwrap();
-    run(s, &format!("<!-- gear-plan project=p base={base} -->\n{body}"), rid)
+    run(
+        s,
+        &format!("<!-- gear-plan project=p base={base} -->\n{body}"),
+        rid,
+    )
 }
 
 /// A plan that creates two tasks: T-1 for `heat`, T-2 for `wire`.
@@ -115,7 +152,12 @@ fn task(s: &mut Store, id: &str) -> gear_store::TaskRow {
 #[test]
 fn a_new_task_keeps_the_repo_base_and_gate_of_its_lane() {
     let mut s = world();
-    let r = run(&mut s, &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()), "r1").unwrap();
+    let r = run(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()),
+        "r1",
+    )
+    .unwrap();
     assert_eq!(r.created, vec!["T-1".to_string(), "T-2".to_string()]);
 
     // The lane in the child repo.
@@ -151,7 +193,12 @@ fn a_new_task_keeps_the_repo_base_and_gate_of_its_lane() {
 #[test]
 fn a_followup_is_set_on_an_existing_task_too() {
     let mut s = world();
-    run(&mut s, &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()), "r1").unwrap();
+    run(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()),
+        "r1",
+    )
+    .unwrap();
 
     // The captain writes the follow-up on the task that already exists.
     run_at(
@@ -171,7 +218,12 @@ fn a_followup_is_set_on_an_existing_task_too() {
 #[test]
 fn an_unknown_followup_is_refused() {
     let mut s = world();
-    run(&mut s, &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()), "r1").unwrap();
+    run(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()),
+        "r1",
+    )
+    .unwrap();
 
     let error = run_at(
         &mut s,
@@ -192,20 +244,16 @@ fn an_unknown_followup_is_refused() {
 /// A task that was handed in and failed its review: the captain's item.
 fn world_with_a_failed_review() -> Store {
     let mut s = world();
-    run(&mut s, &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()), "r1").unwrap();
+    run(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()),
+        "r1",
+    )
+    .unwrap();
     s.write(|tx| {
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, NOW)?;
-        gear_app::tasks::submit_result(
-            tx,
-            "p",
-            "T-1",
-            1,
-            1,
-            "abc1234",
-            "ops/reports/T-1.md",
-            NOW,
-        )?;
+        gear_app::tasks::submit_result(tx, "p", "T-1", 1, 1, "abc1234", "ops/reports/T-1.md", NOW)?;
         tx.insert_review_verdict(&gear_store::ReviewVerdictRow {
             project: "p".into(),
             task: "T-1".into(),
@@ -233,7 +281,10 @@ fn a_fail_asks_for_the_minutes_of_the_rework() {
 
     assert_eq!(task(&mut s, "T-1").rework_estimate_min, Some(25));
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Rejected
     );
 }
@@ -250,13 +301,18 @@ fn a_pass_over_a_failed_review_needs_a_why() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
     assert!(
-        error.detail.contains("a pass over a failed review needs why="),
+        error
+            .detail
+            .contains("a pass over a failed review needs why="),
         "{}",
         error.detail
     );
     // Nothing was settled: the attempt is still handed in.
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Submitted
     );
 
@@ -268,7 +324,10 @@ fn a_pass_over_a_failed_review_needs_a_why() {
     )
     .unwrap();
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Accepted
     );
 }
@@ -277,7 +336,12 @@ fn a_pass_over_a_failed_review_needs_a_why() {
 #[test]
 fn a_pass_over_a_passed_review_needs_no_why() {
     let mut s = world();
-    run(&mut s, &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()), "r1").unwrap();
+    run(
+        &mut s,
+        &format!("<!-- gear-plan project=p base=0 -->\n{}", two_new()),
+        "r1",
+    )
+    .unwrap();
     s.write(|tx| {
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW)?;
         gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, NOW)?;
@@ -301,7 +365,10 @@ fn a_pass_over_a_passed_review_needs_no_why() {
     )
     .unwrap();
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Accepted
     );
 }
@@ -323,7 +390,10 @@ fn a_pass_naming_a_task_that_is_not_merged_is_refused() {
     assert!(err.detail.contains("T-2"), "{}", err.detail);
     // Nothing settled: the attempt is still handed in.
     assert_eq!(
-        s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap().state,
+        s.read(|tx| tx.get_attempt("p", "T-1", 1))
+            .unwrap()
+            .unwrap()
+            .state,
         AttemptState::Submitted
     );
 }
@@ -371,44 +441,103 @@ fn rebind_waits_for_all_open_attempts_then_changes_config_and_preserves_old_task
     s.write(|tx| {
         // Simulate a legacy task from before repo snapshots existed.
         let mut old = tx.get_task("p", "T-1")?.unwrap();
-        old.repo = None; old.base = None; old.gate = None;
+        old.repo = None;
+        old.base = None;
+        old.gate = None;
         tx.update_task(&old)?;
         gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW + 20)?;
         let mut a = tx.get_attempt("p", "T-1", 1)?.unwrap();
         a.state = AttemptState::Submitted;
         tx.update_attempt(&a)
-    }).unwrap();
-    let result = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/core/, tests/]\n", "rebind").unwrap();
-    assert!(result.warnings.contains(&"rebind heat: waits for T-1".into()));
+    })
+    .unwrap();
+    let result = run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=engine owns=[src/core/, tests/]\n",
+        "rebind",
+    )
+    .unwrap();
+    assert!(result
+        .warnings
+        .contains(&"rebind heat: waits for T-1".into()));
     let before = gear_app::config::latest(&mut s, "p").unwrap();
     assert_eq!(before.repo_of_lane("heat").name, "api");
-    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p")
+        .unwrap()
+        .is_empty());
     s.write(|tx| {
         let mut a = tx.get_attempt("p", "T-1", 1)?.unwrap();
         a.state = AttemptState::Accepted;
         tx.update_attempt(&a)
-    }).unwrap();
-    assert_eq!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(), vec!["heat"]);
+    })
+    .unwrap();
+    assert_eq!(
+        gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(),
+        vec!["heat"]
+    );
     let after = gear_app::config::latest(&mut s, "p").unwrap();
     assert_eq!(after.repo_of_lane("heat").name, "engine");
-    assert_eq!(after.lanes.iter().find(|l| l.name == "heat").unwrap().owns, ["src/core/", "tests/"]);
+    assert_eq!(
+        after.lanes.iter().find(|l| l.name == "heat").unwrap().owns,
+        ["src/core/", "tests/"]
+    );
     let old = task(&mut s, "T-1");
-    assert_eq!((old.repo.as_deref(), old.base.as_deref(), old.gate.as_deref()), (Some("/repo/crates/api"), Some("feat/api"), Some("cargo test -p api")));
-    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
-    let next = run_at(&mut s, "# Queue\n## NEW [must] lane=heat\ngoal: new\naccept: done\nestimate: 10\ndeps: -\n", "new").unwrap();
-    assert_eq!(task(&mut s, &next.created[0]).repo.as_deref(), Some("/repo/crates/engine"));
+    assert_eq!(
+        (
+            old.repo.as_deref(),
+            old.base.as_deref(),
+            old.gate.as_deref()
+        ),
+        (
+            Some("/repo/crates/api"),
+            Some("feat/api"),
+            Some("cargo test -p api")
+        )
+    );
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p")
+        .unwrap()
+        .is_empty());
+    let next = run_at(
+        &mut s,
+        "# Queue\n## NEW [must] lane=heat\ngoal: new\naccept: done\nestimate: 10\ndeps: -\n",
+        "new",
+    )
+    .unwrap();
+    assert_eq!(
+        task(&mut s, &next.created[0]).repo.as_deref(),
+        Some("/repo/crates/engine")
+    );
 }
 
 #[test]
 fn idle_rebind_applies_at_once_and_invalid_targets_are_atomic() {
     let mut s = world();
-    let error = run_at(&mut s, "# Staff\n- rebind wire repo=missing owns=[src/]\n", "bad").unwrap_err();
+    let error = run_at(
+        &mut s,
+        "# Staff\n- rebind wire repo=missing owns=[src/]\n",
+        "bad",
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 0);
-    let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/wire/]\n", "idle").unwrap();
+    let result = run_at(
+        &mut s,
+        "# Staff\n- rebind wire repo=api owns=[src/wire/]\n",
+        "idle",
+    )
+    .unwrap();
     assert!(result.warnings.contains(&"rebind wire: applied".into()));
-    assert_eq!(gear_app::config::latest(&mut s, "p").unwrap().repo_of_lane("wire").name, "api");
-    assert!(parse("<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind wire repo=api owns=[]\n").is_err());
+    assert_eq!(
+        gear_app::config::latest(&mut s, "p")
+            .unwrap()
+            .repo_of_lane("wire")
+            .name,
+        "api"
+    );
+    assert!(parse(
+        "<!-- gear-plan project=p base=0 -->\n# Staff\n- rebind wire repo=api owns=[]\n"
+    )
+    .is_err());
 }
 
 #[test]
@@ -419,15 +548,36 @@ fn idle_rebind_and_new_task_in_one_apply_use_the_destination_repo() {
         // A legacy task must be snapshotted before the existing-task map is
         // loaded, even when its queue block is updated in the same apply.
         let mut old = tx.get_task("p", "T-2")?.unwrap();
-        old.repo = None; old.base = None; old.gate = None;
+        old.repo = None;
+        old.base = None;
+        old.gate = None;
         tx.update_task(&old)
-    }).unwrap();
+    })
+    .unwrap();
     let result = run_at(&mut s, "# Staff\n- rebind wire repo=api owns=[src/new/]\n# Queue\n## T-2 [should] lane=wire\ngoal: B\naccept: b\nestimate: 30\ndeps: -\n\n## NEW [must] lane=wire\ngoal: new repo work\naccept: done\nestimate: 10\ndeps: -\n", "rebind-and-new").unwrap();
     assert!(result.warnings.contains(&"rebind wire: applied".into()));
     let new = task(&mut s, &result.created[0]);
-    assert_eq!((new.repo.as_deref(), new.base.as_deref(), new.gate.as_deref()), (Some("/repo/crates/api"), Some("feat/api"), Some("cargo test -p api")));
+    assert_eq!(
+        (
+            new.repo.as_deref(),
+            new.base.as_deref(),
+            new.gate.as_deref()
+        ),
+        (
+            Some("/repo/crates/api"),
+            Some("feat/api"),
+            Some("cargo test -p api")
+        )
+    );
     let old = task(&mut s, "T-2");
-    assert_eq!((old.repo.as_deref(), old.base.as_deref(), old.gate.as_deref()), (Some("/repo"), Some("dev"), Some("make test")));
+    assert_eq!(
+        (
+            old.repo.as_deref(),
+            old.base.as_deref(),
+            old.gate.as_deref()
+        ),
+        (Some("/repo"), Some("dev"), Some("make test"))
+    );
 }
 
 fn world_with_two_pending_attempts() -> Store {
@@ -439,48 +589,95 @@ fn world_with_two_pending_attempts() -> Store {
     }).unwrap();
     run_at(&mut s, &two_new(), "create-pending-fixture").unwrap();
     s.write(|tx| {
-        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW+20)?;
-        gear_app::tasks::start_attempt(tx, "p", "T-2", "p:wire", 1, NOW+20)?;
+        gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW + 20)?;
+        gear_app::tasks::start_attempt(tx, "p", "T-2", "p:wire", 1, NOW + 20)?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     s
 }
 
 #[test]
 fn overlapping_pending_rebinds_in_one_apply_are_refused_atomically() {
     let mut s = world_with_two_pending_attempts();
-    let error = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/]\n- rebind wire repo=engine owns=[src/]\n", "both-conflict").unwrap_err();
+    let error = run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=engine owns=[src/]\n- rebind wire repo=engine owns=[src/]\n",
+        "both-conflict",
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("overlaps"), "{}", error.detail);
     for seat in ["p:heat", "p:wire"] {
-        assert!(s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key(seat))).unwrap().is_none());
+        assert!(s
+            .read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key(seat)))
+            .unwrap()
+            .is_none());
     }
     assert_eq!(s.read(|tx| tx.plan_version("p")).unwrap(), 1);
-    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
-    run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/]\n", "retry-valid").unwrap();
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p")
+        .unwrap()
+        .is_empty());
+    run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=engine owns=[src/]\n",
+        "retry-valid",
+    )
+    .unwrap();
     s.write(|tx| {
         let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
         attempt.state = AttemptState::Accepted;
         tx.update_attempt(&attempt)
-    }).unwrap();
-    assert_eq!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(), vec!["heat"]);
+    })
+    .unwrap();
+    assert_eq!(
+        gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(),
+        vec!["heat"]
+    );
 }
 
 #[test]
 fn overlapping_pending_rebinds_across_applies_refuse_only_the_second() {
     let mut s = world_with_two_pending_attempts();
-    let first = run_at(&mut s, "# Staff\n- rebind heat repo=engine owns=[src/]\n", "first-valid").unwrap();
-    assert!(first.warnings.contains(&"rebind heat: waits for T-1".into()));
-    let error = run_at(&mut s, "# Staff\n- rebind wire repo=engine owns=[src/deep/]\n", "second-conflict").unwrap_err();
+    let first = run_at(
+        &mut s,
+        "# Staff\n- rebind heat repo=engine owns=[src/]\n",
+        "first-valid",
+    )
+    .unwrap();
+    assert!(first
+        .warnings
+        .contains(&"rebind heat: waits for T-1".into()));
+    let error = run_at(
+        &mut s,
+        "# Staff\n- rebind wire repo=engine owns=[src/deep/]\n",
+        "second-conflict",
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("overlaps"), "{}", error.detail);
-    assert!(s.read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key("p:wire"))).unwrap().is_none());
+    assert!(s
+        .read(|tx| tx.get_meta(&gear_app::plan::rebind_pending_key("p:wire")))
+        .unwrap()
+        .is_none());
     s.write(|tx| {
         let mut attempt = tx.get_attempt("p", "T-1", 1)?.unwrap();
         attempt.state = AttemptState::Accepted;
         tx.update_attempt(&attempt)
-    }).unwrap();
-    assert_eq!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(), vec!["heat"]);
-    assert_eq!(gear_app::config::latest(&mut s, "p").unwrap().repo_of_lane("heat").name, "engine");
-    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap().is_empty());
+    })
+    .unwrap();
+    assert_eq!(
+        gear_app::plan::reconcile_rebinds(&mut s, "p").unwrap(),
+        vec!["heat"]
+    );
+    assert_eq!(
+        gear_app::config::latest(&mut s, "p")
+            .unwrap()
+            .repo_of_lane("heat")
+            .name,
+        "engine"
+    );
+    assert!(gear_app::plan::reconcile_rebinds(&mut s, "p")
+        .unwrap()
+        .is_empty());
 }

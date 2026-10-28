@@ -34,7 +34,8 @@ fn msg(thread: &str, sender: &str, kind: MsgKind, created: Ts, urgent: bool) -> 
 
 fn store() -> Store {
     let mut s = Store::open_in_memory().unwrap();
-    s.write(|tx| testing::seed_project(tx, "p", "sess", NOW)).unwrap();
+    s.write(|tx| testing::seed_project(tx, "p", "sess", NOW))
+        .unwrap();
     s
 }
 
@@ -53,7 +54,13 @@ fn groups_by_thread_with_more_count() {
         for i in 0..5 {
             tx.insert_message(&msg("T-1:1", "p:heat", MsgKind::Question, NOW + i, false))?;
         }
-        tx.insert_message(&msg("T-2:1", "p:pricing", MsgKind::Question, NOW + 5, false))?;
+        tx.insert_message(&msg(
+            "T-2:1",
+            "p:pricing",
+            MsgKind::Question,
+            NOW + 5,
+            false,
+        ))?;
         Ok(())
     })
     .unwrap();
@@ -65,7 +72,11 @@ fn groups_by_thread_with_more_count() {
 
     let first = &views[0];
     assert_eq!(first.thread, "T-1:1");
-    assert_eq!(first.open.len(), 3, "at most three unhandled messages are shown");
+    assert_eq!(
+        first.open.len(),
+        3,
+        "at most three unhandled messages are shown"
+    );
     assert_eq!(first.more, 2, "the rest is counted");
     // Oldest first.
     assert_eq!(first.open[0].id, "M-1");
@@ -84,15 +95,38 @@ fn due_waiting_included_not_yet_due_excluded() {
     s.write(|tx| {
         tx.insert_message(&msg("open", "p:heat", MsgKind::Question, NOW, false))?;
         let due = tx.insert_message(&msg("due", "p:pricing", MsgKind::Question, NOW + 1, false))?;
-        tx.update_message_state("p", &due.id, MsgState::Waiting, None, Some("user"), Some(NOW + 100), NOW + 1)?;
-        let later = tx.insert_message(&msg("later", "p:other", MsgKind::Question, NOW + 2, false))?;
-        tx.update_message_state("p", &later.id, MsgState::Waiting, None, Some("user"), Some(NOW + 200), NOW + 2)?;
+        tx.update_message_state(
+            "p",
+            &due.id,
+            MsgState::Waiting,
+            None,
+            Some("user"),
+            Some(NOW + 100),
+            NOW + 1,
+        )?;
+        let later =
+            tx.insert_message(&msg("later", "p:other", MsgKind::Question, NOW + 2, false))?;
+        tx.update_message_state(
+            "p",
+            &later.id,
+            MsgState::Waiting,
+            None,
+            Some("user"),
+            Some(NOW + 200),
+            NOW + 2,
+        )?;
         Ok(())
     })
     .unwrap();
 
-    assert_eq!(batch(&mut s, NOW + 50, BatchLimits::default()), vec!["open"]);
-    assert_eq!(batch(&mut s, NOW + 150, BatchLimits::default()), vec!["open", "due"]);
+    assert_eq!(
+        batch(&mut s, NOW + 50, BatchLimits::default()),
+        vec!["open"]
+    );
+    assert_eq!(
+        batch(&mut s, NOW + 150, BatchLimits::default()),
+        vec!["open", "due"]
+    );
     assert_eq!(
         batch(&mut s, NOW + 250, BatchLimits::default()),
         vec!["open", "due", "later"]
@@ -183,7 +217,13 @@ fn urgent_first_then_oldest() {
     let mut s = store();
     s.write(|tx| {
         tx.insert_message(&msg("old", "p:heat", MsgKind::Question, NOW, false))?;
-        tx.insert_message(&msg("urgent", "p:pricing", MsgKind::Question, NOW + 1, true))?;
+        tx.insert_message(&msg(
+            "urgent",
+            "p:pricing",
+            MsgKind::Question,
+            NOW + 1,
+            true,
+        ))?;
         tx.insert_message(&msg("new", "p:other", MsgKind::Question, NOW + 2, false))?;
         Ok(())
     })
@@ -207,11 +247,20 @@ fn urgent_flood_keeps_one_normal_slot() {
     })
     .unwrap();
 
-    let limits = BatchLimits { max_threads: 2, per_sender: 2 };
+    let limits = BatchLimits {
+        max_threads: 2,
+        per_sender: 2,
+    };
     let threads = batch(&mut s, NOW + 10, limits);
     assert_eq!(threads.len(), 2);
-    assert!(threads.contains(&"normal".to_string()), "the oldest normal thread keeps a slot");
-    assert!(threads.contains(&"u1".to_string()), "the other slot goes to the oldest urgent thread");
+    assert!(
+        threads.contains(&"normal".to_string()),
+        "the oldest normal thread keeps a slot"
+    );
+    assert!(
+        threads.contains(&"u1".to_string()),
+        "the other slot goes to the oldest urgent thread"
+    );
 }
 
 #[test]
@@ -225,7 +274,10 @@ fn per_sender_cap() {
     })
     .unwrap();
 
-    let limits = BatchLimits { max_threads: 6, per_sender: 1 };
+    let limits = BatchLimits {
+        max_threads: 6,
+        per_sender: 1,
+    };
     let threads = batch(&mut s, NOW + 10, limits);
     assert_eq!(threads.len(), 2, "one thread per sender");
     assert_eq!(threads, vec!["t1".to_string(), "t3".to_string()]);
@@ -236,13 +288,22 @@ fn max_threads_cap() {
     let mut s = store();
     s.write(|tx| {
         for i in 0..5 {
-            tx.insert_message(&msg(&format!("t{i}"), "p:heat", MsgKind::Question, NOW + i, false))?;
+            tx.insert_message(&msg(
+                &format!("t{i}"),
+                "p:heat",
+                MsgKind::Question,
+                NOW + i,
+                false,
+            ))?;
         }
         Ok(())
     })
     .unwrap();
 
-    let limits = BatchLimits { max_threads: 2, per_sender: 6 };
+    let limits = BatchLimits {
+        max_threads: 2,
+        per_sender: 6,
+    };
     let threads = batch(&mut s, NOW + 10, limits);
     assert_eq!(threads.len(), 2);
     assert_eq!(threads, vec!["t0".to_string(), "t1".to_string()]);
@@ -259,7 +320,10 @@ fn zero_max_threads_returns_nothing() {
     .unwrap();
 
     // No slot at all: not even the reserved one.
-    let limits = BatchLimits { max_threads: 0, per_sender: 2 };
+    let limits = BatchLimits {
+        max_threads: 0,
+        per_sender: 2,
+    };
     assert!(batch(&mut s, NOW + 10, limits).is_empty());
 }
 
@@ -269,16 +333,28 @@ fn selection_changes_nothing() {
     s.write(|tx| {
         tx.insert_message(&msg("t1", "p:heat", MsgKind::Question, NOW, true))?;
         let m2 = tx.insert_message(&msg("t2", "p:heat", MsgKind::Question, NOW + 1, false))?;
-        tx.update_message_state("p", &m2.id, MsgState::Waiting, None, Some("user"), Some(NOW + 100), NOW + 1)?;
+        tx.update_message_state(
+            "p",
+            &m2.id,
+            MsgState::Waiting,
+            None,
+            Some("user"),
+            Some(NOW + 100),
+            NOW + 1,
+        )?;
         Ok(())
     })
     .unwrap();
 
-    let before = s.read(|tx| tx.actionable_for("p", CAPTAIN, NOW + 10)).unwrap();
+    let before = s
+        .read(|tx| tx.actionable_for("p", CAPTAIN, NOW + 10))
+        .unwrap();
     let _ = s
         .read(|tx| select_batch(tx, "p", CAPTAIN, NOW + 10, BatchLimits::default()))
         .unwrap();
-    let after = s.read(|tx| tx.actionable_for("p", CAPTAIN, NOW + 10)).unwrap();
+    let after = s
+        .read(|tx| tx.actionable_for("p", CAPTAIN, NOW + 10))
+        .unwrap();
     assert_eq!(before, after, "reading the inbox changes no message");
 
     let m2 = s.read(|tx| tx.get_message("p", "M-2")).unwrap().unwrap();

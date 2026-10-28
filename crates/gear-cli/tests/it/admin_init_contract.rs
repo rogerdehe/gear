@@ -65,7 +65,12 @@ fn stderr(o: &Output) -> String {
 fn config_version(db: &Path) -> i64 {
     let mut store = Store::open(db).expect("the store");
     store
-        .read(|tx| Ok(tx.get_project("p")?.map(|row| row.config_version).unwrap_or(0)))
+        .read(|tx| {
+            Ok(tx
+                .get_project("p")?
+                .map(|row| row.config_version)
+                .unwrap_or(0))
+        })
         .expect("the project")
 }
 
@@ -89,7 +94,13 @@ fn a_first_registration_is_the_captains_not_another_seats() {
     let other_repo = other.join("repo");
     std::fs::create_dir_all(&other_repo).expect("the repo");
     let other_db = other.join("gear.db");
-    let o = init(&other, &other_db, &config(&other, &other_repo), Some("p:captain:1"), true);
+    let o = init(
+        &other,
+        &other_db,
+        &config(&other, &other_repo),
+        Some("p:captain:1"),
+        true,
+    );
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.starts_with("ERROR FORBIDDEN: "), "{err}");
@@ -120,7 +131,10 @@ fn a_captains_re_init_needs_its_pane_proven() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.contains("ERROR NOT_REGISTERED"), "{err}");
-    assert!(err.contains("herdr"), "the refusal says the pane cannot be read: {err}");
+    assert!(
+        err.contains("herdr"),
+        "the refusal says the pane cannot be read: {err}"
+    );
     assert_eq!(config_version(&db), 1, "nothing changed");
 }
 
@@ -148,7 +162,10 @@ fn a_pull_request_merge_mode_is_registered() {
     assert_eq!(config_version(&db), 1, "the project was registered");
     let mut store = Store::open(&db).expect("the store");
     let cfg = gear_app::config::latest(&mut store, "p").expect("the registered config");
-    assert_eq!(cfg.root_repo().github.unwrap().merge, gear_app::config::MergeMode::Pr);
+    assert_eq!(
+        cfg.root_repo().github.unwrap().merge,
+        gear_app::config::MergeMode::Pr
+    );
 }
 
 #[test]
@@ -161,7 +178,10 @@ fn a_lane_may_not_register_the_project() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.contains("ERROR FORBIDDEN"), "{err}");
-    assert!(err.contains("captain"), "the refusal names the seat to use: {err}");
+    assert!(
+        err.contains("captain"),
+        "the refusal names the seat to use: {err}"
+    );
     assert_eq!(config_version(&db), 0, "nothing was registered");
 }
 
@@ -171,7 +191,13 @@ fn another_projects_captain_may_not_register_this_one() {
     let repo = dir.join("repo");
     std::fs::create_dir_all(&repo).expect("the repo");
     let db = dir.join("gear.db");
-    let o = init(&dir, &db, &config(&dir, &repo), Some("other:captain:1"), true);
+    let o = init(
+        &dir,
+        &db,
+        &config(&dir, &repo),
+        Some("other:captain:1"),
+        true,
+    );
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert!(stderr(&o).contains("ERROR FORBIDDEN"), "{}", stderr(&o));
     assert_eq!(config_version(&db), 0);
@@ -190,7 +216,11 @@ fn a_stale_captain_generation_may_not_register() {
     // reached — either way the registration stands.
     let o = init(&dir, &db, &config(&dir, &repo), Some("p:captain:2"), true);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
-    assert!(stderr(&o).contains("ERROR NOT_REGISTERED"), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("ERROR NOT_REGISTERED"),
+        "{}",
+        stderr(&o)
+    );
     assert_eq!(config_version(&db), 1, "the first registration stands");
 }
 
@@ -247,8 +277,15 @@ fn a_kind_without_its_skill_is_refused() {
     let message = stderr(&out);
     assert!(message.contains("BAD_FORMAT"), "{message}");
     assert!(message.contains("GEAR skill is not installed"), "{message}");
-    assert!(message.contains("gear admin install-skill --agent codex"), "{message}");
-    assert_eq!(config_version(&db.join("gear.db")), 0, "nothing was registered");
+    assert!(
+        message.contains("gear admin install-skill --agent codex"),
+        "{message}"
+    );
+    assert_eq!(
+        config_version(&db.join("gear.db")),
+        0,
+        "nothing was registered"
+    );
 }
 
 /// T-83 (round 2, F1) through the real binary: the review's reproduction —
@@ -296,7 +333,10 @@ fn a_model_chain_cli_without_its_skill_is_refused() {
     let message = stderr(&out);
     assert!(message.contains("BAD_FORMAT"), "{message}");
     assert!(message.contains("opencode"), "{message}");
-    assert!(message.contains("gear admin install-skill --agent opencode"), "{message}");
+    assert!(
+        message.contains("gear admin install-skill --agent opencode"),
+        "{message}"
+    );
     assert_eq!(config_version(&db), 0, "nothing was registered");
 
     install(SkillAgent::OpenCode, &home).expect("install opencode");
@@ -355,10 +395,16 @@ fn headline(o: &Output) -> String {
 /// Every path under `root`, relative and sorted: a snapshot of the tree.
 fn tree(root: &Path) -> Vec<PathBuf> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            out.push(path.strip_prefix(base).expect("under the root").to_path_buf());
+            out.push(
+                path.strip_prefix(base)
+                    .expect("under the root")
+                    .to_path_buf(),
+            );
             if path.is_dir() {
                 walk(base, &path, out);
             }
@@ -374,7 +420,12 @@ fn tree(root: &Path) -> Vec<PathBuf> {
 /// a machine that has the skills installed and no project store yet.
 fn check_cmd_without_db(home: &Path, config: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gear"))
-        .args(["admin", "init", "--check", config.to_str().expect("a utf-8 path")])
+        .args([
+            "admin",
+            "init",
+            "--check",
+            config.to_str().expect("a utf-8 path"),
+        ])
         .env("HOME", home)
         .env_remove("GEAR_DB")
         .env_remove("GEAR_ADMIN")
@@ -452,7 +503,11 @@ fn check_creates_no_default_store_without_gear_db() {
     let o = check_cmd_without_db(&home, &path);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(headline(&o), "config ok: project p, 0 lanes, 0 reviewers");
-    assert_eq!(tree(&home), before, "a check creates no default store directory");
+    assert_eq!(
+        tree(&home),
+        before,
+        "a check creates no default store directory"
+    );
 
     // The error path changes nothing either.
     let bad = dir.join("bad.toml");
@@ -547,13 +602,33 @@ fn check_refuses_a_second_project_on_the_same_repo() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
-    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
-    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
-    assert!(err.contains("put {project} in conventions.task_branch"), "{err}");
-    assert_eq!(std::fs::metadata(&db).expect("the store").len(), before, "a check writes nothing");
+    let shown = std::fs::canonicalize(&repo)
+        .expect("the repo")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        err.contains(&format!("project p also works in {shown}")),
+        "{err}"
+    );
+    assert!(
+        err.contains("put {project} in conventions.task_branch"),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::metadata(&db).expect("the store").len(),
+        before,
+        "a check writes nothing"
+    );
 
     // On another repository the same config passes.
-    let o = check_cmd(&dir, &db, &config_for(&dir, "q", &elsewhere), None, false, false);
+    let o = check_cmd(
+        &dir,
+        &db,
+        &config_for(&dir, "q", &elsewhere),
+        None,
+        false,
+        false,
+    );
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(headline(&o), "config ok: project q, 0 lanes, 0 reviewers");
 }
@@ -600,9 +675,18 @@ fn check_reads_the_default_store_when_gear_db_is_unset() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     let err = stderr(&o);
     assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
-    let shown = std::fs::canonicalize(&repo).expect("the repo").to_string_lossy().into_owned();
-    assert!(err.contains(&format!("project p also works in {shown}")), "{err}");
-    assert!(!err.contains("skipped"), "the check read the default store: {err}");
+    let shown = std::fs::canonicalize(&repo)
+        .expect("the repo")
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        err.contains(&format!("project p also works in {shown}")),
+        "{err}"
+    );
+    assert!(
+        !err.contains("skipped"),
+        "the check read the default store: {err}"
+    );
 
     // On another repository the same config passes, and still says nothing of a
     // skipped check.
@@ -735,9 +819,18 @@ fn init_names_the_lanes_and_reviewers_after_registering() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let printed = stdout(&o);
     assert!(printed.contains("project p (config v1)"), "{printed}");
-    assert!(printed.contains("  lane heat: codex role/model · owns src/, Cargo.toml"), "{printed}");
-    assert!(printed.contains("  lane keel: codex mine/model · owns docs/"), "{printed}");
-    assert!(printed.contains("  reviewers: 1 × codex review/model"), "{printed}");
+    assert!(
+        printed.contains("  lane heat: codex role/model · owns src/, Cargo.toml"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("  lane keel: codex mine/model · owns docs/"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("  reviewers: 1 × codex review/model"),
+        "{printed}"
+    );
     assert_eq!(config_version(&db), 1, "the project was registered");
 }
 
@@ -815,7 +908,11 @@ fn init_refuses_a_config_for_another_herdr_session() {
     let err = stderr(&o);
     assert!(err.starts_with("ERROR BAD_FORMAT: "), "{err}");
     assert!(err.contains(refused), "{err}");
-    assert!(!stdout(&o).contains("config ok"), "no headline: {}", stdout(&o));
+    assert!(
+        !stdout(&o).contains("config ok"),
+        "no headline: {}",
+        stdout(&o)
+    );
 
     // A real init writes nothing at all.
     let o = init_from_session(&home, &alpha, &beta, false, None);
@@ -855,5 +952,86 @@ fn init_refuses_a_config_for_another_herdr_session() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let o = init_from_session(&home, &alpha, &beta, false, Some(&explicit));
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    assert_eq!(config_version(&explicit), 1, "registered into the named store");
+    assert_eq!(
+        config_version(&explicit),
+        1,
+        "registered into the named store"
+    );
+}
+
+/// T-315: `--check --models` asks each seat's CLI for the models it lists and
+/// warns on stderr about a configured model id that is not among them — a
+/// warning, exit 0 — while a plain `--check` runs no CLI at all.
+#[test]
+fn check_models_warns_about_a_model_its_cli_does_not_list() {
+    let dir = scratch("check-models");
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = dir.join("gear.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "[project]\nid = \"p\"\nherdr_session = \"sess\"\nrepo = {repo}\n\
+             \n[quota]\nlanes = 1\ntemps = 0\n\
+             \n[captain]\npane = \"w1:p1\"\nkind = \"codex\"\nprofile = \"codex\"\n\
+             \n[[lanes]]\nname = \"heat\"\nduty = \"everything\"\nowns = [\"src/\"]\n\
+             kind = \"pi\"\nprofile = \"pi\"\nmodels = [\"tok/deep-2\"]\n\
+             \n[conventions]\ngate = \"make test\"\n",
+            repo = serde_json::json!(repo.to_string_lossy()).to_string()
+        ),
+    )
+    .expect("the config");
+    // A PATH with one CLI on it: a `pi` that lists `tok/deep-1`, and leaves a
+    // marker behind whenever it runs, so a run that asks no CLI is visible.
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("the bin directory");
+    let pi = bin.join("pi");
+    std::fs::write(
+        &pi,
+        "#!/bin/sh\nprintf 'ran' > \"$GEAR_PI_MARKER\"\nprintf 'provider model context\\ntok deep-1 600K\\n'\n",
+    )
+    .expect("the fake pi");
+    let mut perms = std::fs::metadata(&pi).expect("the fake pi").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&pi, perms).expect("an executable fake pi");
+
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the test home");
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, &home).expect("install the skill");
+    }
+    let marker = dir.join("pi-ran");
+    let db = dir.join("gear.db");
+    let run = |args: &[&str]| -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_gear"));
+        cmd.args(args)
+            .env("HOME", &home)
+            .env("GEAR_DB", &db)
+            .env("PATH", &bin)
+            .env("GEAR_PI_MARKER", &marker)
+            .env_remove("GEAR_ADMIN")
+            .env_remove("GEAR_CTX")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_SOCKET_PATH");
+        cmd.output().expect("run gear")
+    };
+    let config = path.to_str().expect("a utf-8 path");
+
+    let o = run(&["admin", "init", "--check", "--models", config]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains(
+            "warning: lane heat: model tok/deep-2 is not among the models pi lists"
+        ),
+        "{}",
+        stderr(&o)
+    );
+    assert!(marker.exists(), "`--models` asked the CLI");
+    std::fs::remove_file(&marker).expect("clear the marker");
+
+    // The plain check stays offline: the same config, no CLI run at all.
+    let o = run(&["admin", "init", "--check", config]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(!stderr(&o).contains("warning:"), "{}", stderr(&o));
+    assert!(!marker.exists(), "a plain --check runs no CLI");
 }

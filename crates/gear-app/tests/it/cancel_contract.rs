@@ -19,8 +19,20 @@ const CAP: &str = "w1:p1";
 
 fn cap() -> (Env, Fingerprint) {
     (
-        Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP.into()), admin: false },
-        Fingerprint { pane_id: CAP.into(), kind: Some("codex".into()), session_ref: None },
+        Env {
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some(CAP.into()),
+            admin: false,
+        },
+        Fingerprint {
+            pane_id: CAP.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
@@ -37,14 +49,31 @@ fn world() -> Store {
     s
 }
 
-fn run(s: &mut Store, queue: &str, base: i64, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    queue: &str,
+    base: i64,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, T0 + 10)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        T0 + 10,
+    )
 }
 
 fn attempt(s: &mut Store, task: &str, n: i64) -> AttemptState {
-    s.read(|tx| tx.get_attempt("p", task, n)).unwrap().unwrap().state
+    s.read(|tx| tx.get_attempt("p", task, n))
+        .unwrap()
+        .unwrap()
+        .state
 }
 
 fn state(s: &mut Store, task: &str) -> TaskState {
@@ -52,7 +81,8 @@ fn state(s: &mut Store, task: &str) -> TaskState {
 }
 
 fn lane_messages(s: &mut Store, task: &str) -> Vec<gear_store::MessageRow> {
-    s.read(|tx| tx.thread_messages("p", &format!("{task}:cancel"))).unwrap()
+    s.read(|tx| tx.thread_messages("p", &format!("{task}:cancel")))
+        .unwrap()
 }
 
 const CANCEL_T1: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: T-1\n";
@@ -72,9 +102,15 @@ fn cancelling_a_started_task_abandons_its_attempt_and_tells_the_lane() {
     run(&mut s, CANCEL_T1, 1, "v2").unwrap();
 
     assert_eq!(state(&mut s, "T-1"), TaskState::Cancelled);
-    assert_eq!(attempt(&mut s, "T-1", 1), AttemptState::Abandoned, "the seat is free");
     assert_eq!(
-        s.read(|tx| tx.in_progress_attempts_of_seat("p:heat")).unwrap().len(),
+        attempt(&mut s, "T-1", 1),
+        AttemptState::Abandoned,
+        "the seat is free"
+    );
+    assert_eq!(
+        s.read(|tx| tx.in_progress_attempts_of_seat("p:heat"))
+            .unwrap()
+            .len(),
         0,
         "no attempt holds the lane"
     );
@@ -157,9 +193,22 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     let mut s = world();
     let text = "<!-- gear-plan project=p base=1 -->\n# Queue\n## T-2 [must] lane=heat\ngoal: B\naccept: b\nestimate: 30\ndeps: -\nstate: cancelled\n";
     let (env, fp) = cap();
-    apply(&mut s, &env, Some(&fp), None, &parse(text).unwrap(), text, "v2", T0 + 10).unwrap();
+    apply(
+        &mut s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(text).unwrap(),
+        text,
+        "v2",
+        T0 + 10,
+    )
+    .unwrap();
     assert_eq!(state(&mut s, "T-2"), TaskState::Cancelled);
-    assert!(lane_messages(&mut s, "T-2").is_empty(), "nothing was running");
+    assert!(
+        lane_messages(&mut s, "T-2").is_empty(),
+        "nothing was running"
+    );
 
     // A done task is refused, naming it.
     s.write(|tx| {
@@ -169,7 +218,17 @@ fn a_finished_task_cannot_be_cancelled_and_an_idle_one_gets_no_line() {
     })
     .unwrap();
     let bad = "<!-- gear-plan project=p base=2 -->\n# Queue\n## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
-    let error = apply(&mut s, &env, Some(&fp), None, &parse(bad).unwrap(), bad, "v3", T0 + 20).unwrap_err();
+    let error = apply(
+        &mut s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(bad).unwrap(),
+        bad,
+        "v3",
+        T0 + 20,
+    )
+    .unwrap_err();
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
 }
@@ -188,7 +247,11 @@ fn sh(dir: &Path, command: &str) {
         .current_dir(dir)
         .output()
         .expect("run sh");
-    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 fn sh_out(dir: &Path, command: &str) -> String {
@@ -198,7 +261,11 @@ fn sh_out(dir: &Path, command: &str) -> String {
         .current_dir(dir)
         .output()
         .expect("run sh");
-    assert!(out.status.success(), "{command}: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{command}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
@@ -261,8 +328,14 @@ fn repo(scratch: &Path, merged: bool) -> (PathBuf, String) {
 /// the objects and the ref is set — no test pushes (T-108).
 fn publish(origin: &Path, source: &Path, branch: &str) {
     let sha = sh_out(source, &format!("git rev-parse refs/heads/{branch}"));
-    sh(origin, &format!("git fetch -q {} refs/heads/{branch}", source.display()));
-    sh(origin, &format!("git update-ref refs/heads/{branch} {}", sha.trim()));
+    sh(
+        origin,
+        &format!("git fetch -q {} refs/heads/{branch}", source.display()),
+    );
+    sh(
+        origin,
+        &format!("git update-ref refs/heads/{branch} {}", sha.trim()),
+    );
 }
 
 fn config(repo: &Path) -> String {
@@ -382,7 +455,8 @@ fn done_world(repo: &Path, candidate: &str) -> Store {
     s
 }
 
-const CANCEL_DONE: &str = "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
+const CANCEL_DONE: &str =
+    "## T-1 [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nstate: cancelled\n";
 
 fn merge_ops(s: &mut Store) -> Vec<OpRow> {
     s.read(|tx| tx.ops_in_state("p", OpState::Failed)).unwrap()
@@ -401,7 +475,11 @@ fn a_done_task_whose_merge_was_given_up_is_cancelled_with_its_items() {
     let result = run(&mut s, CANCEL_DONE, 0, "v1").unwrap();
 
     assert_eq!(result.cancelled, vec!["T-1".to_string()]);
-    assert_eq!(result.resolved.len(), 2, "the merge and push items: {result:?}");
+    assert_eq!(
+        result.resolved.len(),
+        2,
+        "the merge and push items: {result:?}"
+    );
     assert_eq!(state(&mut s, "T-1"), TaskState::Cancelled);
     for thread in ["merge-failed:T-1", "push:T-1"] {
         let items = s.read(|tx| tx.thread_messages("p", thread)).unwrap();
@@ -410,7 +488,11 @@ fn a_done_task_whose_merge_was_given_up_is_cancelled_with_its_items() {
         assert_eq!(items[0].result.as_deref(), Some("cancelled by the captain"));
     }
     let ops = merge_ops(&mut s);
-    assert_eq!(ops.len(), 1, "the failed merge op stays as history: {ops:?}");
+    assert_eq!(
+        ops.len(),
+        1,
+        "the failed merge op stays as history: {ops:?}"
+    );
     assert_eq!(ops[0].result.as_deref(), Some("the gate said no"));
     assert_eq!(merge_ops(&mut s).len(), 1, "no op was created");
 }
@@ -427,8 +509,14 @@ fn a_done_task_whose_work_is_merged_cannot_be_cancelled() {
 
     assert_eq!(error.code, ErrorCode::BadFormat);
     assert!(error.detail.contains("T-1"), "{}", error.detail);
-    assert!(error.detail.contains("cannot be cancelled"), "{}", error.detail);
+    assert!(
+        error.detail.contains("cannot be cancelled"),
+        "{}",
+        error.detail
+    );
     assert_eq!(state(&mut s, "T-1"), TaskState::Done);
-    let items = s.read(|tx| tx.thread_messages("p", "merge-failed:T-1")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "merge-failed:T-1"))
+        .unwrap();
     assert_eq!(items[0].state, MsgState::Open, "nothing was resolved");
 }

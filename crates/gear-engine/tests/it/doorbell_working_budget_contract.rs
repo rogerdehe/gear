@@ -59,7 +59,10 @@ fn a_doorbell_to_a_working_seat_spends_no_budget_and_flags_nothing() {
         let (confirmed, flagged) =
             confirm_pending_with(&mut s, "p", 2, 180, &working(), at).unwrap();
         assert!(confirmed.is_empty(), "{confirmed:?}");
-        assert!(flagged.is_empty(), "a working lane is not flagged: {flagged:?}");
+        assert!(
+            flagged.is_empty(),
+            "a working lane is not flagged: {flagged:?}"
+        );
     }
 
     let stored = s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
@@ -79,12 +82,24 @@ fn the_budget_counts_again_once_the_agent_is_idle() {
     let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 2, 180, &[], T0 + 20).unwrap();
     assert!(confirmed.is_empty());
     assert!(flagged.is_empty(), "one check is not yet the budget");
-    assert_eq!(s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().check_budget, 1);
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op))
+            .unwrap()
+            .unwrap()
+            .check_budget,
+        1
+    );
 
     // The second check spends the budget: the seat is flagged.
     let (_, flagged) = confirm_pending_with(&mut s, "p", 2, 180, &[], T0 + 30).unwrap();
     assert_eq!(flagged, vec![LANE.to_string()]);
-    assert_eq!(s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().check_budget, 2);
+    assert_eq!(
+        s.read(|tx| tx.get_op("p", &op))
+            .unwrap()
+            .unwrap()
+            .check_budget,
+        2
+    );
 }
 
 #[test]
@@ -113,13 +128,19 @@ fn a_delivery_keeps_its_window_while_the_agent_works() {
         .unwrap();
 
     // The window (8 s) is wall clock: a working agent is not spared it.
-    let (confirmed, flagged) =
-        confirm_pending_with(&mut s, "p", 3, 8, &working(), T0 + 5).unwrap();
+    let (confirmed, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &working(), T0 + 5).unwrap();
     assert!(confirmed.is_empty());
-    assert!(flagged.is_empty(), "the window is not over yet: {flagged:?}");
+    assert!(
+        flagged.is_empty(),
+        "the window is not over yet: {flagged:?}"
+    );
 
     let (_, flagged) = confirm_pending_with(&mut s, "p", 3, 8, &working(), T0 + 30).unwrap();
-    assert_eq!(flagged, vec![LANE.to_string()], "the delivery failed as before");
+    assert_eq!(
+        flagged,
+        vec![LANE.to_string()],
+        "the delivery failed as before"
+    );
     assert_eq!(
         s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap().state,
         OpState::Failed
@@ -149,7 +170,9 @@ fn a_working_lane_opens_no_stall_item() {
         );
     }
 
-    let items = s.read(|tx| tx.thread_messages("p", "stall:p:heat")).unwrap();
+    let items = s
+        .read(|tx| tx.thread_messages("p", "stall:p:heat"))
+        .unwrap();
     assert!(items.is_empty(), "no stall item was opened: {items:?}");
     let stored = s.read(|tx| tx.get_op("p", &op)).unwrap().unwrap();
     assert_eq!(stored.state, OpState::Submitted, "the doorbell still waits");

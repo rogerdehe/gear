@@ -18,9 +18,25 @@ fn store_with_projects() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess-p", T0)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                CAP_PANE,
+                "codex",
+                T0,
+            )?;
             testing::seed_project(tx, "q", "sess-q", T0)?;
-            testing::seed_active_seat(tx, "q", "captain", SeatRole::Captain, OTHER_PANE, "codex", T0)?;
+            testing::seed_active_seat(
+                tx,
+                "q",
+                "captain",
+                SeatRole::Captain,
+                OTHER_PANE,
+                "codex",
+                T0,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -59,7 +75,11 @@ fn herdr_with_agent(pane: &str) -> FakeHerdr {
 }
 
 fn op_state(store: &mut Store, project: &str, id: &str) -> OpState {
-    store.read(|tx| tx.get_op(project, id)).unwrap().unwrap().state
+    store
+        .read(|tx| tx.get_op(project, id))
+        .unwrap()
+        .unwrap()
+        .state
 }
 
 #[test]
@@ -77,7 +97,11 @@ fn ok_is_submitted_and_prompts_text() {
 
     assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Submitted);
-    assert_eq!(herdr.prompts_to(CAP_PANE), vec![TEXT], "the doorbell text is prompted");
+    assert_eq!(
+        herdr.prompts_to(CAP_PANE),
+        vec![TEXT],
+        "the doorbell text is prompted"
+    );
 }
 
 /// T-149 (design §10.1): a refused prompt is not a failed delivery. The
@@ -93,7 +117,9 @@ fn refused_is_named_again_and_retried_next_tick() {
         })
         .unwrap();
     let mut herdr = herdr_with_agent(CAP_PANE);
-    herdr.inject_next = Some(Inject::Refuse { code: "agent_blocked".into() });
+    herdr.inject_next = Some(Inject::Refuse {
+        code: "agent_blocked".into(),
+    });
 
     let done = execute_intended(&mut store, &mut herdr, "p", T0 + 2).unwrap();
 
@@ -164,7 +190,14 @@ fn a_sender_does_not_type_a_message_the_engine_already_intends() {
 
     // The sender's path finds the engine's Intended doorbell covering M-1.
     let typed = deliver_doorbell_now(
-        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 2,
+        &mut store,
+        &mut herdr,
+        "p",
+        "p:captain",
+        1,
+        "M-1",
+        true,
+        T0 + 2,
     )
     .unwrap();
     assert!(typed.is_none(), "the sender skipped");
@@ -172,7 +205,10 @@ fn a_sender_does_not_type_a_message_the_engine_already_intends() {
 
     // The engine's own execute types it: exactly one prompt.
     let done = execute_intended(&mut store, &mut herdr, "p", T0 + 3).unwrap();
-    assert_eq!(done, vec![(intended[0].id.clone(), "submitted".to_string())]);
+    assert_eq!(
+        done,
+        vec![(intended[0].id.clone(), "submitted".to_string())]
+    );
     assert_eq!(herdr.prompts_to(CAP_PANE).len(), 1, "{:?}", herdr.calls);
     let ops = store
         .read(|tx| tx.ops_of_seat_kind("p:captain", OpKind::Doorbell))
@@ -189,7 +225,14 @@ fn a_sender_claim_keeps_the_engine_from_ringing_the_same_message() {
     let mut herdr = herdr_with_agent(CAP_PANE);
 
     let typed = deliver_doorbell_now(
-        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 1,
+        &mut store,
+        &mut herdr,
+        "p",
+        "p:captain",
+        1,
+        "M-1",
+        true,
+        T0 + 1,
     )
     .unwrap();
     assert_eq!(typed.as_deref(), Some(CAP_PANE));
@@ -197,7 +240,14 @@ fn a_sender_claim_keeps_the_engine_from_ringing_the_same_message() {
 
     // A second send for the same message skips: the claim covers it.
     let again = deliver_doorbell_now(
-        &mut store, &mut herdr, "p", "p:captain", 1, "M-1", true, T0 + 2,
+        &mut store,
+        &mut herdr,
+        "p",
+        "p:captain",
+        1,
+        "M-1",
+        true,
+        T0 + 2,
     )
     .unwrap();
     assert!(again.is_none(), "the same message is never typed twice");
@@ -221,7 +271,10 @@ fn delivery_for_missing_attempt_is_voided() {
 
     assert_eq!(done, vec![("O-1".to_string(), "void".to_string())]);
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Void);
-    assert!(herdr.calls.is_empty(), "a delivery without an attempt is never sent");
+    assert!(
+        herdr.calls.is_empty(),
+        "a delivery without an attempt is never sent"
+    );
     let stored = store.read(|tx| tx.get_op("p", "O-1")).unwrap().unwrap();
     let reason = stored.result.expect("a voided op says why");
     assert!(reason.contains("attempt 1"), "{reason}");
@@ -252,7 +305,8 @@ fn stale_delivery_is_voided() {
                 wait_cond: None,
                 rework_note: None,
                 estimate_min: None,
-                 issue: None,updated: T0,
+                issue: None,
+                updated: T0,
             })?;
             // The seat's open attempt is attempt 2 ...
             tx.insert_attempt(&AttemptRow {
@@ -320,7 +374,8 @@ fn unreachable_seat_is_void() {
             testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", T0)?;
             insert_doorbell(tx, "p", "p:heat", 1, T0 + 1);
             // Parked is not reachable (design/08): no doorbell may go out.
-            tx.set_seat_state("p:heat", SeatState::Parked, Some("parked"), T0 + 1).unwrap();
+            tx.set_seat_state("p:heat", SeatState::Parked, Some("parked"), T0 + 1)
+                .unwrap();
             Ok(())
         })
         .unwrap();
@@ -330,7 +385,10 @@ fn unreachable_seat_is_void() {
 
     assert_eq!(done, vec![("O-1".to_string(), "void".to_string())]);
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Void);
-    assert!(herdr.calls.is_empty(), "an unreachable seat is never prompted");
+    assert!(
+        herdr.calls.is_empty(),
+        "an unreachable seat is never prompted"
+    );
 }
 
 #[test]
@@ -371,6 +429,13 @@ fn other_projects_untouched() {
 
     assert_eq!(done, vec![("O-1".to_string(), "submitted".to_string())]);
     assert_eq!(op_state(&mut store, "p", "O-1"), OpState::Submitted);
-    assert_eq!(op_state(&mut store, "q", "O-1"), OpState::Intended, "another project waits");
-    assert!(herdr.prompts_to(OTHER_PANE).is_empty(), "no prompt outside the project");
+    assert_eq!(
+        op_state(&mut store, "q", "O-1"),
+        OpState::Intended,
+        "another project waits"
+    );
+    assert!(
+        herdr.prompts_to(OTHER_PANE).is_empty(),
+        "no prompt outside the project"
+    );
 }

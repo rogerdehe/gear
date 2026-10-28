@@ -75,7 +75,19 @@ fn minimal_config_parses_with_defaults_and_is_valid() {
         }
     );
     assert_eq!(Conventions::default().gate, "", "the gate has no default");
-    assert_eq!(cfg.timing, Timing { tick_s: 4, cooldown_s: 90, sample_min: 20, review_timer_min: 45, captain_item_stale_min: 15, lane_busy_idle_min: 10, delivery_grace_s: 180, handin_base_window_min: 30 });
+    assert_eq!(
+        cfg.timing,
+        Timing {
+            tick_s: 4,
+            cooldown_s: 90,
+            sample_min: 20,
+            review_timer_min: 45,
+            captain_item_stale_min: 15,
+            lane_busy_idle_min: 10,
+            delivery_grace_s: 180,
+            handin_base_window_min: 30
+        }
+    );
     assert!(cfg.profiles.is_empty());
     assert_eq!(validate(&cfg), vec![]);
 }
@@ -116,7 +128,11 @@ fn names_and_agent_name_length() {
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[1].name = "heat".into();
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[1].name"], "duplicate lane name");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[1].name"],
+        "duplicate lane name"
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.project.id = "9harbor".into();
@@ -128,14 +144,21 @@ fn duty_and_owns_are_required() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[0].duty = "   ".into();
     cfg.lanes[1].owns = vec![];
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[0].duty", "lanes[1].owns"]);
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[0].duty", "lanes[1].owns"]
+    );
 }
 
 #[test]
 fn owns_overlap_on_path_boundaries_only() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[1].owns = vec!["src/heat/model.rs".into()];
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[1].owns"], "prefix on / boundary overlaps");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[1].owns"],
+        "prefix on / boundary overlaps"
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[0].owns = vec!["src/a".into()];
@@ -144,7 +167,11 @@ fn owns_overlap_on_path_boundaries_only() {
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[1].owns = vec!["tests/heat/".into()];
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[1].owns"], "equal paths overlap");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[1].owns"],
+        "equal paths overlap"
+    );
 }
 
 #[test]
@@ -153,7 +180,10 @@ fn quota_conventions_and_timing() {
     cfg.quota.lanes = 1;
     cfg.conventions.release = "dev".into();
     cfg.timing.cooldown_s = 4;
-    assert_eq!(fields(&validate(&cfg)), vec!["quota.lanes", "conventions.release", "timing.cooldown_s"]);
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["quota.lanes", "conventions.release", "timing.cooldown_s"]
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "main".into();
@@ -166,16 +196,28 @@ fn quota_conventions_and_timing() {
 fn whitespace_does_not_hide_overlaps_or_empty_values() {
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[1].owns = vec![" src/heat/ ".into()];
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[1].owns"], "trimmed owns overlap");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[1].owns"],
+        "trimmed owns overlap"
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.lanes[0].owns = vec!["src/heat/".into(), "   ".into()];
-    assert_eq!(fields(&validate(&cfg)), vec!["lanes[0].owns"], "blank owns entry");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["lanes[0].owns"],
+        "blank owns entry"
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.integration = "dev ".into();
     cfg.conventions.release = "dev".into();
-    assert_eq!(fields(&validate(&cfg)), vec!["conventions.release"], "trimmed branch names compared");
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["conventions.release"],
+        "trimmed branch names compared"
+    );
 
     let mut cfg = parse(MINIMAL).unwrap();
     cfg.conventions.staging = "  ".into();
@@ -191,7 +233,8 @@ fn max_task_min_defaults_to_sixty_and_a_project_may_raise_it() {
     assert_eq!(cfg.conventions.max_task_min, 60, "the default cap");
     assert_eq!(validate(&cfg), vec![], "the default is valid");
 
-    let cfg = parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmax_task_min = 90")).unwrap();
+    let cfg =
+        parse(&MINIMAL.replace(GATE_LINE, "gate = \"make test\"\nmax_task_min = 90")).unwrap();
     assert_eq!(cfg.conventions.max_task_min, 90);
     assert_eq!(validate(&cfg), vec![], "a project may plan longer tasks");
 }
@@ -226,40 +269,77 @@ fn models_parse_with_defaults() {
     assert_eq!(cfg.models.on_quota.review, QuotaPolicy::Fallback);
     assert_eq!(cfg.models.quota_reset_h, 4);
     assert!(cfg.lanes[0].models.is_empty());
-    assert_eq!(parse(&format!("{MINIMAL}\n[models]\non_quota = {{ lanes = \"later\" }}\n")).unwrap_err().code, ErrorCode::BadFormat);
+    assert_eq!(
+        parse(&format!(
+            "{MINIMAL}\n[models]\non_quota = {{ lanes = \"later\" }}\n"
+        ))
+        .unwrap_err()
+        .code,
+        ErrorCode::BadFormat
+    );
 }
 
 #[test]
 fn models_rules() {
     // L-74: fallback with no next model is refused (it would only park)
-    let single = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["deepseek/deepseek-v4.1-flash"]"#);
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{single}")).unwrap())), vec!["models.review"]);
+    let single = MODELS.replace(
+        r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#,
+        r#"review = ["deepseek/deepseek-v4.1-flash"]"#,
+    );
+    assert_eq!(
+        fields(&validate(&parse(&format!("{MINIMAL}{single}")).unwrap())),
+        vec!["models.review"]
+    );
     // valid as given
     assert!(validate(&parse(&format!("{MINIMAL}{MODELS}")).unwrap()).is_empty());
     // review must hold a model different from every lane's primary
-    let same = MODELS.replace(r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#, r#"review = ["minimax-cn/MiniMax-M3.1-Flash"]"#);
+    let same = MODELS.replace(
+        r#"review = ["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-pro"]"#,
+        r#"review = ["minimax-cn/MiniMax-M3.1-Flash"]"#,
+    );
     // (a one-model review chain with fallback is also refused: L-74)
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())), vec!["models.review", "models.review"]);
+    assert_eq!(
+        fields(&validate(&parse(&format!("{MINIMAL}{same}")).unwrap())),
+        vec!["models.review", "models.review"]
+    );
     // no blank or repeated entries in a chain (after trim)
     let blank = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""  ""#);
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{blank}")).unwrap())), vec!["models.review"]);
-    let dup = MODELS.replace(r#""deepseek/deepseek-v4-pro""#, r#""deepseek/deepseek-v4.1-flash ""#);
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{dup}")).unwrap())), vec!["models.review"]);
+    assert_eq!(
+        fields(&validate(&parse(&format!("{MINIMAL}{blank}")).unwrap())),
+        vec!["models.review"]
+    );
+    let dup = MODELS.replace(
+        r#""deepseek/deepseek-v4-pro""#,
+        r#""deepseek/deepseek-v4.1-flash ""#,
+    );
+    assert_eq!(
+        fields(&validate(&parse(&format!("{MINIMAL}{dup}")).unwrap())),
+        vec!["models.review"]
+    );
     // wait needs a window
     let zero = MODELS.replace("quota_reset_h = 4", "quota_reset_h = 0");
-    assert_eq!(fields(&validate(&parse(&format!("{MINIMAL}{zero}")).unwrap())), vec!["models.quota_reset_h"]);
+    assert_eq!(
+        fields(&validate(&parse(&format!("{MINIMAL}{zero}")).unwrap())),
+        vec!["models.quota_reset_h"]
+    );
     // empty chains = models not managed by GEAR: valid
     assert!(validate(&parse(MINIMAL).unwrap()).is_empty());
 }
 
 #[test]
 fn captain_stale_period_is_configurable_and_nonzero() {
-    let cfg = parse(&format!("{MINIMAL}\n[timing]\ncaptain_item_stale_min = 30\n")).unwrap();
+    let cfg = parse(&format!(
+        "{MINIMAL}\n[timing]\ncaptain_item_stale_min = 30\n"
+    ))
+    .unwrap();
     assert_eq!(cfg.timing.captain_item_stale_min, 30);
     assert!(validate(&cfg).is_empty());
     let mut cfg = cfg;
     cfg.timing.captain_item_stale_min = 0;
-    assert_eq!(fields(&validate(&cfg)), vec!["timing.captain_item_stale_min"]);
+    assert_eq!(
+        fields(&validate(&cfg)),
+        vec!["timing.captain_item_stale_min"]
+    );
 }
 
 // ---- the two forms of a chain entry (T-35)
@@ -281,7 +361,10 @@ fn a_model_entry_names_its_cli_and_its_arguments() {
     // The entry form: the model, the CLI and the arguments.
     assert_eq!(cfg.models.lanes[1].model(), "gpt-6.1-sol");
     assert_eq!(cfg.models.lanes[1].cli(), Some("codex"));
-    assert_eq!(cfg.models.lanes[1].args(), ["-c", "model_reasoning_effort=medium"]);
+    assert_eq!(
+        cfg.models.lanes[1].args(),
+        ["-c", "model_reasoning_effort=medium"]
+    );
     assert_eq!(cfg.models.lanes[1].context_window_k(), Some(500));
     assert_eq!(cfg.models.lanes[0].context_window_k(), None);
     // It is valid: the review chain still holds a model no lane runs.
@@ -344,7 +427,10 @@ fn the_claude_rule_reads_an_entrys_cli_else_the_seats_kind() {
     let own_cli = format!(
         "{MINIMAL}\n[models]\nlanes = [\"gpt-6.1-sol\", {{ model = \"anthropic/claude-sonnet-5-5\", cli = \"claude\" }}]\n"
     );
-    assert_eq!(fields(&validate(&parse(&own_cli).unwrap())), vec!["models.lanes"]);
+    assert_eq!(
+        fields(&validate(&parse(&own_cli).unwrap())),
+        vec!["models.lanes"]
+    );
 
     // `models.lanes` is shared by every lane: a claude lane is enough.
     let claude_lane = MINIMAL.replace(
@@ -354,20 +440,33 @@ fn the_claude_rule_reads_an_entrys_cli_else_the_seats_kind() {
     let shared = format!(
         "{claude_lane}\n[models]\nlanes = [\"anthropic/claude-sonnet-5-5\", \"claude-sonnet-5-5\"]\n"
     );
-    assert_eq!(fields(&validate(&parse(&shared).unwrap())), vec!["models.lanes"]);
+    assert_eq!(
+        fields(&validate(&parse(&shared).unwrap())),
+        vec!["models.lanes"]
+    );
 
     // A lane's own chain is checked against that lane's kind.
     let lane_own = claude_lane.replace(
         "profile = \"opencode\"\n\n[[lanes]]\nname = \"pricing\"",
         "profile = \"opencode\"\nmodels = [\"anthropic/claude-sonnet-5-5\"]\n\n[[lanes]]\nname = \"pricing\"",
     );
-    assert_eq!(fields(&validate(&parse(&lane_own).unwrap())), vec!["lanes[0].models"]);
+    assert_eq!(
+        fields(&validate(&parse(&lane_own).unwrap())),
+        vec!["lanes[0].models"]
+    );
 
     // The captain's chain follows the captain's kind, not a lane's.
     let captain = format!("{MINIMAL}\n[models]\ncaptain = [\"anthropic/claude-sonnet-5-5\"]\n");
-    assert_eq!(validate(&parse(&captain).unwrap()), vec![], "the captain is a codex");
+    assert_eq!(
+        validate(&parse(&captain).unwrap()),
+        vec![],
+        "the captain is a codex"
+    );
     let claude_captain = captain.replace("kind = \"codex\"", "kind = \"claude\"");
-    assert_eq!(fields(&validate(&parse(&claude_captain).unwrap())), vec!["models.captain"]);
+    assert_eq!(
+        fields(&validate(&parse(&claude_captain).unwrap())),
+        vec!["models.captain"]
+    );
 }
 
 /// A broken entry is a bad format, and the detail says where.
@@ -517,7 +616,9 @@ fn a_project_without_a_gate_is_told_to_name_one() {
     let issues = validate(&parse(&text).unwrap());
     assert_eq!(fields(&issues), vec!["conventions.gate"]);
     assert!(
-        issues[0].problem.starts_with("name the command the merge gate runs"),
+        issues[0]
+            .problem
+            .starts_with("name the command the merge gate runs"),
         "{}",
         issues[0].problem
     );
@@ -528,7 +629,10 @@ fn a_project_without_a_gate_is_told_to_name_one() {
         "{}{REPOS}",
         MULTI.replace("gate = \"make test\"", "gate = \"\"")
     );
-    assert_eq!(fields(&validate(&parse(&text).unwrap())), vec!["conventions.gate"]);
+    assert_eq!(
+        fields(&validate(&parse(&text).unwrap())),
+        vec!["conventions.gate"]
+    );
 }
 
 /// T-255: a gate in `[conventions]` is enough, and so is a gate in every
@@ -536,16 +640,25 @@ fn a_project_without_a_gate_is_told_to_name_one() {
 /// root repo counts only when it is the whole project or a lane works there).
 #[test]
 fn conventions_gate_or_every_repo_gate_satisfies_the_rule() {
-    assert_eq!(validate(&parse(MINIMAL).unwrap()), vec![], "[conventions] gate");
+    assert_eq!(
+        validate(&parse(MINIMAL).unwrap()),
+        vec![],
+        "[conventions] gate"
+    );
 
     // Every repo has its own gate, and no lane works in the root: the empty
     // root gate never runs.
     let text = format!(
         "{}{REPOS_EACH_GATED}",
-        MULTI.replace("gate = \"make test\"\n", "")
+        MULTI
+            .replace("gate = \"make test\"\n", "")
             .replace(PRICING_LANE, "")
     );
-    assert_eq!(validate(&parse(&text).unwrap()), vec![], "every repo has its own gate");
+    assert_eq!(
+        validate(&parse(&text).unwrap()),
+        vec![],
+        "every repo has its own gate"
+    );
 
     // The `pricing` lane works in the root, so the root runs a gate too and
     // `[conventions]` must name it.
@@ -607,7 +720,11 @@ fn a_lane_without_a_repo_works_in_the_project_root() {
     let cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
     let root = cfg.root_repo();
     assert_eq!(cfg.repo_of_lane("pricing"), root, "a lane without a repo");
-    assert_eq!(cfg.repo_of_lane("nobody"), root, "a lane that is not in the config");
+    assert_eq!(
+        cfg.repo_of_lane("nobody"),
+        root,
+        "a lane that is not in the config"
+    );
 }
 
 #[test]
@@ -662,16 +779,10 @@ fn a_repo_gate_is_never_left_as_a_todo() {
 #[test]
 fn a_gate_may_not_pipe_away_a_failure() {
     let mut cfg = parse(MINIMAL).unwrap();
-    cfg.conventions.gate =
-        "go build ./... && go vet ./internal/... 2>&1 | head -20".into();
+    cfg.conventions.gate = "go build ./... && go vet ./internal/... 2>&1 | head -20".into();
     assert_eq!(fields(&validate(&cfg)), vec!["conventions.gate"]);
 
-    for gate in [
-        "make gate",
-        "a && b",
-        "a || b",
-        "set -o pipefail; a | b",
-    ] {
+    for gate in ["make gate", "a && b", "a || b", "set -o pipefail; a | b"] {
         let mut cfg = parse(MINIMAL).unwrap();
         cfg.conventions.gate = gate.into();
         assert_eq!(validate(&cfg), vec![], "{gate}");
@@ -725,7 +836,11 @@ fn a_lane_binds_to_a_repo_that_exists() {
 
     let mut cfg = parse(&format!("{MULTI}{REPOS}")).unwrap();
     cfg.lanes[0].repo = None;
-    assert_eq!(validate(&cfg), vec![], "a lane without a repo works in the root");
+    assert_eq!(
+        validate(&cfg),
+        vec![],
+        "a lane without a repo works in the root"
+    );
 }
 
 /// `owns` is relative to the lane's repo: the same paths in two repos are
@@ -761,7 +876,10 @@ key_path = "minimax-cn.key"
 #[test]
 fn the_quota_sources_parse() {
     let cfg = parse(MINIMAL).unwrap();
-    assert!(cfg.quota.sources.is_empty(), "no source without the section");
+    assert!(
+        cfg.quota.sources.is_empty(),
+        "no source without the section"
+    );
     let cfg = parse(&format!("{MINIMAL}{SOURCES}")).unwrap();
     assert_eq!(cfg.quota.sources.len(), 1);
     assert_eq!(cfg.quota.sources[0].provider, "minimax-cn");
@@ -787,17 +905,37 @@ fn an_unknown_reader_is_a_finding() {
 #[test]
 fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
     let text=format!("{MINIMAL}\n[timing]\ndelivery_grace_s=45\n[prices.\"openai/model\"]\ninput=1.5\noutput=2.0\ncache_read=0.25\ncache_write=0.0\n");
-    let cfg=parse(&text).unwrap();
-    assert_eq!(cfg.timing.delivery_grace_s,45);
-    let price=&cfg.prices["openai/model"];
-    assert_eq!((price.input,price.output,price.cache_read,price.cache_write),(1.5,2.0,0.25,0.0));
+    let cfg = parse(&text).unwrap();
+    assert_eq!(cfg.timing.delivery_grace_s, 45);
+    let price = &cfg.prices["openai/model"];
+    assert_eq!(
+        (
+            price.input,
+            price.output,
+            price.cache_read,
+            price.cache_write
+        ),
+        (1.5, 2.0, 0.25, 0.0)
+    );
     assert!(validate(&cfg).is_empty());
-    let mut bad=cfg.clone(); bad.timing.delivery_grace_s=0; bad.prices.get_mut("openai/model").unwrap().cache_read=-1.0;
-    let issues=validate(&bad); let fields=fields(&issues);
-    assert!(fields.contains(&"timing.delivery_grace_s"),"{issues:?}");
-    assert!(fields.contains(&"prices.openai/model.cache_read"),"{issues:?}");
-    assert_eq!(parse(&text.replace("input=1.5","input=1")).unwrap().prices["openai/model"].input,1.0);
-    assert!(parse(&text.replace("output=2.0","output='bad'")).unwrap_err().detail.contains("output"));
+    let mut bad = cfg.clone();
+    bad.timing.delivery_grace_s = 0;
+    bad.prices.get_mut("openai/model").unwrap().cache_read = -1.0;
+    let issues = validate(&bad);
+    let fields = fields(&issues);
+    assert!(fields.contains(&"timing.delivery_grace_s"), "{issues:?}");
+    assert!(
+        fields.contains(&"prices.openai/model.cache_read"),
+        "{issues:?}"
+    );
+    assert_eq!(
+        parse(&text.replace("input=1.5", "input=1")).unwrap().prices["openai/model"].input,
+        1.0
+    );
+    assert!(parse(&text.replace("output=2.0", "output='bad'"))
+        .unwrap_err()
+        .detail
+        .contains("output"));
 }
 
 // T-252: branch names are configuration. The defaults are the names GEAR
@@ -807,7 +945,10 @@ fn prices_and_delivery_grace_parse_and_validate_with_field_names() {
 fn branch_templates_default_to_the_names_gear_uses() {
     let cfg = parse(MINIMAL).unwrap();
     assert_eq!(cfg.conventions.task_branch, gear_model::branch::TASK_BRANCH);
-    assert_eq!(cfg.conventions.review_branch, gear_model::branch::REVIEW_BRANCH);
+    assert_eq!(
+        cfg.conventions.review_branch,
+        gear_model::branch::REVIEW_BRANCH
+    );
     assert_eq!(validate(&cfg), vec![], "the defaults are valid");
 
     // T-255 gave the fixture its own `[conventions]` section: the templates
@@ -818,7 +959,11 @@ fn branch_templates_default_to_the_names_gear_uses() {
     );
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.conventions.task_branch, "{project}/{lane}/t{n}");
-    assert_eq!(validate(&cfg), vec![], "a project may name its own branches");
+    assert_eq!(
+        validate(&cfg),
+        vec![],
+        "a project may name its own branches"
+    );
 }
 
 #[test]
@@ -850,7 +995,14 @@ fn a_branch_template_must_be_expandable_and_usable() {
     );
     // A name git would refuse: a leading '/', "..", "//", a trailing '/', and
     // a trailing ".lock".
-    for bad in ["/x/t{n}", "a..b/t{n}", "{lane}/../t{n}", "{lane}//t{n}", "{lane}/t{n}/", "{lane}/t{n}.lock"] {
+    for bad in [
+        "/x/t{n}",
+        "a..b/t{n}",
+        "{lane}/../t{n}",
+        "{lane}//t{n}",
+        "{lane}/t{n}/",
+        "{lane}/t{n}.lock",
+    ] {
         assert_eq!(
             fields(&validate(&with("task_branch", bad))),
             vec!["conventions.task_branch"],

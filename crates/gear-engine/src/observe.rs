@@ -138,7 +138,10 @@ fn observe_seat(
         flags,
         idle,
         screen,
-        session: agent.agent_session.as_ref().map(|session| session.value.clone()),
+        session: agent
+            .agent_session
+            .as_ref()
+            .map(|session| session.value.clone()),
     })
 }
 
@@ -165,7 +168,9 @@ fn screen_of(
     let idle_or_done = matches!(status, AgentStatus::Idle | AgentStatus::Done);
     let blocked = status == AgentStatus::Blocked;
     // A working agent is read only for a kind that shows a back-off.
-    let shows_backoff = profile.map(|profile| !profile.backoff_markers.is_empty()).unwrap_or(false);
+    let shows_backoff = profile
+        .map(|profile| !profile.backoff_markers.is_empty())
+        .unwrap_or(false);
     if !idle_or_done && !blocked && !shows_backoff {
         return (BTreeSet::new(), false, None);
     }
@@ -226,7 +231,9 @@ pub fn record_sessions(store: &mut Store, observed: &[SeatObs]) -> GearResult<()
     }
     store.write(|tx| {
         for (seat, generation, session) in updates {
-            let current = tx.get_binding(&seat, generation)?.and_then(|binding| binding.session_ref);
+            let current = tx
+                .get_binding(&seat, generation)?
+                .and_then(|binding| binding.session_ref);
             if current.as_deref() != Some(session.as_str()) {
                 tx.set_binding_session_ref(&seat, generation, &session)?;
             }
@@ -237,5 +244,8 @@ pub fn record_sessions(store: &mut Store, observed: &[SeatObs]) -> GearResult<()
 
 /// States considered "may receive a doorbell/delivery".
 pub fn reachable(state: SeatState) -> bool {
-    matches!(state, SeatState::Active | SeatState::Standby | SeatState::Retiring)
+    matches!(
+        state,
+        SeatState::Active | SeatState::Standby | SeatState::Retiring
+    )
 }

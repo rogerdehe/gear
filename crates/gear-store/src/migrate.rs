@@ -51,12 +51,30 @@ pub struct Step {
 /// The steps, in order. Every step carries the store from `from` to
 /// `from + 1`; a store older than the first step starts there.
 pub const STEPS: &[Step] = &[
-    Step { from: 1, apply: step_1_to_2 },
-    Step { from: 2, apply: step_2_to_3 },
-    Step { from: 3, apply: step_3_to_4 },
-    Step { from: 4, apply: step_4_to_5 },
-    Step { from: 5, apply: step_5_to_6 },
-    Step { from: 6, apply: step_6_to_7 },
+    Step {
+        from: 1,
+        apply: step_1_to_2,
+    },
+    Step {
+        from: 2,
+        apply: step_2_to_3,
+    },
+    Step {
+        from: 3,
+        apply: step_3_to_4,
+    },
+    Step {
+        from: 4,
+        apply: step_4_to_5,
+    },
+    Step {
+        from: 5,
+        apply: step_5_to_6,
+    },
+    Step {
+        from: 6,
+        apply: step_6_to_7,
+    },
 ];
 
 /// The columns of the `voyages` table, in the order of the canonical shape.
@@ -129,7 +147,8 @@ fn step_1_to_2(tx: &Transaction<'_>) -> GearResult<()> {
 
     // The `slots` table is gone: its place is `seats.worktree` and
     // `resources`. Nothing has read it since the skeleton.
-    tx.execute_batch("DROP TABLE IF EXISTS slots").map_err(map_sqlite)?;
+    tx.execute_batch("DROP TABLE IF EXISTS slots")
+        .map_err(map_sqlite)?;
 
     Ok(())
 }

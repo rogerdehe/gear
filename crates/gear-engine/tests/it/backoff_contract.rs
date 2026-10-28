@@ -43,7 +43,8 @@ fn world_in(mut store: Store) -> World {
     herdr.add_agent(LANE, "codex", AgentStatus::Working);
     herdr.set_screen(LANE, RETRYING);
     let mut cfg = EngineCfg::default();
-    cfg.profiles.insert("codex".into(), gear_herdr::builtin("codex").unwrap());
+    cfg.profiles
+        .insert("codex".into(), gear_herdr::builtin("codex").unwrap());
     World { store, herdr, cfg }
 }
 
@@ -73,7 +74,10 @@ fn a_working_codex_seat_in_a_back_off_is_recorded_and_shown() {
     );
 
     // And a flagged seat that waits for its provider raises no stall item.
-    let opened = w.store.write(|tx| stall::alert(tx, "p:heat", T0 + 12)).unwrap();
+    let opened = w
+        .store
+        .write(|tx| stall::alert(tx, "p:heat", T0 + 12))
+        .unwrap();
     assert!(!opened, "a back-off is not a stall");
     assert!(stall_items(&mut w).is_empty(), "{:?}", stall_items(&mut w));
 }
@@ -89,9 +93,16 @@ fn ordinary_output_is_not_a_back_off() {
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 10).unwrap();
 
     assert!(report.backoff.is_empty(), "{report:?}");
-    assert!(w.store.read(|tx| tx.seats_in_backoff("p")).unwrap().is_empty());
+    assert!(w
+        .store
+        .read(|tx| tx.seats_in_backoff("p"))
+        .unwrap()
+        .is_empty());
     // A flagged seat that is not waiting rings the captain as before.
-    assert!(w.store.write(|tx| stall::alert(tx, "p:heat", T0 + 12)).unwrap());
+    assert!(w
+        .store
+        .write(|tx| stall::alert(tx, "p:heat", T0 + 12))
+        .unwrap());
     assert_eq!(stall_items(&mut w).len(), 1);
 }
 
@@ -106,11 +117,18 @@ fn the_back_off_ends_when_the_screen_has_moved_on() {
 
     // The provider answered: the status header is back to the ordinary work
     // line, and the next tick clears the wait.
-    w.herdr.set_screen(LANE, "• Working (3m 01s • esc to interrupt)\n• Ran cargo build");
+    w.herdr.set_screen(
+        LANE,
+        "• Working (3m 01s • esc to interrupt)\n• Ran cargo build",
+    );
     let report = tick(&mut w.store, &mut w.herdr, &w.cfg, T0 + 20).unwrap();
 
     assert!(report.backoff.is_empty(), "{report:?}");
-    assert!(w.store.read(|tx| tx.seats_in_backoff("p")).unwrap().is_empty());
+    assert!(w
+        .store
+        .read(|tx| tx.seats_in_backoff("p"))
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -126,7 +144,10 @@ fn the_wait_survives_reopening_the_store() {
         w.store.read(|tx| tx.seats_in_backoff("p")).unwrap(),
         vec!["p:heat".to_string()]
     );
-    assert!(!w.store.write(|tx| stall::alert(tx, "p:heat", T0 + 20)).unwrap());
+    assert!(!w
+        .store
+        .write(|tx| stall::alert(tx, "p:heat", T0 + 20))
+        .unwrap());
     assert!(stall_items(&mut w).is_empty());
 }
 
@@ -140,7 +161,11 @@ fn the_observation_carries_the_back_off_and_the_seat_is_found() {
         .unwrap();
 
     let heat = observed.iter().find(|obs| obs.seat.id == "p:heat").unwrap();
-    assert!(heat.screen.as_deref().unwrap_or_default().contains("Reconnecting..."));
+    assert!(heat
+        .screen
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Reconnecting..."));
     assert_eq!(
         stall::waiting_for_provider(&w.cfg.profiles, &observed),
         vec!["p:heat".to_string()]

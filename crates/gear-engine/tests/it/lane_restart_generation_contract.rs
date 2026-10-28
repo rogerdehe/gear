@@ -91,8 +91,7 @@ fn retry(store: &mut Store, seat: &str, now: i64) -> i64 {
         .write(|tx| {
             tx.set_seat_state(seat, SeatState::Unknown, Some("lost"), now)?;
             tx.set_seat_state(seat, SeatState::Queued, Some("retried by the captain"), now)?;
-            let generation =
-                gear_app::seats::begin_onboard(tx, seat, PANE, "pi", now)?;
+            let generation = gear_app::seats::begin_onboard(tx, seat, PANE, "pi", now)?;
             gear_app::seats::finish_onboard(tx, seat, generation, None, now)?;
             Ok(generation)
         })
@@ -146,7 +145,10 @@ fn hand_in(task: &str, request_id: &str) -> SendArgs {
 fn a_retry_carries_the_delivered_attempt_to_the_new_generation() {
     let mut s = world();
     let generation = retry(&mut s, "p:heat", T + 1);
-    assert_eq!(generation, 6, "the retry moves the seat to the next generation");
+    assert_eq!(
+        generation, 6,
+        "the retry moves the seat to the next generation"
+    );
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
     assert_eq!(attempt.generation, 6, "the attempt moves with the seat");
     assert_eq!(attempt.state, AttemptState::Delivered);

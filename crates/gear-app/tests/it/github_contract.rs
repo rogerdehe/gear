@@ -52,11 +52,20 @@ fn a_project_github_section_parses_and_resolves_on_the_root_repo() {
         "{BASE}\n[github]\nrepo = \"rogerdehe/gear\"\nmerge = \"push\"\nmerge_method = \"merge\"\n\n[github.issues]\nlabels = [\"gear\", \"triage\"]\n"
     );
     let cfg = config::parse(&text).unwrap();
-    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    assert!(
+        config::validate(&cfg).is_empty(),
+        "{:?}",
+        config::validate(&cfg)
+    );
     let root = cfg.root_repo();
-    let github = root.github.expect("the project's mode reaches the root repo");
+    let github = root
+        .github
+        .expect("the project's mode reaches the root repo");
     assert_eq!(github.repo, "rogerdehe/gear");
-    assert_eq!(github.issues_labels, vec!["gear".to_string(), "triage".to_string()]);
+    assert_eq!(
+        github.issues_labels,
+        vec!["gear".to_string(), "triage".to_string()]
+    );
     assert_eq!(github.merge, config::MergeMode::Push);
     assert_eq!(github.merge_method, config::MergeMethod::Merge);
     // The root's own repo works the same way.
@@ -69,11 +78,21 @@ fn a_repo_github_section_replaces_the_projects_and_absent_means_local_only() {
         "{BASE}\n[github]\nrepo = \"rogerdehe/gear\"\n\n[[repos]]\nname = \"api\"\npath = \"services/api\"\n\n[repos.github]\nrepo = \"rogerdehe/api\"\nmerge_method = \"squash\"\n"
     );
     let cfg = config::parse(&text).unwrap();
-    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    assert!(
+        config::validate(&cfg).is_empty(),
+        "{:?}",
+        config::validate(&cfg)
+    );
     let repos = cfg.repos();
-    assert_eq!(repos[0].github.as_ref().map(|g| g.repo.as_str()), Some("rogerdehe/gear"));
+    assert_eq!(
+        repos[0].github.as_ref().map(|g| g.repo.as_str()),
+        Some("rogerdehe/gear")
+    );
     let api = repos.iter().find(|repo| repo.name == "api").unwrap();
-    assert_eq!(api.github.as_ref().map(|g| g.repo.as_str()), Some("rogerdehe/api"));
+    assert_eq!(
+        api.github.as_ref().map(|g| g.repo.as_str()),
+        Some("rogerdehe/api")
+    );
     // A repo without its own section follows the project's, and the default
     // merge mode is `push` with `squash`.
     let api = api.github.as_ref().unwrap();
@@ -88,8 +107,15 @@ fn a_repo_github_section_replaces_the_projects_and_absent_means_local_only() {
 
 #[test]
 fn a_project_can_land_through_a_pull_request() {
-    let cfg = config::parse(&format!("{BASE}\n[github]\nrepo = \"a/b\"\nmerge = \"pr\"\n")).unwrap();
-    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    let cfg = config::parse(&format!(
+        "{BASE}\n[github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"
+    ))
+    .unwrap();
+    assert!(
+        config::validate(&cfg).is_empty(),
+        "{:?}",
+        config::validate(&cfg)
+    );
     assert_eq!(cfg.root_repo().github.unwrap().merge, config::MergeMode::Pr);
 }
 
@@ -98,8 +124,16 @@ fn a_child_repo_can_land_through_a_pull_request() {
     let cfg = config::parse(&format!(
         "{BASE}\n[[repos]]\nname = \"api\"\npath = \"api\"\n\n[repos.github]\nrepo = \"a/b\"\nmerge = \"pr\"\n"
     )).unwrap();
-    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
-    let api = cfg.repos().into_iter().find(|repo| repo.name == "api").unwrap();
+    assert!(
+        config::validate(&cfg).is_empty(),
+        "{:?}",
+        config::validate(&cfg)
+    );
+    let api = cfg
+        .repos()
+        .into_iter()
+        .find(|repo| repo.name == "api")
+        .unwrap();
     assert_eq!(api.github.unwrap().merge, config::MergeMode::Pr);
 }
 
@@ -110,7 +144,11 @@ fn a_child_repo_without_a_section_is_local_only() {
         "{BASE}\n[github]\nrepo = \"root/project\"\nmerge = \"push\"\n\n[[repos]]\nname = \"child\"\npath = \"child\"\n\n[[repos]]\nname = \"api\"\npath = \"services/api\"\n\n[repos.github]\nrepo = \"root/api\"\n"
     );
     let cfg = config::parse(&text).unwrap();
-    assert!(config::validate(&cfg).is_empty(), "{:?}", config::validate(&cfg));
+    assert!(
+        config::validate(&cfg).is_empty(),
+        "{:?}",
+        config::validate(&cfg)
+    );
 
     // The root keeps the project's identity.
     let root = cfg.root_repo();
@@ -121,12 +159,18 @@ fn a_child_repo_without_a_section_is_local_only() {
     // The child has none — through both ways to reach it.
     let repos = cfg.repos();
     let child = repos.iter().find(|repo| repo.name == "child").unwrap();
-    assert_eq!(child.github, None, "a child does not inherit the root's mode");
+    assert_eq!(
+        child.github, None,
+        "a child does not inherit the root's mode"
+    );
     let lane = cfg.lanes.iter().find(|lane| lane.name == "heat").unwrap();
     assert!(lane.repo.is_none());
     // The configured child keeps its own identity.
     let api = repos.iter().find(|repo| repo.name == "api").unwrap();
-    assert_eq!(api.github.as_ref().map(|g| g.repo.as_str()), Some("root/api"));
+    assert_eq!(
+        api.github.as_ref().map(|g| g.repo.as_str()),
+        Some("root/api")
+    );
 }
 
 #[test]
@@ -136,9 +180,18 @@ fn a_github_section_without_a_repo_or_with_a_bad_repo_is_refused() {
     let issues = config::validate(&cfg);
     assert_eq!(issues.len(), 1, "{issues:?}");
     assert_eq!(issues[0].field, "github.repo");
-    assert!(issues[0].problem.contains("owner/name"), "{}", issues[0].problem);
+    assert!(
+        issues[0].problem.contains("owner/name"),
+        "{}",
+        issues[0].problem
+    );
 
-    for bad in ["https://github.com/rogerdehe/gear", "gear", "a/b/c", "owner /name"] {
+    for bad in [
+        "https://github.com/rogerdehe/gear",
+        "gear",
+        "a/b/c",
+        "owner /name",
+    ] {
         let text = format!("{BASE}\n[github]\nrepo = \"{bad}\"\n");
         let cfg = config::parse(&text).unwrap();
         let issues = config::validate(&cfg);
@@ -155,7 +208,9 @@ fn a_github_section_without_a_repo_or_with_a_bad_repo_is_refused() {
     let cfg = config::parse(&text).unwrap();
     let issues = config::validate(&cfg);
     assert!(
-        issues.iter().any(|issue| issue.field == "repos[0].github.repo"),
+        issues
+            .iter()
+            .any(|issue| issue.field == "repos[0].github.repo"),
         "{issues:?}"
     );
 }
@@ -177,7 +232,9 @@ fn an_unknown_merge_mode_or_method_is_a_parse_error() {
 
 #[test]
 fn a_blank_issue_label_is_refused() {
-    let text = format!("{BASE}\n[github]\nrepo = \"a/b\"\n\n[github.issues]\nlabels = [\"gear\", \"  \"]\n");
+    let text = format!(
+        "{BASE}\n[github]\nrepo = \"a/b\"\n\n[github.issues]\nlabels = [\"gear\", \"  \"]\n"
+    );
     let cfg = config::parse(&text).unwrap();
     let issues = config::validate(&cfg);
     assert_eq!(issues.len(), 1, "{issues:?}");
@@ -204,7 +261,15 @@ fn world() -> Store {
     let mut s = Store::open_in_memory().unwrap();
     s.write(|tx| {
         testing::seed_project(tx, "p", "sess", NOW)?;
-        testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, CAP_PANE, "codex", NOW)?;
+        testing::seed_active_seat(
+            tx,
+            "p",
+            "captain",
+            SeatRole::Captain,
+            CAP_PANE,
+            "codex",
+            NOW,
+        )?;
         testing::seed_active_seat(tx, "p", "heat", SeatRole::Lane, "w1:p2", "opencode", NOW)?;
         Ok(())
     })
@@ -214,15 +279,41 @@ fn world() -> Store {
 
 fn cap() -> (Env, Fingerprint) {
     (
-        Env { ctx: Some(GearCtx { project: "p".into(), seat: "captain".into(), generation: 1 }), pane_id: Some(CAP_PANE.into()), admin: false },
-        Fingerprint { pane_id: CAP_PANE.into(), kind: Some("codex".into()), session_ref: None },
+        Env {
+            ctx: Some(GearCtx {
+                project: "p".into(),
+                seat: "captain".into(),
+                generation: 1,
+            }),
+            pane_id: Some(CAP_PANE.into()),
+            admin: false,
+        },
+        Fingerprint {
+            pane_id: CAP_PANE.into(),
+            kind: Some("codex".into()),
+            session_ref: None,
+        },
     )
 }
 
-fn run(s: &mut Store, queue: &str, base: i64, rid: &str) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
+fn run(
+    s: &mut Store,
+    queue: &str,
+    base: i64,
+    rid: &str,
+) -> gear_model::GearResult<gear_app::plan::ApplyResult> {
     let text = format!("<!-- gear-plan project=p base={base} -->\n# Queue\n{queue}");
     let (env, fp) = cap();
-    apply(s, &env, Some(&fp), None, &parse(&text).unwrap(), &text, rid, NOW)
+    apply(
+        s,
+        &env,
+        Some(&fp),
+        None,
+        &parse(&text).unwrap(),
+        &text,
+        rid,
+        NOW,
+    )
 }
 
 fn issue_of(s: &mut Store, task: &str) -> Option<i64> {
@@ -265,13 +356,26 @@ fn an_issue_round_trips_through_apply_and_is_kept_when_a_draft_omits_it() {
 
 #[test]
 fn an_issue_that_is_not_hash_number_is_refused_at_its_line() {
-    for bad in ["12", "#x", "#-1", "#", "#0", "#+12", "#9223372036854775808", "#18446744073709551615"] {
+    for bad in [
+        "12",
+        "#x",
+        "#-1",
+        "#",
+        "#0",
+        "#+12",
+        "#9223372036854775808",
+        "#18446744073709551615",
+    ] {
         let text = format!(
             "<!-- gear-plan project=toy base=0 -->\n# Queue\n## NEW [must] lane=heat\ngoal: A\naccept: a\nestimate: 30\ndeps: -\nissue: {bad}\n"
         );
         let error = parse(&text).unwrap_err();
         assert_eq!(error.code, ErrorCode::BadFormat, "{bad}");
-        assert!(error.detail.starts_with("line 8:"), "{bad}: {}", error.detail);
+        assert!(
+            error.detail.starts_with("line 8:"),
+            "{bad}: {}",
+            error.detail
+        );
         assert!(error.detail.contains("issue"), "{bad}: {}", error.detail);
     }
 }
@@ -295,11 +399,18 @@ fn issue_block_renders_a_valid_new_block() {
     ));
 
     // It parses as a plan queue block, with the issue's facts.
-    let draft = parse(&format!("<!-- gear-plan project=toy base=0 -->\n# Queue\n{rendered}")).unwrap();
+    let draft = parse(&format!(
+        "<!-- gear-plan project=toy base=0 -->\n# Queue\n{rendered}"
+    ))
+    .unwrap();
     assert_eq!(draft.queue.len(), 1, "{rendered}");
     let item = &draft.queue[0];
     assert_eq!(item.id, None, "a NEW block");
-    assert_eq!(item.priority, Priority::Should, "the label names the priority");
+    assert_eq!(
+        item.priority,
+        Priority::Should,
+        "the label names the priority"
+    );
     assert_eq!(
         item.goal.as_deref(),
         Some("The board shows the lane twice"),
@@ -322,7 +433,10 @@ fn issue_block_renders_a_valid_new_block() {
 #[test]
 fn issue_block_defaults_the_priority_and_handles_an_empty_body() {
     let rendered = issue_block(&issue(7, "Do the thing", "", &["bug"]));
-    let draft = parse(&format!("<!-- gear-plan project=toy base=0 -->\n# Queue\n{rendered}")).unwrap();
+    let draft = parse(&format!(
+        "<!-- gear-plan project=toy base=0 -->\n# Queue\n{rendered}"
+    ))
+    .unwrap();
     let item = &draft.queue[0];
     assert_eq!(item.priority, Priority::Must, "no priority label: must");
     assert_eq!(

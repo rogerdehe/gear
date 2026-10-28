@@ -2,7 +2,10 @@
 
 use crate::identity::{require_seat, Fingerprint};
 use crate::Env;
-use gear_model::{AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState, TaskState, Ts};
+use gear_model::{
+    AttemptState, ErrorCode, GearError, GearResult, MsgKind, MsgState, SeatRole, SeatState,
+    TaskState, Ts,
+};
 use gear_store::{MessageRow, NewMessage, RequestOutcome, Store, Tx};
 use std::collections::BTreeMap;
 
@@ -107,11 +110,24 @@ pub fn send(
 }
 
 /// Hand in a direction check without submitting the lane's attempt.
-pub fn send_direction(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts) -> GearResult<SendResult> {
+pub fn send_direction(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+    now: Ts,
+) -> GearResult<SendResult> {
     send_inner(store, env, fp, args, now, true)
 }
 
-fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &SendArgs, now: Ts, direction: bool) -> GearResult<SendResult> {
+fn send_inner(
+    store: &mut Store,
+    env: &Env,
+    fp: Option<&Fingerprint>,
+    args: &SendArgs,
+    now: Ts,
+    direction: bool,
+) -> GearResult<SendResult> {
     // A request that already committed replays its receipt before the hand-in
     // gate: the hand-in happened, only the receipt was lost, and an outage
     // must not report it as failed (T-19 review F2). The caller is the live
@@ -150,8 +166,9 @@ fn send_inner(store: &mut Store, env: &Env, fp: Option<&Fingerprint>, args: &Sen
             if let (Some(ctx), Some(task), Some(attempt)) =
                 (env.ctx.as_ref(), args.task.as_deref(), args.attempt)
             {
-                let previous = store
-                    .read(|tx| crate::tasks::rework_base_candidate(tx, &ctx.project, task, attempt))?;
+                let previous = store.read(|tx| {
+                    crate::tasks::rework_base_candidate(tx, &ctx.project, task, attempt)
+                })?;
                 if let Some(previous) = previous {
                     crate::tasks::require_rework_contains(&gate.worktree, &previous, candidate)?;
                 }
@@ -631,7 +648,11 @@ fn stored_receipt(
             )
         })?;
         Ok(Some(SendResult {
-            project: env.ctx.as_ref().map(|ctx| ctx.project.clone()).unwrap_or_default(),
+            project: env
+                .ctx
+                .as_ref()
+                .map(|ctx| ctx.project.clone())
+                .unwrap_or_default(),
             msg_id: value["msg_id"].as_str().unwrap_or_default().to_string(),
             thread: value["thread"].as_str().unwrap_or_default().to_string(),
             recipient: value["recipient"].as_str().unwrap_or_default().to_string(),
@@ -643,7 +664,13 @@ fn stored_receipt(
 /// The args key of a send: the same seat and generation with the same
 /// arguments is the same request (design/13), whether it is checked before the
 /// transaction (to replay a committed receipt) or inside it.
-fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs, direction: bool) -> String {
+fn request_key(
+    project: &str,
+    seat: &str,
+    generation: i64,
+    args: &SendArgs,
+    direction: bool,
+) -> String {
     let key = format!(
         "{project}|{seat}:{generation}|send|kind={}|body={:?}|task={:?}|attempt={:?}|contract={:?}|candidate={:?}|verdict={:?}|about={:?}|to={:?}|reply_to={:?}|urgent={}|left={:?}|blocker={:?}|on={:?}|friction={:?}",
         args.kind.as_str(),
@@ -662,7 +689,11 @@ fn request_key(project: &str, seat: &str, generation: i64, args: &SendArgs, dire
         args.on,
         args.friction
     );
-    if direction { format!("{key}|direction=true") } else { key }
+    if direction {
+        format!("{key}|direction=true")
+    } else {
+        key
+    }
 }
 
 /// The next unused sequence number of a thread with this prefix.
@@ -692,7 +723,10 @@ fn next_thread_seq(
                 format!("too many threads named {prefix}:* in project {project}"),
             ));
         }
-        if tx.thread_messages(project, &format!("{prefix}:{seq}"))?.is_empty() {
+        if tx
+            .thread_messages(project, &format!("{prefix}:{seq}"))?
+            .is_empty()
+        {
             return Ok(seq);
         }
     }
@@ -723,7 +757,10 @@ pub struct BatchLimits {
 
 impl Default for BatchLimits {
     fn default() -> Self {
-        BatchLimits { max_threads: 6, per_sender: 2 }
+        BatchLimits {
+            max_threads: 6,
+            per_sender: 2,
+        }
     }
 }
 
@@ -753,7 +790,10 @@ pub fn select_batch(
         if !groups.contains_key(&message.thread) {
             order.push(message.thread.clone());
         }
-        groups.entry(message.thread.clone()).or_default().push(message);
+        groups
+            .entry(message.thread.clone())
+            .or_default()
+            .push(message);
     }
 
     // One view per thread.
@@ -782,7 +822,12 @@ pub fn select_batch(
             last_reply,
         });
         oldest.push(messages.first().map(|m| m.created).unwrap_or_default());
-        senders.push(messages.first().map(|m| m.sender.clone()).unwrap_or_default());
+        senders.push(
+            messages
+                .first()
+                .map(|m| m.sender.clone())
+                .unwrap_or_default(),
+        );
     }
 
     // 2. one slot is reserved for the oldest normal thread.
@@ -813,7 +858,10 @@ pub fn select_batch(
 
     // Display order: urgent threads first, then oldest first.
     selected.sort_by_key(|index| (if views[*index].urgent { 0 } else { 1 }, oldest[*index]));
-    Ok(selected.into_iter().map(|index| views[index].clone()).collect())
+    Ok(selected
+        .into_iter()
+        .map(|index| views[index].clone())
+        .collect())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -993,7 +1041,10 @@ fn rework_waiting(
         // Not handed in yet: the rework has not reached the reviewer.
         if matches!(
             attempt.state,
-            AttemptState::Delivered | AttemptState::Started | AttemptState::Stopped | AttemptState::Unknown
+            AttemptState::Delivered
+                | AttemptState::Started
+                | AttemptState::Stopped
+                | AttemptState::Unknown
         ) {
             newer = Some(attempt.n);
         }

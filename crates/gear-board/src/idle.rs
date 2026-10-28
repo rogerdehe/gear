@@ -143,7 +143,9 @@ pub fn idle_reason(
     }
 
     // The task is queued and nobody gave it to the lane.
-    Ok(Some(IdleReason::Undelivered { task: next.id.clone() }))
+    Ok(Some(IdleReason::Undelivered {
+        task: next.id.clone(),
+    }))
 }
 
 /// The text of the reason (§8.2).
@@ -160,7 +162,10 @@ pub fn describe(reason: &IdleReason, tx: &Tx<'_>, project: &str) -> String {
             format!("waiting for {on} ({})", lane_and_stage(tx, project, on))
         }
         IdleReason::DepWait { task, on } => {
-            format!("next {task} waits for {on} ({})", lane_and_stage(tx, project, on))
+            format!(
+                "next {task} waits for {on} ({})",
+                lane_and_stage(tx, project, on)
+            )
         }
         IdleReason::Undelivered { task } => format!("next {task} is ready but not delivered"),
         IdleReason::NoWork => "nothing left planned".to_string(),

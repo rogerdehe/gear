@@ -26,8 +26,12 @@ pub fn issue_block(issue: &gear_forge::Issue) -> String {
         .iter()
         .find_map(|label| Priority::from_label(label))
         .unwrap_or(Priority::Must);
-    let accept = first_line(&issue.body)
-        .unwrap_or_else(|| format!("the request of issue #{number} is met", number = issue.number));
+    let accept = first_line(&issue.body).unwrap_or_else(|| {
+        format!(
+            "the request of issue #{number} is met",
+            number = issue.number
+        )
+    });
     format!(
         "## NEW [{priority}] lane=<lane> milestone=<M>\n\
          goal: {goal}\n\

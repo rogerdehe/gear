@@ -56,7 +56,9 @@ pub(crate) fn target(
         .iter()
         .find(|m| m["providerID"] == provider && m["id"] == id)
     else {
-        return Lookup::Invalid(format!("invalid OpenCode model {model}: absent from model.list"));
+        return Lookup::Invalid(format!(
+            "invalid OpenCode model {model}: absent from model.list"
+        ));
     };
     if let Some(variant) = variant {
         if !info["variants"]
@@ -100,7 +102,8 @@ pub(crate) fn derived_labels(
     // The display name as OpenCode renders it in the status bar: the provider's
     // own name from `provider.list` (F1 of the T-94 review), e.g. "MiniMax
     // (minimax.cn)" or "OpenCode Go", not its id.
-    let provider_name = provider_display_name(herdr, provider, directory).unwrap_or_else(|| provider.to_string());
+    let provider_name =
+        provider_display_name(herdr, provider, directory).unwrap_or_else(|| provider.to_string());
     let text = format!("{model_name} {provider_name}");
     Some(gear_app::config::ModelSwitch {
         picker: text.clone(),
@@ -370,14 +373,21 @@ variant = "max"
             {"id": "minimax-cn", "name": "MiniMax (minimax.cn)"},
             {"id": "opencode-go", "name": "OpenCode Go"}
         ]})));
-        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", None, Some("/repo"))
-            .expect("the catalogue holds it");
+        let labels = derived_labels(
+            &mut herdr,
+            "minimax-cn/MiniMax-M3.1-Flash",
+            None,
+            Some("/repo"),
+        )
+        .expect("the catalogue holds it");
         assert_eq!(labels.bar, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.picker, "MiniMax-M3.1-Flash MiniMax (minimax.cn)");
         assert_eq!(labels.variant, None);
 
         // A model the catalogue does not hold has no labels to derive.
-        herdr.api_replies.push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
+        herdr
+            .api_replies
+            .push_back(Ok(json!({"data": [{"providerID": "x", "id": "y"}]})));
         assert!(derived_labels(&mut herdr, "minimax-cn/nope", None, Some("/repo")).is_none());
 
         // The chain's variant rides along when it names one.
@@ -386,9 +396,16 @@ variant = "max"
             "id": "MiniMax-M3.1-Flash",
             "name": "MiniMax-M3.1-Flash"
         }]})));
-        herdr.api_replies.push_back(Ok(json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]})));
-        let labels = derived_labels(&mut herdr, "minimax-cn/MiniMax-M3.1-Flash", Some("max"), None)
-            .expect("the catalogue holds it");
+        herdr.api_replies.push_back(Ok(
+            json!({"data": [{"id": "minimax-cn", "name": "MiniMax (minimax.cn)"}]}),
+        ));
+        let labels = derived_labels(
+            &mut herdr,
+            "minimax-cn/MiniMax-M3.1-Flash",
+            Some("max"),
+            None,
+        )
+        .expect("the catalogue holds it");
         assert_eq!(labels.variant.as_deref(), Some("max"));
     }
 }

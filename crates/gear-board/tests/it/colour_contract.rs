@@ -81,7 +81,15 @@ fn world() -> Store {
     store
         .write(|tx| {
             testing::seed_project(tx, "p", "sess", NOW)?;
-            testing::seed_active_seat(tx, "p", "captain", SeatRole::Captain, "w1:p1", "codex", NOW)?;
+            testing::seed_active_seat(
+                tx,
+                "p",
+                "captain",
+                SeatRole::Captain,
+                "w1:p1",
+                "codex",
+                NOW,
+            )?;
             testing::seed_active_seat(tx, "p", "hull", SeatRole::Lane, "w1:p2", "pi", NOW)?;
             testing::seed_active_seat(tx, "p", "rewrite", SeatRole::Lane, "w1:p3", "pi", NOW)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
@@ -138,7 +146,10 @@ fn board() -> gear_board::Board {
     let mut store = world();
     gear_board::build(
         &mut store,
-        &Options { project: Some("p".into()), ..Default::default() },
+        &Options {
+            project: Some("p".into()),
+            ..Default::default()
+        },
         now_seconds(),
     )
     .unwrap()
@@ -156,12 +167,17 @@ fn find(screen: &str, needle: &str) -> (usize, usize) {
 
 /// The line of a plain screen that holds a text.
 fn line_with<'a>(screen: &'a str, needle: &str) -> &'a str {
-    screen.lines().find(|line| line.contains(needle)).unwrap_or_else(|| panic!("no {needle:?}:\n{screen}"))
+    screen
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no {needle:?}:\n{screen}"))
 }
 
 /// The column of a text in a line, in characters.
 fn column(line: &str, needle: &str) -> usize {
-    let at = line.find(needle).unwrap_or_else(|| panic!("no {needle:?} in {line:?}"));
+    let at = line
+        .find(needle)
+        .unwrap_or_else(|| panic!("no {needle:?} in {line:?}"));
     line[..at].chars().count()
 }
 
@@ -174,15 +190,23 @@ fn a_task_over_its_estimate_has_a_yellow_bar() {
     let (row, x) = find(&text, "██████████ 60/30m");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Warn), "{text}");
     let ansi = screen.ansi(true);
-    let end = ansi.find("██████████ 60/30m\u{1b}[0m").expect("the bar ends its yellow run");
-    assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[33m"), "{ansi:?}");
+    let end = ansi
+        .find("██████████ 60/30m\u{1b}[0m")
+        .expect("the bar ends its yellow run");
+    assert!(
+        ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[33m"),
+        "{ansi:?}"
+    );
     // The heading of what needs a look is yellow and bold.
     let (row, x) = find(&text, "NEEDS A LOOK");
     assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold());
     // A lane name is bold, in its lane colour (the first lane is cyan).
     let (row, x) = find(&text, "› hull");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Acc));
-    assert_eq!(screen.style_at(x + 2, row), Style::fg(Color::Acc).and_bold().reversed_if(true));
+    assert_eq!(
+        screen.style_at(x + 2, row),
+        Style::fg(Color::Acc).and_bold().reversed_if(true)
+    );
 }
 
 #[test]
@@ -190,13 +214,29 @@ fn a_merged_task_is_green_in_the_graph() {
     let board = board();
     let project = &board.projects[0];
     let lines = styled_lines(&project.graph, &project.graph_lanes, None);
-    let line = lines.iter().find(|line| line.text.contains(" T-1 ")).expect("the row of T-1");
+    let line = lines
+        .iter()
+        .find(|line| line.text.contains(" T-1 "))
+        .expect("the row of T-1");
     let cells: Vec<(char, Style)> = line.cells().collect();
     // The merge into dev and the review's ✓ are green and bold.
-    assert_eq!(cells[3], ('●', Style::fg(Color::Ok).and_bold()), "{:?}", line.text);
-    assert_eq!(cells[9], ('✓', Style::fg(Color::Ok).and_bold()), "{:?}", line.text);
+    assert_eq!(
+        cells[3],
+        ('●', Style::fg(Color::Ok).and_bold()),
+        "{:?}",
+        line.text
+    );
+    assert_eq!(
+        cells[9],
+        ('✓', Style::fg(Color::Ok).and_bold()),
+        "{:?}",
+        line.text
+    );
     // The working task's symbol is yellow, the dev column's head green.
-    let line = lines.iter().find(|line| line.text.contains(" T-2 ")).expect("the row of T-2");
+    let line = lines
+        .iter()
+        .find(|line| line.text.contains(" T-2 "))
+        .expect("the row of T-2");
     let at = line.text.chars().position(|c| c == '◉').unwrap();
     assert_eq!(line.styles[at], Style::fg(Color::Warn).and_bold());
     assert_eq!(lines[0].styles[2], Style::fg(Color::Ok).and_bold());
@@ -210,15 +250,29 @@ fn the_time_bar_is_red_once_the_projected_finish_is_past_the_eta() {
     let mut board = board();
     board.projects[0].voyages[0].projected_min = Some(13 * 60);
     let screen = canvas(&board, Tab::Now, 0, None, (160, 40));
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Bad), "{}", screen.text());
+    assert_eq!(
+        screen.style_at(7, 1).fg,
+        Some(Color::Bad),
+        "{}",
+        screen.text()
+    );
     let (row, x) = find(&screen.text(), "projected finish");
     assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad));
-    assert!(screen.ansi(true).contains("time   \u{1b}[31m██"), "{:?}", screen.ansi(true));
+    assert!(
+        screen.ansi(true).contains("time   \u{1b}[31m██"),
+        "{:?}",
+        screen.ansi(true)
+    );
 
     // Within the eta it is green.
     board.projects[0].voyages[0].projected_min = Some(11 * 60);
     let screen = canvas(&board, Tab::Now, 0, None, (160, 40));
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Ok), "{}", screen.text());
+    assert_eq!(
+        screen.style_at(7, 1).fg,
+        Some(Color::Ok),
+        "{}",
+        screen.text()
+    );
 }
 
 #[test]
@@ -232,17 +286,27 @@ fn no_color_draws_no_colour_code() {
         let screen = canvas(&board, tab, 0, None, (160, 40));
         let coloured = screen.ansi(true);
         let plain = screen.ansi(false);
-        assert!(coloured.contains("\u{1b}[3") || coloured.contains("\u{1b}[9"), "{tab:?} has colour");
+        assert!(
+            coloured.contains("\u{1b}[3") || coloured.contains("\u{1b}[9"),
+            "{tab:?} has colour"
+        );
         // No foreground colour at all: only bold and the reverse video of the
         // open tab are left.
-        let codes: Vec<&str> = plain.split('\u{1b}').skip(1).map(|code| code.split('m').next().unwrap()).collect();
+        let codes: Vec<&str> = plain
+            .split('\u{1b}')
+            .skip(1)
+            .map(|code| code.split('m').next().unwrap())
+            .collect();
         for code in &codes {
             assert!(
                 ["[0", "[1", "[7", "[1;7"].contains(code),
                 "{tab:?}: a code that is not bold or reverse: {code:?}"
             );
         }
-        assert!(plain.contains("\u{1b}[7m"), "the open tab stays in reverse video");
+        assert!(
+            plain.contains("\u{1b}[7m"),
+            "the open tab stays in reverse video"
+        );
     }
     // The plain frame carries no code at all, and neither does the JSON.
     assert!(!frame(&board, Tab::Now, 0, None, (160, 40)).contains('\u{1b}'));
@@ -266,7 +330,11 @@ impl Keys for Quit {
 fn the_board_draws_in_colour_unless_told_not_to() {
     let mut store = world();
     for (color, coloured) in [(true, true), (false, false)] {
-        let opts = Options { project: Some("p".into()), color, ..Options::default() };
+        let opts = Options {
+            project: Some("p".into()),
+            color,
+            ..Options::default()
+        };
         let mut out: Vec<u8> = Vec::new();
         run_with(&mut store, &opts, &mut out, &mut Quit, None).unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -291,14 +359,21 @@ fn a_long_lane_name_never_runs_into_the_next_column() {
     assert!(column(short, "merged") > goal, "{graph}");
     // The heads of the lane columns do not overwrite each other.
     let head = line_with(&graph, "dev");
-    assert!(head.contains("hull") && head.contains("rewrite"), "{head:?}");
+    assert!(
+        head.contains("hull") && head.contains("rewrite"),
+        "{head:?}"
+    );
 
     // Now: the middle column starts at the same place for both lanes.
     let now = frame(&board, Tab::Now, 0, None, size);
     assert!(now.contains("rewrite T-2 Give internal"), "{now}");
     let long = line_with(&now, "rewrite T-2");
     let short = line_with(&now, "› hull");
-    assert_eq!(column(long, "T-2"), column(short, "hull") + "rewrite".len() + 1, "{now}");
+    assert_eq!(
+        column(long, "T-2"),
+        column(short, "hull") + "rewrite".len() + 1,
+        "{now}"
+    );
 
     // Workload: the bars start at the same place.
     let workload = frame(&board, Tab::Workload, 0, None, size);
