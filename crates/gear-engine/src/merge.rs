@@ -2074,15 +2074,14 @@ fn close_branches(
     (closed, left)
 }
 
-/// A branch of a task: its last segment is the last segment of the task's own
-/// branch (`t<n>`) or that name with a suffix (`t53-v2`, a rework round). The
-/// task's branch is expanded from the project's template (T-253), so a
-/// template that names the project or the lane changes nothing here: only the
-/// last segment is the task's own name.
+/// A branch of a task: the task's own branch, or that branch with a suffix
+/// (`t53-v2`, a rework round). Both are the **whole** branch expanded from the
+/// project's template (T-253), never a segment of it: with
+/// `task_branch = "tasks/{n}/work"` the branch `tasks/2/work` is another
+/// task's branch, and only the prefix can tell it from `tasks/1/work` (F1 of
+/// the T-253 review — a segment match deleted it). Anything else is retained.
 fn is_task_branch(branch: &str, task_branch: &str) -> bool {
-    let base = task_branch.rsplit('/').next().unwrap_or(task_branch);
-    let segment = branch.rsplit('/').next().unwrap_or(branch);
-    segment == base || segment.starts_with(&format!("{base}-"))
+    branch == task_branch || branch.starts_with(&format!("{task_branch}-"))
 }
 
 /// Close a branch on origin. A branch that is already gone is closed too.

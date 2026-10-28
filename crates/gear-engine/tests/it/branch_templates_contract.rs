@@ -416,6 +416,73 @@ seat_branch = "w/{seat}""#);
     );
 }
 
+/// T-253 (F1 of the review): the cleanup after a merge closes **only** the
+/// task's own branches. With `task_branch = "tasks/{n}/work"` the number is not
+/// the final segment, so a last-segment match called `tasks/2/work` a branch of
+/// T-1 and deleted another task's work.
+#[test]
+fn a_merge_closes_only_the_tasks_own_branches() {
+    let repo = Repo::new();
+    let config = repo.config(r#"task_branch = "tasks/{n}/work"
+review_branch = "b/review/t{n}"
+seat_branch = "w/{seat}""#);
+    let mut store = world(&config);
+    let mut herdr = FakeHerdr::new();
+    let cfg = cfg();
+
+    let active = onboard_queued(&mut store, &mut herdr, &cfg, T0 + 1).unwrap();
+    assert_eq!(active, vec!["p:heat".to_string()]);
+
+    // The task's work, plus three branches that share the candidate's tip:
+    // the task's own rework suffix, and another task's branch under the same
+    // template (`tasks/2/work` is T-2's, not T-1's).
+    let candidate = repo.lane_work("tasks/1/work");
+    for branch in ["tasks/1/work-v2", "tasks/2/work"] {
+        sh(&repo.origin, &format!("git branch {branch} {candidate}"));
+    }
+
+    store
+        .write(|tx| {
+            tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
+            tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
+            tasks::submit_result(tx, "p", "T-1", 1, 1, &candidate, "ops/reports/T-1.md", T0)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let report = start_reviews(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T0 + 10).unwrap();
+    assert_eq!(report.started, vec!["p:review-1"]);
+    repo.review_work("b/review/t1");
+    store
+        .write(|tx| {
+            tx.insert_review_verdict(&ReviewVerdictRow {
+                project: "p".into(),
+                task: "T-1".into(),
+                attempt: 1,
+                passed: true,
+                findings: "all good".into(),
+                by_seat: "p:review-1".into(),
+                created: T0 + 25,
+            })?;
+            tasks::settle_review(tx, "p", "T-1", 1, T0 + 30)
+        })
+        .unwrap();
+
+    let merge_worktree = repo.merge_worktree("w/merge");
+    herdr.add_worktree("w/merge", &merge_worktree.to_string_lossy(), "wt-merge:p1");
+    wait_merge(&mut store, &mut herdr, &cfg);
+
+    // The task's own branch and its rework suffix are closed…
+    assert_eq!(
+        sh(&repo.origin, "git branch --list 'tasks/1/work*'"),
+        "",
+        "the task's own branches are closed"
+    );
+    // …and the other task's branch survives, still holding the shared commit.
+    let unrelated = sh(&repo.origin, "git rev-parse tasks/2/work");
+    assert_eq!(unrelated, candidate, "another task's branch is untouched");
+}
+
 /// T-253: a worktree Herdr returns for a seat must belong to the seat's repo.
 /// Two repos can share one folder name, so Herdr can hand the engine another
 /// repository's checkout. It is not used: the captain gets one item on thread
