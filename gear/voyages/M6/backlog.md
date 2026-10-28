@@ -18,3 +18,7 @@
 - Quota markers for claude and grok, a status-bar reading for every kind (postponed from M3 #1 and M4 #2; 5 voyages; provider readings may make them unnecessary). — postponed from M5 (2026-10-28, user: "放弃的那些先记录到 M6 里头"; captain's reason to drop: quota is read from the providers now; screen markers are fragile).
 - The live Codex quota fallback, never observed (postponed from M4 #21; 3 voyages). — postponed from M5 (2026-10-28, user: "放弃的那些先记录到 M6 里头"; captain's reason to drop: M5's reviewers have no fallback (user: wait when Codex is spent)).
 - Kickoff prints each model's picker and bar labels (T-94 F4) — postponed from M5 (2026-10-28, user; captain's reason to drop: display only).
+
+## Collected during M5
+
+- **An explicit departure, and a way to remove a milestone (another project's captain, 2026-10-28).** A milestone departs on the first apply that leaves any task carrying it, cancelled and [wont] included (gear-app plan.rs fn fix_departures counts every task), so a captain cannot register and review drafted tasks before the user says depart; one invented a holding milestone with a one-minute eta to park them, and every station of it fell due at once. Apply never deletes a voyage row either, so a milestone created by mistake stays in the store with its words. Asked: drafts that do not depart (an explicit `depart` line or command the user's words authorise), and removing a milestone that has no task and no history.
