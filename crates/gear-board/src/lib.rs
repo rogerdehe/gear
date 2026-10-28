@@ -299,8 +299,13 @@ pub struct TaskBoard {
     /// How many rounds the task has in the rounds table (§4.1): a dev round
     /// and a review round are two rounds of one attempt.
     pub stored_rounds: usize,
-    /// The tokens of the task's rounds, when they are counted (§4.3).
+    /// The fresh tokens of the task's rounds (input, output, cache write),
+    /// when they are counted (§4.3).
     pub tokens: Option<i64>,
+    /// The cache reads of the task's rounds, when they are counted: they are
+    /// shown apart from the fresh tokens, since a task that re-reads its
+    /// context shows millions of them (the user, 2026-10-28).
+    pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
 }
@@ -470,6 +475,7 @@ pub fn project_with_agents(
             rounds: tx.attempts_of_task(project, &task.id)?.len(),
             stored_rounds: tx.rounds_of_task(project, &task.id)?.len(),
             tokens: tokens_of(tx, project, &task.id)?,
+            cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
@@ -1025,8 +1031,12 @@ fn actual_min_of(
 /// The finished voyages are not in `voyages` (the home page and the station
 /// watch the active ones only), but their measurements are still true: a
 /// landed voyage keeps its burn-up and its lanes.
-/// The tokens of a task's rounds (§4.3): None when a round counted none of
-/// them, so a sum is never a total that hides an unknown part (F5).
+/// The tokens of a task's rounds (§4.3): the fresh tokens only — input,
+/// output and cache write. The cache reads are counted apart
+/// ([`cache_read_of`]): a task that re-reads its context for twenty minutes
+/// shows millions of them, and a sum that mixed them would say nothing about
+/// the work (the user, 2026-10-28). None when a round counted none of them,
+/// so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
     let mut total = 0;
@@ -1043,10 +1053,24 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
         {
             return Ok(None);
         }
-        total += round.input.unwrap_or(0)
-            + round.output.unwrap_or(0)
-            + round.cache_read.unwrap_or(0)
-            + round.cache_write.unwrap_or(0);
+        total += round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
+    }
+    Ok((!rounds.is_empty()).then_some(total))
+}
+
+/// The cache reads of a task's rounds (§4.3), counted apart from the fresh
+/// tokens: None when a round did not count its cache reads, so the sum is
+/// never a total that hides an unknown part (F5).
+fn cache_read_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    let mut total = 0;
+    for round in &rounds {
+        // A round that counted no cache reads is unknown, not a measured
+        // zero: the field's presence says what was counted (F5).
+        let Some(cache_read) = round.cache_read else {
+            return Ok(None);
+        };
+        total += cache_read;
     }
     Ok((!rounds.is_empty()).then_some(total))
 }
@@ -1253,6 +1277,8 @@ pub fn to_json(board: &Board) -> GearResult<String> {
                     "tasks": lane.tasks.iter().map(|task| serde_json::json!({
                         "id": task.id,
                         "state": state_word(task.state),
+                        "tokens": task.tokens,
+                        "cache_read": task.cache_read,
                     })).collect::<Vec<_>>(),
                 })).collect::<Vec<_>>(),
                 "decisions": project.decisions.iter().map(|decision| serde_json::json!({
