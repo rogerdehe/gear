@@ -550,7 +550,20 @@ fn onboard_seat(
             // Design §10.1: the command goes to the agent's name, never to the
             // pane id — an agent that exited leaves a shell behind, and the
             // command would be typed into it.
-            if let Some(name) = crate::names::live_name(herdr, &pane) {
+            // T-285: an agent Herdr left unnamed is named first, in this same
+            // try — a prompt to an unnamed agent is refused, so a leftover
+            // would never be asked and the seat would park after three tries.
+            let name = crate::names::agent_name(&seat.project, &seat.name);
+            let target = match crate::names::live_name(herdr, &pane) {
+                Some(live) => Some(live),
+                None => match crate::names::ensure(herdr, &pane, &name) {
+                    crate::names::Ensure::Renamed | crate::names::Ensure::Named => Some(name),
+                    crate::names::Ensure::Taken { .. }
+                    | crate::names::Ensure::NoAgent
+                    | crate::names::Ensure::Failed(_) => None,
+                },
+            };
+            if let Some(name) = target {
                 let _ = herdr.prompt(&name, command);
             }
         } else if !exit_profile.exit_keys.is_empty() {
