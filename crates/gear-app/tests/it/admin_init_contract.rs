@@ -464,7 +464,7 @@ fn a_second_project_on_one_repo_needs_project_in_its_branch_templates() {
     let templated = project_on(
         "beta",
         &repo,
-        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\nvoyage_dir = \"gear/voyages/{project}/{milestone}\"\n",
+        "task_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"\nseat_branch = \"{project}/{seat}\"\nvoyage_dir = \"gear/{project}/voyages/{milestone}\"\n",
     );
     let r = init_with_home(&mut s, &admin(), &templated, Some(home.path()), T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
@@ -517,7 +517,7 @@ fn a_second_project_on_one_repo_needs_its_own_voyage_folder() {
     assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
 
     // A voyage folder that names the project registers.
-    let kept_apart = format!("{TEMPLATED}voyage_dir = \"gear/voyages/{{project}}/{{milestone}}\"\n");
+    let kept_apart = format!("{TEMPLATED}voyage_dir = \"gear/{{project}}/voyages/{{milestone}}\"\n");
     let beta = project_on("beta", &repo, &kept_apart);
     let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 2).unwrap();
     assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
@@ -539,54 +539,57 @@ fn two_projects_on_one_github_repo_need_their_own_issue_labels() {
     let github = |repo: &str, labels: &str| {
         format!("[github]\nrepo = {repo:?}\n\n[github.issues]\nlabels = [{labels}]\n")
     };
-    let alpha = project_on_with(
-        "alpha",
-        &first,
-        "",
-        &github("Owner/Name", "\"fleet-alpha\", \"shared-x\""),
-    );
+    let alpha = project_on_with("alpha", &first, "", &github("o/r", "\"a\""));
     init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
 
-    // Another local repository, the same GitHub one (named in another case),
-    // no labels: every open issue would be taken twice.
-    let beta = project_on_with("beta", &second, "", &github("owner/name", ""));
+    // Another local repository, the same GitHub one in another case, and
+    // labels of its own: it registers.
+    let beta = project_on_with("beta", &second, "", &github("O/R", "\"b\""));
+    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap();
+    assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
+
+    // A shared label would make one issue a task of both projects: refused,
+    // naming the label and alpha.
+    let gamma = project_on_with("gamma", &first, "", &github("o/r", "\"a\", \"c\""));
+    let e = init_with_home(&mut s, &admin(), &gamma, Some(home.path()), T0 + 2).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "project alpha also takes issues labelled a from GitHub o/r: give each project labels of its own"
+    );
+    assert!(s.read(|tx| tx.get_project("gamma")).unwrap().is_none(), "nothing written");
+
+    // No labels at all takes every open issue, alpha's too: refused.
+    let delta = project_on_with("delta", &second, "", &github("o/r", ""));
+    let e = init_with_home(&mut s, &admin(), &delta, Some(home.path()), T0 + 3).unwrap_err();
+    assert_eq!(e.code, ErrorCode::BadFormat);
+    assert_eq!(
+        e.detail,
+        "project alpha also takes issues from GitHub o/r: each project needs its own non-empty [github.issues] labels"
+    );
+    assert!(s.read(|tx| tx.get_project("delta")).unwrap().is_none(), "nothing written");
+}
+
+/// T-302: every shared label is named in the refusal, in this config's order.
+#[test]
+fn shared_issue_labels_are_named_together() {
+    let mut s = Store::open_in_memory().unwrap();
+    let home = home_with_skills();
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first");
+    let second = dir.path().join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let github = |labels: &str| {
+        format!("[github]\nrepo = \"o/r\"\n\n[github.issues]\nlabels = [{labels}]\n")
+    };
+    let alpha = project_on_with("alpha", &first, "", &github("\"a\", \"z\""));
+    init_with_home(&mut s, &admin(), &alpha, Some(home.path()), T0).unwrap();
+    let beta = project_on_with("beta", &second, "", &github("\"z\", \"a\", \"q\""));
     let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 1).unwrap_err();
     assert_eq!(e.code, ErrorCode::BadFormat);
     assert_eq!(
         e.detail,
-        "project alpha also takes issues from GitHub Owner/Name: each project needs its own non-empty [github.issues] labels"
+        "project alpha also takes issues labelled z, a from GitHub o/r: give each project labels of its own"
     );
-    assert!(s.read(|tx| tx.get_project("beta")).unwrap().is_none(), "nothing written");
-
-    // One shared label: that issue would become a task of both projects.
-    let beta = project_on_with(
-        "beta",
-        &second,
-        "",
-        &github("owner/name", "\"fleet-beta\", \"shared-x\""),
-    );
-    let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 2).unwrap_err();
-    assert_eq!(e.code, ErrorCode::BadFormat);
-    assert_eq!(
-        e.detail,
-        "project alpha also takes issues labelled shared-x from GitHub Owner/Name: give each project labels of its own"
-    );
-
-    // Two shared labels are named together, in this config's own order.
-    let beta = project_on_with(
-        "beta",
-        &second,
-        "",
-        &github("owner/name", "\"shared-x\", \"fleet-alpha\""),
-    );
-    let e = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 3).unwrap_err();
-    assert_eq!(
-        e.detail,
-        "project alpha also takes issues labelled shared-x, fleet-alpha from GitHub Owner/Name: give each project labels of its own"
-    );
-
-    // Disjoint labels may share the repository.
-    let beta = project_on_with("beta", &second, "", &github("owner/name", "\"fleet-beta\""));
-    let r = init_with_home(&mut s, &admin(), &beta, Some(home.path()), T0 + 4).unwrap();
-    assert_eq!((r.project.as_str(), r.config_version), ("beta", 1));
 }
