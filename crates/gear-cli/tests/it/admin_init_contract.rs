@@ -346,6 +346,39 @@ fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).into_owned()
 }
 
+/// Every path under `root`, relative and sorted: a snapshot of the tree.
+fn tree(root: &Path) -> Vec<PathBuf> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            out.push(path.strip_prefix(base).expect("under the root").to_path_buf());
+            if path.is_dir() {
+                walk(base, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+/// `gear admin init --check <config>` with no `GEAR_DB`: the ordinary shell of
+/// a machine that has the skills installed and no project store yet.
+fn check_cmd_without_db(home: &Path, config: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_gear"))
+        .args(["admin", "init", "--check", config.to_str().expect("a utf-8 path")])
+        .env("HOME", home)
+        .env_remove("GEAR_DB")
+        .env_remove("GEAR_ADMIN")
+        .env_remove("GEAR_CTX")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .output()
+        .expect("run gear")
+}
+
 /// T-228: `--check` validates a config and changes nothing — it needs no
 /// `GEAR_ADMIN`, opens no store and starts nothing.
 #[test]
@@ -391,6 +424,37 @@ fn check_validates_a_config_and_opens_no_store() {
     let o = check_cmd(&dir, &db, &path, Some("other:heat:1"), false, false);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert!(!db.exists(), "still no store");
+}
+
+/// T-228 (review F1): with no `GEAR_DB`, a check leaves the default store's
+/// directories uncreated too — a valid config and a malformed one alike.
+#[test]
+fn check_creates_no_default_store_without_gear_db() {
+    let dir = scratch("check-home");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("the home");
+    // The skills a config's kinds need, installed before the snapshot: they
+    // are what a set-up machine already holds.
+    for agent in gear_app::skill::SkillAgent::ALL {
+        gear_app::skill::install(*agent, &home).expect("install the skill");
+    }
+    let repo = dir.join("repo");
+    std::fs::create_dir_all(&repo).expect("the repo");
+    let path = config(&dir, &repo);
+
+    let before = tree(&home);
+    let o = check_cmd_without_db(&home, &path);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o).trim(), "config ok: project p, 0 lanes, 0 reviewers");
+    assert_eq!(tree(&home), before, "a check creates no default store directory");
+
+    // The error path changes nothing either.
+    let bad = dir.join("bad.toml");
+    std::fs::write(&bad, "this is not a config\n").expect("the malformed config");
+    let o = check_cmd_without_db(&home, &bad);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("ERROR BAD_FORMAT"), "{}", stderr(&o));
+    assert_eq!(tree(&home), before, "a failed check creates nothing either");
 }
 
 /// T-228: a config with two lanes owning the same path is refused with the

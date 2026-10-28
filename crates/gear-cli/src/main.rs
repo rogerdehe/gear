@@ -287,7 +287,11 @@ fn main() {
     // without touching the user's home (design/13: a read-only command writes
     // nothing).
     let cli = Cli::parse();
-    default_store_path();
+    // T-228 (review F1): `admin init --check` validates a config and changes
+    // nothing, and that includes the directories of the default store.
+    if !checks_a_config(&cli.cmd) {
+        default_store_path();
+    }
     let code = match run(cli) {
         Ok(()) => 0,
         Err(e) => {
@@ -296,6 +300,11 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// True for the read-only validation `gear admin init --check`.
+fn checks_a_config(cmd: &Option<Cmd>) -> bool {
+    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
