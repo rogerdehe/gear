@@ -289,6 +289,9 @@ enum AdminOp {
     },
     /// Stop the background engine (it starts again on the next `gear` call).
     Stop,
+    /// Every store on this machine and the projects in it (T-322): the shared
+    /// store, one per Herdr session, and the registered ones. Read-only.
+    Projects,
 }
 
 fn main() {
@@ -298,7 +301,7 @@ fn main() {
     let cli = Cli::parse();
     // T-228 (review F1): `admin init --check` validates a config and changes
     // nothing, and that includes the directories of the default store.
-    if !checks_a_config(&cli.cmd) {
+    if !writes_nothing(&cli.cmd) {
         default_store_path();
     }
     let code = match run(cli) {
@@ -311,9 +314,16 @@ fn main() {
     std::process::exit(code);
 }
 
-/// True for the read-only validation `gear admin init --check`.
-fn checks_a_config(cmd: &Option<Cmd>) -> bool {
-    matches!(cmd, Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } }))
+/// True for the commands that write nothing at all, not even the directory of
+/// the default store: the read-only validation `gear admin init --check` and
+/// `gear admin projects`, which only reads the stores already on this machine
+/// (T-322).
+fn writes_nothing(cmd: &Option<Cmd>) -> bool {
+    matches!(
+        cmd,
+        Some(Cmd::Admin { op: AdminOp::Init { check: true, .. } })
+            | Some(Cmd::Admin { op: AdminOp::Projects })
+    )
 }
 
 /// Where GEAR keeps its store when `GEAR_DB` is not set: one store per Herdr
@@ -398,6 +408,7 @@ fn run(cli: Cli) -> GearResult<()> {
             cmd_admin_install_skill(&agent, cli.json)
         }
         Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
+        Some(Cmd::Admin { op: AdminOp::Projects }) => cmd_admin_projects(cli.json),
         Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
             cmd_captain_handover(&pane, cli.json)
         }
@@ -421,7 +432,9 @@ fn run(cli: Cli) -> GearResult<()> {
 ///   (T-104);
 /// - `admin init --check` only validates a config: it reads the store's other
 ///   projects for the branch check but writes nothing, so there is nothing to
-///   keep moving (T-228, T-256).
+///   keep moving (T-228, T-256);
+/// - `admin projects` only reads the stores on this machine (T-322): an engine
+///   would open one of them and write it.
 fn starts_engine(cmd: &Option<Cmd>) -> bool {
     match cmd {
         None => true,
@@ -429,6 +442,7 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         Some(Cmd::Run)
         | Some(Cmd::Admin { op: AdminOp::Stop })
         | Some(Cmd::Admin { op: AdminOp::Kickoff })
+        | Some(Cmd::Admin { op: AdminOp::Projects })
         | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
         | Some(Cmd::Board { .. })
         | Some(Cmd::Report { .. })
@@ -474,6 +488,171 @@ fn cmd_admin_kickoff(json: bool) -> GearResult<()> {
         println!("{}", gear_app::kickoff::render(&inventory));
     }
     Ok(())
+}
+
+/// `gear admin projects`: every store on this machine and the projects in it
+/// (T-322).
+///
+/// Since v0.4.5 each Herdr session has its own store ([`default_store_in`]),
+/// and nothing listed them together. This does, and nothing else: the stores
+/// are the shared one, every `~/.local/state/gear/<session>/gear.db` and every
+/// store the registry names, existing files only, each once (by canonical
+/// path), in path order. Each is opened read-only, so nothing is written and
+/// no engine starts.
+fn cmd_admin_projects(json: bool) -> GearResult<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let stores: Vec<StoreProjects> = stores_in(home.as_deref())
+        .into_iter()
+        .map(|path| {
+            let store = path.to_string_lossy().into_owned();
+            match projects_in_store(&path) {
+                Ok(projects) => StoreProjects { store, projects, error: None },
+                Err(detail) => StoreProjects { store, projects: Vec::new(), error: Some(detail) },
+            }
+        })
+        .collect();
+    if json {
+        println!("{}", stores_json(&stores)?);
+    } else {
+        let out = render_stores(&stores);
+        if !out.is_empty() {
+            println!("{out}");
+        }
+    }
+    Ok(())
+}
+
+/// One store as `gear admin projects` reports it: what it holds, or why it
+/// could not be read.
+struct StoreProjects {
+    store: String,
+    projects: Vec<ProjectSummary>,
+    error: Option<String>,
+}
+
+/// What `gear admin projects` says about one project.
+struct ProjectSummary {
+    id: String,
+    session: String,
+    config_version: i64,
+    /// The voyage the project is in; empty when it has none.
+    voyage: String,
+}
+
+impl ProjectSummary {
+    /// The voyage as printed: the id, or `-` when the project is in none.
+    fn voyage_or_dash(&self) -> &str {
+        if self.voyage.is_empty() { "-" } else { &self.voyage }
+    }
+}
+
+/// The stores of this machine, in path order: the shared store, every
+/// `~/.local/state/gear/<session>/gear.db` and every store the registry names
+/// ([`targets_path_in`]). Existing files only, each once: deduplicated by
+/// canonical path, which is also what is printed.
+fn stores_in(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let Some(home) = home else { return Vec::new() };
+    let state = home.join(".local/state/gear");
+    let mut named = vec![state.join("gear.db")];
+    if let Ok(entries) = std::fs::read_dir(&state) {
+        for entry in entries.flatten() {
+            named.push(entry.path().join("gear.db"));
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(targets_path_in(home)) {
+        for line in text.lines() {
+            if let Some((_, db)) = line.split_once('\t') {
+                named.push(std::path::PathBuf::from(db));
+            }
+        }
+    }
+    let mut paths: std::collections::BTreeSet<std::path::PathBuf> = std::collections::BTreeSet::new();
+    for path in named {
+        // Canonicalize already tells whether the file exists, and dedups a
+        // store reached twice (a session directory and a registry line).
+        if let Ok(real) = std::fs::canonicalize(&path) {
+            if real.is_file() {
+                paths.insert(real);
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
+/// The projects of the store at `path`, read-only; `Err` is why it was not
+/// readable (`gear admin projects` prints it and goes on).
+fn projects_in_store(path: &std::path::Path) -> Result<Vec<ProjectSummary>, String> {
+    let mut store = gear_store::Store::open_read_only(path).map_err(|e| e.detail)?;
+    store
+        .read(|tx| {
+            let mut projects = Vec::new();
+            for id in tx.project_ids()? {
+                let Some(row) = tx.get_project(&id)? else { continue };
+                projects.push(ProjectSummary {
+                    session: row.herdr_session,
+                    config_version: row.config_version,
+                    voyage: gear_app::plan::current_voyage(tx, &id)?,
+                    id: row.id,
+                });
+            }
+            Ok(projects)
+        })
+        .map_err(|e| e.detail)
+}
+
+/// [`StoreProjects`] as lines: the store's path, then one line per project, or
+/// `(no projects)`, or `cannot read: <detail>`.
+fn render_stores(stores: &[StoreProjects]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for store in stores {
+        lines.push(store.store.clone());
+        if let Some(detail) = &store.error {
+            lines.push(format!("  cannot read: {detail}"));
+            continue;
+        }
+        if store.projects.is_empty() {
+            lines.push("  (no projects)".to_string());
+            continue;
+        }
+        for project in &store.projects {
+            lines.push(format!(
+                "  {} · session {} · config v{} · voyage {}",
+                project.id,
+                project.session,
+                project.config_version,
+                project.voyage_or_dash()
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// [`StoreProjects`] as JSON: `[{"store", "projects": [{"id", "session",
+/// "config_version", "voyage"}], "error"}]`.
+fn stores_json(stores: &[StoreProjects]) -> GearResult<String> {
+    let doc: Vec<serde_json::Value> = stores
+        .iter()
+        .map(|store| {
+            let projects: Vec<serde_json::Value> = store
+                .projects
+                .iter()
+                .map(|project| {
+                    serde_json::json!({
+                        "id": project.id,
+                        "session": project.session,
+                        "config_version": project.config_version,
+                        "voyage": project.voyage_or_dash(),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "store": store.store,
+                "projects": projects,
+                "error": store.error,
+            })
+        })
+        .collect();
+    serde_json::to_string(&doc).map_err(json_error)
 }
 
 /// Refuse a **first** registration from another project's seat (T-100).

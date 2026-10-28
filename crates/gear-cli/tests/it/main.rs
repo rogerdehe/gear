@@ -6,6 +6,7 @@ mod import_issues_contract;
 mod install_skill_contract;
 mod offline_contract;
 mod plan_check_contract;
+mod projects_contract;
 mod readonly_no_engine;
 mod scratch;
 mod skill_contract;
