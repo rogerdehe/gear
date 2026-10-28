@@ -1605,12 +1605,21 @@ fn open_panel(
 }
 
 /// Print the board once: the JSON or the text, depending on the options.
+///
+/// The text is one static frame: nothing can be pressed after it, so it is the
+/// frame of one project even when the store holds several — the project
+/// switch of the interactive board (`p`, T-317) is not mentioned, exactly as
+/// before the board could switch at all (review of T-317, F1).
 fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<()> {
     if opts.json {
         writeln!(out, "{}", to_json(board)?).map_err(write_error)?;
     } else {
         let size = (screen::DEFAULT_WIDTH, screen::DEFAULT_ROWS);
-        writeln!(out, "{}", frame::frame(board, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
+        // Every view of the frame reads the first project, so a board of one
+        // project draws what it always drew.
+        let mut one = board.clone();
+        one.projects.truncate(1);
+        writeln!(out, "{}", frame::frame(&one, tab_of(opts.view), 0, None, size)).map_err(write_error)?;
     }
     out.flush().map_err(write_error)
 }

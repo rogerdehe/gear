@@ -985,6 +985,32 @@ fn a_board_without_a_project_shows_them_one_at_a_time() {
     board.join().ok();
 }
 
+/// T-317 (review round 1, F1): the board printed once — a pipe, no terminal —
+/// is one static frame, so it is the frame of one project: nothing can be
+/// pressed after it, and it does not promise a key. `run` takes the
+/// printed-once path whenever stdin or stdout is not a terminal, which is the
+/// case in every test process.
+#[test]
+fn a_board_printed_once_promises_no_project_key() {
+    let mut store = world_with_two_projects();
+    let opts = Options { project: None, color: false, ..Options::default() };
+    let mut out: Vec<u8> = Vec::new();
+    gear_board::run(&mut store, &opts, &mut out, None).expect("the printed board");
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let title = plain(text.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · a"), "the first project prints: {title}");
+    assert!(!title.contains("next of"), "a printed board promises no key: {title}");
+
+    // The JSON is the whole board, unchanged: the switch is only the text's
+    // own business.
+    let opts = Options { json: true, project: None, ..Options::default() };
+    let mut out: Vec<u8> = Vec::new();
+    gear_board::run(&mut store, &opts, &mut out, None).expect("the board as JSON");
+    let doc: serde_json::Value = serde_json::from_slice(&out).expect("JSON");
+    let projects = doc["projects"].as_array().expect("the projects");
+    assert_eq!(projects.len(), 2, "the JSON holds both projects: {doc}");
+}
+
 /// T-317: a board of one project has no suffix to explain, and neither does
 /// a board opened with `--project`.
 #[test]
