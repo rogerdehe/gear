@@ -73,6 +73,13 @@ pub fn start_reviews(
     // Submitted with nothing telling the captain (another project's M0), so
     // the captain is told to settle it (v0.4.8).
     if config.temps.is_none() {
+        // T-273 (F1 of its review): a mechanical hand-in merges on its gate
+        // alone, and that settlement needs no reviewer at all. It is settled
+        // here, before a missing `[temps]` turns into a manual-settlement
+        // request; the ordinary and stale-contract hand-ins keep today's
+        // notice.
+        let hand_ins = tasks_to_review(store, project)?;
+        start_hand_in_reviews(store, herdr, cfg, &config, profiles, project, &hand_ins, &mut report, now)?;
         tell_captain_of_hand_ins_without_reviewers(store, project, now)?;
         return Ok(report);
     }
@@ -139,7 +146,6 @@ fn start_hand_in_reviews(
     report: &mut ReviewReport,
     now: Ts,
 ) -> GearResult<()> {
-    let Some(temps) = config.temps.as_ref() else { return Ok(()) };
     for task in tasks {
         // T-273: a mechanical task is not reviewed. The attempt is settled as
         // a pass in this tick, and the merge gate decides; a task without
@@ -163,6 +169,11 @@ fn start_hand_in_reviews(
                 )),
             }
         }
+        // Without `[temps]` there is no reviewer to start (T-273, F1 of its
+        // review): this guard comes **after** the mechanical branch, so a
+        // mechanical hand-in is settled in a project without reviewers too.
+        // The remaining hand-ins keep `tell_captain_of_hand_ins_without_reviewers`.
+        let Some(temps) = config.temps.as_ref() else { continue };
         // T-69 / B02-04: an attempt whose checkout already failed three times
         // is not tried again. A recovered seat (the park's slot freed) must
         // not restart the loop with a fresh generation and a fresh budget; a
@@ -2493,6 +2504,49 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
         assert_eq!(store.read(|tx| tx.verdicts_of_task("p", "T-1")).unwrap().len(), 1);
         assert!(starts(&herdr).is_empty());
+    }
+
+    /// T-273 (F1 of its review): a mechanical hand-in merges on its gate
+    /// alone, so it is settled in a project without `[temps]` too — no
+    /// reviewer configuration is needed for that, and the captain gets no
+    /// manual-settlement request for it.
+    #[test]
+    fn a_mechanical_hand_in_settles_without_reviewers() {
+        let mut store = world_mechanical(CONFIG_NO_REVIEWERS, Some("delete three dead fns"));
+        let mut herdr = FakeHerdr::new();
+
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+
+        assert_eq!(report.settled, vec!["p:T-1/1".to_string()], "{report:?}");
+        assert!(report.settle_failed.is_empty(), "{report:?}");
+        assert!(report.started.is_empty(), "{report:?}");
+        let attempt = store.read(|tx| tx.get_attempt("p", "T-1", 1)).unwrap().unwrap();
+        assert_eq!(attempt.state, AttemptState::Accepted, "no reviewer is needed: {report:?}");
+        let verdict = store
+            .read(|tx| tx.verdicts_of_task("p", "T-1"))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(verdict.passed);
+        assert_eq!(verdict.evidence.as_deref(), Some("mechanical: delete three dead fns"));
+        assert_eq!(verdict.by_seat, "engine");
+        // The merge follows as for a captain's pass.
+        crate::merge::merge_passed(&mut store, &mut herdr, &cfg(), "p", T0 + 11).unwrap();
+        let mut merges: Vec<_> = Vec::new();
+        for state in [OpState::Intended, OpState::Executing] {
+            merges.extend(
+                store
+                    .read(|tx| tx.ops_in_state("p", state))
+                    .unwrap()
+                    .into_iter()
+                    .filter(|op| op.kind == OpKind::Merge),
+            );
+        }
+        assert_eq!(merges.len(), 1, "the merge is queued: {merges:?}");
+        assert_eq!(merges[0].task.as_deref(), Some("T-1"));
+        // One Info line, and no manual-settlement request for it.
+        assert_eq!(thread(&mut store, "mechanical:T-1").len(), 1);
+        assert!(thread(&mut store, "verdict:T-1:1").is_empty(), "no manual-settlement request");
     }
 
     /// T-273 contract v2 (hull's question M-4507): a mechanical task whose
