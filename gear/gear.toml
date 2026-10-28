@@ -100,4 +100,4 @@ variant = "high"
 integration = "dev"
 release = "main"
 # The gate runs every test in parallel and warns about each test over 10 s (user, 2026-10-26).
-gate = "cargo build --workspace --all-targets && scripts/test.sh"
+gate = "make gate"   # T-238 (M4.2): 4 build jobs and 4 test threads on the shared machine
