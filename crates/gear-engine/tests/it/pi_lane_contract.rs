@@ -167,6 +167,7 @@ fn active_world(config_text: &str) -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             gear_app::tasks::start_attempt(tx, "toy", "T-1", "toy:heat", 1, T0)?;
             gear_app::tasks::on_delivery_confirmed(tx, "toy", "T-1", 1, T0)?;

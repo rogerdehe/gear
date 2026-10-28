@@ -271,7 +271,9 @@ fn job_packet(store: &mut Store, config: &ProjectConfig, task: &ReviewTask, dire
     let saved = store.read(|tx| tx.get_task(&config.project.id, &task.task))?;
     let repo = saved.as_ref().map(|row| config.repo_of_task(row)).unwrap_or_else(|| config.repo_of_lane(&task.lane));
     let branch = gear_model::branch::expand(&config.conventions.task_branch, &config.project.id, &task.lane, &task.task);
-    Ok(format!("Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, config.conventions.remote, repo.integration, task.task, task.attempt))
+    // T-267: the reviewer's first `gear` is what confirms the delivery, so the
+    // direction packet asks for it as the review packet does.
+    Ok(format!("Run `gear` first (it records that you got this). Direction check of {} attempt {} at {} (branch {}). Read the contract (gear --show {}) and the diff from {}/{}. Answer one question: is this work going the way the contract asks (right files, right approach, contract read correctly)? Do not judge what is not built yet; no line-level remarks; no build, no tests; at most 10 minutes. Hand in: gear send --kind result --task {} --attempt {} --direction \"ok\" when nothing is misread, else --direction \"<up to three problems: the contract sentence misread and what to do instead>\".", task.task, task.attempt, task.candidate, branch, task.task, config.conventions.remote, repo.integration, task.task, task.attempt))
 }
 
 /// A direction check passed when the first word of its body is `ok`, in any
@@ -2164,6 +2166,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 // The lane hands the result in.
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -2342,6 +2345,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -2360,6 +2364,7 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0 + 5,
+                    mechanical: None,
                 })?;
                 let mut task = tx.get_task("p", "T-1")?.unwrap();
                 task.contract_version = 2;
@@ -2497,6 +2502,10 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert_eq!(initial["sha"], first);
         assert_eq!(store.read(|tx| tx.rounds_of_task("p", "T-1")).unwrap().iter().filter(|r| r.role == "direction").count(), 1);
         let packet = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap().payload["text"].as_str().unwrap().to_string();
+        // T-267: the reviewer's first `gear` is what confirms the delivery,
+        // so the direction packet asks for it first, as the review packet
+        // does.
+        assert!(packet.starts_with("Run `gear` first"), "the direction packet asks for `gear` first: {packet}");
         assert!(packet.contains("Direction check of T-1 attempt 1"));
         let failed = store.read(|tx| tx.last_op("p:review-1", OpKind::Deliver)).unwrap().unwrap();
         store.write(|tx| tx.set_op_state("p", &failed.id, gear_model::OpState::Failed, Some("agent_not_ready"), T0 + 10)).unwrap();
@@ -3780,6 +3789,7 @@ review = [
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-2", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-2", 1, T0)?;
@@ -4297,6 +4307,7 @@ profile = "opencode"
                 project: "p".into(), task: task.id.clone(), version: 1,
                 goal: "next job".into(), accept: "review it".into(),
                 evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0,
+                mechanical: None,
             })?;
             gear_app::tasks::start_attempt(tx, "p", &task.id, "p:heat", 1, T0)?;
             gear_app::tasks::on_delivery_confirmed(tx, "p", &task.id, 1, T0)?;

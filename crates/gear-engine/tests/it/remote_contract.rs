@@ -223,6 +223,7 @@ fn world(config: &str) -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             Ok(())
         })

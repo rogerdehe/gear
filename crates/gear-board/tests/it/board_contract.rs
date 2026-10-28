@@ -988,6 +988,7 @@ fn world_with_a_long_graph() -> Store {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             Ok(())
         })

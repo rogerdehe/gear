@@ -189,6 +189,7 @@ fn world() -> Store {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 if task.id == "T-141" {
                     // The task was accepted: it waits for its merge.

@@ -321,6 +321,7 @@ fn done_world(repo: &Path, candidate: &str) -> Store {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })?;
         tx.insert_attempt(&AttemptRow {
             session_ref: None,

@@ -16,7 +16,7 @@ fn world() -> (Store, String) {
             lane: Some("heat".into()), milestone: None, required: false, contract_version: 1, deps: vec![], followup_of: None,
             wait_on: None, wait_cond: None, rework_note: None, estimate_min: None,  issue: None,updated: T0 })?;
         tx.insert_contract(&ContractRow { project: "p".into(), task: "T-7".into(), version: 1, goal: "g".into(), accept: "a".into(),
-            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0 })?;
+            evidence_files: vec![], evidence_due_min: None, body: String::new(), created: T0, mechanical: None, })?;
         start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
         let op = tx.insert_op(&NewOp { project: "p".into(), seat: "p:heat".into(), generation: 1, kind: OpKind::Deliver,
             task: Some("T-7".into()), attempt: Some(1), ref_msg: None, plan_version: None,

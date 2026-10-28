@@ -58,6 +58,7 @@ fn world() -> (Store, FakeHerdr, EngineCfg) {
                 evidence_due_min: None,
                 body: String::new(),
                 created: NOW,
+                mechanical: None,
             })?;
             tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, NOW)?;
             tasks::on_delivery_confirmed(tx, "p", "T-1", 1, NOW)?;

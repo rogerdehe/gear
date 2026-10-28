@@ -119,6 +119,7 @@ fn world(on_quota_review: &str) -> (Store, SeatRow) {
                 evidence_due_min: None,
                 body: String::new(),
                 created: T0,
+                mechanical: None,
             })?;
             start_attempt(tx, "p", "T-7", "p:heat", 1, T0)?;
             let mut attempt = tx.attempts_of_task("p", "T-7")?.pop().unwrap();

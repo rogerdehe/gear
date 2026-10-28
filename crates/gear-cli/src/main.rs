@@ -2860,6 +2860,7 @@ mod tests {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)
@@ -3051,6 +3052,7 @@ mod tests {
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
                 gear_app::tasks::on_delivery_confirmed(tx, "p", "T-1", 1, T0)?;
@@ -3693,6 +3695,7 @@ path="api"
                     evidence_due_min: Some(90),
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 Ok(())
             })
@@ -4277,6 +4280,7 @@ path="api"
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })
                 .unwrap();
                 gear_app::tasks::start_attempt(tx, "p", "T-7", "p:heat", 1, T0).unwrap();
@@ -4378,6 +4382,7 @@ path="api"
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         }
     }
 
@@ -5200,6 +5205,7 @@ path="api"
                         evidence_due_min: None,
                         body: String::new(),
                         created: T0,
+                        mechanical: None,
                     })?;
                 }
                 gear_app::tasks::start_attempt(tx, "p", "T-1", "p:heat", 1, T0)?;
@@ -6357,6 +6363,7 @@ path="api"
                     evidence_due_min: None,
                     body: String::new(),
                     created: T0,
+                    mechanical: None,
                 })?;
                 Ok(())
             })

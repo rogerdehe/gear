@@ -89,6 +89,7 @@ fn world() -> (tempfile::TempDir, Store) {
             evidence_due_min: None,
             body: String::new(),
             created: T0,
+            mechanical: None,
         })
     })
     .unwrap();

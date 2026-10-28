@@ -68,7 +68,7 @@ fn tasks_roundtrip_order_and_update() {
 fn contracts_roundtrip() {
     let mut s = store();
     let c = ContractRow { project: "p".into(), task: "T-1".into(), version: 1, goal: "g".into(), accept: "a".into(),
-        evidence_files: vec!["notes/x.md".into()], evidence_due_min: Some(60), body: "b".into(), created: NOW };
+        evidence_files: vec!["notes/x.md".into()], evidence_due_min: Some(60), body: "b".into(), created: NOW, mechanical: None, };
     s.write(|tx| tx.insert_contract(&c)).unwrap();
     assert_eq!(s.read(|tx| tx.get_contract("p", "T-1", 1)).unwrap(), Some(c.clone()));
     assert_eq!(s.read(|tx| tx.get_contract("p", "T-1", 2)).unwrap(), None);
