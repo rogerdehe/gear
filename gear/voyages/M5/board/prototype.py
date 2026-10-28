@@ -5,6 +5,7 @@ Keys: 1-5 / Tab views · [ ] older / newer voyage · j/k or arrows select · Ent
 import curses
 import os
 import sys
+import unicodedata
 
 NOW = "14:32"
 # ---------------------------------------------------------------- fake data, one block per voyage
@@ -616,10 +617,20 @@ class FakeCurses:
         pass
 
 
+def cell_width(ch):
+    """How many terminal cells a character takes (curses counts cells, not characters): a wide character of the
+    East Asian wide or fullwidth class takes two, a combining or format character none, everything else one."""
+    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
 class FakeWin:
-    """A curses window that keeps its cells instead of opening a screen: getmaxyx, erase, addnstr (clipped at the
-    window's right edge, as curses clips), chgat (sets a run of cells' attribute, keeps their characters),
-    refresh, keypad."""
+    """A curses window that keeps its cells instead of opening a screen: getmaxyx, erase, addnstr (n characters,
+    a character that does not fit in the line's remaining cells is not drawn, chgat (sets a run of cells'
+    attribute, keeps their characters), refresh, keypad. A wide character is one glyph in two cells: the first cell
+    holds it, the second is its continuation (a space, tail[y][x] is True), both with the same attribute, as a
+    terminal draws it."""
     def __init__(self, h=GOLDEN_H, w=GOLDEN_W):
         self.h, self.w = h, w
         self.erase()
@@ -629,12 +640,30 @@ class FakeWin:
     def erase(self):
         self.chars = [[" "] * self.w for _ in range(self.h)]
         self.attrs = [[0] * self.w for _ in range(self.h)]
+        self.tail = [[False] * self.w for _ in range(self.h)]      # the second cell of a wide character
+
+    def _blank(self, y, x):
+        """Overwrite one cell: a wide character whose other half sits here loses that half, as curses blanks it."""
+        if self.tail[y][x]:
+            self.chars[y][x] = " "; self.tail[y][x] = False
+        if x + 1 < self.w and self.tail[y][x + 1]:
+            self.chars[y][x + 1] = " "; self.tail[y][x + 1] = False
 
     def addnstr(self, y, x, s, n, a=0):
         if not (0 <= y < self.h and 0 <= x < self.w): return
-        for i, c in enumerate(s[:max(0, min(n, self.w - x))]):
-            self.chars[y][x + i] = c
-            self.attrs[y][x + i] = a
+        cx = x
+        for c in s[:max(0, n)]:
+            cw = cell_width(c)
+            if cw == 0:                                        # combining: joins the character before it
+                if cx > x: self.chars[y][cx - 1] += c
+                continue
+            if cx + cw > self.w: return                        # does not fit in this line's cells
+            for i in range(cw):
+                self._blank(y, cx + i)
+                self.chars[y][cx + i] = c if i == 0 else " "
+                self.attrs[y][cx + i] = a
+                self.tail[y][cx + i] = i > 0
+            cx += cw
 
     def chgat(self, y, x, n, a):
         if not (0 <= y < self.h): return
