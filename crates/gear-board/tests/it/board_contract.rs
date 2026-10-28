@@ -919,6 +919,111 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     board.join().ok();
 }
 
+/// A session with two projects, neither of them named: both are the
+/// board's, and the store is the session's.
+fn world_with_two_projects() -> Store {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            for (project, pane) in [("a", "w1:p1"), ("b", "w1:p2")] {
+                testing::seed_project(tx, project, "sess", T0)?;
+                testing::seed_active_seat(
+                    tx, project, "data", SeatRole::Lane, pane, "opencode", T0,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// T-317 (M4.2 #35): a board opened without a project shows the session's
+/// projects one at a time, and `p` walks through them.
+#[test]
+fn a_board_without_a_project_shows_them_one_at_a_time() {
+    let mut store = world_with_two_projects();
+    let opts = Options {
+        project: None,
+        refresh: Duration::from_millis(50),
+        ..Options::default()
+    };
+    let pty = Pty::open();
+    let slave = pty.slave;
+    let (left, done) = std::sync::mpsc::channel();
+
+    let board = std::thread::spawn(move || {
+        let mut out = FdWriter(slave);
+        let mut keys = gear_board::Terminal::on(slave);
+        let result = run_with(&mut store, &opts, &mut out, &mut keys, None);
+        let _ = left.send(result.is_ok());
+    });
+
+    // The first frame shows the first project and says how many there are:
+    // the title starts with the project and ends with the key's sentence.
+    let mut frames = Frames { master: pty.master, buffer: String::new() };
+    let frame = frames.next("LANES", Duration::from_secs(5));
+    let title = plain(frame.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+
+    // `p` shows the second project.
+    press(pty.master, b"p");
+    let frame = frames.next("GEAR · b", Duration::from_secs(5));
+    let title = plain(frame.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · b · p: next of 2 projects"), "{title}");
+
+    // `p` on the last project comes back to the first.
+    press(pty.master, b"p");
+    let frame = frames.next("GEAR · a", Duration::from_secs(5));
+    let title = plain(frame.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · a · p: next of 2 projects"), "{title}");
+
+    press(pty.master, b"q");
+    assert!(
+        done.recv_timeout(Duration::from_secs(5)).unwrap_or(false),
+        "the board did not leave on `q`"
+    );
+    board.join().ok();
+}
+
+/// T-317: a board of one project has no suffix to explain, and neither does
+/// a board opened with `--project`.
+#[test]
+fn a_board_of_one_project_has_no_project_key() {
+    let mut store = world();
+    let board = build(
+        &mut store,
+        &Options { project: None, ..Options::default() },
+        T0,
+    )
+    .unwrap();
+    let text = gear_board::frame::frame(
+        &board,
+        gear_board::frame::Tab::Now,
+        0,
+        None,
+        (80, 24),
+    );
+    let title = plain(text.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(!title.contains("next of"), "{title}");
+
+    // Even with more projects in the store, `--project` names the one shown.
+    store
+        .write(|tx| testing::seed_project(tx, "other", "sess", T0))
+        .unwrap();
+    let board = build(&mut store, &options(), T0).unwrap();
+    let text = gear_board::frame::frame(
+        &board,
+        gear_board::frame::Tab::Now,
+        0,
+        None,
+        (80, 24),
+    );
+    let title = plain(text.lines().next().unwrap_or_default());
+    assert!(title.starts_with("GEAR · p"), "{title}");
+    assert!(!title.contains("next of"), "{title}");
+}
+
 /// F6: a frame that is still being written is not a frame: the reader waits
 /// for the footer line that ends it.
 #[test]

@@ -324,7 +324,7 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
     let voyage = project.and_then(|project| project.voyages.first());
 
     // Row 0: the title and the clock.
-    let title = match (project, voyage) {
+    let mut title = match (project, voyage) {
         (Some(project), Some(voyage)) => format!(
             "GEAR · {} · {}: {}",
             project.project, voyage.milestone, voyage.title
@@ -332,6 +332,14 @@ fn header(canvas: &mut Canvas, board: &Board, tab: Tab) {
         (Some(project), None) => format!("GEAR · {}", project.project),
         _ => "GEAR".to_string(),
     };
+    // A board opened without a project holds the session's projects: the
+    // title says that the others are one key away (T-317).
+    if board.projects.len() > 1 {
+        title.push_str(&format!(
+            " · p: next of {} projects",
+            board.projects.len()
+        ));
+    }
     canvas.put_styled(0, 0, &title, Style::bold());
     if board.engine == crate::EngineState::Down {
         // The engine is down: the next `gear` call starts it. It says so on
