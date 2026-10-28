@@ -357,11 +357,14 @@ pub(crate) fn ready_tasks_of(tx: &Tx<'_>, seat: &SeatRow) -> GearResult<Vec<Task
     let tasks = tx.tasks_of_project(&seat.project)?;
     let lane_repo = tx.get_project(&seat.project)?.and_then(|p| gear_app::config::parse(&p.config_toml).ok())
         .map(|config| config.repo_of_lane(&seat.name).path);
-    let done: BTreeSet<String> = tasks
-        .iter()
-        .filter(|task| task.state == TaskState::Done)
-        .map(|task| task.id.clone())
-        .collect();
+    // A dependency counts only when its work is merged (T-236, F-76): Done is
+    // set at the review pass, before the merge reaches the integration branch.
+    let mut done: BTreeSet<String> = BTreeSet::new();
+    for task in tasks.iter().filter(|task| task.state == TaskState::Done) {
+        if gear_app::tasks::merged_at(tx, &seat.project, &task.id)?.is_some() {
+            done.insert(task.id.clone());
+        }
+    }
     Ok(tasks
         .into_iter()
         .filter(|task| task.lane.as_deref() == Some(seat.name.as_str()))
