@@ -40,6 +40,10 @@ profile = "opencode"
 gate = "make test"
 "#;
 
+/// The gate line of [`MINIMAL`]: the tests that name other conventions put
+/// their lines next to it, in the same section.
+const GATE_LINE: &str = "gate = \"make test\"";
+
 fn fields(issues: &[ConfigIssue]) -> Vec<&str> {
     issues.iter().map(|i| i.field.as_str()).collect()
 }
@@ -780,8 +784,11 @@ fn branch_templates_default_to_the_names_gear_uses() {
     assert_eq!(cfg.conventions.review_branch, gear_model::branch::REVIEW_BRANCH);
     assert_eq!(validate(&cfg), vec![], "the defaults are valid");
 
-    let text = format!(
-        "{MINIMAL}\n[conventions]\ntask_branch = \"{{project}}/{{lane}}/t{{n}}\"\nreview_branch = \"{{project}}/review/t{{n}}\"\n"
+    // T-255 gave the fixture its own `[conventions]` section: the templates
+    // join it rather than a second one.
+    let text = MINIMAL.replace(
+        GATE_LINE,
+        "gate = \"make test\"\ntask_branch = \"{project}/{lane}/t{n}\"\nreview_branch = \"{project}/review/t{n}\"",
     );
     let cfg = parse(&text).unwrap();
     assert_eq!(cfg.conventions.task_branch, "{project}/{lane}/t{n}");
@@ -791,7 +798,11 @@ fn branch_templates_default_to_the_names_gear_uses() {
 #[test]
 fn a_branch_template_must_be_expandable_and_usable() {
     let with = |field: &str, value: &str| {
-        parse(&format!("{MINIMAL}\n[conventions]\n{field} = \"{value}\"\n")).unwrap()
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\n{field} = \"{value}\""),
+        ))
+        .unwrap()
     };
     // No `{n}`: every task would share one branch.
     assert_eq!(
@@ -834,7 +845,11 @@ fn a_seat_branch_names_the_project_and_the_seat() {
     assert_eq!(validate(&cfg), vec![], "the default seat branch is valid");
 
     let with = |value: &str| {
-        parse(&format!("{MINIMAL}\n[conventions]\nseat_branch = \"{value}\"\n")).unwrap()
+        parse(&MINIMAL.replace(
+            GATE_LINE,
+            &format!("gate = \"make test\"\nseat_branch = \"{value}\""),
+        ))
+        .unwrap()
     };
     // No `{seat}`: every seat would share one worktree branch.
     assert_eq!(
