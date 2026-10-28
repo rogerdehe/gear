@@ -98,7 +98,7 @@ One plan file per voyage, edited in place: `gear/voyages/<milestone>/plan.md` (o
 gear plan apply gear/voyages/M1/plan.md
 ```
 
-**The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): a Herdr tab running `gear board` in the project's repository, restarted if one from an earlier voyage is still open, and check it shows this project and this voyage.
+**The first thing after a voyage's first apply: open the board for the user** (user, 2026-10-28): a Herdr tab running `gear board` (the board labels its tab `<project> board`) in the project's repository, restarted if one from an earlier voyage is still open, and check it shows this project and this voyage.
 
 After a successful apply GEAR rewrites the file: `base=` becomes the applied version, each `## NEW` header gets its id (`## T-<n>`), and `# Verdicts` is removed. Re-applying it changes nothing. One wrong section, field or value rejects the whole draft (`BAD_FORMAT`, with the line) and nothing is written. When the voyage lands, the file is its record; the next voyage gets a new file.
 
