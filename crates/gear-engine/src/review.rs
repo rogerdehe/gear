@@ -913,12 +913,14 @@ fn prepare_review_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn H
     let same_path = |a: &str, b: &str| a == b || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b);
     // T-425: a warm worktree may still hold a half-done merge that an
     // interrupted job left behind, and git refuses the stash and the checkout
-    // in it ("could not write index"). `merge --abort` clears the merge before
-    // the stash reads the tree, `reset --hard` clears what is left before the
-    // checkout. Both are ignored: no merge in progress is no error.
+    // in it ("could not write index"). `merge --abort` clears the merge, then
+    // `reset --hard` clears what is left — both **before** the stash, because
+    // an abort can fail when a cleanly merged file was edited again ("Entry 'b'
+    // not uptodate") and the fallible stash would then return before the reset
+    // (F2 of the review). Both are ignored: no merge in progress is no error.
     let _ = review_git(git, path, &["merge", "--abort"]);
-    stash_review_tree(git, store, project, path, &task.task, task.attempt, now)?;
     let _ = review_git(git, path, &["reset", "--hard"]);
+    stash_review_tree(git, store, project, path, &task.task, task.attempt, now)?;
     let listing = review_git(git, repo, &["worktree", "list", "--porcelain"]).map_err(git_error)?;
     for entry in listing.split("\n\n") {
         let mut lines = entry.lines();
@@ -4058,6 +4060,50 @@ review = [{ model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning
         assert!(prepare_review_tree(&RealReviewGit, &mut store, &mut herdr, "p", work.to_str().unwrap(), seat.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
         assert_eq!(sh(&seat, "git rev-parse HEAD"), candidate);
         assert_eq!(sh(&seat, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// F2 of the T-425 review: a half-done merge with a cleanly merged file
+    /// edited again makes `git merge --abort` fail ("Entry 'b' not uptodate"),
+    /// so the ignored reset must run before the fallible evidence stash; the
+    /// warm worktree then checks out and counts no seat failure.
+    #[test]
+    fn a_half_done_merge_with_an_edited_file_checks_out_after_the_reset() {
+        let root = crate::testtmp::temp("gear-review-half-merge");
+        sh(&root, "git init -q --bare origin.git && git init -q -b dev work");
+        let work = root.join("work");
+        std::fs::write(work.join("a"), "base").unwrap();
+        std::fs::write(work.join("b"), "base").unwrap();
+        sh(&work, "git add -A && git -c user.name=a -c user.email=a@b commit -qm base && git remote add origin ../origin.git");
+        publish(&work, "dev");
+        let candidate = sh(&work, "git rev-parse HEAD");
+        // The reviewer's merge state: main and other both change a, other also
+        // changes b; the merge conflicts in a and merges b cleanly, and b is
+        // then edited again without staging.
+        let seat = root.join("seat");
+        sh(&work, &format!("git worktree add -q -b home/seat {} dev", seat.display()));
+        sh(&seat, "git checkout -q -b other && printf other > a && printf other > b && git add -A && git -c user.name=a -c user.email=a@b commit -qm other");
+        sh(&seat, "git checkout -q home/seat && printf main > a && git add a && git -c user.name=a -c user.email=a@b commit -qm main");
+        sh(&seat, "git -c user.name=a -c user.email=a@b merge other; true");
+        assert_eq!(sh(&seat, "git rev-parse -q --verify MERGE_HEAD").len(), 40, "the worktree is mid-merge");
+        std::fs::write(seat.join("b"), "edited again").unwrap();
+        // git refuses the abort, and with it the stash: only the reset recovers.
+        let abort = sh(&seat, "git merge --abort; echo $?");
+        assert_ne!(abort.lines().last().unwrap_or_default(), "0", "the abort refuses the edited file");
+
+        let mut store = world(CONFIG);
+        REVIEW_GIT_FAKE.with(|fake| fake.set(false));
+        let mut herdr = FakeHerdr::new();
+        store
+            .write(|tx| testing::seed_active_seat(tx, "p", "review-9", SeatRole::Temp, "w9:p9", "codex", T0))
+            .unwrap();
+        let seat_row = store.read(|tx| tx.get_seat("p:review-9")).unwrap().unwrap();
+        let task = ReviewTask { task: "T-1".into(), attempt: 1, writer: "p:heat".into(), lane: "heat".into(), candidate: candidate.clone() };
+        assert!(prepare_seat_tree(&RealReviewGit, &mut store, &mut herdr, &seat_row, work.to_str().unwrap(), seat.to_str().unwrap(), "origin", "review/t1", &task, T0).unwrap());
+        assert_eq!(sh(&seat, "git rev-parse HEAD"), candidate);
+        assert_eq!(sh(&seat, "git rev-parse --abbrev-ref HEAD"), "review/t1");
+        let fails = store.read(|tx| tx.get_meta(&checkout_fails_key("p:review-9"))).unwrap().unwrap_or_default();
+        assert!(fails.is_empty(), "the seat counted {fails:?}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
