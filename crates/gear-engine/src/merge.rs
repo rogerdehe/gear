@@ -195,11 +195,22 @@ pub fn merge_passed(
     // One read of the merge ops per tick, not one full scan per passed task:
     // the scan per task grew with every op ever written and held a core.
     let queued = merge_keys(store, project)?;
-    for (task, lane, candidate, attempt, attempt_candidate) in passed {
+    for (task, lane, candidate, attempt, attempt_candidate, mechanical) in passed {
         if queued.contains(&(task.clone(), attempt)) {
             continue;
         }
         let branch = branch_of(&config.conventions.task_branch, project, &lane, &task);
+        let mut payload = serde_json::json!({
+            "branch": branch,
+            "candidate": candidate,
+            "attempt_candidate": attempt_candidate,
+            "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
+        });
+        // T-405: the merge op of a mechanically settled attempt says so, so
+        // the merge does not require a review branch that never existed.
+        if mechanical {
+            payload["mechanical"] = serde_json::json!(true);
+        }
         store.write(|tx| {
             tx.insert_op(&NewOp {
                 project: project.to_string(),
@@ -212,12 +223,7 @@ pub fn merge_passed(
                 attempt: Some(attempt),
                 ref_msg: None,
                 plan_version: None,
-                payload: serde_json::json!({
-                    "branch": branch,
-                    "candidate": candidate,
-                    "attempt_candidate": attempt_candidate,
-                    "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
-                }),
+                payload,
                 created: now,
             })?;
             Ok(())
@@ -1046,12 +1052,13 @@ fn attempt_already_merged(
 }
 
 /// The tasks of the project whose **current** attempt has a passing verdict:
-/// (task, lane, candidate, attempt, the attempt's candidate).
+/// (task, lane, candidate, attempt, the attempt's candidate, whether the pass
+/// was the engine's mechanical one).
 ///
 /// An attempt that already carries a merge time is left out (design §10.7, row
 /// B03-01): its work is on the integration branch — it landed with another
 /// task's merge — so the engine must not merge it again.
-fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String)>> {
+fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String, bool)>> {
     store.read(|tx| {
         let mut passed = Vec::new();
         for task in tx.tasks_of_project(project)? {
@@ -1085,10 +1092,34 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             else {
                 continue;
             };
-            passed.push((task.id.clone(), lane, verdict.candidate, verdict.attempt, latest.candidate.clone().unwrap_or_default()));
+            // T-405: a mechanical pass is the engine's own verdict (T-273),
+            // and its note says so: such a task has no reviewer, so no review
+            // branch, and its merge must not wait for one.
+            let mechanical = settled_mechanically(&verdict);
+            passed.push((
+                task.id.clone(),
+                lane,
+                verdict.candidate,
+                verdict.attempt,
+                latest.candidate.clone().unwrap_or_default(),
+                mechanical,
+            ));
         }
         Ok(passed)
     })
+}
+
+/// T-405: whether the pass is the engine's own mechanical settlement (T-273)
+/// rather than a reviewer's or the captain's: the verdict whose note starts
+/// `mechanical:`. Such a task never had a reviewer, so it never has a review
+/// branch, and its merge must not require one.
+fn settled_mechanically(verdict: &gear_store::VerdictRow) -> bool {
+    verdict.passed
+        && verdict.by_seat == "engine"
+        && verdict
+            .evidence
+            .as_deref()
+            .is_some_and(|note| note.starts_with("mechanical:"))
 }
 
 /// The other tasks of the project with a candidate: (task, candidate, whether
@@ -1762,15 +1793,23 @@ fn merge_one_locked(
     // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
     //    cannot slip an unreviewed commit in.
-    //    The review branch is *required*: a merge that publishes the task
-    //    without its review is a partial merge (F6 of the T-12 review). The
-    //    integration branch is not touched: the merge fails before it, so
-    //    dev stays where it was. A candidate that is already merged needs no
-    //    merge commit; its review branch still merges with it.
+    //    The review branch is *required* for a reviewed merge: a merge that
+    //    publishes the task without its review is a partial merge (F6 of the
+    //    T-12 review). A mechanically settled attempt has no reviewer, so no
+    //    review branch (T-405): its op carries `"mechanical": true`, and the
+    //    pinned candidate merges alone. The integration branch is not touched:
+    //    the merge fails before it, so dev stays where it was. A candidate
+    //    that is already merged needs no merge commit; its review branch still
+    //    merges with it.
+    let mechanical = op
+        .payload
+        .get("mechanical")
+        .and_then(|mechanical| mechanical.as_bool())
+        .unwrap_or(false);
     let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
-    let has_review = review_found.is_ok();
-    if !has_review && !already {
+    let has_review = review_found.is_ok() && !mechanical;
+    if !has_review && !mechanical && !already {
         let reason = review_found.unwrap_err();
         return Step::Failed(Failed::stuck(format!(
             "{task}: the review branch {review_ref} is missing on {remote_name}\n{reason}\n\
@@ -6316,6 +6355,70 @@ gate = "{project_gate}"
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", op.updated + 1)).unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
         assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
+    }
+
+    #[test]
+    fn a_mechanical_task_merges_without_a_review_branch() {
+        // T-405: a mechanically settled task has no reviewer, so origin never
+        // had a review branch for it. Its merge op carries `"mechanical":
+        // true`, and the pinned candidate merges into dev alone.
+        let scratch = Scratch::new("mechanical");
+        sh(&scratch.root, "git -C origin.git update-ref -d refs/heads/review/t5");
+        let (worktree, candidate) = scratch.prepared();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-5",
+                    1,
+                    1,
+                    &candidate,
+                    "ops/reports/T-5.md",
+                    0,
+                )?;
+                // T-273: the engine settles a mechanical hand-in itself; the
+                // note of its verdict says so.
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: "T-5".into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.clone(),
+                    passed: true,
+                    evidence: Some("mechanical: the task is a rename".into()),
+                    by_seat: "engine".into(),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        accept(&mut store, "T-5", 10);
+
+        let mut cfg = test_cfg();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Confirmed, "{op:?}");
+        assert_eq!(
+            op.payload["mechanical"],
+            serde_json::json!(true),
+            "the op of a mechanically settled attempt says so"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(!log.contains("review"), "no review branch was merged: {log}");
+        assert!(scratch.dev_has_task_commit());
+        let branches = scratch.origin_branches();
+        assert!(!branches.contains("heat/t5"), "the task branch is closed: {branches}");
     }
 
     #[test]
