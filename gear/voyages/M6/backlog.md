@@ -63,3 +63,6 @@
 
 ## macOS scans every new build binary
 - 2026-10-29 M5: syspolicyd (Gatekeeper) ran at about 250 % CPU for hours: every test binary, build script and fresh tool a lane, reviewer or merge gate builds is assessed on its first run, so git calls and test starts slowed many times over on a busy machine, and a reviewer saw compiles stall on signature checks. The fix is the machine's: `sudo spctl developer-mode enable-terminal`, then System Settings → Privacy & Security → Developer Tools on for the terminal app that hosts Herdr, and restart it. Candidate for the skill (`gear admin kickoff` could check it and say so on macOS), since every Rust or Go fleet on a Mac hits it.
+
+## A warm reviewer is told the previous review's directory
+- 2026-10-29 M5 (F-185, F-197): a reviewer seat reused for another task got a packet whose working directory was the previous review's worktree (review/t336 for T-331, review/t407 for T-420); the reviewer found the right one itself each time, at a few minutes' cost. The packet of a warm seat should name the worktree of the task it now reviews.
