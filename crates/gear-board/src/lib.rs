@@ -475,6 +475,15 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The fresh tokens of the task's development rounds (T-363): the `dev`
+    /// and `rework` rounds, apart from the review rounds.
+    pub dev_tokens: Option<i64>,
+    /// The fresh tokens of the task's review rounds (T-363).
+    pub review_tokens: Option<i64>,
+    /// The cost of the task's development rounds (T-363).
+    pub dev_cost: Option<f64>,
+    /// The cost of the task's review rounds (T-363).
+    pub review_cost: Option<f64>,
     /// The tasks it depends on (T-349): the board's forecast waits for them to
     /// merge before the task can start.
     pub deps: Vec<String>,
@@ -757,6 +766,10 @@ pub fn project_for(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            dev_tokens: side_tokens_of(tx, project, &task.id, Side::Development)?,
+            review_tokens: side_tokens_of(tx, project, &task.id, Side::Review)?,
+            dev_cost: side_cost_of(tx, project, &task.id, Side::Development)?,
+            review_cost: side_cost_of(tx, project, &task.id, Side::Review)?,
             deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
@@ -776,6 +789,18 @@ pub fn project_for(
             }),
         }
     }
+    // One lane order for every view that has a row or a column per lane
+    // (T-363, the captain's decision for Tasks made once for all): the lanes
+    // by their first task in plan order, a lane with no task after them in its
+    // present (seat) order. It is the prototype's order, and the lane colours
+    // follow it. The sort is stable, so the lanes without a task keep their
+    // order.
+    lanes.sort_by_key(|lane| {
+        tasks
+            .iter()
+            .position(|task| lane_of(task) == lane.lane)
+            .unwrap_or(usize::MAX)
+    });
     // Every registered lane stays in the model, even with nothing queued: an
     // empty lane is exactly what the captain has to see to refill it (the
     // review of T-9).
@@ -1428,8 +1453,15 @@ fn actual_min_of(
 /// so a sum is never a total that hides an unknown part (F5).
 fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> {
     let rounds = tx.rounds_of_task(project, task)?;
+    Ok(tokens_of_rounds(rounds.iter()))
+}
+
+/// The fresh tokens of the rounds a filter keeps: the body of [`tokens_of`].
+fn tokens_of_rounds<'a>(rounds: impl Iterator<Item = &'a RoundRow>) -> Option<i64> {
     let mut total = 0;
-    for round in &rounds {
+    let mut any = false;
+    for round in rounds {
+        any = true;
         // The fields' presence says what was counted: a round that counted
         // nothing is a measured zero, not an unknown (F5). A round that has
         // none of the four counted fields counted nothing at all: the sum
@@ -1440,11 +1472,41 @@ fn tokens_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i64>> 
             && round.cache_read.is_none()
             && round.cache_write.is_none()
         {
-            return Ok(None);
+            return None;
         }
         total += round.input.unwrap_or(0) + round.output.unwrap_or(0) + round.cache_write.unwrap_or(0);
     }
-    Ok((!rounds.is_empty()).then_some(total))
+    any.then_some(total)
+}
+
+/// The side of the work a round counts for (T-363): a rework is development.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Development,
+    Review,
+}
+
+/// The side a round's role counts for, when it counts for one.
+fn side_of(role: &str) -> Option<Side> {
+    match role {
+        "dev" | "rework" => Some(Side::Development),
+        "review" => Some(Side::Review),
+        _ => None,
+    }
+}
+
+/// The fresh tokens of one side of the task's work (T-363): the rules of
+/// [`tokens_of`] over its development rounds or its review rounds only.
+fn side_tokens_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    side: Side,
+) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    Ok(tokens_of_rounds(
+        rounds.iter().filter(|round| side_of(&round.role) == Some(side)),
+    ))
 }
 
 /// The cache reads of a task's rounds (§4.3), counted apart from the fresh
@@ -1468,16 +1530,37 @@ fn cache_read_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<i6
 /// so a sum is never a total that hides an unknown part (F5).
 fn cost_of(tx: &Tx<'_>, project: &str, task: &str) -> GearResult<Option<f64>> {
     let rounds = tx.rounds_of_task(project, task)?;
+    Ok(cost_of_rounds(rounds.iter()))
+}
+
+/// The cost of the rounds a filter keeps: the body of [`cost_of`].
+fn cost_of_rounds<'a>(rounds: impl Iterator<Item = &'a RoundRow>) -> Option<f64> {
     let mut total = 0.0;
-    for round in &rounds {
+    let mut any = false;
+    for round in rounds {
+        any = true;
         // A round that was never priced is unknown, not a price of zero:
         // the sum that hides it is not a total (F5 of the T-166 review).
         let Some(cost) = round.cost_usd else {
-            return Ok(None);
+            return None;
         };
         total += cost;
     }
-    Ok((!rounds.is_empty()).then_some(total))
+    any.then_some(total)
+}
+
+/// The cost of one side of the task's work (T-363): the rules of [`cost_of`]
+/// over its development rounds or its review rounds only.
+fn side_cost_of(
+    tx: &Tx<'_>,
+    project: &str,
+    task: &str,
+    side: Side,
+) -> GearResult<Option<f64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    Ok(cost_of_rounds(
+        rounds.iter().filter(|round| side_of(&round.role) == Some(side)),
+    ))
 }
 
 /// The captain's decisions of the voyage, as the board shows them (§7.1).
@@ -1894,6 +1977,7 @@ pub fn run_with(
         tab: tab_of(opts.view),
         selected: 0,
         detail: false,
+        opened: Vec::new(),
         size: keys.size(),
     };
     let mut panel: Option<Vec<style::Line>> = None;
@@ -2125,6 +2209,23 @@ pub fn run_with(
                 }
                 Event::Key('\r') | Event::Key('\n') => {
                     let board = kept.as_ref().expect("the board was just built or kept");
+                    // The Cost view opens a lane's tasks instead of a panel
+                    // (T-363): `Enter` on a lane shows them under it, and on
+                    // the same lane hides them again.
+                    if screen.tab == frame::Tab::Cost {
+                        if let Some(lane) =
+                            board.projects.first().and_then(|p| p.lanes.get(screen.selected))
+                        {
+                            match screen.opened.iter().position(|open| *open == lane.lane) {
+                                Some(index) => {
+                                    screen.opened.remove(index);
+                                }
+                                None => screen.opened.push(lane.lane.clone()),
+                            }
+                        }
+                        panel = None;
+                        break;
+                    }
                     panel = open_panel(board, store, screen.tab, screen.selected, screen.size.0)?;
                     break;
                 }
@@ -2216,14 +2317,9 @@ fn open_panel(
             Ok(Some(rows))
         }
         frame::Tab::Cost => {
-            // The task panel of the task the row names: its rounds with their
-            // tokens.
-            let tasks = frame::token_tasks(project);
-            let Some((_, task)) = tasks.get(selected) else {
-                return Ok(None);
-            };
-            let rows = store.read(|tx| graph::styled_panel(tx, &project.project, &task.id, now_ts()))?;
-            Ok(Some(rows))
+            // The Cost view opens no panel (T-363): `Enter` on a lane shows
+            // its tasks under the lane's row.
+            Ok(None)
         }
         frame::Tab::Log => Ok(None),
     }
@@ -2253,6 +2349,7 @@ fn print_once(board: &Board, opts: &Options, out: &mut dyn Write) -> GearResult<
                     tab: tab_of(opts.view),
                     selected: 0,
                     detail: false,
+                    opened: Vec::new(),
                     size,
                 },
                 None
