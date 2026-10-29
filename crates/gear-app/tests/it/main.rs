@@ -2,7 +2,7 @@
 /// A fresh scratch directory under the temp directory, unique to this test
 /// and this name, removed when the test is done (T-412): a passing run leaves
 /// nothing behind. The same name in one test is the same directory.
-pub fn temp(name: &str) -> PathBuf {
+pub fn temp(name: &str) -> std::path::PathBuf {
     use std::cell::{Cell, RefCell};
     use std::sync::atomic::{AtomicU64, Ordering};
     static THREADS: AtomicU64 = AtomicU64::new(0);
@@ -12,7 +12,7 @@ pub fn temp(name: &str) -> PathBuf {
         /// The number of this thread, given at its first scratch directory.
         thread: Cell<Option<u64>>,
         /// The directories it made, by name.
-        dirs: RefCell<Vec<(String, PathBuf)>>,
+        dirs: RefCell<Vec<(String, std::path::PathBuf)>>,
     }
 
     impl Drop for Made {
