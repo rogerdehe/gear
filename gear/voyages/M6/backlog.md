@@ -75,3 +75,6 @@
 
 ## No command files a bug issue on the forge
 - 2026-10-29 M5 (another project's captain): a voyage policy asked for a GitHub issue per production bug a test found; GEAR's [github] mode only imports issues and comments on task PRs, so the captain filed them with gh by hand. A captain command that files an issue through the engine's forge ops (once, retried, recorded) would keep that path inside GEAR.
+
+## Hand-in and review checks against the packet
+- 2026-10-29 M5 (another project's rework audit: 58 of 135 reviewed tasks passed first time): a plan apply that warns when two Ready packets name one file; a pre-hand-in check that the diff stays in the task's allowed files and the report matches the adopted contract; a reviewer start that verifies its worktree, branch, task, attempt and adopted contract before it reads anything; a captain's direction-check answer carried into the review packet.
