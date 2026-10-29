@@ -7,7 +7,8 @@
 use gear_app::time::{self, Filter};
 use gear_store::testing;
 use gear_store::{
-    AttemptRow, AttemptStep, ContractRow, NewFriction, RoundKey, RoundTokens, TaskRow, VoyageRow,
+    AttemptRow, AttemptStep, ContractRow, NewDecision, NewFriction, RoundKey, RoundTokens, TaskRow,
+    VoyageRow,
 };
 use gear_model::{AttemptState, SeatRole, TaskState};
 use std::collections::BTreeSet;
@@ -510,6 +511,106 @@ fn a_voyage_shows_only_its_own_friction() {
         .unwrap();
     let bodies: Vec<&str> = report.frictions.iter().map(|row| row.body.as_str()).collect();
     assert_eq!(bodies, vec!["the friction of M4"], "only this voyage's friction");
+}
+
+/// T-335: the confirmed goal changes are a part of the report of their own
+/// (M5 kickoff, S3), right after the `done:` sentence, with the before and the
+/// after of every change.
+#[test]
+fn the_report_lists_the_goal_change_of_its_voyage() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.upsert_voyage(&voyage("M1", T0)).unwrap();
+        // The user confirmed the change after departure (T-410).
+        tx.insert_decision_if_new(&NewDecision {
+            project: "p".into(),
+            key: "g1".into(),
+            voyage: "M1".into(),
+            at: "2026-10-27 12:30".into(),
+            kind: "user".into(),
+            what: "done of M1 changed from \"users install v0.1.0\" to \"users install v0.2.0\""
+                .into(),
+            why: Some("confirmed by the user".into()),
+            alt: None,
+            changes: None,
+            star: true,
+            source: "gear".into(),
+            line: None,
+            plan_version: None,
+        })
+        .unwrap();
+        // A captain decision of another kind is not a goal change.
+        tx.insert_decision_if_new(&NewDecision {
+            project: "p".into(),
+            key: "d1".into(),
+            voyage: "M1".into(),
+            at: "2026-10-27 12:40".into(),
+            kind: "cut".into(),
+            what: "the light procedure moved to M5".into(),
+            why: None,
+            alt: None,
+            changes: None,
+            star: false,
+            source: "plan".into(),
+            line: None,
+            plan_version: None,
+        })
+        .unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let report = s
+        .read(|tx| gear_app::voyage::report(tx, "p", "M1", false, T0 + 60))
+        .unwrap();
+    assert_eq!(report.goal_changes.len(), 1, "one goal change: {:?}", report.goal_changes);
+    let text = gear_app::voyage::render(&report);
+    let lines: Vec<&str> = text.lines().collect();
+    let done = lines.iter().position(|line| *line == "Done (M1)").expect("the done part");
+    let part = lines
+        .iter()
+        .position(|line| *line == "Goal changes (M1)")
+        .unwrap_or_else(|| panic!("the goal changes part: {text}"));
+    assert!(part > done, "the part follows the done sentence: {text}");
+    let change = lines[part + 1];
+    assert!(
+        change.contains("users install v0.1.0") && change.contains("users install v0.2.0"),
+        "the before and the after: {change}"
+    );
+    assert!(
+        !text.contains("the light procedure moved to M5"),
+        "another kind is not a goal change: {text}"
+    );
+    // `--json` carries the same list.
+    let doc = serde_json::to_value(&report).unwrap();
+    let changes = doc["goal_changes"].as_array().expect("the goal changes in JSON");
+    assert_eq!(changes.len(), 1, "{doc}");
+    assert!(
+        changes[0]["what"].as_str().unwrap_or_default().contains("users install v0.2.0"),
+        "{doc}"
+    );
+}
+
+/// T-335: a voyage without a confirmed goal change says so, once.
+#[test]
+fn a_voyage_without_a_goal_change_says_so() {
+    let mut s = world();
+    s.write(|tx| {
+        tx.upsert_voyage(&voyage("M1", T0)).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    let report = s
+        .read(|tx| gear_app::voyage::report(tx, "p", "M1", false, T0 + 60))
+        .unwrap();
+    assert!(report.goal_changes.is_empty());
+    let text = gear_app::voyage::render(&report);
+    let lines: Vec<&str> = text.lines().collect();
+    let part = lines
+        .iter()
+        .position(|line| *line == "Goal changes (M1)")
+        .unwrap_or_else(|| panic!("the goal changes part: {text}"));
+    assert_eq!(lines[part + 1], "  no goal change", "{text}");
+    assert_eq!(text.matches("no goal change").count(), 1, "said once: {text}");
 }
 
 /// The lane set of a voyage's report is the project's lanes.

@@ -208,6 +208,108 @@ fn board(store: &mut Store) -> gear_board::Board {
     .unwrap()
 }
 
+/// T-335: the board carries the voyage's confirmed goal changes apart from
+/// the decisions list, so the S4 header can draw them red. A goal change is a
+/// decision of kind `user` with source `gear` (T-410): another kind, or the
+/// goal change of another voyage, is not one.
+#[test]
+fn the_goal_changes_are_the_gear_user_decisions_of_the_measured_voyage() {
+    let mut store = world();
+    let departure = now_seconds() - 7200;
+    store
+        .write(|tx| {
+            // An older voyage with a goal change of its own: not this board's.
+            tx.upsert_voyage(&gear_store::VoyageRow {
+                project: "p".into(),
+                milestone: "M1".into(),
+                title: "the first voyage".into(),
+                done: Some("it is done".into()),
+                bar: None,
+                eta: Some("8h".into()),
+                departure: Some(departure),
+                departure_tasks: Some(1),
+                departure_estimate_min: Some(40),
+                updated: departure,
+            })?;
+            // Two goal changes of the measured voyage, in the order they
+            // appeared, and a decision of another kind beside them.
+            for (key, at, what) in [
+                (
+                    "g1",
+                    "2026-10-27 12:30",
+                    "done of M4 changed from \"old done\" to \"new done\"",
+                ),
+                (
+                    "g2",
+                    "2026-10-27 12:40",
+                    "eta of M4 changed from \"8h\" to \"10h\"",
+                ),
+            ] {
+                tx.insert_decision_if_new(&NewDecision {
+                    project: "p".into(),
+                    key: key.into(),
+                    voyage: "M4".into(),
+                    at: at.into(),
+                    kind: "user".into(),
+                    what: what.into(),
+                    why: Some("confirmed by the user".into()),
+                    alt: None,
+                    changes: None,
+                    star: true,
+                    source: "gear".into(),
+                    line: None,
+                    plan_version: None,
+                })?;
+            }
+            // A gear decision of another kind is not a goal change.
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "g3".into(),
+                voyage: "M4".into(),
+                at: "2026-10-27 12:50".into(),
+                kind: "cut".into(),
+                what: "the light procedure moved to M5".into(),
+                why: None,
+                alt: None,
+                changes: None,
+                star: false,
+                source: "gear".into(),
+                line: None,
+                plan_version: None,
+            })?;
+            // And the goal change of the older voyage.
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "g4".into(),
+                voyage: "M1".into(),
+                at: "2026-10-26 09:00".into(),
+                kind: "user".into(),
+                what: "eta of M1 changed from \"6h\" to \"8h\"".into(),
+                why: Some("confirmed by the user".into()),
+                alt: None,
+                changes: None,
+                star: true,
+                source: "gear".into(),
+                line: None,
+                plan_version: None,
+            })
+        })
+        .unwrap();
+    let board = board(&mut store);
+    let changes = &board.projects[0].goal_changes;
+    let whats: Vec<&str> = changes.iter().map(|change| change.what.as_str()).collect();
+    assert_eq!(
+        whats,
+        vec![
+            "done of M4 changed from \"old done\" to \"new done\"",
+            "eta of M4 changed from \"8h\" to \"10h\"",
+        ],
+        "the gear user decisions of the measured voyage, oldest first"
+    );
+    assert_eq!(changes[0].at, "2026-10-27 12:30");
+    assert_eq!(changes[0].why.as_deref(), Some("confirmed by the user"));
+}
+
 #[test]
 fn the_decisions_view_shows_the_log_the_star_and_the_frictions() {
     let mut store = world();
