@@ -16,6 +16,16 @@ const MERGED: i64 = NOW - 6000;
 /// A project with two voyages: M1 landed with a retired lane `old` that
 /// merged T-1, and M2 sailing on the lane `hull`.
 fn world() -> Store {
+    world_with_m2(true)
+}
+
+/// The same project with only the landed M1: no voyage sails, so the board
+/// shows the landed one.
+fn world_landed() -> Store {
+    world_with_m2(false)
+}
+
+fn world_with_m2(sailing: bool) -> Store {
     let mut store = Store::open_in_memory().unwrap();
     store
         .write(|tx| {
@@ -25,22 +35,27 @@ fn world() -> Store {
             let old = testing::seed_active_seat(tx, "p", "old", SeatRole::Lane, "w1:p3", "pi", NOW)?;
             tx.set_seat_state(&old.id, SeatState::Retired, None, NOW)?;
             voyage(tx, "M1", NOW - 7200)?;
-            voyage(tx, "M2", NOW - 3600)?;
             // M1: one task it merged, and one it cut.
             task(tx, "T-1", 1, "M1", "old", TaskState::Done)?;
             task(tx, "T-4", 4, "M1", "old", TaskState::Cancelled)?;
-            // M2: one done, one ready.
-            task(tx, "T-2", 2, "M2", "hull", TaskState::Done)?;
-            task(tx, "T-3", 3, "M2", "hull", TaskState::Ready)?;
             decision(tx, "d1", "M1", "the old lane lands with M1")?;
-            decision(tx, "d2", "M2", "the hull lane keeps the work")?;
+            if sailing {
+                voyage(tx, "M2", NOW - 3600)?;
+                // M2: one done, one ready.
+                task(tx, "T-2", 2, "M2", "hull", TaskState::Done)?;
+                task(tx, "T-3", 3, "M2", "hull", TaskState::Ready)?;
+                decision(tx, "d2", "M2", "the hull lane keeps the work")?;
+            }
             Ok(())
         })
         .unwrap();
     store
         .write(|tx| {
             attempt(tx, "T-1", "p:old", NOW - 6600, MERGED)?;
-            attempt(tx, "T-2", "p:hull", NOW - 3000, NOW - 2400)
+            if sailing {
+                attempt(tx, "T-2", "p:hull", NOW - 3000, NOW - 2400)?;
+            }
+            Ok(())
         })
         .unwrap();
     store
@@ -289,4 +304,44 @@ fn a_task_that_left_the_voyage_is_named_but_not_counted() {
     // The voyage it joined records no move, so it names nothing as moved out.
     let m2 = board(&mut store, Some("M2"));
     assert!(m2.moved_out.is_empty(), "{:?}", m2.moved_out);
+}
+
+/// The text of the graph row a task's branch leaves `dev` on: the fork row's
+/// `starts +<h>h<mm>m`, or `None` for a row that is not one.
+fn starts_of(plan: &ProjectBoard) -> Vec<String> {
+    gear_board::frame::task_rows(plan, NOW, 160)
+        .into_iter()
+        .map(|row| row.text)
+        .filter(|text| text.contains("starts +"))
+        .collect()
+}
+
+/// T-362 (F1 of the review of attempt 1): the Tasks view measures its rows from
+/// the shown voyage's own departure, so a landed voyage picked with `[` reads
+/// its tasks' starts there — M1 departed at NOW − 7200 and its task started at
+/// NOW − 6600, so its branch leaves dev at +0h10m, not 50 minutes before it.
+#[test]
+fn the_tasks_view_measures_a_landed_voyage_from_its_own_departure() {
+    let mut store = world();
+    let plan = board(&mut store, Some("M1"));
+    assert_eq!(
+        plan.shown.as_ref().and_then(|voyage| voyage.departure),
+        Some(NOW - 7200),
+        "the shown voyage is M1"
+    );
+    assert_eq!(starts_of(&plan), vec!["       starts +0h10m"], "M1's rows");
+}
+
+/// The same for a project whose only voyage has landed: the board shows it, and
+/// the Tasks view still measures from its departure, not from `now`.
+#[test]
+fn a_landed_only_project_measures_the_tasks_view_from_its_departure() {
+    let mut store = world_landed();
+    let plan = board(&mut store, None);
+    assert_eq!(plan.shown.as_ref().map(|voyage| voyage.milestone.as_str()), Some("M1"));
+    assert!(
+        plan.shown.as_ref().is_some_and(|voyage| !voyage.sailing),
+        "the landed voyage is the one shown"
+    );
+    assert_eq!(starts_of(&plan), vec!["       starts +0h10m"], "M1's rows");
 }
