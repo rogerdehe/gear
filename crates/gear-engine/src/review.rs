@@ -996,6 +996,10 @@ fn prepare_seat_tree(git: &dyn ReviewGit, store: &mut Store, herdr: &mut dyn Her
             if seats.len() >= 2 {
                 mark_checkout_stuck(store, &seat.project, &task.task, task.attempt, &reason)?;
                 tell_captain(store, &seat.project, task, &reason, now)?;
+                // F1 of the T-425 review: a stuck attempt is skipped on every
+                // later tick, so this seat would never reach its third failure
+                // — end its assignment here, or a warm seat keeps it forever.
+                end_stuck_seat_assignment(store, herdr, seat, now)?;
             }
             // The third failure on one seat is the worktree's, not the task's:
             // the seat leaves the pool and the captain removes the worktree.
@@ -1664,6 +1668,40 @@ fn checkout_fails_key(seat: &str) -> String {
 /// checked out, not one seat's broken worktree.
 fn checkout_failed_seats_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.review_checkout_seats.{project}.{task}.{attempt}")
+}
+
+/// End the assignment of the seat whose checkout turned an attempt stuck
+/// (F1 of the T-425 review). The attempt is skipped on every later tick, so the
+/// seat never comes back for its next job and would keep what it holds now: a
+/// warm `Standby` seat keeps `engine.review_pending.<seat>`, so `free_seat`,
+/// `release_idle_standby` and `release_finished_reviews` all leave it and at
+/// quota no other hand-in starts. Its reservation is cleared; a seat that is
+/// still onboarding goes through the normal release, which voids its pending
+/// binding, clears its reservation and frees its temp slot.
+fn end_stuck_seat_assignment(
+    store: &mut Store,
+    herdr: &mut dyn HerdrAct,
+    seat: &SeatRow,
+    now: Ts,
+) -> GearResult<()> {
+    // The seat in the store is the one that holds the reservation: the caller's
+    // row may predate the start it just tried.
+    let current = store.read(|tx| tx.get_seat(&seat.id))?.unwrap_or_else(|| seat.clone());
+    if current.state == SeatState::Standby {
+        store.write(|tx| tx.set_meta(&pending_review_key(&current.id), ""))?;
+        return Ok(());
+    }
+    let _ = crate::release::release_one(
+        store,
+        herdr,
+        &current.project,
+        &current,
+        None,
+        now,
+        "checkout stuck",
+    )
+    .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
+    Ok(())
 }
 
 /// Retire a seat whose worktree failed its checkout three times (T-425): the
@@ -5782,6 +5820,55 @@ profile = "opencode"
         REVIEW_GIT_FAIL.with(|fail| fail.set(false));
         let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 30).unwrap();
         assert!(report.started.is_empty(), "{report:?}");
+    }
+
+    /// F1 of the T-425 review: when a second seat's failed checkout makes the
+    /// attempt stuck, that seat must not keep its assignment — a stuck attempt
+    /// is skipped on every later tick, so a warm seat would hold its
+    /// reservation forever and no other hand-in could take it at quota.
+    #[test]
+    fn second_warm_seat_is_free_after_attempt_becomes_stuck() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap();
+        // `p:review-1` is warm: its T-1 is done and it stands by for a job.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-1")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+                tx.clear_seat_task("p:review-1")
+            })
+            .unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        // Another seat already failed on this attempt: this one failure makes
+        // the attempt stuck.
+        store
+            .write(|tx| tx.set_meta(&checkout_failed_seats_key("p", "T-2", 1), "p:review-0"))
+            .unwrap();
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = Some("p-review-1".into()));
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
+        assert!(checkout_stuck(&mut store, "p", "T-2", 1).unwrap(), "two seats failed on the candidate");
+        assert_eq!(
+            store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(),
+            Some(""),
+            "the warm seat's reservation ends with the stuck attempt"
+        );
+        // The attempt is skipped from now on; the warm seat is free for the
+        // next hand-in.
+        REVIEW_GIT_FAIL_ON.with(|on| *on.borrow_mut() = None);
+        for tick in 0..5 {
+            let at = T0 + 1000 + tick;
+            crate::release::release_finished_reviews(&mut store, &mut herdr, "p", at).unwrap();
+            start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", at).unwrap();
+        }
+        let seat = free_seat(&mut store, "p", "T-3", "codex").unwrap();
+        assert_eq!(
+            seat.map(|seat| seat.id).as_deref(),
+            Some("p:review-1"),
+            "the warm second seat must be available for another hand-in"
+        );
     }
 
     fn queue_review_job(store: &mut Store, n: i64, lane: &str) {
