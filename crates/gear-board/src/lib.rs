@@ -237,6 +237,10 @@ pub struct ProjectBoard {
     /// decisions on its `done`, `bar` and `eta`, oldest first; empty without
     /// a measured voyage. The S4 header draws them red.
     pub goal_changes: Vec<GoalChangeBoard>,
+    /// The latest confirmed goal change of the shown voyage (T-358), as
+    /// (time, before, after): the S4 header draws it red under the goal box.
+    /// `None` while the voyage's goal never changed.
+    pub goal_changed: Option<(String, String, String)>,
     /// The goal check of the shown voyage (T-354): each clause of the goal and
     /// whether it is met. The plan's clauses when the store has them, else the
     /// clauses of the voyage's done sentence, every one unmet.
@@ -1062,6 +1066,8 @@ pub fn project_for(
         project,
         workload.as_ref().map(|voyage| voyage.milestone.as_str()),
     )?;
+    // The latest of them is the line under the goal box (T-358).
+    let goal_changed = goal_changed_of(&goal_changes);
     // The goal check of the shown voyage (T-354): the plan's own clauses, else
     // the clauses of its done sentence, unmet.
     let goal_check = match shown.as_ref() {
@@ -1123,6 +1129,7 @@ pub fn project_for(
         quota: quota_readings(tx, project)?,
         decisions,
         goal_changes,
+        goal_changed,
         goal_check,
         frictions,
         // The overlaps with the integration branch (T-188): information
@@ -1690,6 +1697,18 @@ fn goal_changes_of(
         .collect())
 }
 
+/// The latest confirmed goal change of the voyage (T-358), as (time, before,
+/// after): its words come from the decision T-410 (C6) records,
+/// `<field> of <M> changed from "<old>" to "<new>"`. `None` without a goal
+/// change, or when its words are not that record's.
+fn goal_changed_of(changes: &[GoalChangeBoard]) -> Option<(String, String, String)> {
+    let change = changes.last()?;
+    let (_, rest) = change.what.split_once(" changed from \"")?;
+    let (before, rest) = rest.split_once("\" to \"")?;
+    let (after, _) = rest.split_once('"')?;
+    Some((change.at.clone(), before.to_string(), after.to_string()))
+}
+
 /// The goal check of a voyage (T-354): the meta `goal-check:<project>:<milestone>`
 /// holds the plan's clauses as a JSON array of `{"met": bool, "text": str}`.
 /// Without it the clauses of the voyage's done sentence stand in, every one
@@ -2101,6 +2120,10 @@ pub fn run_with(
     // walks through them.
     let mut shown = 0usize;
     let mut first = true;
+    // The voyage the whole board shows (T-357): the one the options name, else
+    // the measured one. `[`, `]` and a click on a label pick another, and every
+    // frame is built with the pick.
+    let mut milestone: Option<String> = opts.milestone.clone();
     // The board that was built last, and what it was built from (T-384). The
     // whole board is kept: a refresh that finds nothing changed redraws it
     // instead of building it again, and a key that only moves the selection,
@@ -2139,7 +2162,8 @@ pub fn run_with(
             || version != kept_version
             || at.duration_since(built_at) >= hook::stale_after();
         if stale {
-            match build_with_agents(store, opts, now_ts(), agents.as_deref()) {
+            let shown_opts = Options { milestone: milestone.clone(), ..opts.clone() };
+            match build_with_agents(store, &shown_opts, now_ts(), agents.as_deref()) {
                 Ok(mut board) => {
                     // The frame draws the shown project: the project the board
                     // was opened with is the only one then, and every other
@@ -2286,6 +2310,35 @@ pub fn run_with(
                     panel = None;
                     break;
                 }
+                // `[` and `]` pick the voyage the whole board shows (T-357):
+                // the list is newest first, so `[` goes one entry older and `]`
+                // one newer, and the oldest and the newest voyage stay where
+                // they are.
+                Event::Key(character @ ('[' | ']')) => {
+                    let picked = kept.as_ref().and_then(|board| {
+                        let project = board.projects.first()?;
+                        let shown = project.shown.as_ref()?.milestone.as_str();
+                        let index = project
+                            .voyage_list
+                            .iter()
+                            .position(|entry| entry.milestone == shown)?;
+                        let next = if character == '[' {
+                            (index + 1).min(project.voyage_list.len() - 1)
+                        } else {
+                            index.saturating_sub(1)
+                        };
+                        project.voyage_list.get(next).map(|entry| entry.milestone.clone())
+                    });
+                    if let Some(picked) = picked {
+                        milestone = Some(picked);
+                        screen.selected = 0;
+                        panel = None;
+                        // The kept board shows another voyage: the next frame
+                        // is built for the pick.
+                        kept = None;
+                        break;
+                    }
+                }
                 // The `d` key unfolds the header and folds it again (T-354):
                 // the tab and the selection stay where they were.
                 Event::Key('d') | Event::Key('D') => {
@@ -2360,7 +2413,24 @@ pub fn run_with(
                     // (T-353).
                     let column = x.saturating_sub(1) as usize;
                     let row = y.saturating_sub(1) as usize;
-                    if row == layout.tab_row {
+                    if row == 0 {
+                        // A click on a voyage's label on the first row picks
+                        // that voyage (T-357): the whole board shows it.
+                        let picked = layout
+                            .voyages
+                            .iter()
+                            .find(|(first, last, _)| column >= *first && column <= *last)
+                            .map(|(_, _, named)| named.clone());
+                        if let Some(picked) = picked {
+                            milestone = Some(picked);
+                            screen.selected = 0;
+                            panel = None;
+                            // The kept board shows another voyage: the next
+                            // frame is built for the pick.
+                            kept = None;
+                            break;
+                        }
+                    } else if row == layout.tab_row {
                         let picked = layout
                             .tabs
                             .iter()

@@ -48,9 +48,10 @@ impl Tab {
         }
     }
 
-    /// The label of the tab on the tab row: ` 1 Now `.
+    /// The label of the tab on the tab row: `  1 Now  `, two spaces on each
+    /// side of the key and the title (T-356).
     pub fn label(self) -> String {
-        format!(" {} {} ", self.number(), self.title())
+        format!("  {} {}  ", self.number(), self.title())
     }
 
     /// The tab of a number (the keys 1 to 4).
@@ -482,10 +483,10 @@ pub fn offset_of(picks: &[usize], selected: usize, top: usize, last: usize) -> u
 /// voyage of the project with the shown one lit, the second row names the
 /// shown voyage, and the third starts the goal box with its quality bar.
 ///
-/// The tabs follow the box directly, and the view's heading comes two rows
-/// after the tab row (its own row and the spacer under the tabs). Every text
-/// is put at the prototype's column and cut at the edge, as
-/// [`Canvas::put_styled`] cuts it.
+/// The tabs follow the box directly, framed by a rule above them and one under
+/// them (T-356), and the view's heading comes three rows after the tab row
+/// (the bottom rule, the spacer under the bar). Every text is put at the
+/// prototype's column and cut at the edge, as [`Canvas::put_styled`] cuts it.
 ///
 /// It returns the layout it drew ([`Layout`]), which is what the clicks and
 /// the view need.
@@ -589,6 +590,20 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         row += 1;
     }
 
+    // The latest goal change, when the user agreed to one: a red line under
+    // the box with when, before and after (T-358, README change 2).
+    if let Some((time, before, after)) = project.and_then(|project| project.goal_changed.as_ref()) {
+        let line = format!(
+            "{:<14}{}: {} \u{2192} {} (the user agreed; Decisions shows both)",
+            "Goal changed",
+            clock_of(time),
+            before,
+            after
+        );
+        canvas.put_styled(1, row, &line, Style::fg(Color::Bad).and_bold());
+        row += 1;
+    }
+
     // The header's rows under the box (README changes 3, 4, 6 and 14): folded,
     // three rows with the goal check, the milestone the voyage is on, the time
     // against the plan and the tasks (T-354); unfolded with `d`, one row per
@@ -602,24 +617,48 @@ fn header(canvas: &mut Canvas, board: &Board, screen: &Screen) -> Layout {
         };
     }
 
-    // The tab row follows after one blank row: the tab bar draws its frame
-    // around it (T-356), so the blank row is where its top rule goes.
+    // The tab row follows after one blank row, and the blank row is where the
+    // tab bar's top rule goes: the bar is framed (T-356), its bottom rule
+    // under the tabs and one blank row under that, so the view's heading is
+    // three rows below the tabs. A tab is its key and its title between two
+    // spaces, a rule between it and the next, and the clicked columns are the
+    // tab's own and the rule after it, as the prototype's are.
     let tab_row = row + 1;
+    let width = canvas.width;
+    let accent = Style::fg(Color::Acc);
+    canvas.put_styled(
+        1,
+        tab_row - 1,
+        &format!("╭{}╮", "─".repeat(width.saturating_sub(4))),
+        accent,
+    );
     let mut tabs = Vec::new();
     let mut x = 1;
     for tab in Tab::all() {
         let label = tab.label();
-        if tab == screen.tab {
-            canvas.put(x, tab_row, &label);
-            canvas.reverse(tab_row, x, label.chars().count());
+        let count = label.chars().count();
+        canvas.put_styled(x, tab_row, "│", accent);
+        // The shown tab is lit: the accent colour, bold, in reverse video; a
+        // tab that is not shown is bold alone, as the prototype draws it.
+        let style = if tab == screen.tab {
+            Style::fg(Color::Acc).and_bold().reversed_if(true)
         } else {
-            canvas.put_styled(x, tab_row, &label, Style::fg(Color::Dim));
-        }
-        tabs.push((x, x + label.chars().count() - 1, tab));
-        x += label.chars().count() + 1;
+            Style::bold()
+        };
+        canvas.put_styled(x + 1, tab_row, &label, style);
+        tabs.push((x, x + count, tab));
+        x += count + 1;
     }
+    canvas.put_styled(x, tab_row, "│", accent);
+    canvas.put_styled(width.saturating_sub(2), tab_row, "│", accent);
+    canvas.put_styled(
+        1,
+        tab_row + 1,
+        &format!("╰{}╯", "─".repeat(width.saturating_sub(4))),
+        accent,
+    );
 
-    Layout { top: tab_row + 2, tab_row, tabs, voyages }
+    Layout { top: tab_row + 3, tab_row, tabs, voyages }
 }
 
 /// The numbers the header's time and tasks rows read (T-354), all in
