@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, RoundRow, SeatRow, Store, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -809,7 +809,7 @@ pub fn project_with_agents(
         deps,
         graph,
         graph_lanes,
-        quota: quota_readings(tx)?,
+        quota: quota_readings(tx, project)?,
         decisions,
         frictions,
         // The overlaps with the integration branch (T-188): information
@@ -1156,14 +1156,34 @@ fn dep_line(node: &DepNode) -> String {
     line
 }
 
-/// The minutes a task took: from its first attempt to its merge, or until
-/// now when it is not merged yet.
+/// The seconds a lane worked on a task (§5.1): the `active_s` of its dev and
+/// rework rounds. None when the task has no such round, so a task that was
+/// never worked on is not a measured zero (F5).
+fn worked_s_of(rounds: &[RoundRow]) -> Option<i64> {
+    let mut total = 0;
+    let mut worked = false;
+    for round in rounds {
+        if round.role == "dev" || round.role == "rework" {
+            total += round.active_s;
+            worked = true;
+        }
+    }
+    worked.then_some(total)
+}
+
+/// The minutes the lane worked on a task (§5.1): the sum of the `active_s` of
+/// its dev and rework rounds. A task with none of them is measured from its
+/// first attempt to its merge, or until now when it is not merged yet.
 fn actual_min_of(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
     now: Ts,
 ) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    if let Some(worked) = worked_s_of(&rounds) {
+        return Ok(Some(worked / 60));
+    }
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
     let merged = times.iter().filter_map(|(_, times)| times.merged).max();
@@ -1174,8 +1194,6 @@ fn actual_min_of(
     })
 }
 
-/// The quota readings of the providers (§9.1): the meta keys
-/// `quota.reading.<provider>`.
 /// The voyage the Workload view measures: the active one, else the latest
 /// departed voyage that is finished (F5).
 ///
@@ -1317,11 +1335,28 @@ fn workload_voyage(
         .min_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX)))
 }
 
-fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
+/// The quota readings of the providers (§9.1): the meta keys
+/// `quota.reading.<provider>`.
+///
+/// Only the providers the project reads now are shown (T-383): a reading left
+/// in the meta by an earlier config is not one of them. A config that does
+/// not parse does not filter: the readings are shown rather than hidden.
+fn quota_readings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<QuotaReading>> {
+    let wanted = quota_providers(tx, project)?;
     let mut readings = Vec::new();
     for key in tx.meta_keys_with_prefix("quota.reading.")? {
         let Some(raw) = tx.get_meta(&key)? else { continue };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
+            .to_string();
+        if let Some(wanted) = &wanted {
+            if !wanted.contains(&provider) {
+                continue;
+            }
+        }
         let mut windows = Vec::new();
         for window in value
             .get("windows")
@@ -1342,11 +1377,7 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
             continue;
         }
         readings.push(QuotaReading {
-            provider: value
-                .get("provider")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
-                .to_string(),
+            provider,
             windows,
             read_at: value
                 .get("read_at")
@@ -1355,6 +1386,28 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
         });
     }
     Ok(readings)
+}
+
+/// The providers the project's stored config reads (§9.1): the `provider` of
+/// every `[[quota.sources]]`.
+///
+/// None when the config does not parse or the project is not there: the
+/// filter is skipped then, and every reading stays.
+fn quota_providers(tx: &Tx<'_>, project: &str) -> GearResult<Option<Vec<String>>> {
+    let Some(row) = tx.get_project(project)? else { return Ok(None) };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let mut providers = Vec::new();
+    for source in config
+        .get("quota")
+        .and_then(|quota| quota.get("sources"))
+        .and_then(toml::Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        if let Some(provider) = source.get("provider").and_then(toml::Value::as_str) {
+            providers.push(provider.to_string());
+        }
+    }
+    Ok(Some(providers))
 }
 
 /// The line about the captain's inbox.

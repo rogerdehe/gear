@@ -292,7 +292,14 @@ enum AdminOp {
         agent: String,
     },
     /// Stop the background engine (it starts again on the next `gear` call).
-    Stop,
+    Stop {
+        /// Keep it stopped: while `engine.hold` exists no `gear` call starts
+        /// the engine until `gear admin start` (T-394).
+        #[arg(long)]
+        hold: bool,
+    },
+    /// Lift a hold (`admin stop --hold`) and start the background engine.
+    Start,
     /// Every store on this machine and the projects in it (T-322): the shared
     /// store, one per Herdr session, and the registered ones. Read-only.
     Projects,
@@ -411,7 +418,8 @@ fn run(cli: Cli) -> GearResult<()> {
         Some(Cmd::Admin { op: AdminOp::InstallSkill { agent } }) => {
             cmd_admin_install_skill(&agent, cli.json)
         }
-        Some(Cmd::Admin { op: AdminOp::Stop }) => cmd_admin_stop(),
+        Some(Cmd::Admin { op: AdminOp::Stop { hold } }) => cmd_admin_stop(hold),
+        Some(Cmd::Admin { op: AdminOp::Start }) => cmd_admin_start(),
         Some(Cmd::Admin { op: AdminOp::Projects }) => cmd_admin_projects(cli.json),
         Some(Cmd::Captain { op: CaptainOp::Handover { pane } }) => {
             cmd_captain_handover(&pane, cli.json)
@@ -424,7 +432,8 @@ fn run(cli: Cli) -> GearResult<()> {
 /// Does this command start the engine when its lock is free (PRD §16)?
 ///
 /// Most commands do: the project must keep moving. These do not:
-/// - `run` *is* the engine, and `admin stop` stops it;
+/// - `run` *is* the engine, and `admin stop` stops it, `admin start` starts
+///   it (T-394);
 /// - `board` only observes — starting the engine would hide the "engine down"
 ///   warning it exists to show (PRD §15, the review of T-3);
 /// - `report time` only observes (the time accounting of what the store
@@ -444,7 +453,8 @@ fn starts_engine(cmd: &Option<Cmd>) -> bool {
         None => true,
         Some(Cmd::Admin { op: AdminOp::Init { check, .. } }) => !check,
         Some(Cmd::Run)
-        | Some(Cmd::Admin { op: AdminOp::Stop })
+        | Some(Cmd::Admin { op: AdminOp::Stop { .. } })
+        | Some(Cmd::Admin { op: AdminOp::Start })
         | Some(Cmd::Admin { op: AdminOp::Kickoff })
         | Some(Cmd::Admin { op: AdminOp::Projects })
         | Some(Cmd::Admin { op: AdminOp::InstallSkill { .. } })
@@ -844,14 +854,28 @@ fn cmd_admin_init(
         // T-256: another project of this store on the same repository is a
         // branch clash, reported before anything is registered. The store is
         // only read, and only when it exists already: a check creates nothing.
-        match other_projects()? {
+        // T-388: the same read gives the config this store holds for this very
+        // project, which is what a re-init would change. A store with no
+        // project of this id is a first registration: nothing to compare.
+        let changes: Option<(i64, Vec<String>)> = match other_projects()? {
             Some(others) => {
-                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &others) {
+                let pairs: Vec<(String, String)> = others
+                    .iter()
+                    .map(|(id, text, _)| (id.clone(), text.clone()))
+                    .collect();
+                if let Some(problem) = gear_app::admin::branch_clash(&parsed, &pairs) {
                     return Err(GearError::new(gear_model::ErrorCode::BadFormat, problem));
                 }
+                others
+                    .iter()
+                    .find(|(id, _, _)| *id == parsed.project.id)
+                    .map(|(_, registered, version)| (*version, config_changes(registered, &text)))
             }
-            None => eprintln!("cross-project check skipped: no store"),
-        }
+            None => {
+                eprintln!("cross-project check skipped: no store");
+                None
+            }
+        };
         // T-304: the lane quota counts the lanes that can run — the seats,
         // retired ones excluded — so it is checked after the branch check,
         // against the retired lanes of this project's seats.
@@ -872,6 +896,10 @@ fn cmd_admin_init(
         };
         if json {
             let lane_list = lane_list(&parsed);
+            let changes = changes
+                .as_ref()
+                .map(|(_, lines)| lines.clone())
+                .unwrap_or_default();
             println!(
                 "{}",
                 serde_json::json!({
@@ -882,6 +910,7 @@ fn cmd_admin_init(
                     "lane_list": lane_json(&lane_list),
                     "review_model": review_model(&parsed),
                     "model_warnings": model_warnings,
+                    "changes": changes,
                 })
             );
         } else {
@@ -889,6 +918,18 @@ fn cmd_admin_init(
                 "config ok: project {}, {lanes} lanes, {reviewers} reviewers",
                 parsed.project.id
             );
+            // T-388: right after it, what the re-init would change (or that
+            // it changes nothing), so a captain sees the store it writes.
+            if let Some((version, lines)) = &changes {
+                if lines.is_empty() {
+                    println!("no change against the registered config v{version}");
+                } else {
+                    println!("changes against the registered config v{version}:");
+                    for line in lines {
+                        println!("{line}");
+                    }
+                }
+            }
             for line in seat_lines(&parsed) {
                 println!("{line}");
             }
@@ -990,6 +1031,49 @@ fn cmd_admin_init(
     Ok(())
 }
 
+/// The lines of a `--check` change list (T-388): the registered config text
+/// against the config file's own text, as a line diff — `- ` for a line only
+/// in the registered one, `+ ` for a line only in the file, in file order.
+/// The LCS is a plain table, small next to a config file, so no dependency.
+fn config_changes(registered: &str, file: &str) -> Vec<String> {
+    let old: Vec<&str> = registered.lines().collect();
+    let new: Vec<&str> = file.lines().collect();
+    // `same[i][j]`: the length of the longest common subsequence of the tails
+    // `old[i..]` and `new[j..]`.
+    let mut same = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            same[i][j] = if old[i] == new[j] {
+                same[i + 1][j + 1] + 1
+            } else {
+                same[i + 1][j].max(same[i][j + 1])
+            };
+        }
+    }
+    let mut lines = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() && j < new.len() {
+        if old[i] == new[j] {
+            i += 1;
+            j += 1;
+        } else if same[i + 1][j] >= same[i][j + 1] {
+            // A tie takes the registered line away first, as a diff does.
+            lines.push(format!("- {}", old[i]));
+            i += 1;
+        } else {
+            lines.push(format!("+ {}", new[j]));
+            j += 1;
+        }
+    }
+    for line in &old[i..] {
+        lines.push(format!("- {line}"));
+    }
+    for line in &new[j..] {
+        lines.push(format!("+ {line}"));
+    }
+    lines
+}
+
 /// Read the config a command was given, as `BadFormat` when it cannot be read.
 fn read_config(config: &std::path::Path) -> GearResult<String> {
     std::fs::read_to_string(config).map_err(|e| {
@@ -1001,14 +1085,15 @@ fn read_config(config: &std::path::Path) -> GearResult<String> {
 }
 
 /// The other projects of the store this `gear` call would use — `(id,
-/// config_toml)` — for the branch check of `admin init --check` (T-256), or
-/// `None` when there is no store to read: none at the path, or no `HOME` to
-/// find the default one under. The path is `GEAR_DB` when the caller names
+/// config_toml, config_version)` — for the branch check of `admin init
+/// --check` (T-256) and its change list (T-388), or `None` when there is no
+/// store to read: none at the path, or no `HOME` to find the default one
+/// under. The path is `GEAR_DB` when the caller names
 /// one, else the default store of this session — resolved with
 /// [`default_store_in`], never with [`default_store_path`], which creates the
 /// directory. Only an existing store is opened, and read-only: a check creates
 /// no file, applies no schema and migrates nothing (T-228).
-fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
+fn other_projects() -> GearResult<Option<Vec<(String, String, i64)>>> {
     let path = match std::env::var_os(gear_model::ctx::ENV_DB) {
         Some(path) => std::path::PathBuf::from(path),
         None => {
@@ -1028,7 +1113,7 @@ fn other_projects() -> GearResult<Option<Vec<(String, String)>>> {
             let mut others = Vec::new();
             for id in tx.project_ids()? {
                 if let Some(row) = tx.get_project(&id)? {
-                    others.push((row.id, row.config_toml));
+                    others.push((row.id, row.config_toml, row.config_version));
                 }
             }
             Ok(others)
@@ -2828,11 +2913,17 @@ fn engine_target_ok() -> Result<(), String> {
 }
 
 fn ensure_engine() {
+    let Some(dir) = engine_dir() else { return };
+    // A stop the user asked for stays stopped (T-394): no gear call starts a
+    // held engine, and each call says why it is not running.
+    if hold_path(&dir).exists() {
+        eprintln!("{HELD_NOTICE}");
+        return;
+    }
     // Only the registered store gets an engine (L-54); others are silent.
     if engine_target_ok().is_err() {
         return;
     }
-    let Some(dir) = engine_dir() else { return };
     match take_engine_lock(&dir) {
         Ok(lock) => drop(lock), // free: release it for the engine we start
         Err(_) => return,       // already running (or unusable: `gear run` reports it)
@@ -2865,8 +2956,35 @@ fn spawn_engine(dir: &std::path::Path) -> std::io::Result<u32> {
     Ok(cmd.spawn()?.id())
 }
 
-/// `gear admin stop`: signal the engine named in its lock file.
-fn cmd_admin_stop() -> GearResult<()> {
+/// `engine.hold`: the stop the user asked for (T-394). While it exists no
+/// `gear` call starts the engine; `gear admin start` removes it.
+fn hold_path(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("engine.hold")
+}
+
+/// What every `gear` call says while the engine is held (T-394).
+const HELD_NOTICE: &str = "gear: the engine is held (gear admin stop --hold); `gear admin start` resumes it";
+
+/// What `gear admin stop --hold` says once the hold is written (T-394).
+const HELD_WRITTEN: &str = "engine held: no gear call starts it until `gear admin start`";
+
+/// Hold the engine: write `engine.hold` with the time and who held it.
+fn write_hold(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(hold_path(dir), format!("{} held by gear admin stop --hold\n", utc(now_ts())))
+}
+
+/// The stop's last step with `--hold`: write the hold and say so (T-394).
+fn hold_engine(dir: &std::path::Path) -> GearResult<()> {
+    write_hold(dir).map_err(|e| {
+        GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot write {}: {e}", hold_path(dir).display()))
+    })?;
+    println!("{HELD_WRITTEN}");
+    Ok(())
+}
+
+/// `gear admin stop`: signal the engine named in its lock file. With `hold`
+/// it writes `engine.hold` as well, so the stop stays (T-394).
+fn cmd_admin_stop(hold: bool) -> GearResult<()> {
     let env = env_from_process()?;
     if env.ctx.is_some() {
         return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not stop the engine"));
@@ -2875,13 +2993,16 @@ fn cmd_admin_stop() -> GearResult<()> {
     if let Ok(lock) = take_engine_lock(&dir) {
         drop(lock);
         println!("engine not running");
+        if hold {
+            hold_engine(&dir)?;
+        }
         return Ok(());
     }
     // One engine and one store serve every project of a Herdr session, and each
     // project cannot restart at its own point while it does: a captain that
-    // stops the engine says which projects that pauses (T-298). Read-only — a
-    // stop writes nothing — and a store that cannot be read prints nothing
-    // more; the stop goes on either way.
+    // stops the engine says which projects that pauses (T-298). Read-only — the
+    // stop writes nothing to the store — and a store that cannot be read prints
+    // nothing more; the stop goes on either way.
     if let Some(db) = std::env::var_os(gear_model::ctx::ENV_DB) {
         if let Some(projects) = projects_in(std::path::Path::new(&db)) {
             println!("{}", stop_notice(&projects));
@@ -2919,12 +3040,49 @@ fn cmd_admin_stop() -> GearResult<()> {
         // the next `gear` call from starting one.
         drop(held);
         println!("engine stopped (pid {pid})");
+        if hold {
+            hold_engine(&dir)?;
+        }
         return Ok(());
     }
     Err(GearError::new(
         gear_model::ErrorCode::Forbidden,
         format!("the engine (pid {pid}) is still running after 20 min"),
     ))
+}
+
+/// `gear admin start`: lift the hold `gear admin stop --hold` wrote and start
+/// the engine as `ensure_engine` does, printing its pid (T-394).
+fn cmd_admin_start() -> GearResult<()> {
+    let env = env_from_process()?;
+    if env.ctx.is_some() {
+        return Err(GearError::new(gear_model::ErrorCode::Forbidden, "agents do not start the engine"));
+    }
+    let dir = engine_dir().ok_or_else(|| GearError::new(gear_model::ErrorCode::NoTarget, "GEAR_DB is not set"))?;
+    // The hold goes whichever way the start goes: the user asked for it gone.
+    let hold = hold_path(&dir);
+    if let Err(e) = std::fs::remove_file(&hold) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(GearError::new(gear_model::ErrorCode::BadFormat, format!("cannot remove {}: {e}", hold.display())));
+        }
+    }
+    // Only the registered store gets an engine (L-54), as in `ensure_engine`.
+    if engine_target_ok().is_err() {
+        return Ok(());
+    }
+    match take_engine_lock(&dir) {
+        Ok(lock) => {
+            drop(lock); // free: release it for the engine we start
+            match spawn_engine(&dir) {
+                Ok(pid) => println!("engine started (pid {pid})"),
+                Err(e) => {
+                    return Err(GearError::new(gear_model::ErrorCode::NoTarget, format!("could not start the engine: {e}")))
+                }
+            }
+        }
+        Err(_) => println!("engine already running"),
+    }
+    Ok(())
 }
 
 /// What `gear admin stop` says before it signals the engine (T-298): the

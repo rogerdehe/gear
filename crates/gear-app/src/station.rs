@@ -185,7 +185,10 @@ fn bad(message: impl Into<String>) -> GearError {
 
 /// Positive relative ETA durations: 20h, 2.5 hours, 90m, 1h30m, 2d 4h.
 /// Absolute dates/prose are not guessed; task-completion stations still work.
-fn eta_seconds(text: &str) -> Option<i64> {
+///
+/// One or more `<number><unit>` groups and nothing else: `apply` refuses a
+/// milestone whose `eta:` this does not read (T-387).
+pub(crate) fn eta_seconds(text: &str) -> Option<i64> {
     let mut rest = text.trim();
     let mut total = 0.0;
     while !rest.is_empty() {

@@ -224,6 +224,11 @@ pub fn merge_passed(
         })?;
     }
 
+    // 1b. an accepted attempt that nothing will merge is named (T-397): no
+    //     work sits accepted and unmerged without a word. This comes after the
+    //     queue step, so a merge that was just queued is a merge in flight.
+    tell_captain_lost(store, project, &config, now)?;
+
     // A worker survives between ticks. Collect only a completed result;
     // never join a running thread. One worker per repo (T-53): the workers of
     // the repos of a project are collected one after the other.
@@ -2466,6 +2471,152 @@ fn tell_captain_waiting(
     })
 }
 
+/// The thread of the item that says an accepted attempt of a task is merged by
+/// nothing (T-397). One item per task: the word is given once per attempt.
+fn lost_thread(task: &str) -> String {
+    format!("merge-lost:{task}")
+}
+
+/// The key that remembers that the captain was told that an accepted attempt
+/// of a task is merged by nothing (T-397): the word is given once per attempt,
+/// so a resolved item does not bring the same news back on the next tick.
+fn merge_lost_told_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.merge_lost_told.{project}.{task}.{attempt}")
+}
+
+/// The key that remembers that a candidate is already on the integration branch
+/// (T-397). A commit stays an ancestor once it is one, so the answer is asked of
+/// git once per attempt instead of on every tick.
+fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
+    format!("engine.merge_lost_landed.{project}.{task}.{attempt}")
+}
+
+/// Name the accepted attempts that nothing will merge (T-397): a Done task
+/// whose latest accepted attempt has a candidate and no merge time, with no
+/// merge op queued or running and no open `merge-failed` item — the work sat
+/// accepted and unmerged with no word about it.
+///
+/// One item per attempt, and a candidate that is already an ancestor of the
+/// integration branch is left alone: the engine names only what is lost.
+fn tell_captain_lost(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<()> {
+    // One scan of the ops and one of the tasks per tick, like the merge keys of
+    // the queue step: a project with no lost task pays two reads.
+    let silent = store.read(|tx| {
+        let mut in_flight = std::collections::HashSet::new();
+        for state in [
+            OpState::Intended,
+            OpState::Executing,
+            OpState::Submitted,
+            OpState::Unknown,
+        ] {
+            for op in tx.ops_in_state(project, state)? {
+                if op.kind == OpKind::Merge {
+                    if let Some(task) = op.task {
+                        in_flight.insert(task);
+                    }
+                }
+            }
+        }
+        let mut silent: Vec<(String, i64, String, Repo)> = Vec::new();
+        for task in tx.tasks_of_project(project)? {
+            // Only a done task is settled: the others may still be handed in.
+            if task.state != TaskState::Done {
+                continue;
+            }
+            let Some(latest) = tx.attempts_of_task(project, &task.id)?.into_iter().last() else {
+                continue;
+            };
+            if latest.state != gear_model::AttemptState::Accepted {
+                continue;
+            }
+            let Some(candidate) = latest.candidate.clone() else {
+                continue;
+            };
+            // The attempt carries a merge time: its work landed (design §10.7,
+            // row B03-01).
+            if tx.attempt_times(project, &task.id, latest.n)?.merged.is_some() {
+                continue;
+            }
+            // A merge op will merge it: queued, running or being recovered.
+            if in_flight.contains(&task.id) {
+                continue;
+            }
+            // Its merge failed and the captain has that item still open.
+            let failed_open = tx
+                .thread_messages(project, &failed_thread(&task.id))?
+                .into_iter()
+                .any(|message| message.state == MsgState::Open);
+            if failed_open {
+                continue;
+            }
+            // Told and settled already: a resolved item does not come back.
+            if tx.get_meta(&merge_lost_told_key(project, &task.id, latest.n))?.is_some() {
+                continue;
+            }
+            if tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some() {
+                continue;
+            }
+            // F1 of the T-397 review: the task's own snapshot says where its
+            // work lands — a task keeps the repo and the base it was created
+            // against even when its lane moves (design, `repo_of_task`), and
+            // merge execution asks the same question (see `repo_of_op`).
+            let repo = config.repo_of_task(&task);
+            silent.push((task.id, latest.n, candidate, repo));
+        }
+        Ok(silent)
+    })?;
+    for (task, attempt, candidate, repo) in silent {
+        // The candidate's own repo answers, from its remote-tracking ref: no
+        // fetch on the tick's path. A ref that lags can only answer "not
+        // merged", and the remerge the item names settles that (it fetches).
+        let reference = format!(
+            "refs/remotes/{}/{}",
+            config.conventions.remote, repo.integration
+        );
+        if is_ancestor(Path::new(&repo.path), &candidate, &reference) {
+            store.write(|tx| tx.set_meta(&merge_lost_landed_key(project, &task, attempt), &now.to_string()))?;
+            continue;
+        }
+        let body = format!(
+            "{task} attempt {attempt} was accepted but is not merged and nothing will merge it: \
+             `- remerge {task}` under `# Staff` retries it"
+        );
+        store.write(|tx| {
+            let captain = tx.captain_of(project)?.ok_or_else(|| {
+                GearError::new(
+                    ErrorCode::NoTarget,
+                    format!("project {project} has no captain"),
+                )
+            })?;
+            tx.insert_message(&NewMessage {
+                meta: None,
+                project: project.to_string(),
+                thread: lost_thread(&task),
+                task: Some(task.clone()),
+                attempt: Some(attempt),
+                sender: captain.id.clone(),
+                sender_gen: 1,
+                recipient: captain.id,
+                kind: MsgKind::Question,
+                urgent: false,
+                body,
+                reply_to: None,
+                needs_ack: false,
+                state: MsgState::Open,
+                created: now,
+            })?;
+            tx.set_meta(&merge_lost_told_key(project, &task, attempt), &now.to_string())?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 /// Close the item that says the merge of a task waits (T-62): the wait is
 /// over.
 fn resolve_wait(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
@@ -3318,6 +3469,209 @@ mod tests {
         assert!(error.detail.contains("no task T-99"), "{error:?}");
     }
 
+    /// A done task whose attempt was accepted with `candidate`, whose merge op
+    /// ended in `state` (T-397): the state a merge leaves when it failed, was
+    /// voided, or never ran.
+    fn lost_task(store: &mut Store, candidate: &str, state: OpState, now: Ts) {
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(tx, "p", "T-5", 1, 1, candidate, "report", 0)?;
+                let mut attempt = tx.get_attempt("p", "T-5", 1)?.unwrap();
+                attempt.state = gear_model::AttemptState::Accepted;
+                tx.update_attempt(&attempt)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.state = TaskState::Done;
+                tx.update_task(&task)?;
+                tx.insert_op(&NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind: OpKind::Merge,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({ "branch": "heat/t5", "candidate": candidate }),
+                    created: 10,
+                })?;
+                if state != OpState::Intended {
+                    tx.set_op_state("p", "O-1", state, Some("gate said no"), now)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// The failed-merge item of T-5, resolved: the captain settled it without a
+    /// remerge (T-397).
+    fn failed_item_resolved(store: &mut Store, now: Ts) {
+        store
+            .write(|tx| {
+                tx.insert_message(&NewMessage {
+                    meta: None,
+                    project: "p".into(),
+                    thread: failed_thread("T-5"),
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    sender: "p:captain".into(),
+                    sender_gen: 1,
+                    recipient: "p:captain".into(),
+                    kind: MsgKind::Question,
+                    urgent: false,
+                    body: "merge of T-5 failed: the gate said no".into(),
+                    reply_to: None,
+                    needs_ack: false,
+                    state: MsgState::Resolved,
+                    created: now,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    /// T-397: a merge failed, its item was resolved without a remerge, and the
+    /// accepted work sat unmerged with no word about it. The engine names it
+    /// once, with the plan line that retries it, and the next tick is quiet.
+    #[test]
+    fn an_accepted_attempt_that_nothing_merges_is_named_once() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "the lost work was not named: {items:?}");
+        assert_eq!(
+            items[0].body,
+            "T-5 attempt 1 was accepted but is not merged and nothing will merge it: \
+             `- remerge T-5` under `# Staff` retries it"
+        );
+        assert_eq!(items[0].state, MsgState::Open);
+
+        // Once per attempt: a later tick adds no second item.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "a second tick added an item: {items:?}");
+    }
+
+    /// T-397: a merge that is still queued will merge the attempt itself: it is
+    /// not lost.
+    #[test]
+    fn an_attempt_with_a_queued_merge_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Intended, 10);
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(items.is_empty(), "a queued merge is not a lost one: {items:?}");
+    }
+
+    /// T-397: an attempt that carries its merge time is merged: no item.
+    #[test]
+    fn a_merged_attempt_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        store
+            .write(|tx| tx.set_attempt_time("p", "T-5", 1, gear_store::AttemptStep::Merged, 12))
+            .unwrap();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(items.is_empty(), "a merged attempt is not lost: {items:?}");
+    }
+
+    /// F1 of the T-397 review: the ancestor check asks the repo and the base
+    /// the *task* was created against, not its lane's current ones. A
+    /// completed task keeps its snapshot, so a candidate that is already on
+    /// the task's saved base — which differs from the project's current
+    /// integration branch — is not lost.
+    #[test]
+    fn a_candidate_on_the_tasks_saved_base_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-saved-base");
+        // The accepted work is already on the base the task was cut from, and
+        // the project integrates on `dev`, which does not hold it.
+        let candidate = scratch.head_of("heat/t5");
+        sh(
+            &scratch.work,
+            &format!("git update-ref refs/remotes/origin/old-dev {candidate}"),
+        );
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)?;
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.repo = Some(scratch.work.display().to_string());
+                task.base = Some("old-dev".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "the work is on the task's own base, not the lane's: {items:?}"
+        );
+    }
+
+    /// T-397: a candidate that is already an ancestor of the integration branch
+    /// is left alone — and the answer is remembered, so git is asked once.
+    #[test]
+    fn a_candidate_on_the_integration_branch_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-landed");
+        let landed = scratch.head_of("dev");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &landed, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(items.is_empty(), "the work is on the branch: {items:?}");
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&merge_lost_landed_key("p", "T-5", 1)))
+                .unwrap()
+                .is_some(),
+            "the ancestor answer is kept"
+        );
+    }
+
     #[test]
     fn a_merge_that_carries_no_other_task_is_not_held() {
         let pair = Pair::new("independent", false);
@@ -3698,6 +4052,15 @@ profile = "opencode"
 [conventions]
 gate = "{gate}"
 "#
+        )
+    }
+
+    /// The test project's config with `repo` pointing at a checkout that is
+    /// really there (T-397): the ancestor check asks git.
+    fn config_text_in(gate: &str, repo: &Path) -> String {
+        config_text(gate).replace(
+            "repo = \"/repo\"",
+            &format!("repo = \"{}\"", repo.display()),
         )
     }
 

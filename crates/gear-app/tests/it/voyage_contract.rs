@@ -97,6 +97,72 @@ fn a_milestone_without_its_three_fields_is_rejected() {
     assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
 }
 
+/// T-387: the `eta:` is a duration GEAR measures the voyage against, and
+/// nothing else. A block whose eta reads as prose is refused with nothing
+/// written — for a new voyage and for an edit of one that already departed.
+#[test]
+fn an_eta_that_is_not_a_duration_is_refused() {
+    let mut s = world();
+    // Durations apply: one group, then several.
+    run(&mut s, &plan(0, "done: users install it\nbar: keep it simple\neta: 8h\n"), "r1", NOW).unwrap();
+    run(
+        &mut s,
+        &plan(1, "done: users install it\nbar: keep it simple\neta: 1d 4h\n"),
+        "r2",
+        NOW + 10,
+    )
+    .unwrap();
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().eta.as_deref(),
+        Some("1d 4h")
+    );
+
+    // Prose and a style word after a duration are refused, and the stored
+    // voyage keeps the eta it had.
+    for (n, eta) in ["8h, hard", "do it properly"].into_iter().enumerate() {
+        // A refused apply leaves the plan version where it was.
+        let base = s.read(|tx| tx.plan_version("p")).unwrap();
+        let text = plan(base, &format!("done: users install it\nbar: keep it simple\neta: {eta}\n"));
+        let err = run(&mut s, &text, &format!("r-bad-{n}"), NOW + 20 + n as i64).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{eta}");
+        assert!(
+            err.detail.contains(
+                "milestone M1: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions"
+            ),
+            "{}",
+            err.detail
+        );
+        assert!(err.detail.contains(&format!("got \"{eta}\"")), "{}", err.detail);
+    }
+    assert_eq!(
+        s.read(|tx| tx.get_voyage("p", "M1")).unwrap().unwrap().eta.as_deref(),
+        Some("1d 4h")
+    );
+
+    // A fresh plan carrying such an eta writes nothing: no voyage, no task, no
+    // departure — the voyage cannot depart.
+    let mut fresh = world();
+    for (n, eta) in ["8h, hard", "do it properly"].into_iter().enumerate() {
+        let text = plan(0, &format!("done: users install it\nbar: keep it simple\neta: {eta}\n"));
+        let err = run(&mut fresh, &text, &format!("r-fresh-{n}"), NOW).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadFormat, "{eta}");
+        assert!(fresh.read(|tx| tx.get_voyage("p", "M1")).unwrap().is_none(), "{eta}");
+        assert!(fresh.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty(), "{eta}");
+    }
+    assert_eq!(fresh.read(|tx| tx.plan_version("p")).unwrap(), 0);
+
+    // The refusal shows the first 40 characters of what it got, no more.
+    let long = "do it properly and carefully, this one is long";
+    let text = plan(0, &format!("done: users install it\nbar: keep it simple\neta: {long}\n"));
+    let err = run(&mut fresh, &text, "r-long", NOW).unwrap_err();
+    assert!(
+        err.detail.contains(&format!("got \"{}\"", long.chars().take(40).collect::<String>())),
+        "{}",
+        err.detail
+    );
+    assert!(!err.detail.contains("is long"), "{}", err.detail);
+}
+
 #[test]
 fn a_voyage_is_stored_with_its_departure_and_shown() {
     let mut s = world();
@@ -554,4 +620,101 @@ fn the_snapshot_lists_the_voyages_by_departure_not_by_id() {
             .unwrap_or_else(|| panic!("{second} is in the snapshot: {snapshot}"));
         assert!(earlier < later, "{first} departed first, {second} second: {snapshot}");
     }
+}
+
+/// M5 S3: a voyage's stations come from its block, and each task's station
+/// from its queue header; both are stored, and `plan show` prints the task's.
+#[test]
+fn a_voyage_stores_its_stations_and_each_task_its_own() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                done: users install it\nbar: keep it simple\neta: 8h\n\
+                station S1: reliability fixes and conventions as configuration, released as v0.5.0\n\
+                station S2: the board matches the prototype\n\
+                # Queue\n\
+                ## NEW [must] lane=heat milestone=M1 station=S2\n\
+                goal: A\naccept: a\nestimate: 30\ndeps: -\n\n\
+                ## NEW [should] lane=heat milestone=M1\n\
+                goal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, text, "r1", NOW).unwrap();
+
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    let named: Vec<(&str, &str)> = stations
+        .iter()
+        .map(|station| (station.id.as_str(), station.needs.as_str()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("S1", "reliability fixes and conventions as configuration, released as v0.5.0"),
+            ("S2", "the board matches the prototype"),
+        ]
+    );
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap().as_deref(), Some("S2"));
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-2")).unwrap(), None);
+
+    // `gear plan show` prints the station in the header, after the milestone.
+    let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(
+        block.starts_with("## T-1 [must] lane=heat milestone=M1 station=S2"),
+        "{block}"
+    );
+}
+
+/// M5 S3: a task may name only a station its milestone block has; a station
+/// without a milestone is refused too, and a refusal writes nothing.
+#[test]
+fn a_task_naming_an_unknown_station_is_refused() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                done: users install it\nbar: keep it simple\neta: 8h\n\
+                station S1: the first station\n\
+                # Queue\n\
+                ## NEW [must] lane=heat milestone=M1 station=S9\n\
+                goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, text, "r1", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("T-1 names station S9, but milestone M1 has no `station S9:` line"),
+        "{}",
+        err.detail
+    );
+    assert!(s.read(|tx| tx.get_voyage("p", "M1")).unwrap().is_none());
+    assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
+
+    // The same station without a milestone on the task.
+    let no_milestone = "<!-- gear-plan project=p base=0 -->\n# Queue\n\
+                        ## NEW [must] lane=heat station=S2\n\
+                        goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, no_milestone, "r2", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("T-1 names station S2 but has no milestone"),
+        "{}",
+        err.detail
+    );
+    assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
+}
+
+/// M5 S3: a block always carries every field, so re-applying the task without
+/// `station=` clears the station it had.
+#[test]
+fn a_block_without_station_clears_the_tasks_station() {
+    let mut s = world();
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                 done: users install it\nbar: keep it simple\neta: 8h\n\
+                 station S1: the first station\n\
+                 station S2: the second station\n\
+                 # Queue\n\
+                 ## NEW [must] lane=heat milestone=M1 station=S2\n\
+                 goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap().as_deref(), Some("S2"));
+
+    let again = "<!-- gear-plan project=p base=1 -->\n# Queue\n\
+                 ## T-1 [must] lane=heat milestone=M1\n";
+    run(&mut s, again, "r2", NOW + 10).unwrap();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
+    let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(!block.contains("station="), "{block}");
 }
