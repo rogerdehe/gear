@@ -468,12 +468,12 @@ pub fn release_idle_standby(
 
 /// The number of hand-ins that wait for a reviewer (T-424): a task in
 /// `Verifying` whose latest attempt is handed in (`Submitted`), with no verdict
-/// for that attempt yet, and no reviewer on it — no `Active` temp seat bound to
-/// it and no `Standby` seat whose `engine.review_pending` names it (that
-/// review is handed over to the seat on the next tick, so the hand-in does not
-/// wait for one). Nothing reviews such a task now. A lane that is "handed in,
-/// waits for a reviewer" is not counted by [`working_lanes`], so the sweep
-/// reads this count too.
+/// for that attempt yet, and no `Active` temp seat on it — nothing reviews it
+/// now. A Standby seat that holds its `engine.review_pending` reservation is
+/// not `Active`: the hand-in still waits for a reviewer until a seat is on it,
+/// so a reviewer that is only reserved keeps the sweep off (the direction check
+/// of T-424). A lane that is "handed in, waits for a reviewer" is not counted
+/// by [`working_lanes`], so the sweep reads this count too.
 fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
     store.read(|tx| {
         let seats = tx.seats_of_project(project)?;
@@ -495,22 +495,12 @@ fn hand_ins_waiting(store: &mut Store, project: &str) -> GearResult<usize> {
             if tx.get_review_verdict(project, &task.id, attempt.n)?.is_some() {
                 continue;
             }
-            // A reviewer that works on it now — or one that is handed its review
-            // on the next tick — is not waited for.
-            let mut reviewing = false;
-            for seat in &seats {
-                if seat.role != SeatRole::Temp {
-                    continue;
-                }
-                let bound = seat.task_id.as_deref() == Some(task.id.as_str());
-                let pending = tx
-                    .get_meta(&format!("engine.review_pending.{}", seat.id))?
-                    .is_some_and(|pending| pending == task.id);
-                if (bound && seat.state == SeatState::Active) || (pending && seat.state == SeatState::Standby) {
-                    reviewing = true;
-                    break;
-                }
-            }
+            // A reviewer that works on it now is not waited for.
+            let reviewing = seats.iter().any(|seat| {
+                seat.role == SeatRole::Temp
+                    && seat.state == SeatState::Active
+                    && seat.task_id.as_deref() == Some(task.id.as_str())
+            });
             if !reviewing {
                 waiting += 1;
             }
@@ -2590,6 +2580,10 @@ profile = "codex"
     /// its agent is idle and `fn start` (review.rs) hands it the review. It has
     /// a job, so the idle sweep leaves it alone — released, the pending review
     /// starts it again, and again (844 starts in one voyage).
+    ///
+    /// `r-3` works on `T-1` (T-424): the hand-in is not waiting for a reviewer,
+    /// so the sweep runs at all — a hand-in that only waits keeps every
+    /// Standby reviewer (see `a_hand_in_reserved_for_a_standby_reviewer_still_waits`).
     #[test]
     fn a_standby_reviewer_with_a_pending_review_is_not_released() {
         // No lane works (W = 0): every jobless Standby reviewer goes.
@@ -2601,12 +2595,16 @@ profile = "codex"
                 tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)?;
                 tx.set_seat_state("p:r-1", SeatState::Standby, Some("waiting for its review"), T0)?;
                 // Its review is on its way: the seat has a job.
-                tx.set_meta("engine.review_pending.p:r-1", "T-1")
+                tx.set_meta("engine.review_pending.p:r-1", "T-1")?;
+                // A reviewer is on `T-1`: the hand-in does not wait for one.
+                testing::seed_temp_seat(tx, "p", "r-3", "T-1", "w4:p4", "codex", T0)?;
+                Ok(())
             })
             .unwrap();
         let mut herdr = FakeHerdr::new();
         herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
         herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w4:p4", "codex", gear_herdr::AgentStatus::Idle);
 
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
         release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
@@ -2618,6 +2616,36 @@ profile = "codex"
         let idle = store.read(|tx| tx.get_seat("p:r-2")).unwrap().unwrap();
         assert_eq!(idle.state, SeatState::Released, "the jobless one goes");
         assert_eq!(exits(&herdr), 1, "only the idle reviewer's pane is closed");
+    }
+
+    /// T-424 (the direction check): a hand-in whose review is reserved for a
+    /// `Standby` seat still waits for a reviewer — the reservation is not an
+    /// `Active` seat on the task — so the sweep releases nothing while it
+    /// waits, the jobless Standby reviewer included.
+    #[test]
+    fn a_hand_in_reserved_for_a_standby_reviewer_still_waits() {
+        let mut store = world(TaskState::Verifying, "w2:p2", "codex");
+        standby_for_a_pending_review(&mut store, T0);
+        store
+            .write(|tx| {
+                let second = testing::seed_temp_seat(tx, "p", "r-2", "T-1", "w3:p3", "codex", T0)?;
+                tx.set_seat_state(&second.id, SeatState::Standby, Some("review done"), T0)
+            })
+            .unwrap();
+        let mut herdr = FakeHerdr::new();
+        herdr.add_agent("w2:p2", "codex", gear_herdr::AgentStatus::Idle);
+        herdr.add_agent("w3:p3", "codex", gear_herdr::AgentStatus::Idle);
+
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 10).unwrap();
+        release_finished_reviews(&mut store, &mut herdr, "p", T0 + 20).unwrap();
+
+        for name in ["p:r-1", "p:r-2"] {
+            let seat = store.read(|tx| tx.get_seat(name)).unwrap().unwrap();
+            assert_eq!(seat.state, SeatState::Standby, "{name} waits while the hand-in waits");
+        }
+        let pending = store.read(|tx| tx.get_meta("engine.review_pending.p:r-1")).unwrap();
+        assert_eq!(pending.as_deref(), Some("T-1"), "its review is still its job");
+        assert_eq!(exits(&herdr), 0, "no pane is closed while a hand-in waits");
     }
 
     /// T-391: the excess is counted over the seats the sweep leaves in. With
