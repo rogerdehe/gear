@@ -195,11 +195,22 @@ pub fn merge_passed(
     // One read of the merge ops per tick, not one full scan per passed task:
     // the scan per task grew with every op ever written and held a core.
     let queued = merge_keys(store, project)?;
-    for (task, lane, candidate, attempt, attempt_candidate) in passed {
+    for (task, lane, candidate, attempt, attempt_candidate, mechanical) in passed {
         if queued.contains(&(task.clone(), attempt)) {
             continue;
         }
         let branch = branch_of(&config.conventions.task_branch, project, &lane, &task);
+        let mut payload = serde_json::json!({
+            "branch": branch,
+            "candidate": candidate,
+            "attempt_candidate": attempt_candidate,
+            "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
+        });
+        // T-405: the merge op of a mechanically settled attempt says so, so
+        // the merge does not require a review branch that never existed.
+        if mechanical {
+            payload["mechanical"] = serde_json::json!(true);
+        }
         store.write(|tx| {
             tx.insert_op(&NewOp {
                 project: project.to_string(),
@@ -212,12 +223,7 @@ pub fn merge_passed(
                 attempt: Some(attempt),
                 ref_msg: None,
                 plan_version: None,
-                payload: serde_json::json!({
-                    "branch": branch,
-                    "candidate": candidate,
-                    "attempt_candidate": attempt_candidate,
-                    "review": review_branch(&config.conventions.review_branch, project, &lane, &task),
-                }),
+                payload,
                 created: now,
             })?;
             Ok(())
@@ -228,6 +234,11 @@ pub fn merge_passed(
     //     work sits accepted and unmerged without a word. This comes after the
     //     queue step, so a merge that was just queued is a merge in flight.
     tell_captain_lost(store, project, &config, now)?;
+
+    // 1c. the task branches on the remote (the branch sweep): a cancelled
+    //     task's branches are deleted, and a branch older than the project's
+    //     `branch_max_age_min` is named to the captain.
+    sweep_branches(store, cfg, project, &config, now)?;
 
     // A worker survives between ticks. Collect only a completed result;
     // never join a running thread. One worker per repo (T-53): the workers of
@@ -1046,12 +1057,13 @@ fn attempt_already_merged(
 }
 
 /// The tasks of the project whose **current** attempt has a passing verdict:
-/// (task, lane, candidate, attempt, the attempt's candidate).
+/// (task, lane, candidate, attempt, the attempt's candidate, whether the pass
+/// was the engine's mechanical one).
 ///
 /// An attempt that already carries a merge time is left out (design §10.7, row
 /// B03-01): its work is on the integration branch — it landed with another
 /// task's merge — so the engine must not merge it again.
-fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String)>> {
+fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, String, String, i64, String, bool)>> {
     store.read(|tx| {
         let mut passed = Vec::new();
         for task in tx.tasks_of_project(project)? {
@@ -1085,10 +1097,34 @@ fn passed_tasks(store: &mut Store, project: &str) -> GearResult<Vec<(String, Str
             else {
                 continue;
             };
-            passed.push((task.id.clone(), lane, verdict.candidate, verdict.attempt, latest.candidate.clone().unwrap_or_default()));
+            // T-405: a mechanical pass is the engine's own verdict (T-273),
+            // and its note says so: such a task has no reviewer, so no review
+            // branch, and its merge must not wait for one.
+            let mechanical = settled_mechanically(&verdict);
+            passed.push((
+                task.id.clone(),
+                lane,
+                verdict.candidate,
+                verdict.attempt,
+                latest.candidate.clone().unwrap_or_default(),
+                mechanical,
+            ));
         }
         Ok(passed)
     })
+}
+
+/// T-405: whether the pass is the engine's own mechanical settlement (T-273)
+/// rather than a reviewer's or the captain's: the verdict whose note starts
+/// `mechanical:`. Such a task never had a reviewer, so it never has a review
+/// branch, and its merge must not require one.
+fn settled_mechanically(verdict: &gear_store::VerdictRow) -> bool {
+    verdict.passed
+        && verdict.by_seat == "engine"
+        && verdict
+            .evidence
+            .as_deref()
+            .is_some_and(|note| note.starts_with("mechanical:"))
 }
 
 /// The other tasks of the project with a candidate: (task, candidate, whether
@@ -1762,15 +1798,23 @@ fn merge_one_locked(
     // 6. the merges, in order (the approved candidate, then the review
     //    branch); the candidate is pinned by sha, so a branch that moves later
     //    cannot slip an unreviewed commit in.
-    //    The review branch is *required*: a merge that publishes the task
-    //    without its review is a partial merge (F6 of the T-12 review). The
-    //    integration branch is not touched: the merge fails before it, so
-    //    dev stays where it was. A candidate that is already merged needs no
-    //    merge commit; its review branch still merges with it.
+    //    The review branch is *required* for a reviewed merge: a merge that
+    //    publishes the task without its review is a partial merge (F6 of the
+    //    T-12 review). A mechanically settled attempt has no reviewer, so no
+    //    review branch (T-405): its op carries `"mechanical": true`, and the
+    //    pinned candidate merges alone. The integration branch is not touched:
+    //    the merge fails before it, so dev stays where it was. A candidate
+    //    that is already merged needs no merge commit; its review branch still
+    //    merges with it.
+    let mechanical = op
+        .payload
+        .get("mechanical")
+        .and_then(|mechanical| mechanical.as_bool())
+        .unwrap_or(false);
     let review_ref = format!("{remote_name}/{review}");
     let review_found = git(dir, &["rev-parse", "--verify", &review_ref]);
-    let has_review = review_found.is_ok();
-    if !has_review && !already {
+    let has_review = review_found.is_ok() && !mechanical;
+    if !has_review && !mechanical && !already {
         let reason = review_found.unwrap_err();
         return Step::Failed(Failed::stuck(format!(
             "{task}: the review branch {review_ref} is missing on {remote_name}\n{reason}\n\
@@ -2364,6 +2408,275 @@ fn tell_captain(
     })
 }
 
+/// How often the branch sweep asks the remote for its branches: it is a
+/// network call, so not on every tick.
+const BRANCH_SWEEP_EVERY_S: i64 = 600;
+
+/// When the branch sweep last asked the remote of a project.
+fn branch_sweep_key(project: &str) -> String {
+    format!("engine.branch_sweep.{project}")
+}
+
+/// When the captain was last told about a branch that is too old: told again
+/// only after another `branch_max_age_min`.
+fn branch_told_key(project: &str, branch: &str) -> String {
+    format!("engine.branch_told.{project}.{branch}")
+}
+
+/// A branch on the remote that belongs to a task of the project: the task's
+/// own branch (or a suffixed one) or its review branch.
+#[derive(Debug, Clone)]
+struct TaskBranch {
+    name: String,
+    sha: String,
+    task: String,
+    state: TaskState,
+    /// When the task's first attempt started: the branch is that old.
+    since: Option<Ts>,
+    /// A review branch (the reviewers'), not a branch a lane cut.
+    review: bool,
+    /// The task's voyage is still sailing: one of its tasks is not terminal.
+    open_voyage: bool,
+}
+
+/// When the captain was last told that the open voyages hold too many task
+/// branches, and how many: told again when the count grows, or after another
+/// `branch_max_age_min`.
+fn branch_count_told_key(project: &str) -> String {
+    format!("engine.branch_count_told.{project}")
+}
+
+/// The branch sweep: a branch of a voyage is meant to be merged within the
+/// project's `branch_max_age_min` (120 by default). A branch of a cancelled
+/// task is deleted on the remote, since nothing will merge it (the captain is
+/// told its commit, so it can be restored); a branch older than the limit is
+/// named to the captain, who decides what to do with its task.
+fn sweep_branches(
+    store: &mut Store,
+    cfg: &EngineCfg,
+    project: &str,
+    config: &ProjectConfig,
+    now: Ts,
+) -> GearResult<()> {
+    let last = store
+        .read(|tx| tx.get_meta(&branch_sweep_key(project)))?
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    if now - last < BRANCH_SWEEP_EVERY_S {
+        return Ok(());
+    }
+    store.write(|tx| tx.set_meta(&branch_sweep_key(project), &now.to_string()))?;
+    let tasks = store.read(|tx| tx.tasks_of_project(project))?;
+    let mut repos: Vec<Repo> = Vec::new();
+    for task in &tasks {
+        let repo = config.repo_of_task(task);
+        if !repos.iter().any(|known| known.path == repo.path) {
+            repos.push(repo);
+        }
+    }
+    let remote = Target::of(config, cfg.remote.as_ref());
+    for repo in repos {
+        let dir = Path::new(&repo.path);
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(heads) = git(dir, &["ls-remote", "--heads", remote.name]) else {
+            continue;
+        };
+        let found = task_branches(store, project, config, &tasks, &repo, &heads)?;
+        sweep_in(store, project, config, dir, remote, found, now)?;
+    }
+    Ok(())
+}
+
+/// The branches of `heads` (the output of `git ls-remote --heads`) that
+/// belong to a task of `repo`.
+fn task_branches(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    tasks: &[gear_store::TaskRow],
+    repo: &Repo,
+    heads: &str,
+) -> GearResult<Vec<TaskBranch>> {
+    let mut names: Vec<(String, String, &gear_store::TaskRow)> = Vec::new();
+    for task in tasks {
+        let Some(lane) = task.lane.as_deref() else { continue };
+        if config.repo_of_task(task).path != repo.path {
+            continue;
+        }
+        names.push((
+            branch_of(&config.conventions.task_branch, project, lane, &task.id),
+            review_branch(&config.conventions.review_branch, project, lane, &task.id),
+            task,
+        ));
+    }
+    let mut open = std::collections::HashSet::new();
+    for task in tasks {
+        if let Some(milestone) = task.milestone.as_deref() {
+            if !task.state.is_terminal() {
+                open.insert(milestone.to_string());
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for line in heads.lines() {
+        let Some((sha, name)) = line.split_once('\t') else { continue };
+        let Some(name) = name.trim().strip_prefix("refs/heads/") else { continue };
+        let Some((_, review, task)) = names
+            .iter()
+            .find(|(own, review, _)| is_task_branch(name, own) || is_task_branch(name, review))
+        else {
+            continue;
+        };
+        let is_review = is_task_branch(name, review);
+        let open_voyage = task.milestone.as_deref().is_some_and(|milestone| open.contains(milestone));
+        let since = store
+            .read(|tx| tx.attempts_of_task(project, &task.id))?
+            .iter()
+            .map(|attempt| attempt.started)
+            .min();
+        found.push(TaskBranch {
+            name: name.to_string(),
+            sha: sha.trim().to_string(),
+            task: task.id.clone(),
+            state: task.state,
+            since,
+            review: is_review,
+            open_voyage,
+        });
+    }
+    Ok(found)
+}
+
+/// Delete the branches of cancelled tasks and name the branches older than
+/// the project's limit, in one item to the captain.
+fn sweep_in(
+    store: &mut Store,
+    project: &str,
+    config: &ProjectConfig,
+    dir: &Path,
+    remote: Target<'_>,
+    found: Vec<TaskBranch>,
+    now: Ts,
+) -> GearResult<()> {
+    let limit = i64::from(config.conventions.branch_max_age_min.max(1)) * 60;
+    // The open voyages' task branches (not the reviewers'), oldest first.
+    let mut live: Vec<&TaskBranch> = found
+        .iter()
+        .filter(|branch| branch.open_voyage && !branch.review && branch.state != TaskState::Cancelled)
+        .collect();
+    live.sort_by_key(|branch| branch.since.unwrap_or(now));
+    let cap = config.lanes.len().max(1) * config.conventions.branch_max_per_lane.max(1) as usize;
+    let mut crowded: Vec<String> = Vec::new();
+    if live.len() > cap {
+        let key = branch_count_told_key(project);
+        let told = store.read(|tx| tx.get_meta(&key))?;
+        let (count, at) = told
+            .as_deref()
+            .and_then(|value| value.split_once(':'))
+            .and_then(|(count, at)| Some((count.parse::<usize>().ok()?, at.parse::<i64>().ok()?)))
+            .unwrap_or((0, 0));
+        if live.len() > count || now - at >= limit {
+            store.write(|tx| tx.set_meta(&key, &format!("{}:{now}", live.len())))?;
+            crowded = live
+                .iter()
+                .map(|branch| {
+                    let age = branch.since.map(|since| (now - since) / 60).unwrap_or(0);
+                    format!("{} ({}, {:?}, open {age} min)", branch.name, branch.task, branch.state)
+                })
+                .collect();
+        }
+    }
+    let mut deleted = Vec::new();
+    let mut old = Vec::new();
+    for branch in found {
+        let short = &branch.sha[..branch.sha.len().min(10)];
+        if branch.state == TaskState::Cancelled {
+            if remote.delete(dir, &branch.name) {
+                deleted.push(format!("{} at {short} ({}, cancelled)", branch.name, branch.task));
+            }
+            continue;
+        }
+        let Some(since) = branch.since else { continue };
+        let age = now - since;
+        if age < limit {
+            continue;
+        }
+        let key = branch_told_key(project, &branch.name);
+        let told = store.read(|tx| tx.get_meta(&key))?.and_then(|value| value.parse::<i64>().ok());
+        if told.is_some_and(|at| now - at < limit) {
+            continue;
+        }
+        store.write(|tx| tx.set_meta(&key, &now.to_string()))?;
+        old.push(format!(
+            "{} ({}, {:?}, open {} min, tip {short})",
+            branch.name,
+            branch.task,
+            branch.state,
+            age / 60
+        ));
+    }
+    if deleted.is_empty() && old.is_empty() && crowded.is_empty() {
+        return Ok(());
+    }
+    let mut body = String::new();
+    if !crowded.is_empty() {
+        body.push_str(&format!(
+            "{} task branches of the open voyage(s) are on the remote, over the limit of {cap} ({} lanes × `[conventions] branch_max_per_lane` {}): work is piling up unmerged and branches rot. Clean up: get the oldest reviewed and merged, finish the reworks before new work, cancel what will not land. Oldest first:\n",
+            crowded.len(),
+            config.lanes.len().max(1),
+            config.conventions.branch_max_per_lane.max(1)
+        ));
+        for line in &crowded {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    if !old.is_empty() {
+        body.push_str(&format!(
+            "{} branch(es) open longer than {} min (`[conventions] branch_max_age_min`): a branch of a voyage is meant to merge within that time, so its task is stuck. For each, find why and act: get it reviewed and merged, send it back with a smaller rework, or cancel the task.\n",
+            old.len(),
+            limit / 60
+        ));
+        for line in &old {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    if !deleted.is_empty() {
+        body.push_str(&format!(
+            "{} branch(es) of cancelled tasks deleted on {} (restore one with `git push {} <commit>:refs/heads/<branch>`):\n",
+            deleted.len(),
+            remote.name,
+            remote.name
+        ));
+        for line in &deleted {
+            body.push_str(&format!("- {line}\n"));
+        }
+    }
+    let urgent = !old.is_empty() || !crowded.is_empty();
+    store.write(|tx| {
+        let Some(captain) = tx.captain_of(project)? else { return Ok(()) };
+        tx.insert_message(&NewMessage {
+            meta: None,
+            project: project.to_string(),
+            thread: format!("branches:{now}"),
+            task: None,
+            attempt: None,
+            sender: captain.id.clone(),
+            sender_gen: 1,
+            recipient: captain.id,
+            kind: MsgKind::System,
+            urgent,
+            body: body.trim_end().to_string(),
+            reply_to: None,
+            needs_ack: false,
+            state: MsgState::Open,
+            created: now,
+        })?;
+        Ok(())
+    })
+}
+
 /// The thread of the item that says the merge of a task waits for another one
 /// (T-62). One item per waiting merge: the captain is told once, not every
 /// tick.
@@ -2491,6 +2804,71 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
     format!("engine.merge_lost_landed.{project}.{task}.{attempt}")
 }
 
+/// The word that closes a lost-merge item whose task the scan no longer
+/// checks (T-408).
+const LOST_SKIPPED: &str =
+    "no longer checked: its voyage is finished or its candidate is gone";
+
+/// The accepted attempt the lost-merge scan looks at (T-397, T-408): what it
+/// needs to name the work, and why it may leave it alone.
+struct Lost {
+    task: String,
+    attempt: i64,
+    candidate: String,
+    repo: Repo,
+    /// The word about this attempt was given already (T-397): the item is not
+    /// opened again, and only the T-408 skips can still close it.
+    told: bool,
+    /// The task's voyage still has a task that is not terminal (T-408).
+    voyage: bool,
+}
+
+/// Is the task's voyage open (T-408)? A voyage is its milestone, and it is open
+/// while one of its tasks is not terminal. A task of no milestone has no
+/// voyage to be finished.
+fn voyage_open(open: &std::collections::HashSet<String>, task: &gear_store::TaskRow) -> bool {
+    task.milestone
+        .as_deref()
+        .is_none_or(|milestone| open.contains(milestone))
+}
+
+/// Does the task's repository still hold the candidate (T-408)?
+///
+/// `git cat-file -e <sha>^{commit}` answers: `Some(false)` — the repository no
+/// longer has the commit, and the item would name work that nobody can remerge.
+/// `None` — there is no repository to ask, and the scan does not skip work on a
+/// question git could not put (a repo path that is not there is the project's
+/// trouble, not evidence that the commit is gone).
+fn candidate_held(repo: &Repo, candidate: &str) -> Option<bool> {
+    let dir = Path::new(&repo.path);
+    if !dir.is_dir() {
+        return None;
+    }
+    Some(git(dir, &["cat-file", "-e", &format!("{candidate}^{{commit}}")]).is_ok())
+}
+
+/// Close the lost-merge item of a task the scan no longer checks (T-408): the
+/// captain can no longer act on it.
+fn resolve_lost(store: &mut Store, project: &str, task: &str, now: Ts) -> GearResult<()> {
+    store.write(|tx| {
+        let thread = lost_thread(task);
+        for item in tx.thread_messages(project, &thread)? {
+            if item.state == MsgState::Open {
+                tx.update_message_state(
+                    project,
+                    &item.id,
+                    MsgState::Resolved,
+                    Some(LOST_SKIPPED),
+                    None,
+                    None,
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Name the accepted attempts that nothing will merge (T-397): a Done task
 /// whose latest accepted attempt has a candidate and no merge time, with no
 /// merge op queued or running and no open `merge-failed` item — the work sat
@@ -2498,6 +2876,11 @@ fn merge_lost_landed_key(project: &str, task: &str, attempt: i64) -> String {
 ///
 /// One item per attempt, and a candidate that is already an ancestor of the
 /// integration branch is left alone: the engine names only what is lost.
+///
+/// A task is looked at only while its voyage is open, and only while its repo
+/// still holds the candidate (T-408): a finished voyage settled its lost merges
+/// with it, and a candidate that is no longer an object in the repository
+/// cannot be remerged. An open item about such a task closes with that word.
 fn tell_captain_lost(
     store: &mut Store,
     project: &str,
@@ -2506,7 +2889,7 @@ fn tell_captain_lost(
 ) -> GearResult<()> {
     // One scan of the ops and one of the tasks per tick, like the merge keys of
     // the queue step: a project with no lost task pays two reads.
-    let silent = store.read(|tx| {
+    let lost = store.read(|tx| {
         let mut in_flight = std::collections::HashSet::new();
         for state in [
             OpState::Intended,
@@ -2522,8 +2905,19 @@ fn tell_captain_lost(
                 }
             }
         }
-        let mut silent: Vec<(String, i64, String, Repo)> = Vec::new();
-        for task in tx.tasks_of_project(project)? {
+        let tasks = tx.tasks_of_project(project)?;
+        // T-408: a voyage is its milestone, and it is open while one of its
+        // tasks is not terminal.
+        let mut open_voyages = std::collections::HashSet::new();
+        for task in &tasks {
+            if let Some(milestone) = task.milestone.as_deref() {
+                if !task.state.is_terminal() {
+                    open_voyages.insert(milestone.to_string());
+                }
+            }
+        }
+        let mut lost: Vec<Lost> = Vec::new();
+        for task in &tasks {
             // Only a done task is settled: the others may still be handed in.
             if task.state != TaskState::Done {
                 continue;
@@ -2555,22 +2949,39 @@ fn tell_captain_lost(
                 continue;
             }
             // Told and settled already: a resolved item does not come back.
-            if tx.get_meta(&merge_lost_told_key(project, &task.id, latest.n))?.is_some() {
-                continue;
-            }
-            if tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some() {
-                continue;
-            }
+            // Such a task is still carried, so the T-408 skips can close an
+            // item that is still open.
+            let told = tx.get_meta(&merge_lost_told_key(project, &task.id, latest.n))?.is_some()
+                || tx.get_meta(&merge_lost_landed_key(project, &task.id, latest.n))?.is_some();
             // F1 of the T-397 review: the task's own snapshot says where its
             // work lands — a task keeps the repo and the base it was created
             // against even when its lane moves (design, `repo_of_task`), and
             // merge execution asks the same question (see `repo_of_op`).
-            let repo = config.repo_of_task(&task);
-            silent.push((task.id, latest.n, candidate, repo));
+            let repo = config.repo_of_task(task);
+            lost.push(Lost {
+                task: task.id.clone(),
+                attempt: latest.n,
+                candidate,
+                repo,
+                told,
+                voyage: voyage_open(&open_voyages, task),
+            });
         }
-        Ok(silent)
+        Ok(lost)
     })?;
-    for (task, attempt, candidate, repo) in silent {
+    for Lost { task, attempt, candidate, repo, told, voyage } in lost {
+        // T-408: a lost merge of a finished voyage was settled with the voyage,
+        // and a candidate the repository no longer holds is work that cannot be
+        // remerged. Either way the task is not checked, and an item still open
+        // about it is closed with that word.
+        let skip = !voyage || matches!(candidate_held(&repo, &candidate), Some(false));
+        if skip {
+            resolve_lost(store, project, &task, now)?;
+            continue;
+        }
+        if told {
+            continue;
+        }
         // The candidate's own repo answers, from its remote-tracking ref: no
         // fetch on the tick's path. A ref that lags can only answer "not
         // merged", and the remerge the item names settles that (it fetches).
@@ -3672,6 +4083,117 @@ mod tests {
         );
     }
 
+    /// T-408: a task of a voyage whose tasks are all terminal is not checked —
+    /// a finished voyage settled its lost merges with it (M1's T-13 was one of
+    /// the 34 items T-397 opened the day it went live).
+    #[test]
+    fn a_task_of_a_finished_voyage_is_not_named_lost() {
+        let mut store = world(TaskState::Ready);
+        // T-5 is the only task of M1, and it is Done: the voyage is finished.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+        lost_task(&mut store, "abc1234", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "a finished voyage is not checked: {items:?}"
+        );
+    }
+
+    /// T-408: a candidate the task's repository no longer holds is skipped —
+    /// the item would name work that nobody can remerge (M1's T-13 named
+    /// 6e555b1, which is no longer an object in the repository).
+    #[test]
+    fn a_candidate_the_repository_no_longer_holds_is_not_named_lost() {
+        let scratch = Scratch::new("merge-lost-gone");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        // A commit the clone does not have: `git cat-file -e` does not find it.
+        lost_task(&mut store, "6e555b1", OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert!(
+            items.is_empty(),
+            "a candidate the repo does not hold is not named: {items:?}"
+        );
+        assert!(
+            store
+                .read(|tx| tx.get_meta(&merge_lost_landed_key("p", "T-5", 1)))
+                .unwrap()
+                .is_none(),
+            "a candidate that is gone did not land"
+        );
+    }
+
+    /// T-408: an item that is still open about a task the scan now skips closes
+    /// with the word that says why.
+    #[test]
+    fn an_open_lost_item_of_a_skipped_task_is_resolved() {
+        let scratch = Scratch::new("merge-lost-skipped");
+        let candidate = scratch.local_head_of("heat/t5");
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                let mut project = tx.get_project("p")?.unwrap();
+                project.config_toml = config_text_in("true", &scratch.work);
+                tx.update_project(&project)
+            })
+            .unwrap();
+        lost_task(&mut store, &candidate, OpState::Failed, 10);
+        failed_item_resolved(&mut store, 11);
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        let cfg = test_cfg();
+
+        // The voyage is open and the repo holds the candidate: the work is named.
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "the lost work was not named: {items:?}");
+        assert_eq!(items[0].state, MsgState::Open);
+
+        // The voyage finishes: T-5 is its only task and it is done.
+        store
+            .write(|tx| {
+                let mut task = tx.get_task("p", "T-5")?.unwrap();
+                task.milestone = Some("M1".into());
+                tx.update_task(&task)
+            })
+            .unwrap();
+
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 21).unwrap();
+        let items = store
+            .read(|tx| tx.thread_messages("p", "merge-lost:T-5"))
+            .unwrap();
+        assert_eq!(items.len(), 1, "a second item was opened: {items:?}");
+        assert_eq!(items[0].state, MsgState::Resolved, "{items:?}");
+        assert_eq!(items[0].result.as_deref(), Some(LOST_SKIPPED));
+    }
+
     #[test]
     fn a_merge_that_carries_no_other_task_is_not_held() {
         let pair = Pair::new("independent", false);
@@ -4155,6 +4677,121 @@ gate = "{gate}"
             })
             .unwrap();
         store
+    }
+
+    /// The branch sweep: a cancelled task's branches are deleted on the
+    /// remote, a branch older than `branch_max_age_min` is named to the
+    /// captain once per limit, and a young branch is left alone.
+    #[test]
+    fn the_branch_sweep_deletes_cancelled_branches_and_names_old_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(&work, "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        for branch in ["dev", "heat/t5", "review/t5", "heat/t6", "heat/t7"] {
+            sh(&work, &format!("git push -q origin HEAD:refs/heads/{branch}"));
+        }
+        // T-5 is cancelled; T-6 started three hours ago; T-7 ten minutes ago.
+        let mut store = world(TaskState::Cancelled);
+        store
+            .write(|tx| {
+                for (id, started) in [("T-6", 0), ("T-7", 3 * 3600 - 600)] {
+                    let mut task = tx.get_task("p", "T-5")?.unwrap();
+                    task.id = id.into();
+                    task.state = TaskState::Ready;
+                    tx.insert_task(&task)?;
+                    gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, started)?;
+                    // Sent back: the seat is free for the next task.
+                    let mut attempt = tx.get_attempt("p", id, 1)?.unwrap();
+                    attempt.state = gear_model::AttemptState::Rejected;
+                    tx.update_attempt(&attempt)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let now = 3 * 3600;
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        let remote = Target { name: "origin", runner: &GitRemote };
+        sweep_in(&mut store, "p", &config, &work, remote, found, now).unwrap();
+
+        let left = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        assert!(!left.contains("heat/t5") && !left.contains("review/t5"), "cancelled branches deleted: {left}");
+        assert!(left.contains("heat/t6") && left.contains("heat/t7") && left.contains("refs/heads/dev"), "{left}");
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now)).unwrap();
+        let body: Vec<&str> = items.iter().map(|m| m.body.as_str()).collect();
+        assert_eq!(items.len(), 1, "{body:?}");
+        assert!(items[0].urgent, "an old branch is urgent");
+        assert!(body[0].contains("heat/t6 (T-6") && body[0].contains("open 180 min"), "{}", body[0]);
+        assert!(!body[0].contains("heat/t7"), "a young branch is not named: {}", body[0]);
+        assert!(body[0].contains("heat/t5 at") && body[0].contains("review/t5 at"), "{}", body[0]);
+
+        // Ten minutes later the same old branch is not named again.
+        let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+        let found = task_branches(&mut store, "p", &config, &tasks, &repo, &heads).unwrap();
+        sweep_in(&mut store, "p", &config, &work, remote, found, now + 600).unwrap();
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now + 600)).unwrap();
+        assert_eq!(items.len(), 1, "told once per limit");
+    }
+
+    /// The branch sweep counts the open voyage's task branches: more than
+    /// lanes × `branch_max_per_lane` (1 × 3 here) is named to the captain,
+    /// review branches and other voyages' branches are not counted.
+    #[test]
+    fn the_branch_sweep_names_too_many_open_branches() {
+        let root = tempfile::tempdir().unwrap();
+        let origin = root.path().join("origin.git");
+        let work = root.path().join("work");
+        sh(root.path(), &format!("git init -q --bare {}", origin.display()));
+        sh(root.path(), &format!("git init -q -b dev {}", work.display()));
+        sh(&work, "git -c user.email=t@t -c user.name=t commit -q --allow-empty -m base");
+        sh(&work, &format!("git remote add origin {}", origin.display()));
+        let now = 3600;
+        let mut store = world(TaskState::Done);
+        store
+            .write(|tx| {
+                for (id, milestone) in [("T-6", "M1"), ("T-7", "M1"), ("T-8", "M1"), ("T-9", "M0")] {
+                    let mut task = tx.get_task("p", "T-5")?.unwrap();
+                    task.id = id.into();
+                    task.state = TaskState::Ready;
+                    task.milestone = Some(milestone.into());
+                    tx.insert_task(&task)?;
+                    gear_app::tasks::start_attempt(tx, "p", id, "p:heat", 1, now - 60)?;
+                    let mut attempt = tx.get_attempt("p", id, 1)?.unwrap();
+                    attempt.state = gear_model::AttemptState::Rejected;
+                    tx.update_attempt(&attempt)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for branch in ["heat/t6", "heat/t7", "heat/t8", "review/t6", "review/t7", "heat/t9"] {
+            sh(&work, &format!("git push -q origin HEAD:refs/heads/{branch}"));
+        }
+        let config = gear_app::config::parse(&config_text_in("true", &work)).unwrap();
+        let tasks = store.read(|tx| tx.tasks_of_project("p")).unwrap();
+        let repo = config.repo_of_task(&tasks[0]);
+        let remote = Target { name: "origin", runner: &GitRemote };
+        let sweep = |store: &mut Store, at: Ts| {
+            let heads = git(&work, &["ls-remote", "--heads", "origin"]).unwrap();
+            let found = task_branches(store, "p", &config, &tasks, &repo, &heads).unwrap();
+            sweep_in(store, "p", &config, &work, remote, found, at).unwrap();
+        };
+        // Three task branches of M1 (and M0's T-9, also open): four, over 3.
+        sweep(&mut store, now);
+        let items = store.read(|tx| tx.actionable_for("p", "p:captain", now)).unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        let body = &items[0].body;
+        assert!(body.contains("4 task branches") && body.contains("limit of 3"), "{body}");
+        assert!(!body.contains("review/t6"), "review branches are not counted: {body}");
+        // The same count a minute later is not told again.
+        sweep(&mut store, now + 60);
+        assert_eq!(store.read(|tx| tx.actionable_for("p", "p:captain", now + 60)).unwrap().len(), 1);
     }
 
     /// The project config of a repo in pull-request mode (design §11.1).
@@ -6316,6 +6953,70 @@ gate = "{project_gate}"
         let inbox = store.read(|tx| tx.actionable_for("p", "p:captain", op.updated + 1)).unwrap();
         assert_eq!(inbox.len(), 1, "{inbox:?}");
         assert!(inbox[0].body.contains("review branch"), "{}", inbox[0].body);
+    }
+
+    #[test]
+    fn a_mechanical_task_merges_without_a_review_branch() {
+        // T-405: a mechanically settled task has no reviewer, so origin never
+        // had a review branch for it. Its merge op carries `"mechanical":
+        // true`, and the pinned candidate merges into dev alone.
+        let scratch = Scratch::new("mechanical");
+        sh(&scratch.root, "git -C origin.git update-ref -d refs/heads/review/t5");
+        let (worktree, candidate) = scratch.prepared();
+        let mut herdr = gear_herdr::fake::FakeHerdr::new();
+        herdr.add_worktree("p/merge", &worktree.path, &worktree.pane_id);
+        let mut store = world(TaskState::Ready);
+        store
+            .write(|tx| {
+                gear_app::tasks::start_attempt(tx, "p", "T-5", "p:heat", 1, 0)?;
+                gear_app::tasks::on_delivery_confirmed(tx, "p", "T-5", 1, 0)?;
+                gear_app::tasks::submit_result(
+                    tx,
+                    "p",
+                    "T-5",
+                    1,
+                    1,
+                    &candidate,
+                    "ops/reports/T-5.md",
+                    0,
+                )?;
+                // T-273: the engine settles a mechanical hand-in itself; the
+                // note of its verdict says so.
+                tx.insert_verdict(&gear_store::VerdictRow {
+                    project: "p".into(),
+                    task: "T-5".into(),
+                    attempt: 1,
+                    contract_version: 1,
+                    candidate: candidate.clone(),
+                    passed: true,
+                    evidence: Some("mechanical: the task is a rename".into()),
+                    by_seat: "engine".into(),
+                    created: 10,
+                })?;
+                Ok(())
+            })
+            .unwrap();
+        accept(&mut store, "T-5", 10);
+
+        let mut cfg = test_cfg();
+        cfg.profiles.insert("opencode".into(), gear_herdr::builtin("opencode").unwrap());
+        merge_passed(&mut store, &mut herdr, &cfg, "p", 20).unwrap();
+        let merged = wait_merge(&mut store, &mut herdr, &cfg);
+
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        let op = merge_op(&mut store);
+        assert_eq!(op.state, OpState::Confirmed, "{op:?}");
+        assert_eq!(
+            op.payload["mechanical"],
+            serde_json::json!(true),
+            "the op of a mechanically settled attempt says so"
+        );
+        let log = scratch.dev_log();
+        assert!(log.contains("task"), "the candidate landed: {log}");
+        assert!(!log.contains("review"), "no review branch was merged: {log}");
+        assert!(scratch.dev_has_task_commit());
+        let branches = scratch.origin_branches();
+        assert!(!branches.contains("heat/t5"), "the task branch is closed: {branches}");
     }
 
     #[test]

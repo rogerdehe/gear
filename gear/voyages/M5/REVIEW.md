@@ -8,7 +8,7 @@ The general lane rules in the voyage's `CONVENTIONS.md` apply (English only, git
 
 1. **Independent.** Judge the work from the task packet, the contract tests and documents it names, and the diff. The writer's Result and notes are claims to verify, not facts. Never change the reviewed branch.
 2. **Verified facts (mechanical acceptance).** Run them yourself on the reviewed commit; do not copy the writer's numbers:
-   - the packet's Acceptance commands pass; `cargo build -p <crate> --all-targets` has zero warnings;
+   - the packet's Acceptance commands pass, run scoped to what the candidate touched: `make check CRATE=<crate> TESTS='<nextest filter for the changed modules and test files>'` (the merge gate runs the whole suite; a whole-crate run of your own is not needed); `cargo build -p <crate> --all-targets` has zero warnings;
    - `git diff --name-only origin/dev...origin/<branch>` lists only the packet's "Allowed changes";
    - `git merge-tree --write-tree origin/dev origin/<branch>` reports no conflicts.
    - test times: a test over 10 s that the candidate added or changed is a finding; one it did not touch is not a failed fact of this task (the suite runs while other lanes build) — list it under Set aside, never as blocking.

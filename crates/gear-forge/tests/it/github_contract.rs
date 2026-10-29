@@ -72,7 +72,10 @@ fn executable(path: &Path, text: &str) {
 }
 
 /// A scratch directory with an executable `gh` in it, and the forge that
-/// looks for `gh` only there.
+/// looks for `gh` only there. The bound is wide on purpose: the 30 s the
+/// forge ships with is a production setting, and a loaded machine would turn
+/// it into a failure these tests say nothing about. A test that checks the
+/// bound sets its own.
 fn forge_with(tag: &str, script: Option<&str>) -> (PathBuf, GitHub) {
     let dir = std::env::temp_dir().join(format!("gear-forge-{}-{tag}", std::process::id()));
     fs::remove_dir_all(&dir).ok();
@@ -83,7 +86,9 @@ fn forge_with(tag: &str, script: Option<&str>) -> (PathBuf, GitHub) {
         // The ordinary fake: a link to the one script of this test file.
         None => fs::hard_link(shared_fake(), dir.join("gh")).expect("link the fake gh"),
     }
-    let forge = GitHub::new().with_path(&dir);
+    let forge = GitHub::new()
+        .with_path(&dir)
+        .with_timeout(Duration::from_secs(300));
     (dir, forge)
 }
 

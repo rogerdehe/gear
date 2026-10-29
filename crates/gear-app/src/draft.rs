@@ -24,6 +24,9 @@ pub struct QueueItem {
     pub priority: Priority,
     pub lane: Option<String>,
     pub milestone: Option<String>,
+    /// The voyage station the task belongs to (M5 S3): `station=S2`. The
+    /// station must be one the task's milestone block names.
+    pub station: Option<String>,
     pub required: bool,
     pub goal: Option<String>,
     pub accept: Option<String>,
@@ -121,6 +124,9 @@ pub struct Draft {
     pub staff: Vec<StaffItem>,
     pub verdicts: Vec<VerdictLine>,
     pub reviews: Vec<ReviewLine>,
+    /// The user asked for this goal, bar or eta change and confirmed it
+    /// (T-410): `gear plan apply --confirmed`. The parser never sets it.
+    pub confirmed: bool,
 }
 
 /// The id and title of a `# Milestone <id>: <title>` (or `# Voyage <id>:
@@ -160,6 +166,38 @@ pub fn milestone_fields(body: &str) -> (Option<String>, Option<String>, Option<S
     (done, bar, eta)
 }
 
+/// The stations a milestone block names (M5 S3), in plan order: every trimmed
+/// line `station <id>: <what reaching it needs>`. The id is non-empty and has
+/// no whitespace, the needs are non-empty; a repeated id, an empty id or empty
+/// needs rejects the block, naming the line.
+pub fn milestone_stations(body: &str) -> Result<Vec<gear_store::VoyageStation>, String> {
+    let mut stations: Vec<gear_store::VoyageStation> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("station ") else { continue };
+        let (id, needs) = match rest.split_once(':') {
+            Some((id, needs)) => (id.trim(), needs.trim()),
+            None => ("", ""),
+        };
+        let refused = || {
+            format!(
+                "station <id>: <what reaching it needs>, got {line:?}"
+            )
+        };
+        if id.is_empty() || id.split_whitespace().count() != 1 || needs.is_empty() {
+            return Err(refused());
+        }
+        if stations.iter().any(|station| station.id == id) {
+            return Err(refused());
+        }
+        stations.push(gear_store::VoyageStation {
+            id: id.to_string(),
+            needs: needs.to_string(),
+        });
+    }
+    Ok(stations)
+}
+
 /// Parse a draft. Header `<!-- gear-plan project=<id> base=<n> -->` on the
 /// first non-empty line is required. Sections may be absent; known sections
 /// only (`Goal`, `Milestone …`/`Voyage …`, `Decisions`, `Queue`, `Staff`,
@@ -190,6 +228,7 @@ pub fn parse(text: &str) -> GearResult<Draft> {
         staff: Vec::new(),
         verdicts: Vec::new(),
         reviews: Vec::new(),
+        confirmed: false,
     };
 
     let mut index = first + 1;
@@ -483,6 +522,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
     })?;
     let mut lane = None;
     let mut milestone = None;
+    let mut station = None;
     let mut required = false;
     for token in tokens {
         if token == "required" {
@@ -498,6 +538,13 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
             if milestone.replace(value.to_string()).is_some() {
                 return Err(bad(line, "repeated `milestone=` in one queue block header"));
             }
+        } else if let Some(value) = token.strip_prefix("station=") {
+            if value.is_empty() {
+                return Err(bad(line, "`station=` needs a station id"));
+            }
+            if station.replace(value.to_string()).is_some() {
+                return Err(bad(line, "repeated `station=` in one queue block header"));
+            }
         } else {
             return Err(bad(line, format!("unknown queue block header field {token:?}")));
         }
@@ -508,6 +555,7 @@ fn parse_block_header(header: &str, line: usize) -> GearResult<QueueItem> {
         priority,
         lane,
         milestone,
+        station,
         required,
         goal: None,
         accept: None,

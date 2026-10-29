@@ -122,6 +122,9 @@ fn world() -> Store {
                 model: Some("minimax-cn/MiniMax-M3.1-Flash".into()),
                 start_at: departure,
             })?;
+            // The work time of the round (T-348): the board reads the minutes
+            // the lane worked, not the clock since the delivery.
+            tx.set_round_active(&key, 44 * 60)?;
             tx.set_round_tokens(
                 &key,
                 &RoundTokens {
@@ -834,7 +837,7 @@ impl Keys for Presses {
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
 }
 
 /// T-342 (README change 13): a decision is picked, its reason is not. `Down`

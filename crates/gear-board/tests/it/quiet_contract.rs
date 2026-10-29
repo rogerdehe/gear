@@ -172,9 +172,12 @@ impl HerdrRead for Counting {
 }
 
 /// The frames the board drew, in order.
+///
+/// A frame opens a synchronized update and homes the cursor (T-403); the
+/// frames are told apart there.
 fn frames(out: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(out);
-    text.split("\u{1b}[H\u{1b}[2J").skip(1).map(str::to_string).collect()
+    text.split("\u{1b}[?2026h\u{1b}[H").skip(1).map(str::to_string).collect()
 }
 
 #[test]
@@ -188,8 +191,10 @@ fn ten_refresh_periods_build_the_board_once() {
         .unwrap();
 
     assert_eq!(hook::builds(), 1, "nothing changed: one board, ten refreshes");
-    // The board was redrawn each period all the same.
-    assert_eq!(frames(&out).len(), 11, "the first frame and ten refreshes");
+    // The board is not redrawn either: the frame the ten refreshes build says
+    // what the first one said, so it is not written again (T-403: rewriting
+    // the same frame is what made the page blink).
+    assert_eq!(frames(&out).len(), 1, "the first frame, and no refresh writes one");
 }
 
 #[test]
@@ -213,8 +218,9 @@ fn a_key_press_redraws_without_building_the_board() {
     let mut store = Store::open_in_memory().unwrap();
     seed(&mut store);
 
-    // The graph, then two rows down, then quit: the tab and the selection are
-    // redrawn from the kept board.
+    // The graph, then one row down, then quit: the tab and the selection are
+    // redrawn from the kept board. The second `Down` has nowhere to go on two
+    // tasks and writes no frame at all (T-403).
     let events = vec![Event::Key('2'), Event::Down, Event::Down, Event::Key('q')];
     let mut out: Vec<u8> = Vec::new();
     run_with(&mut store, &options(Duration::from_millis(1)), &mut out, &mut Events(events), None)
@@ -222,8 +228,8 @@ fn a_key_press_redraws_without_building_the_board() {
 
     assert_eq!(hook::builds(), 1, "the keys redrew the board, they did not build it");
     let drawn = frames(&out);
-    assert_eq!(drawn.len(), 4, "the first frame and one redraw per key: {drawn:?}");
-    assert_ne!(drawn[0], drawn[3], "the last frame shows the moved selection");
+    assert_eq!(drawn.len(), 3, "the first frame and one redraw per change: {drawn:?}");
+    assert_ne!(drawn[0], drawn[2], "the last frame shows the moved selection");
 }
 
 #[test]
@@ -283,6 +289,53 @@ fn a_changed_agent_list_builds_the_board_again() {
 
     assert_eq!(herdr.asks, 2);
     assert_eq!(hook::builds(), 2, "the agent list moved: the board was built again");
+}
+
+/// A keyboard that reports another size after the first frame, waits the
+/// period out and then quits.
+struct Resize {
+    size: (usize, usize),
+    asked: bool,
+}
+
+impl Keys for Resize {
+    fn next_event(&mut self, timeout: Duration) -> Option<Event> {
+        if self.asked {
+            return Some(Event::Key('q'));
+        }
+        self.asked = true;
+        self.size = (90, 20);
+        std::thread::sleep(timeout);
+        None
+    }
+
+    fn size(&self) -> (usize, usize) {
+        self.size
+    }
+}
+
+#[test]
+fn a_resize_draws_once_over_a_full_clear() {
+    hook::reset();
+    let mut store = Store::open_in_memory().unwrap();
+    seed(&mut store);
+
+    let mut out: Vec<u8> = Vec::new();
+    run_with(
+        &mut store,
+        &options(Duration::from_millis(1)),
+        &mut out,
+        &mut Resize { size: (100, 30), asked: false },
+        None,
+    )
+    .unwrap();
+
+    // The frame under the new size is drawn all the same, and the terminal is
+    // cleared once for it (T-403): the resize threw the old one away.
+    let drawn = frames(&out);
+    assert_eq!(drawn.len(), 2, "the first frame and the frame of the new size");
+    let text = String::from_utf8_lossy(&out);
+    assert_eq!(text.matches("\u{1b}[2J").count(), 1, "the resize clears the screen once: {text:?}");
 }
 
 /// The keys of a board with no project named: `p` twice — one full cycle over

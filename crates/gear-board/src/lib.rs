@@ -14,6 +14,7 @@
 //! on a terminal; `gear-cli` calls it from the `gear board` subcommand.
 
 mod deps;
+pub mod forecast;
 pub mod frame;
 pub mod golden;
 pub mod graph;
@@ -28,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gear_model::{ErrorCode, GearError, GearResult, OpKind, OpState, SeatRole, SeatState, TaskState, Ts};
-use gear_store::{BindingStatus, SeatRow, Store, Tx};
+use gear_store::{BindingStatus, RoundRow, SeatRow, Store, Tx};
 
 use crate::frame::Tab;
 use crate::idle::IdleReason;
@@ -225,6 +226,10 @@ pub struct ProjectBoard {
     /// The stations of the measured voyage, in plan order, with their
     /// progress (T-334); empty without a measured voyage.
     pub stations: Vec<stations::StationProgress>,
+    /// Each lane's queue played forward (T-349), in the order of `lanes`: when
+    /// the lane ends and how long it sits idle. Empty when no measured voyage
+    /// has open work.
+    pub forecast: Vec<forecast::LaneEnd>,
 }
 
 /// One delivery the engine has not confirmed yet (T-271).
@@ -406,6 +411,9 @@ pub struct TaskBoard {
     pub cache_read: Option<i64>,
     /// The cost of the task's rounds, when it is known (§4.4).
     pub cost_usd: Option<f64>,
+    /// The tasks it depends on (T-349): the board's forecast waits for them to
+    /// merge before the task can start.
+    pub deps: Vec<String>,
 }
 
 /// The captain's inbox: how many items wait, and how long the oldest has.
@@ -583,6 +591,7 @@ pub fn project_with_agents(
             tokens: tokens_of(tx, project, &task.id)?,
             cache_read: cache_read_of(tx, project, &task.id)?,
             cost_usd: cost_of(tx, project, &task.id)?,
+            deps: task.deps.clone(),
         };
         match lanes.iter_mut().find(|lane| lane.lane == name) {
             Some(lane) => lane.tasks.push(line),
@@ -796,6 +805,34 @@ pub fn project_with_agents(
         Some(voyage) => stations::progress(tx, project, &voyage.milestone)?,
         None => Vec::new(),
     };
+    // Each lane's queue played forward (T-349): the measured voyage's forecast,
+    // while it has open work. The jobs come from the lanes, which are in plan
+    // order; the graph's order is for drawing and is not the queue's.
+    let forecast = match &workload {
+        Some(voyage)
+            if lanes
+                .iter()
+                .any(|lane| lane.tasks.iter().any(|task| !task.state.is_terminal())) =>
+        {
+            let jobs: Vec<forecast::Job> = lanes
+                .iter()
+                .flat_map(|lane| {
+                    lane.tasks.iter().map(|task| forecast::Job {
+                        id: task.id.clone(),
+                        lane: lane.lane.clone(),
+                        stage: task.stage,
+                        est_min: task.est_min.unwrap_or(0),
+                        actual_min: task.actual_min.unwrap_or(0),
+                        deps: task.deps.clone(),
+                    })
+                })
+                .collect();
+            let names: Vec<String> = lanes.iter().map(|lane| lane.lane.clone()).collect();
+            let review_merge = forecast::review_merge_min(tx, project, &voyage.milestone)?;
+            forecast::forecast(&jobs, &names, review_merge)
+        }
+        _ => Vec::new(),
+    };
     Ok(ProjectBoard {
         voyages,
         workload,
@@ -809,7 +846,7 @@ pub fn project_with_agents(
         deps,
         graph,
         graph_lanes,
-        quota: quota_readings(tx)?,
+        quota: quota_readings(tx, project)?,
         decisions,
         frictions,
         // The overlaps with the integration branch (T-188): information
@@ -820,6 +857,7 @@ pub fn project_with_agents(
         unconfirmed_deliveries,
         unconfirmed,
         stations,
+        forecast,
     })
 }
 
@@ -1156,14 +1194,34 @@ fn dep_line(node: &DepNode) -> String {
     line
 }
 
-/// The minutes a task took: from its first attempt to its merge, or until
-/// now when it is not merged yet.
+/// The seconds a lane worked on a task (§5.1): the `active_s` of its dev and
+/// rework rounds. None when the task has no such round, so a task that was
+/// never worked on is not a measured zero (F5).
+fn worked_s_of(rounds: &[RoundRow]) -> Option<i64> {
+    let mut total = 0;
+    let mut worked = false;
+    for round in rounds {
+        if round.role == "dev" || round.role == "rework" {
+            total += round.active_s;
+            worked = true;
+        }
+    }
+    worked.then_some(total)
+}
+
+/// The minutes the lane worked on a task (§5.1): the sum of the `active_s` of
+/// its dev and rework rounds. A task with none of them is measured from its
+/// first attempt to its merge, or until now when it is not merged yet.
 fn actual_min_of(
     tx: &Tx<'_>,
     project: &str,
     task: &str,
     now: Ts,
 ) -> GearResult<Option<i64>> {
+    let rounds = tx.rounds_of_task(project, task)?;
+    if let Some(worked) = worked_s_of(&rounds) {
+        return Ok(Some(worked / 60));
+    }
     let times = tx.attempt_times_of_task(project, task)?;
     let start = times.iter().filter_map(|(_, times)| times.started).min();
     let merged = times.iter().filter_map(|(_, times)| times.merged).max();
@@ -1174,8 +1232,6 @@ fn actual_min_of(
     })
 }
 
-/// The quota readings of the providers (§9.1): the meta keys
-/// `quota.reading.<provider>`.
 /// The voyage the Workload view measures: the active one, else the latest
 /// departed voyage that is finished (F5).
 ///
@@ -1317,11 +1373,28 @@ fn workload_voyage(
         .min_by_key(|report| report.elapsed_min.unwrap_or(i64::MAX)))
 }
 
-fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
+/// The quota readings of the providers (§9.1): the meta keys
+/// `quota.reading.<provider>`.
+///
+/// Only the providers the project reads now are shown (T-383): a reading left
+/// in the meta by an earlier config is not one of them. A config that does
+/// not parse does not filter: the readings are shown rather than hidden.
+fn quota_readings(tx: &Tx<'_>, project: &str) -> GearResult<Vec<QuotaReading>> {
+    let wanted = quota_providers(tx, project)?;
     let mut readings = Vec::new();
     for key in tx.meta_keys_with_prefix("quota.reading.")? {
         let Some(raw) = tx.get_meta(&key)? else { continue };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
+            .to_string();
+        if let Some(wanted) = &wanted {
+            if !wanted.contains(&provider) {
+                continue;
+            }
+        }
         let mut windows = Vec::new();
         for window in value
             .get("windows")
@@ -1342,11 +1415,7 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
             continue;
         }
         readings.push(QuotaReading {
-            provider: value
-                .get("provider")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_else(|| key.trim_start_matches("quota.reading."))
-                .to_string(),
+            provider,
             windows,
             read_at: value
                 .get("read_at")
@@ -1355,6 +1424,28 @@ fn quota_readings(tx: &Tx<'_>) -> GearResult<Vec<QuotaReading>> {
         });
     }
     Ok(readings)
+}
+
+/// The providers the project's stored config reads (§9.1): the `provider` of
+/// every `[[quota.sources]]`.
+///
+/// None when the config does not parse or the project is not there: the
+/// filter is skipped then, and every reading stays.
+fn quota_providers(tx: &Tx<'_>, project: &str) -> GearResult<Option<Vec<String>>> {
+    let Some(row) = tx.get_project(project)? else { return Ok(None) };
+    let Ok(config) = row.config_toml.parse::<toml::Value>() else { return Ok(None) };
+    let mut providers = Vec::new();
+    for source in config
+        .get("quota")
+        .and_then(|quota| quota.get("sources"))
+        .and_then(toml::Value::as_array)
+        .unwrap_or(&Vec::new())
+    {
+        if let Some(provider) = source.get("provider").and_then(toml::Value::as_str) {
+            providers.push(provider.to_string());
+        }
+    }
+    Ok(Some(providers))
 }
 
 /// The line about the captain's inbox.
@@ -1527,7 +1618,8 @@ pub fn run(store: &mut Store, opts: &Options, out: &mut dyn Write, mut herdr: Op
 /// store's `data_version` moved, Herdr's agent list moved, or the kept board's
 /// clock got old ([`REBUILD_AFTER`]). Every other frame redraws the board that
 /// was built last, and Herdr is asked for its agents at most every
-/// [`AGENTS_EVERY`].
+/// [`AGENTS_EVERY`]. A frame that reads like the last one written is not
+/// written at all (T-403): the screen keeps it.
 pub fn run_with(
     store: &mut Store,
     opts: &Options,
@@ -1561,6 +1653,10 @@ pub fn run_with(
     // between.
     let mut agents: Option<Vec<AgentInfo>> = None;
     let mut agents_at: Option<std::time::Instant> = None;
+    // The frame that was written last (T-403). A frame that says what that one
+    // said is not written at all: the board redraws in place, and rewriting
+    // the same text only makes the page blink.
+    let mut written: Option<String> = None;
     loop {
         let at = std::time::Instant::now();
         let mut agents_changed = false;
@@ -1612,16 +1708,22 @@ pub fn run_with(
                         e.code, e.detail
                     );
                     screen::draw(out, &text).map_err(write_error)?;
+                    written = Some(text);
                     let deadline = std::time::Instant::now() + opts.refresh;
                     let _ = keys.next_event(deadline.saturating_duration_since(std::time::Instant::now()));
                     continue;
                 }
             }
         }
+        // A resize has thrown away what the screen showed (T-403): the frame
+        // is drawn once, over a full clear, even when it says what the last
+        // one said. Nothing else clears the screen.
+        let size = keys.size();
+        let resized = size != screen.size;
+        screen.size = size;
         // The selection moves over the rows the view paints as picks, and
         // never leaves them (F4): a view that shrank, or a key pressed at its
         // end, does not lose the selection.
-        screen.size = keys.size();
         let mut tall = frame::Canvas::new(screen.size.0, 1000);
         let picks = {
             let board = kept.as_ref().expect("the board was just built or kept");
@@ -1633,7 +1735,14 @@ pub fn run_with(
             frame::canvas(board, &screen, panel.as_deref()).ansi(opts.color)
         };
         first = false;
-        screen::draw(out, &text).map_err(write_error)?;
+        if resized {
+            out.write_all(b"\x1b[2J").map_err(write_error)?;
+            written = None;
+        }
+        if written.as_deref() != Some(text.as_str()) {
+            screen::draw(out, &text).map_err(write_error)?;
+            written = Some(text);
+        }
         let deadline = std::time::Instant::now() + opts.refresh;
         loop {
             let now = std::time::Instant::now();

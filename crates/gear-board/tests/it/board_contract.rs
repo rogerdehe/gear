@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use gear_board::{build, render, run_with, to_json, EngineState, Event, Keys, Options, View};
 use gear_model::{AttemptState, MsgKind, MsgState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, ContractRow, NewMessage, Store, TaskRow};
+use gear_store::{
+    testing, AttemptRow, AttemptStep, ContractRow, NewMessage, NewRound, RoundKey, Store, TaskRow,
+};
 
 const T0: i64 = 1_800_000_000;
 
@@ -335,6 +337,103 @@ fn the_board_is_json() {
     assert_eq!(doc["projects"][0]["lanes"][0]["tasks"][0]["state"], "done");
 }
 
+#[test]
+fn a_task_is_measured_by_the_time_its_lane_worked_on_it() {
+    // T-348: the actual minutes of a task are the `active_s` of its dev and
+    // rework rounds, not the clock since its delivery (T-241 showed "working
+    // 89/25m" where the rework took 17 minutes).
+    let mut store = Store::open_in_memory().unwrap();
+    let now = T0 + 3 * 3600;
+    store
+        .write(|tx| {
+            testing::seed_project(tx, "p", "sess", T0)?;
+            testing::seed_active_seat(tx, "p", "data", SeatRole::Lane, "w1:p1", "pi", T0)?;
+            for (id, rank) in [("T-1", 1), ("T-2", 2)] {
+                tx.insert_task(&TaskRow {
+                    repo: None,
+                    base: None,
+                    gate: None,
+                    rework_estimate_min: None,
+                    project: "p".into(),
+                    id: id.into(),
+                    rank,
+                    state: TaskState::Running,
+                    priority: "must".into(),
+                    lane: Some("data".into()),
+                    milestone: None,
+                    required: false,
+                    contract_version: 1,
+                    deps: vec![],
+                    followup_of: None,
+                    wait_on: None,
+                    wait_cond: None,
+                    rework_note: None,
+                    estimate_min: None,
+                    issue: None,
+                    updated: T0,
+                })?;
+                // Both were delivered three hours ago.
+                tx.insert_attempt(&AttemptRow {
+                    session_ref: None,
+                    session_cli: None,
+                    session_action: None,
+                    sent_at: None,
+                    project: "p".into(),
+                    task: id.into(),
+                    n: 1,
+                    seat: "p:data".into(),
+                    generation: 1,
+                    contract_version: 1,
+                    adopted_version: 1,
+                    pending_update: None,
+                    state: AttemptState::Started,
+                    candidate: None,
+                    report: None,
+                    safe_point: None,
+                    started: T0,
+                    updated: T0,
+                })?;
+                tx.set_attempt_time("p", id, 1, AttemptStep::Started, T0)?;
+            }
+            // T-1 worked for 25 minutes and then reworked it for 10.
+            for (attempt, role, active_s) in [(1, "dev", 1500), (2, "rework", 600)] {
+                let key = RoundKey {
+                    project: "p".into(),
+                    task: "T-1".into(),
+                    attempt,
+                    role: role.into(),
+                };
+                tx.insert_round(&NewRound {
+                    key: key.clone(),
+                    seat: "p:data".into(),
+                    generation: 1,
+                    cli: "pi".into(),
+                    model: None,
+                    start_at: T0,
+                })?;
+                tx.set_round_active(&key, active_s)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let board = build(&mut store, &options(), now).unwrap();
+    let tasks = &board.projects[0].lanes[0].tasks;
+    let worked = tasks.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the work time of the two rounds");
+    // A task without a dev or rework round keeps its span.
+    let span = tasks.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the span of a task with no round");
+
+    let graph = store
+        .read(|tx| gear_board::graph::tasks(tx, "p", now))
+        .unwrap();
+    let worked = graph.iter().find(|task| task.id == "T-1").unwrap();
+    assert_eq!(worked.actual_min, Some(35), "the same work time in the graph");
+    let span = graph.iter().find(|task| task.id == "T-2").unwrap();
+    assert_eq!(span.actual_min, Some(180), "the same span in the graph");
+}
+
 /// Keys that say `q` after the given number of timeouts.
 struct Quitter {
     timeouts: usize,
@@ -366,8 +465,12 @@ fn q_leaves_the_board() {
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains("GEAR · p"), "{text}");
     assert!(text.contains("LANES"), "{text}");
-    // The frame is drawn on the screen, so it starts with the clear.
-    assert!(text.contains("\x1b[2J"), "{text:?}");
+    // The frame is drawn in place (T-403): it opens a synchronized update and
+    // never clears the whole screen.
+    assert!(text.contains("\x1b[?2026h\x1b[H"), "{text:?}");
+    assert!(!text.contains("\x1b[2J"), "the screen is never cleared whole: {text:?}");
+    assert!(text.contains("\x1b[K"), "every line erases its rest: {text:?}");
+    assert!(text.contains("\x1b[J"), "the screen below the frame is erased: {text:?}");
 }
 
 #[test]
@@ -784,6 +887,11 @@ fn world_with_a_voyage() -> Store {
     let mut store = world();
     store
         .write(|tx| {
+            // The config reads minimax-cn: the reading below is one the
+            // project reads now (T-383).
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = "[[quota.sources]]\nprovider = \"minimax-cn\"\nreader = \"minimax\"\n".to_string();
+            tx.update_project(&row)?;
             tx.upsert_voyage(&gear_store::VoyageRow {
                 project: "p".into(),
                 milestone: "M4".into(),
@@ -818,8 +926,9 @@ struct Frames {
     buffer: String,
 }
 
-/// The clear-screen prefix every frame starts with.
-const CLEAR: &str = "\x1b[H\x1b[2J";
+/// The clear-screen prefix every frame starts with: the synchronized update
+/// and the home position (T-403: the screen is never cleared whole).
+const CLEAR: &str = "\x1b[?2026h\x1b[H";
 
 /// The start of the footer, which an 80 column terminal shows: the whole
 /// footer is longer than the screen.
@@ -834,6 +943,40 @@ impl Frames {
     /// The next frame that does not hold `needle`.
     fn next_without(&mut self, needle: &str, timeout: Duration) -> String {
         self.wait(needle, false, timeout)
+    }
+
+    /// Whether no frame at all was written within `timeout`.
+    ///
+    /// The board writes a frame only when it says something new (T-403): a
+    /// key or a click that changes nothing leaves the screen as it is, so no
+    /// frame arrives.
+    fn quiet(&mut self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.take_frame().is_some() {
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let mut fds = libc::pollfd { fd: self.master, events: libc::POLLIN, revents: 0 };
+            let millis = (deadline.saturating_duration_since(now)).as_millis().min(50) as i32;
+            // SAFETY: `fds` is one pollfd we own; the call only waits.
+            let ready = unsafe { libc::poll(&mut fds, 1, millis) };
+            if ready <= 0 {
+                continue;
+            }
+            let mut chunk = [0u8; 4096];
+            // SAFETY: the buffer is one chunk long.
+            let read = unsafe {
+                libc::read(self.master, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+            };
+            if read > 0 {
+                self.buffer
+                    .push_str(&String::from_utf8_lossy(&chunk[..read as usize]));
+            }
+        }
     }
 
     /// Wait for a **complete** frame: the text between a clear-screen and the
@@ -1067,21 +1210,29 @@ fn the_new_board_draws_its_views_and_the_keys_move_between_them() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // A click on the first row of the first view picks that row, and `Enter`
-    // opens its panel.
+    // opens its panel. The row is the one the board already shows as picked,
+    // and a frame that says what the last one said is not written (T-403):
+    // the selection is moved off it first, so the click is a change.
+    press(pty.master, b"j");
+    let _frame = frames.next("› runtime", Duration::from_secs(5));
     press(pty.master, b"\x1b[<0;1;7M");
     let _frame = frames.next("› data", Duration::from_secs(5));
     press(pty.master, b"\r");
     let frame = frames.next("lane data", Duration::from_secs(5));
     assert!(frame.contains("LEFT, in order"), "{frame}");
 
-    // The selection never walks past the last row: `j` twice on two lanes
-    // keeps the last one, and `Enter` opens it.
+    // The selection never walks past the last row: `j` moves to the last
+    // lane, a second `j` has nowhere to go and writes no frame at all, and
+    // `Enter` opens the last lane.
     press(pty.master, b"x");
     let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
     press(pty.master, b"j");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
-    press(pty.master, b"j");
     let _frame = frames.next("› runtime", Duration::from_secs(5));
+    press(pty.master, b"j");
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a key that moves nothing writes no frame"
+    );
     press(pty.master, b"\r");
     let _frame = frames.next("lane runtime", Duration::from_secs(5));
 
@@ -1231,7 +1382,7 @@ fn a_board_of_one_project_has_no_project_key() {
 fn a_frame_without_the_footer_is_never_accepted() {
     let mut frames = Frames { master: -1, buffer: String::new() };
     // The clear-screen and the body, but no footer yet.
-    frames.buffer.push_str("\x1b[H\x1b[2JGEAR · p\nLANES\n");
+    frames.buffer.push_str("\x1b[?2026h\x1b[HGEAR · p\nLANES\n");
     assert!(
         frames.take_frame().is_none(),
         "a frame without the footer is not a frame"
@@ -1330,9 +1481,14 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     let _frame = frames.next("LANES", Duration::from_secs(5));
 
     // The panel of a lane with seventeen tasks is taller than the terminal: it
-    // keeps both borders and the footer's row (F3).
+    // keeps both borders and the footer's row (F3). The first lane is the one
+    // the board shows as picked, and a click that picks it again writes no
+    // frame (T-403): `Enter` opens it from there.
     press(pty.master, b"\x1b[<0;1;7M");
-    let _frame = frames.next("› data", Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click on the picked row writes no frame"
+    );
     press(pty.master, b"\r");
     let frame = frames.next("LEFT, in order", Duration::from_secs(5));
     assert!(frame.contains("┐"), "the right border of the panel: {frame}");
@@ -1344,12 +1500,13 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     );
     // Any key closes the panel.
     press(pty.master, b"x");
-    let _frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
+    let frame = frames.next_without("LEFT, in order", Duration::from_secs(5));
 
     // The Graph tab is clicked where it is drawn (F2: the frame is written
     // without a trailing newline, so the row the user sees is the row the hit
-    // testing expects).
-    let frame = frames.next("LANES", Duration::from_secs(5));
+    // testing expects). The frame that closed the panel is the one on the
+    // screen, and a frame that reads like the last one written is not written
+    // again (T-403).
     let tab = column_of(&frame, 3, "2 Tasks") + 2;
     press(pty.master, format!("\x1b[<0;{tab};4M").as_bytes());
     let _frame = frames.next("dev", Duration::from_secs(5));
@@ -1358,19 +1515,24 @@ fn a_long_graph_scrolls_and_a_tall_panel_keeps_its_borders() {
     // press is read: the board redraws on its own too, and a pty whose output
     // is not read blocks the board (F9). The heading scrolls away with the
     // rows above the selected one (T-342), so the frames are drained by their
-    // footer.
+    // footer. A frame is written only when the selection moves (T-403), so the
+    // last one drained is the one on the screen.
+    let mut frame = String::new();
     for _ in 0..16 {
         press(pty.master, b"j");
-        let _frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
+        frame = frames.last_with(FOOTER_START, Duration::from_secs(5));
     }
-    let frame = frames.last_with("T-17", Duration::from_secs(5));
     assert!(frame.contains("T-17"), "the last task stays visible: {frame}");
 
     // A click on the footer's row and on the spacer below the data selects
-    // nothing (F8): the selection stays on the last task.
+    // nothing (F8): the selection stays on the last task, and no frame is
+    // written (T-403).
     press(pty.master, b"\x1b[<0;1;24M");
     press(pty.master, b"\x1b[<0;1;23M");
-    let _frame = frames.next(FOOTER_START, Duration::from_secs(5));
+    assert!(
+        frames.quiet(Duration::from_millis(300)),
+        "a click that selects nothing writes no frame"
+    );
 
     // `Enter` opens the panel of the task that is visible.
     press(pty.master, b"\r");
@@ -1428,7 +1590,7 @@ impl Keys for Events {
 /// The last frame the board drew: the frames are separated by the clear.
 fn last_frame(out: &[u8]) -> String {
     let text = String::from_utf8_lossy(out);
-    text.rsplit("\u{1b}[H\u{1b}[2J").next().unwrap_or_default().to_string()
+    text.rsplit("\u{1b}[?2026h\u{1b}[H").next().unwrap_or_default().to_string()
 }
 
 /// T-342: a view with more picks than screen rows scrolls so the selected one
@@ -1530,4 +1692,121 @@ fn a_click_on_the_top_row_of_a_scrolled_view_picks_the_task_there() {
         !frame_text.contains("T-17"),
         "the selection moved off the last task: {frame_text}"
     );
+}
+
+// ---- T-383: the QUOTA lines of the board
+
+/// The Now view's frame, wide and tall enough for the whole quota block.
+fn now_frame(store: &mut Store, now: i64) -> String {
+    let board = build(
+        store,
+        &gear_board::Options { project: Some("p".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    let screen = crate::screen(gear_board::frame::Tab::Now, 0, (120, 70));
+    gear_board::frame::canvas(&board, &screen, None).text()
+}
+
+/// The project `p` whose config reads `providers`, with the given quota
+/// readings in the meta (`provider` → the reading's JSON).
+fn world_reading_custom(providers: &[&str], readings: &[(&str, &str)]) -> Store {
+    let mut store = world();
+    store
+        .write(|tx| {
+            let mut row = tx.get_project("p")?.unwrap();
+            row.config_toml = providers
+                .iter()
+                .map(|provider| {
+                    format!("[[quota.sources]]\nprovider = \"{provider}\"\nreader = \"codex\"\n")
+                })
+                .collect();
+            tx.update_project(&row)?;
+            for (provider, reading) in readings {
+                tx.set_meta(&format!("quota.reading.{provider}"), reading)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+}
+
+/// One reading, as the engine writes it: one window, one used percent, one
+/// reset and when it was read.
+fn reading_json(provider: &str, window: &str, reset: i64, read_at: i64) -> String {
+    format!(
+        r#"{{"provider":"{provider}","windows":[{{"name":"{window}","used_percent":63.0,"resets_at":{reset}}}],"read_at":{read_at}}}"#
+    )
+}
+
+#[test]
+fn the_quota_shows_only_the_providers_the_project_reads() {
+    // The config reads codex alone; a reading of an earlier config stays in
+    // the meta and is not shown (T-383).
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[
+            (
+                "codex",
+                &reading_json("codex", "weekly", T0 + 6 * 86_400, T0),
+            ),
+            (
+                "minimax-cn",
+                r#"{"provider":"minimax-cn","windows":[{"name":"5h","used_percent":64.0,"resets_at":1800003600}],"read_at":1800000000}"#,
+            ),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("codex"), "{frame}");
+    assert!(!frame.contains("minimax-cn"), "{frame}");
+}
+
+#[test]
+fn a_reset_days_away_prints_the_day_and_a_later_one_the_clock_alone() {
+    let week = T0 + 6 * 86_400;
+    let hours = T0 + 3 * 3600;
+    let mut store = world_reading_custom(
+        &["codex", "minimax-cn"],
+        &[
+            ("codex", &reading_json("codex", "weekly", week, T0)),
+            ("minimax-cn", &reading_json("minimax-cn", "5h", hours, T0)),
+        ],
+    );
+    let frame = now_frame(&mut store, T0);
+    // A week out: the month and the day, then the time.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("codex"))
+        .unwrap_or_else(|| panic!("no codex line: {frame}"));
+    let reset = line.split("resets ").nth(1).unwrap_or_else(|| panic!("no reset: {line}"));
+    let mut words = reset.split(' ');
+    let month = words.next().unwrap_or_default();
+    let day = words.next().unwrap_or_default();
+    let time = words.next().unwrap_or_default();
+    assert_eq!(month.len(), 3, "the month is a word: {line}");
+    assert!(month.chars().all(|c| c.is_ascii_alphabetic()), "{line}");
+    assert!(day.parse::<u32>().is_ok(), "the day is a number: {line}");
+    assert_eq!(time.len(), 5, "then the time: {line}");
+    assert_eq!(&time[2..3], ":", "{line}");
+    // The date is the one the clock of the machine gives.
+    assert!(line.contains(&gear_board::idle::day_clock(week)), "{line}");
+    // Three hours out: only the clock, as today.
+    let line = frame
+        .lines()
+        .find(|line| line.contains("minimax-cn"))
+        .unwrap_or_else(|| panic!("no minimax-cn line: {frame}"));
+    assert!(
+        line.contains(&format!("resets {}", gear_board::idle::clock(hours))),
+        "{line}"
+    );
+}
+
+#[test]
+fn a_reading_half_an_hour_old_says_its_age() {
+    let mut store = world_reading_custom(
+        &["codex"],
+        &[("codex", &reading_json("codex", "weekly", T0 + 6 * 86_400, T0 - 45 * 60))],
+    );
+    let frame = now_frame(&mut store, T0);
+    assert!(frame.contains("(read 45 min ago)"), "{frame}");
 }
