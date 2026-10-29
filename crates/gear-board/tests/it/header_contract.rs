@@ -9,7 +9,9 @@ use gear_board::frame::{self, Canvas, Screen, Tab};
 use gear_board::style::{Color, Style};
 use gear_board::{build, run_with, Event, Keys, Options};
 use gear_model::{AttemptState, SeatRole, TaskState};
-use gear_store::{testing, AttemptRow, AttemptStep, Store, TaskRow, VoyageRow, VoyageStation};
+use gear_store::{
+    testing, AttemptRow, AttemptStep, NewDecision, Store, TaskRow, VoyageRow, VoyageStation,
+};
 
 const NOW: i64 = 1_800_000_000;
 
@@ -309,22 +311,30 @@ fn the_time_of_a_landed_voyage_is_how_long_it_took() {
 }
 
 #[test]
-fn the_d_key_keeps_the_selection_and_draws_the_same_rows() {
-    // The open header is T-355's: `d` flips the flag and this task draws the
-    // same three rows, so the frame does not change and the selection stays on
-    // the row the user picked.
+fn the_d_key_unfolds_the_header_and_keeps_the_selection() {
+    // T-355: `d` unfolds the header, one row per clause and per station, the
+    // time and the tasks with their legends and the key that folds them again;
+    // the selection stays on the row the user picked.
     let mut store = world();
     let folded = run_events(&mut store, vec![Event::Key('2'), Event::Key('j')]);
     let unfolded = run_events(
         &mut store,
         vec![Event::Key('2'), Event::Key('j'), Event::Key('d')],
     );
-    assert_eq!(
+    assert_ne!(
         last_frame(&unfolded),
         last_frame(&folded),
-        "d draws the folded rows until T-355 unfolds them"
+        "d unfolds the header under the box"
     );
     let frame_text = last_frame(&unfolded);
+    assert!(
+        frame_text.contains("d: fold"),
+        "the unfolded header names the key that folds it: {frame_text}"
+    );
+    assert!(
+        frame_text.contains("Milestones"),
+        "the stations are drawn one row each: {frame_text}"
+    );
     let rows: Vec<&str> = frame_text.lines().collect();
     // Row 0 is the shown voyage's label in reverse video and the tab row the
     // open tab's; the selection is the one lit row besides them.
@@ -337,6 +347,58 @@ fn the_d_key_keeps_the_selection_and_draws_the_same_rows() {
         .map(|(y, _)| y)
         .collect();
     assert_eq!(lit.len(), 1, "one lit row, the selection: {frame_text}");
+}
+
+#[test]
+fn an_unfolded_tasks_row_names_the_tasks_that_moved_out() {
+    // The voyage's log holds a `move` decision (T-351): T-1 left for M6, so the
+    // unfolded header's Tasks row names it apart and counts it nowhere.
+    let mut store = world();
+    store
+        .write(|tx| {
+            tx.insert_decision_if_new(&NewDecision {
+                project: "p".into(),
+                key: "golden-move-T-1".into(),
+                voyage: "M5".into(),
+                at: "2026-10-28 12:00".into(),
+                kind: "move".into(),
+                what: "T-1 moved to M6".into(),
+                why: None,
+                alt: None,
+                changes: None,
+                star: false,
+                source: "gear".into(),
+                line: None,
+                plan_version: None,
+            })
+        })
+        .unwrap();
+    let board = build(
+        &mut store,
+        &Options { project: Some("p".into()), ..Options::default() },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        board.projects[0].moved_out,
+        vec![("T-1".to_string(), "M6".to_string())],
+        "the board reads the voyage's move decision"
+    );
+
+    let screen =
+        Screen { tab: Tab::Now, selected: 0, detail: true, opened: Vec::new(), size: (160, 40) };
+    let canvas = frame::canvas(&board, &screen, None);
+    let rows: Vec<String> = canvas.text().lines().map(str::to_string).collect();
+    let tasks: Vec<&String> = rows
+        .iter()
+        .filter(|row| row.trim_start().starts_with("Tasks"))
+        .collect();
+    assert_eq!(tasks.len(), 1, "one Tasks row: {rows:?}");
+    let row = tasks[0];
+    assert!(
+        row.trim_end().ends_with("· moved out: T-1"),
+        "the Tasks row names the task that moved out: {row:?}"
+    );
 }
 
 struct Events {
