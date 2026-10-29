@@ -1129,14 +1129,20 @@ pub fn styled_lane_panel(
     rows.push(Line::new());
     rows.push(Line::styled("NOW", Style::bold()));
     for task in mine().filter(|task| task.stage.is_open()) {
-        // The stage says what the task does now, in the prototype's words.
+        // The stage says what the task does now, in the prototype's words —
+        // the same words as the lane lines (T-347).
         rows.push(Line::styled(
             format!(
                 "  {} {} {:<30} {}",
                 task.stage.symbol(),
                 task.id,
                 task.title.chars().take(30).collect::<String>(),
-                graph::Stage::words(task)
+                graph::Stage::words_of(
+                    task.stage,
+                    &task.deps,
+                    task.rounds,
+                    task.moved_to.as_deref()
+                )
             ),
             Style::fg(task.stage.color()),
         ));
