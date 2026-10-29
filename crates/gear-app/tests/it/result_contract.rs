@@ -104,6 +104,13 @@ fn a_result_with_an_already_failed_candidate_is_refused() {
     assert_eq!(error.code, ErrorCode::BadFormat, "{}", error.detail);
     assert!(error.detail.contains("aaa1111"), "{}", error.detail);
     assert!(error.detail.contains("attempt 1"), "{}", error.detail);
+    // T-421: the refusal ends with the hint — the lane hands in the commit its
+    // rework is on, not the branch name the store would keep.
+    assert!(
+        error.detail.ends_with("hand in its sha: git rev-parse HEAD)"),
+        "{}",
+        error.detail
+    );
     // Nothing was written: attempt 2 is still started, the task is running.
     let attempt = s.read(|tx| tx.get_attempt("p", "T-1", 2)).unwrap().unwrap();
     assert_eq!(attempt.state, AttemptState::Started, "the hand-in was refused");

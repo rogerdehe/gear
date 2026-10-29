@@ -41,6 +41,8 @@
 #
 # One line goes to stderr:
 #   build-slot: N (cores C, load L, running R, free memory M %)
+# BUILD_SLOT_PRIORITY=normal runs the command at normal priority instead of
+# the lower one, for the same run.
 # BUILD_SLOT_MIN (default 1) is a floor on N before the memory clamps, for the
 # one run everybody waits on (a merge gate that merges one task at a time):
 # it takes at least that share, and the memory clamps still win.
@@ -115,7 +117,11 @@ BUILD_SLOT=1 BUILD_JOBS=$jobs CARGO_BUILD_JOBS=$jobs NEXTEST_TEST_THREADS=$jobs 
 export BUILD_SLOT BUILD_JOBS CARGO_BUILD_JOBS NEXTEST_TEST_THREADS GOMAXPROCS
 
 # A child, not exec: this process stays counted until the command ends.
-if command -v taskpolicy >/dev/null 2>&1; then
+# BUILD_SLOT_PRIORITY=normal skips the lower priority, for the one run
+# everybody waits on (a merge gate); the memory clamps above still hold.
+if [ "${BUILD_SLOT_PRIORITY:-}" = normal ]; then
+    "$@"
+elif command -v taskpolicy >/dev/null 2>&1; then
     taskpolicy -c utility "$@"
 else
     nice -n 10 "$@"

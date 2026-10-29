@@ -568,8 +568,11 @@ fn start(
     }
 
     // 2. the environment of the new agent: the pane is a shell, so the export
-    //    is what the agent inherits. It is sent once per generation.
-    let env = env_command(cfg, seat, plan.generation, &plan.model, &plan.cli);
+    //    is what the agent inherits. It is sent once per generation. The seat's
+    //    own scratch directory comes first (T-420), as on every start.
+    let conventions = gear_app::config::conventions_or_default(store, &seat.project)?;
+    let worktree = worktree_path(store, seat)?;
+    let env = env_command(cfg, seat, plan.generation, &plan.model, &plan.cli, &conventions, worktree.as_deref());
     if !env_ready(store, herdr, &seat.id, &pane, &env, plan.generation)? {
         return wait(store, seat, plan, now, "the environment line was refused");
     }
@@ -951,11 +954,22 @@ fn reserve(
     })
 }
 
-/// The environment line of the new agent: the call context (with the new
-/// generation) and the model when the CLI takes one in the environment.
-fn env_command(cfg: &EngineCfg, seat: &SeatRow, generation: i64, model: &str, cli: &str) -> String {
+/// The environment line of the new agent: the seat's own scratch directory as
+/// `TMPDIR` (T-420), the call context (with the new generation) and the model
+/// when the CLI takes one in the environment.
+fn env_command(
+    cfg: &EngineCfg,
+    seat: &SeatRow,
+    generation: i64,
+    model: &str,
+    cli: &str,
+    conventions: &gear_app::config::Conventions,
+    worktree: Option<&str>,
+) -> String {
+    let prefix = crate::onboard::tmpdir_prefix(conventions, &seat.project, &seat.name, worktree)
+        .unwrap_or_default();
     let mut env = format!(
-        "export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
+        "{prefix}export GEAR_CTX={}:{}:{}; export GEAR_DB={}",
         seat.project, seat.name, generation, cfg.db_path
     );
     if !model.is_empty() { if let Some(start) = model_start(cli, model) {
@@ -1231,6 +1245,38 @@ lanes = [{{model="{model}", cli="{kind}"}}]
         assert_ne!(store.read(|tx|crate::session::round_session(tx,&round)).unwrap().as_deref(),Some("old-session"));
         assert_eq!(store.read(|tx|tx.get_attempt("p","T-1",1)).unwrap().unwrap().session_action.as_deref(),Some("fresh"));
     }
+    /// T-420: a restart's agent gets the seat's own scratch directory as
+    /// `TMPDIR`, as a lane's first start does.
+    #[test]
+    fn a_restart_names_the_seats_own_scratch_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, mut herdr, cfg) = world(dir.path().to_str().unwrap(), false);
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T).unwrap();
+        change(&mut store, "pi", "new-model");
+        reconcile_config(&mut store, &mut herdr, &cfg, &cfg.profiles, "p", T + 1).unwrap();
+        herdr.exit_agent(PANE);
+        advance_pending(&mut store, &mut herdr, &cfg, T + 2);
+        let export = herdr
+            .calls
+            .iter()
+            .find_map(|call| match call {
+                Call::PaneRun { command, .. } if command.contains("export GEAR_CTX=") => {
+                    Some(command.clone())
+                }
+                _ => None,
+            })
+            .expect("the environment line");
+        let scratch = dir.path().join(".gear").join("tmp");
+        assert!(
+            export.starts_with(&format!(
+                "mkdir -p '{}'; export TMPDIR='{}'; ",
+                scratch.display(),
+                scratch.display()
+            )),
+            "{export}"
+        );
+    }
+
     #[test]
     fn pi_resume_injects_lane_rules_after_unattended_args() {
         let dir = tempfile::tempdir().unwrap();

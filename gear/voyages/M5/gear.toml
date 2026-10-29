@@ -45,9 +45,9 @@ models = [
 [profiles.pi]
 unattended_args = ["--approve"]
 
-[temps]                  # reviewers: Codex gpt-6.1-sol, reasoning medium, no fallback (user, M5 kickoff)
-kind = "codex"
-profile = "codex"
+[temps]                  # reviewers: pi on tokenrhythm deepseek-v4-pro, no fallback (user, 2026-10-29; Codex gpt-6.1-sol until then)
+kind = "pi"
+profile = "pi"
 
 [models]
 lanes = [
@@ -55,7 +55,7 @@ lanes = [
 ]
 # The reviewer never runs the model it reviews.
 review = [
-  { model = "gpt-6.1-sol", cli = "codex", args = ["-c", "model_reasoning_effort=medium"], context_window_k = 500 },
+  { model = "tokenrhythm/deepseek-v4-pro-0813", cli = "pi", context_window_k = 1000 },
 ]
 on_quota = { lanes = "wait", review = "wait" }   # M5 (user): no fallback; spent means wait for the user
 quota_reset_h = 5

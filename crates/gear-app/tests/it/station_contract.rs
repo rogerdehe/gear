@@ -80,7 +80,10 @@ fn eta_quarters_open_once_and_keep_their_snapshots_open() {
     assert_eq!(first.len(), 1);
     let message = item(&mut store, &first[0]);
     assert!(message.body.contains("25% eta"), "{}", message.body);
-    assert_eq!(message.body.lines().count(), 1);
+    assert_eq!(message.body.lines().count(), 2);
+    // T-336: the voyage's goal line first, the text of today second.
+    assert_eq!(message.body.lines().next(), Some("Your goal, voyage M2: done: ship it · bar: stable · 5 tasks left in the voyage. Judge every decision against it."), "{}", message.body);
+    assert!(message.body.lines().nth(1).unwrap().starts_with("Station M2 ["), "{}", message.body);
     assert_eq!(message.state, MsgState::Open);
     assert!(check(&mut store, 3601).is_empty());
     assert!(check(&mut store, 7199).is_empty());
@@ -108,7 +111,7 @@ fn three_done_uses_exactly_the_shared_pace_projection_and_slowest_lane() {
     assert_eq!(report.pace(), Some(2.0));
     assert_eq!(report.remaining_estimate_min, Some(90));
     assert_eq!(report.projected_min, Some(60 + 90*2));
-    assert_eq!(message.body, "Station M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m");
+    assert_eq!(message.body, format!("Your goal, voyage M2: done: ship it · bar: stable · 5 tasks left in the voyage. Judge every decision against it.\nStation M2 [60 min, 3 done] · elapsed 60m / eta 8h · time left 420m · pace 2.00x · projected finish 240m from departure · tasks left 2 (90m) · lanes heat 180m · slowest lane heat 180m"));
     assert!(check(&mut store, 3601).is_empty());
     let (env, fp) = captain();
     let page = home::build(&mut store, &env, Some(&fp), T0+3601).unwrap();
@@ -124,7 +127,8 @@ fn simultaneous_and_missed_checkpoints_coalesce_into_one_line() {
     assert_eq!(ids.len(), 1);
     let message = item(&mut store, &ids[0]);
     assert!(message.body.contains("25% eta, 50% eta, 75% eta, 3–6 done"), "{}", message.body);
-    assert_eq!(message.body.lines().count(), 1);
+    assert_eq!(message.body.lines().count(), 2);
+    assert!(message.body.lines().next().unwrap().starts_with("Your goal, voyage M2: "), "{}", message.body);
     assert!(check(&mut store, 10802).is_empty());
 }
 
@@ -145,6 +149,9 @@ fn each_third_completion_is_a_station_including_the_final_task() {
     // T-171: the landing item points at the three steps of the landing
     // (design §7.5): the report first, the user before the lanes.
     let land_body = item(&mut store, &land).body.clone();
+    // T-336: the goal line first, the landing text second.
+    assert!(land_body.starts_with("Your goal, voyage M2: done: ship it · bar: stable · "), "{land_body}");
+    assert!(land_body.lines().nth(1).unwrap().starts_with("Voyage M2 is ready to land: all 6 tasks are done"), "{land_body}");
     assert!(land_body.contains("Run `gear report voyage`"), "{land_body}");
     assert!(land_body.contains("Review it with the user first"), "{land_body}");
     assert!(land_body.contains("Only then ask about reclaiming the lanes"), "{land_body}");

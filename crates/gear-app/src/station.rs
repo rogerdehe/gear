@@ -96,14 +96,14 @@ pub fn checkpoints(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<Vec<String
                 project: project.into(), thread: format!("station:{}", report.milestone),
                 task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
                 recipient: captain.id.clone(), kind: MsgKind::System, urgent: true,
-                body: format!(
+                body: with_goal(tx, project, &report.milestone, format!(
                     "Voyage {} is ready to land: all {done} tasks are done (elapsed {} / eta {}).\n\
 1. Run `gear report voyage` and write the voyage report into # Decisions.\n\
 2. Review it with the user first: the report, the ★ decisions (only those), the friction reports that led to a change. Write each correction as `- <date> user: <text>`.\n\
 3. Only then ask about reclaiming the lanes and the release.\n\
 Close this with `station <id>: land`.",
                     report.milestone, minutes(report.elapsed_min), report.eta.as_deref().unwrap_or("-")
-                ),
+                ))?,
                 reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
             })?;
             tx.set_meta(&format!("{key}:land"), &message.id)?;
@@ -158,7 +158,7 @@ Close this with `station <id>: land`.",
             project: project.into(), thread: format!("station:{}", report.milestone),
             task: None, attempt: None, sender: "engine".into(), sender_gen: 0,
             recipient: captain.id.clone(), kind: MsgKind::System, urgent: past_eta || past_quarter,
-            body, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
+            body: with_goal(tx, project, &report.milestone, body)?, reply_to: None, needs_ack: false, state: MsgState::Open, created: now,
         })?;
         for marker in markers { tx.set_meta(&marker, &message.id)?; }
         if let Some((course_key, hours)) = course {
@@ -194,6 +194,20 @@ pub fn apply_decisions(tx: &Tx<'_>, project: &str, draft: &Draft, now: Ts) -> Ge
 
 fn minutes(value: Option<i64>) -> String {
     value.map(|n| format!("{n}m")).unwrap_or_else(|| "-".into())
+}
+
+/// The captain's message body: the voyage's goal line first, the text of
+/// today second (T-336). Nothing changes when the voyage has no goal text.
+fn with_goal(
+    tx: &Tx<'_>,
+    project: &str,
+    milestone: &str,
+    today: String,
+) -> GearResult<String> {
+    Ok(match gear_board::stations::goal_text(tx, project, milestone)? {
+        Some(goal) => format!("{goal}\n{today}"),
+        None => today,
+    })
 }
 
 fn bad(message: impl Into<String>) -> GearError {

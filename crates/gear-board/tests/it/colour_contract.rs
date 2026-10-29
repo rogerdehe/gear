@@ -166,25 +166,25 @@ fn column(line: &str, needle: &str) -> usize {
 }
 
 #[test]
-fn a_task_over_its_estimate_has_a_yellow_bar() {
+fn a_task_over_its_estimate_is_red() {
     let board = board();
     let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
     let text = screen.text();
-    // T-2 has run 60 of its 30 minutes: the bar is full and yellow.
-    let (row, x) = find(&text, "██████████ 60/30m");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Warn), "{text}");
+    // T-2 has run 60 of its 30 minutes: its TIME is full red and carries the
+    // warning mark (T-359).
+    let (row, x) = find(&text, "60/30m ⚠");
+    assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad), "{text}");
     let ansi = screen.ansi(true);
-    let end = ansi.find("██████████ 60/30m\u{1b}[0m").expect("the bar ends its yellow run");
-    assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[33m"), "{ansi:?}");
+    let end = ansi.find("60/30m ⚠\u{1b}[0m").expect("the time ends its red run");
+    assert!(ansi[..end].rfind("\u{1b}[") == ansi[..end].rfind("\u{1b}[31m"), "{ansi:?}");
     // The heading of what needs a look is yellow and bold.
     let (row, x) = find(&text, "NEEDS A LOOK");
     assert_eq!(screen.style_at(x, row), Style::fg(Color::Warn).and_bold());
-    // A lane name is bold, in its lane colour (the first lane is cyan).
-    let (row, x) = find(&text, "› hull");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Acc));
-    // The selected row is lit across the width (README change 13): the lane
-    // name's own colour is not drawn on it.
-    assert_eq!(screen.style_at(x + 2, row), Style { fg: None, bold: false, reverse: true });
+    // An unselected lane's name is bold, in its lane colour (the second lane
+    // is magenta); the mark before it stays accent-coloured, even on a space.
+    let (row, _) = find(&text, "T-2 Give internal");
+    assert_eq!(screen.style_at(1, row), Style::fg(Color::Acc));
+    assert_eq!(screen.style_at(3, row), Style::fg(Color::Mag).and_bold());
 }
 
 #[test]
@@ -192,19 +192,22 @@ fn the_selected_row_is_lit_across_the_width_in_one_colour() {
     let board = board();
     let size = (160, 40);
     // The second lane of the fixture, `rewrite`, is the selected row.
-    let screen = canvas(&board, &crate::screen(Tab::Now, 1, size), None);
+    let screen_of = crate::screen(Tab::Now, 1, size);
+    let screen = canvas(&board, &screen_of, None);
     let text = screen.text();
-    let (row, _) = find(&text, "› rewrite");
+    let (row, _) = find(&text, "T-2 Give internal");
     let lit = Style { fg: None, bold: false, reverse: true };
     for column in 1..size.0 - 1 {
         assert_eq!(screen.style_at(column, row), lit, "column {column} of the lit row: {text}");
     }
     assert_eq!(screen.style_at(0, row).reverse, false, "the mark's column is not lit: {text}");
     assert_eq!(screen.style_at(size.0 - 1, row).reverse, false, "the last column stays: {text}");
-    // No other row carries a reverse cell, but the row of the tabs (the open
-    // tab is in reverse video).
+    // No other row carries a reverse cell, but the first row (the shown
+    // voyage's label is lit, README change 1) and the row of the tabs (the
+    // open tab is in reverse video).
+    let tab_row = gear_board::frame::layout(&board, &screen_of).tab_row;
     for y in 0..size.1 {
-        if y == row || y == gear_board::frame::TAB_ROW {
+        if y == row || y == 0 || y == tab_row {
             continue;
         }
         for x in 0..size.0 {
@@ -245,25 +248,14 @@ fn a_merged_task_is_green_in_the_graph() {
     let at = line.text.chars().position(|c| c == '◉').unwrap();
     assert_eq!(line.styles[at], Style::fg(Color::Warn).and_bold());
     assert_eq!(lines[0].styles[2], Style::fg(Color::Ok).and_bold());
-    // The terminal gets it as SGR codes: bold green.
+    // The terminal gets the git graph in the same colours: the merge `●` at
+    // dev's column is bold green and the working task's `◉` bold yellow
+    // (T-362). The selected row is lit in one colour (README change 13), so
+    // each is checked on the frame that does not light it.
+    let ansi = canvas(&board, &crate::screen(Tab::Tasks, 1, (160, 40)), None).ansi(true);
+    assert!(ansi.contains("\u{1b}[1;32m●\u{1b}[0m"), "{ansi:?}");
     let ansi = canvas(&board, &crate::screen(Tab::Tasks, 0, (160, 40)), None).ansi(true);
-    assert!(ansi.contains("\u{1b}[1;32m✓\u{1b}[0m"), "{ansi:?}");
-}
-
-#[test]
-fn the_time_bar_is_red_once_the_projected_finish_is_past_the_eta() {
-    let mut board = board();
-    board.projects[0].voyages[0].projected_min = Some(13 * 60);
-    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Bad), "{}", screen.text());
-    let (row, x) = find(&screen.text(), "projected finish");
-    assert_eq!(screen.style_at(x, row).fg, Some(Color::Bad));
-    assert!(screen.ansi(true).contains("time   \u{1b}[31m██"), "{:?}", screen.ansi(true));
-
-    // Within the eta it is green.
-    board.projects[0].voyages[0].projected_min = Some(11 * 60);
-    let screen = canvas(&board, &crate::screen(Tab::Now, 0, (160, 40)), None);
-    assert_eq!(screen.style_at(7, 1).fg, Some(Color::Ok), "{}", screen.text());
+    assert!(ansi.contains("\u{1b}[1;33m◉\u{1b}[0m"), "{ansi:?}");
 }
 
 #[test]
@@ -320,44 +312,52 @@ fn the_board_draws_in_colour_unless_told_not_to() {
     }
 }
 
+/// A long lane name never moves the text columns of a view: the text after
+/// the drawing starts at the same column on every row, whatever the names are.
+/// The Tasks view's lane heads are six cells apart as the prototype writes them
+/// (T-362), so a long name there runs into the next head as it does in the
+/// prototype; the text column after the drawing still holds.
 #[test]
-fn a_long_lane_name_never_runs_into_the_next_column() {
+fn a_long_lane_name_never_moves_the_text_columns() {
     let board = board();
     let size = (200, 40);
 
-    // Graph: the lane name is followed by a space before the goal, and the
-    // goal starts at the same column on every row.
+    // Tasks: the text after the drawing starts at the same column on every
+    // row, whatever the lane names are. The heads name the lanes six cells
+    // apart as the prototype writes them, so the long name is cut by the next
+    // head (T-362).
     let graph = frame(&board, &crate::screen(Tab::Tasks, 0, size), None);
-    assert!(graph.contains("rewrite Give internal/dbtest"), "{graph}");
     let long = line_with(&graph, " T-2 ");
     let short = line_with(&graph, " T-1 ");
-    assert_eq!(column(long, "rewrite"), column(short, "hull"), "{graph}");
-    let goal = column(long, "Give internal");
-    assert!(column(short, "merged") > goal, "{graph}");
-    // The heads of the lane columns do not overwrite each other.
+    assert_eq!(column(long, "T-2 "), column(short, "T-1 "), "{graph}");
+    assert_eq!(column(long, "Give internal"), column(short, "T-1 ") + 7, "{graph}");
     let head = line_with(&graph, "dev");
-    assert!(head.contains("hull") && head.contains("rewrite"), "{head:?}");
+    assert!(head.contains("rewrit") && head.contains("hull"), "{head:?}");
 
-    // Now: the middle column starts at the same place for both lanes.
+    // Now: the table's NOW DOING column starts at column 9 for every lane,
+    // whatever the name: a name longer than five cells runs into it and is cut
+    // by the task there, as the prototype paints it (T-359).
     let now = frame(&board, &crate::screen(Tab::Now, 0, size), None);
-    assert!(now.contains("rewrite T-2 Give internal"), "{now}");
-    let long = line_with(&now, "rewrite T-2");
-    let short = line_with(&now, "› hull");
-    assert_eq!(column(long, "T-2"), column(short, "hull") + "rewrite".len() + 1, "{now}");
+    assert!(now.contains("rewritT-2 Give internal"), "{now}");
+    let long = line_with(&now, "T-2 Give internal");
+    let short = line_with(&now, "nothing left planned for this lane");
+    assert_eq!(column(long, "T-2 Give internal"), 9, "{now}");
+    assert_eq!(column(short, "nothing left planned for this lane"), 9, "{now}");
 
     // Decisions: the friction's status follows the lane after a space.
     let decisions = frame(&board, &crate::screen(Tab::Log, 0, size), None);
     let long = line_with(&decisions, "friction of rewrite");
     let short = line_with(&decisions, "friction of hull");
-    assert!(long.contains("T-2 rewrite open"), "{decisions}");
-    assert_eq!(column(long, "open"), column(short, "open"), "{decisions}");
+    assert!(long.contains("T-2 rewrite unread"), "{decisions}");
+    assert_eq!(column(long, "unread"), column(short, "unread"), "{decisions}");
 
-    // Time & tokens: the estimates line up under their heading.
-    let tokens = frame(&board, &crate::screen(Tab::Cost, 0, size), None);
-    let long = line_with(&tokens, " T-2 ");
-    let short = line_with(&tokens, " T-1 ");
-    assert!(long.contains("rewrite "), "{tokens}");
-    assert_eq!(column(long, "30m"), column(short, "40m"), "{tokens}");
-    let heading = line_with(&tokens, "task   lane");
-    assert_eq!(column(heading, "est"), column(long, "30m"), "{tokens}");
+    // Cost: the lane names are padded to one width, so the estimates line up
+    // under their heading whichever lane the row names.
+    let cost = frame(&board, &crate::screen(Tab::Cost, 0, size), None);
+    let long = line_with(&cost, "rewrite");
+    let short = line_with(&cost, "hull");
+    assert!(long.contains("▸ rewrite"), "{cost}");
+    assert_eq!(column(long, "30m"), column(short, "40m"), "{cost}");
+    let heading = line_with(&cost, "lane / task");
+    assert_eq!(column(heading, "est"), column(long, "30m"), "{cost}");
 }

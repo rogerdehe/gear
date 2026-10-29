@@ -26,6 +26,10 @@ got=$(env -u BUILD_SLOT BUILD_SLOT_MIN=4 BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 B
 got=$(env -u BUILD_SLOT BUILD_SLOT_MIN=4 BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=5 BUILD_SLOT_FREE=20 "$slot" sh -c "$show" 2>/dev/null)
 [ "$got" = "2 2 2 2" ] && echo "ok   floor under the memory clamp -> $got" || { echo "FAIL floor memory: $got"; fail=1; }
 
+# BUILD_SLOT_PRIORITY=normal still runs the command and passes its status
+env -u BUILD_SLOT BUILD_SLOT_PRIORITY=normal BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=1 BUILD_SLOT_FREE=60 "$slot" false 2>/dev/null
+[ $? -eq 1 ] && echo "ok   normal priority runs the command" || { echo "FAIL normal priority"; fail=1; }
+
 # the command's exit status passes through
 env -u BUILD_SLOT BUILD_SLOT_CORES=10 BUILD_SLOT_LOAD=0 BUILD_SLOT_RUNNING=1 BUILD_SLOT_FREE=60 "$slot" false 2>/dev/null
 [ $? -eq 1 ] && echo "ok   exit status" || { echo "FAIL exit status"; fail=1; }
