@@ -387,7 +387,7 @@ fn the_departure_is_the_first_task_creation_even_without_the_block() {
     assert_eq!(err.code, ErrorCode::BadFormat);
     assert!(
         err.detail.contains(
-            "the plan names milestone M1 (NEW) but has no `# Milestone M1: ` block with its done:, bar: and eta: lines (T-22)"
+            "the plan names milestone M1 (NEW) but has no `# Milestone M1: <title>` block with its done:, bar: and eta: lines (T-22)"
         ),
         "{}",
         err.detail

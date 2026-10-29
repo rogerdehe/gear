@@ -52,10 +52,14 @@ pub fn missing_blocks(tx: &Tx<'_>, project: &str, draft: &Draft) -> GearResult<V
             .to_string();
         if done.is_empty() {
             let task = item.id.clone().unwrap_or_else(|| "NEW".to_string());
+            // The block the captain has to write: the title the store keeps, or
+            // the placeholder, since an empty or a repeated id reads like a real
+            // title (T-333, the captain's answer).
             let title = stored
                 .as_ref()
                 .map(|voyage| voyage.title.trim())
-                .unwrap_or_default();
+                .filter(|title| !title.is_empty())
+                .unwrap_or("<title>");
             return Err(GearError::new(
                 ErrorCode::BadFormat,
                 format!(
