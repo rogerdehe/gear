@@ -87,3 +87,6 @@
 
 ## A notice typed into a busy lane aborts its running check
 - 2026-10-29 M5 (T-407 rework, M-6183): the overrun and quiet-lane notices arrive as prompts while the lane runs a 9-minute `make check`; pi stops the command to read them, twice, so the acceptance never finished. A notice to a lane whose agent is working should wait for its next idle moment, or be marked to queue without interrupting.
+
+## Codex 0.165 startup dialogs stop reviewers
+- 2026-10-29 M5 (another project): after `/new` Codex asks "Where should the new conversation run? 1. Use current Git worktree / 2. Create new Git worktree", and on a resume from another directory it asks which working directory to use; Herdr reports both as done/idle, so the engine waits on a reviewer that never starts. GEAR's codex profile should recognise both screens as blocked and answer them (current worktree; the seat's own directory), or start Codex so they never show.
