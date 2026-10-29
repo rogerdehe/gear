@@ -149,8 +149,8 @@ pub fn apply(
             // The milestone blocks of the draft become voyages (T-22), after the
             // queue so the task count at departure is the plan's.
             record_tail_decisions(tx, &ctx.project, draft)?;
-            fix_departures(tx, &ctx.project, now)?;
-            record_voyages(tx, &ctx.project, draft, now)?;
+            let departed_now = fix_departures(tx, &ctx.project, now)?;
+            record_voyages(tx, &ctx.project, draft, &departed_now, now)?;
             record_task_stations(tx, &ctx.project, draft, &result.created)?;
             crate::station::apply_decisions(tx, &ctx.project, draft, now)?;
             serde_json::to_value(&result).map_err(|e| {
@@ -2969,7 +2969,14 @@ fn floor_div(a: i64, b: i64) -> i64 {
 /// milestone id starts its clock when its new tasks come: the reset is recorded
 /// in `meta`, and `departure_from_history` searches only the drafts applied
 /// after it. A milestone that still has tasks never changes.
-fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
+/// The milestones whose departure it fixed are returned, so `record_voyages`
+/// knows which words a voyage states as it departs (T-410).
+fn fix_departures(
+    tx: &Tx<'_>,
+    project: &str,
+    now: Ts,
+) -> GearResult<std::collections::BTreeSet<String>> {
+    let mut departed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
     for task in tx.tasks_of_project(project)? {
         if let Some(milestone) = task.milestone {
@@ -3011,8 +3018,9 @@ fn fix_departures(tx: &Tx<'_>, project: &str, now: Ts) -> GearResult<()> {
         if let Some(estimate) = estimate {
             tx.set_voyage_departure_estimate(project, &milestone, estimate)?;
         }
+        departed.insert(milestone);
     }
-    Ok(())
+    Ok(departed)
 }
 
 /// The meta key that remembers the plan version at which a milestone lost its
@@ -3307,7 +3315,18 @@ fn why_naming(decisions: &[crate::decision::Decision], task: &str) -> Option<Str
 /// board, the stations and the forecast measure against it, so a block whose
 /// eta reads as prose is refused with nothing written (T-387), for every
 /// block, departed or not — such a voyage cannot depart either.
-fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: Ts) -> GearResult<()> {
+///
+/// A departed voyage's `done:`, `bar:` and `eta:` change only when the user
+/// asked for it and confirmed it (T-410): without `--confirmed` the whole
+/// apply is refused with nothing written, and with it the change applies and
+/// a starred decision of kind `user` records it.
+fn record_voyages(
+    tx: &Tx<'_>,
+    project: &str,
+    draft: &crate::draft::Draft,
+    departed_now: &std::collections::BTreeSet<String>,
+    now: Ts,
+) -> GearResult<()> {
     for (header, body) in &draft.milestones {
         let (id, title) = crate::draft::milestone_parts(header);
         let (done, bar, eta) = crate::draft::milestone_fields(body);
@@ -3330,6 +3349,58 @@ fn record_voyages(tx: &Tx<'_>, project: &str, draft: &crate::draft::Draft, now: 
                         "milestone {id}: eta must be a duration GEAR measures the voyage against, e.g. `eta: 8h` or `eta: 1d 4h`; reasons go in # Decisions; got \"{got}\""
                     ),
                 ));
+            }
+        }
+        // T-410: a departed voyage's goal, bar and eta change only when the
+        // user asked for it and confirmed it. A stored value that is None is
+        // a voyage not described yet: the first block states its words and
+        // moves nothing the user agreed on.
+        // A milestone whose departure this apply fixes (a reused id, T-239)
+        // has not departed before this apply: its words are its first.
+        let stored = tx.get_voyage(project, id)?;
+        let departed = stored
+            .as_ref()
+            .filter(|voyage| voyage.departure.is_some())
+            .filter(|_| !departed_now.contains(id));
+        if let Some(stored) = departed {
+            for (field, old, new) in [
+                ("done", &stored.done, &done),
+                ("bar", &stored.bar, &bar),
+                ("eta", &stored.eta, &eta),
+            ] {
+                let Some(old) = old.as_deref() else { continue };
+                let old = old.trim();
+                let new = new.as_deref().unwrap_or("").trim();
+                if old == new {
+                    continue;
+                }
+                if !draft.confirmed {
+                    return Err(bad(
+                        0,
+                        format!(
+                            "milestone {id}: {field} changed after departure (stored \"{old:.40}\", got \"{new:.40}\"): the goal, the bar and the eta change only when the user asks; confirm it with them, then apply again with --confirmed"
+                        ),
+                    ));
+                }
+                // The user's confirmation is a starred decision (T-410).
+                let what = format!("{field} of {id} changed from \"{old}\" to \"{new}\"");
+                let why = "confirmed by the user".to_string();
+                let key = format!("user|{project}|{id}|{field}|{old}|{new}");
+                tx.insert_decision_if_new(&gear_store::NewDecision {
+                    project: project.to_string(),
+                    key: crate::decision::key_of(&key),
+                    voyage: id.to_string(),
+                    at: crate::decision::apply_time(now),
+                    kind: "user".to_string(),
+                    what: what.clone(),
+                    why: Some(why.clone()),
+                    alt: None,
+                    changes: None,
+                    star: true,
+                    source: "gear".to_string(),
+                    line: Some(format!("{what} | why: {why}")),
+                    plan_version: None,
+                })?;
             }
         }
         // The stations the block names, in plan order (M5 S3), then the words;
