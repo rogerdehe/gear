@@ -26,3 +26,5 @@
 - **Run a lane's builds and tests on another machine (another project's user, 2026-10-29: no heavy work on the laptop, it goes to a build host).** In 0.4.10 every seat and its commands run where its pane runs. Asked: a lane whose agent runs locally but whose build and test commands execute on a named remote host, and a GEAR-side bound on concurrent builds across lanes and reviewers (today only fewer seats and narrow per-task check commands bound it).
 
 - A stall item rings the captain urgently while the lane's next delivery is only just intended: after a fail verdict, M-5036 (mast, T-392 attempt 2) and M-5045 (hull, T-300 attempt 2) each named a delivery 0 minutes old, with "no check-in this generation". Both deliveries were confirmed within a minute, and the engine closed both items before the captain could answer. A stall should wait out the delivery's confirmation window before it rings (crates/gear-engine/src/stall.rs and where the flag is set).
+
+- Branch cleanup gaps (another project, 2026-10-29): a cancelled task's branch is never deleted, and a merged task's branch is kept when its tip moved past the merged candidate (one more push after the merge).
