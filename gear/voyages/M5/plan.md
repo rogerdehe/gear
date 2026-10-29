@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=789 -->
+<!-- gear-plan project=gear base=790 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -160,6 +160,7 @@ eta: 21h
 - 2026-10-29 06:23 staff: hull runs dry (M-5739): its next tasks wait only on merges of passed tasks (T-413, T-361, mast's T-350); T-420, T-362, T-363 and T-364 branch from those handed-in branches instead of waiting for the merge queue | why: never-stop | else: hull idles about an hour behind six merges
 - 2026-10-29 06:25 scope: T-407 (probe log lines in session_runner.rs, ops.rs, restart.rs, merge.rs) shares no file with T-386; its order after T-386 was lane order, so it branches from origin/dev (hull started it first)
 - ★ 2026-10-29 06:33 hand-fix: build-slot gains BUILD_SLOT_PRIORITY=normal (the run everybody waits on skips the low priority; the memory clamps still hold): T-361's gate took 11 min at load 22, sharing the low priority with every other run on the machine; T-422 sets it on the gate with the floor
+- station M-5752: keep course 1140 min in, 139 done, 25 left; hull 224 min and mast 226 min, balanced; the merge queue (six ahead, 10-15 min a gate on a load of 22) is the wait: the gate's floor runs from the engine's environment now and T-422 adds normal priority
 
 
 # Queue
