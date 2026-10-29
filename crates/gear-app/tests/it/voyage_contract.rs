@@ -555,3 +555,100 @@ fn the_snapshot_lists_the_voyages_by_departure_not_by_id() {
         assert!(earlier < later, "{first} departed first, {second} second: {snapshot}");
     }
 }
+
+/// M5 S3: a voyage's stations come from its block, and each task's station
+/// from its queue header; both are stored, and `plan show` prints the task's.
+#[test]
+fn a_voyage_stores_its_stations_and_each_task_its_own() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                done: users install it\nbar: keep it simple\neta: 8h\n\
+                station S1: reliability fixes and conventions as configuration, released as v0.5.0\n\
+                station S2: the board matches the prototype\n\
+                # Queue\n\
+                ## NEW [must] lane=heat milestone=M1 station=S2\n\
+                goal: A\naccept: a\nestimate: 30\ndeps: -\n\n\
+                ## NEW [should] lane=heat milestone=M1\n\
+                goal: B\naccept: b\nestimate: 30\ndeps: -\n";
+    run(&mut s, text, "r1", NOW).unwrap();
+
+    let stations = s.read(|tx| tx.voyage_stations("p", "M1")).unwrap();
+    let named: Vec<(&str, &str)> = stations
+        .iter()
+        .map(|station| (station.id.as_str(), station.needs.as_str()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("S1", "reliability fixes and conventions as configuration, released as v0.5.0"),
+            ("S2", "the board matches the prototype"),
+        ]
+    );
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap().as_deref(), Some("S2"));
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-2")).unwrap(), None);
+
+    // `gear plan show` prints the station in the header, after the milestone.
+    let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(
+        block.starts_with("## T-1 [must] lane=heat milestone=M1 station=S2"),
+        "{block}"
+    );
+}
+
+/// M5 S3: a task may name only a station its milestone block has; a station
+/// without a milestone is refused too, and a refusal writes nothing.
+#[test]
+fn a_task_naming_an_unknown_station_is_refused() {
+    let mut s = world();
+    let text = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                done: users install it\nbar: keep it simple\neta: 8h\n\
+                station S1: the first station\n\
+                # Queue\n\
+                ## NEW [must] lane=heat milestone=M1 station=S9\n\
+                goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, text, "r1", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("T-1 names station S9, but milestone M1 has no `station S9:` line"),
+        "{}",
+        err.detail
+    );
+    assert!(s.read(|tx| tx.get_voyage("p", "M1")).unwrap().is_none());
+    assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
+
+    // The same station without a milestone on the task.
+    let no_milestone = "<!-- gear-plan project=p base=0 -->\n# Queue\n\
+                        ## NEW [must] lane=heat station=S2\n\
+                        goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    let err = run(&mut s, no_milestone, "r2", NOW).unwrap_err();
+    assert_eq!(err.code, ErrorCode::BadFormat);
+    assert!(
+        err.detail.contains("T-1 names station S2 but has no milestone"),
+        "{}",
+        err.detail
+    );
+    assert!(s.read(|tx| tx.tasks_of_project("p")).unwrap().is_empty());
+}
+
+/// M5 S3: a block always carries every field, so re-applying the task without
+/// `station=` clears the station it had.
+#[test]
+fn a_block_without_station_clears_the_tasks_station() {
+    let mut s = world();
+    let first = "<!-- gear-plan project=p base=0 -->\n# Milestone M1: release\n\
+                 done: users install it\nbar: keep it simple\neta: 8h\n\
+                 station S1: the first station\n\
+                 station S2: the second station\n\
+                 # Queue\n\
+                 ## NEW [must] lane=heat milestone=M1 station=S2\n\
+                 goal: A\naccept: a\nestimate: 30\ndeps: -\n";
+    run(&mut s, first, "r1", NOW).unwrap();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap().as_deref(), Some("S2"));
+
+    let again = "<!-- gear-plan project=p base=1 -->\n# Queue\n\
+                 ## T-1 [must] lane=heat milestone=M1\n";
+    run(&mut s, again, "r2", NOW + 10).unwrap();
+    assert_eq!(s.read(|tx| tx.task_station("p", "T-1")).unwrap(), None);
+    let block = s.read(|tx| gear_app::plan::show(tx, "p", "T-1")).unwrap();
+    assert!(!block.contains("station="), "{block}");
+}
