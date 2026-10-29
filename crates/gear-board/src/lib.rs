@@ -559,12 +559,17 @@ pub fn project_with_agents(
         if task.state == TaskState::Draft {
             continue;
         }
-        totals.tasks += 1;
-        match task.state {
-            TaskState::Done => totals.done += 1,
-            TaskState::Running => totals.in_progress += 1,
-            TaskState::Waiting => totals.waiting += 1,
-            _ => {}
+        // A cancelled task is not live work (T-415): it stays in the Tasks
+        // view below, but the totals count only what the voyage still can
+        // deliver, as the stations do (station.rs leaves it out too).
+        if task.state != TaskState::Cancelled {
+            totals.tasks += 1;
+            match task.state {
+                TaskState::Done => totals.done += 1,
+                TaskState::Running => totals.in_progress += 1,
+                TaskState::Waiting => totals.waiting += 1,
+                _ => {}
+            }
         }
         let name = task.lane.clone().unwrap_or_else(|| UNASSIGNED.to_string());
         if retired.contains(name.as_str()) {
