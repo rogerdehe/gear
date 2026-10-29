@@ -164,6 +164,9 @@ eta: 21h
 - station M-5781: keep course 1161 min in, 141 done, 23 left; hull 224 min, mast 208 min; eight merges queued on a saturated machine (load about 22, the other project's database runs): T-422 (gate floor 4, normal priority) is in the queue
 
 
+# Verdicts
+- T-331 attempt=1 contract=2 candidate=dba30907 fail estimate=10 rework="The review passed; the merge conflicts with T-336 (merged) in crates/gear-app/tests/it/voyage_contract.rs. Merge origin/dev into your branch, keep both sides' tests (T-336's home-page and station tests and yours), run make check CRATE=gear-app TESTS='binary_id(gear-app::it) & test(/voyage/)', push and hand in."
+
 # Queue
 
 ## T-412 [now] lane=hull milestone=M5 required
