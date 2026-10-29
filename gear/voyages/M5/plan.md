@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=794 -->
+<!-- gear-plan project=gear base=795 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -162,6 +162,7 @@ eta: 21h
 - ★ 2026-10-29 06:33 hand-fix: build-slot gains BUILD_SLOT_PRIORITY=normal (the run everybody waits on skips the low priority; the memory clamps still hold): T-361's gate took 11 min at load 22, sharing the low priority with every other run on the machine; T-422 sets it on the gate with the floor
 - station M-5752: keep course 1140 min in, 139 done, 25 left; hull 224 min and mast 226 min, balanced; the merge queue (six ahead, 10-15 min a gate on a load of 22) is the wait: the gate's floor runs from the engine's environment now and T-422 adds normal priority
 - station M-5781: keep course 1161 min in, 141 done, 23 left; hull 224 min, mast 208 min; eight merges queued on a saturated machine (load about 22, the other project's database runs): T-422 (gate floor 4, normal priority) is in the queue
+- station M-5817: keep course 1200 min in, 141 done, 23 left; projected 1424 min: the merge queue and a store whose writes take 1-1.5 s each (123 MB, an engine tick every 30 s) are the waits; the machine's load is back to about 7
 
 
 # Queue
