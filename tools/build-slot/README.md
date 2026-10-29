@@ -29,6 +29,10 @@ and 1 when under 15 %. CPU contention only slows every run (and the low
 priority keeps the machine usable); memory is what can take a machine down,
 so the memory readings are the hard limits.
 
+`BUILD_SLOT_MIN` (default 1) is a floor on N before the memory clamps, for
+the one run everybody waits on, such as a merge gate that merges one task at a
+time.
+
 ## What the command gets
 
 | variable | value | read by |

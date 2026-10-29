@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=779 -->
+<!-- gear-plan project=gear base=780 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -154,6 +154,7 @@ eta: 21h
 - station M-5708: keep course 1094 min in, 138 done, 24 left; the merge gate gets its share of the cores again
 - ★ 2026-10-29 05:54 hand-fix: build-slot's GOMAXPROCS held per run, not per machine (the other captain's reading: six runs each at GOMAXPROCS 10 on ten cores): it is now cores / N for a run alone and at most 2 while other runs are alive, the value the other project measured; the captain's own tool, fixed at the source and sent
 - 2026-10-29 05:57 scope: the other captain reported a hand-in refused as an already-failed candidate (T-198 there); checked in both stores: its attempt 1 was handed in with a branch name, which GEAR stores as given, so the same branch at a new commit matched it; a new mast task makes `gear send` resolve a branch to its commit and names the fix in the refusal
+- ★ 2026-10-29 06:01 hand-fix: merges took 13-21 min each with six queued: build-slot gave the merge gate an equal share (2 jobs); the captain added BUILD_SLOT_MIN to its own tool (a floor before the memory clamps), and a mechanical mast task sets it to 4 on the gate
 
 
 # Queue
@@ -873,6 +874,12 @@ goal: [v0.5.3 S4] The board can be built for any voyage of the project, and show
 accept: Board tests on one fixture built once (a landed voyage M1 with a retired lane `old` that merged T-1, and a sailing M2): built with milestone None the board shows M2 only (no T-1) and voyage_list is [M2 sailing, M1 landed]; with Some("M1") it shows T-1, lane `old` with "retired at the landing", ended = T-1's merge time; decisions of M1 only. Existing board tests that expect an open task of another voyage on the board follow README change 6; gear-app home tests are unchanged. Run only `make check CRATE=gear-board`; the merge gate runs `make gate`.
 deps: T-349
 estimate: 50
+
+## T-422 [now] lane=mast milestone=M5 required
+mechanical: one variable on two named lines of the Makefile; the merge gate runs it and proves it
+goal: [v0.5.2 S3] The merge gate takes at least 4 jobs (2026-10-29: through build-slot it got an equal share, 2 jobs with five runs alive, and each merge took 13-21 min while six waited; the gate is the one run every task waits on, and with 4 jobs before build-slot its suite ran in about 60 s). Change Makefile only, no other design: in the `gate` target both `tools/build-slot/build-slot.sh` calls become `BUILD_SLOT_MIN=4 tools/build-slot/build-slot.sh` (tools/build-slot/README.md: a floor before the memory clamps), and the `##` comment says "at least 4 jobs". Nothing else changes.
+accept: `make -n gate` shows BUILD_SLOT_MIN=4 on both commands; `sh tools/build-slot/test.sh` passes. The merge gate runs `make gate`.
+estimate: 5
 
 ## T-376 [must] lane=mast milestone=M5 required
 goal: [v0.5.0 S1] A hand-in that waits 20 minutes without its review packet reaching a reviewer rings the captain (another project's T-117: 70 minutes Submitted while seats were free, and nothing said so; the "every temp seat is in use" notice covers only a full quota). Change crates/gear-engine/src/review.rs, after T-375 (same file), no other design: in fn start_reviews, after the hand-in pass, for every task of `tasks_to_review` whose attempt was handed in (`tx.attempt_times(project, task, n)?.handed_in`) at least 1200 s before `now` and that has no Confirmed Deliver op of a Temp seat for that task and attempt, write once per attempt (meta `engine.review_stall.<task>.<attempt>`) one urgent `MsgKind::System` Open message to the captain on thread `review-stall:<task>:<attempt>`: "<task> attempt <n> was handed in <m> min ago and no reviewer has its packet: the seats are <seat: state, task> joined by \"; \"; look at the reviewer panes, or settle it in # Verdicts after reading the candidate yourself". The code change is in crates/gear-engine/src/review.rs only; tests go where the crate keeps them.
