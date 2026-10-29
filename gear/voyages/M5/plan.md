@@ -1,4 +1,4 @@
-<!-- gear-plan project=gear base=834 -->
+<!-- gear-plan project=gear base=835 -->
 # Goal
 Do all the work aligned for M5 and deliver a complete new version that never stops: no hand fix during the whole voyage, no lane idle while there is work it could start, and a board that matches the agreed prototype. Released at each station: S1 reliability fixes and conventions as configuration (v0.5.0); S2 the small-task procedure and each role's place in the skill (v0.5.1); S3 goal, bar and stations locked (v0.5.2); S4 the board built to its prototype, then the final release (v0.5.3).
 
@@ -179,6 +179,7 @@ eta: 21h
 - 2026-10-29 10:30 scope: a review chain change never reaches a reviewer reused warm (the other project moved its reviewers to gpt-6-luna and all four kept gpt-6.1-terra): an error in normal use, so a new mast task, after T-428, releases a warm reviewer whose model is not the chain's; the other captain releases each reviewer after its verdict until then
 - station M-6084: keep course 1380 min in, 157 done, 14 left; hull 143 min, mast 114 min; T-425 handing in, T-427 passed review, mast takes T-428 and T-429 before its chain; nothing is cut (done clause 1)
 - 2026-10-29 10:46 staff: the reviewers move from codex gpt-6.1-sol to pi on tokenrhythm/deepseek-v4-pro-0813 (config v31), no fallback, on the user's order (confirmed in the staffing dialog); the lanes stay on deepseek-v4.1-flash, so no reviewer runs a writer's model; a codex reviewer mid-review finishes, then is released so the next review starts on pi | why: the user's staffing decision
+- station M-6110: keep course 1403 min in, 159 done, 13 left; hull 128 min, mast 89 min; T-423, T-426 and T-427 merged and the shared engine is rebuilt from dev (the other project restarted on it, ours after T-355's merge); nothing is cut (done clause 1)
 - 2026-10-29 08:00 release: v0.5.1 (station S2) published: T-367's merge 6d8d3a0a merged into main as 0974d950, tagged v0.5.1, GitHub release from docs/releases/v0.5.1.md | why: done clause (5)
 
 
