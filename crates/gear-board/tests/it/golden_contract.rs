@@ -108,6 +108,7 @@ type Range = (usize, usize);
 /// A cell inside a skip entry (`swap: None`) is not compared. A cell inside a
 /// swap entry and inside no skip entry is compared, except that the golden
 /// colour `want` matches the board's `got` (case kept: `u` with `m`).
+#[derive(Clone, Copy)]
 struct Pending {
     /// The frame (`now-folded`, …): the name of its golden files.
     frame: Frame,
@@ -160,8 +161,13 @@ const PENDING: &[Pending] = &[
     Pending { frame: "now-folded", rows: (19, 46), cols: (0, 159), swap: None, by: "T-360" },
     Pending { frame: "now-open", rows: (27, 46), cols: (0, 159), swap: None, by: "T-360" },
 
-    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-362" },
-    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-362" },
+    // T-362 draws the Tasks view to the prototype's rows, but the board's own
+    // view starts on row 5: the rows below are the prototype's, which the view
+    // reaches once the header is the prototype's height (T-353..T-356, T-356
+    // puts the view's first row there). The view's own rows are held to the
+    // golden rows by `the_tasks_view_paints_the_prototype_rows`.
+    Pending { frame: "tasks-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
+    Pending { frame: "tasks-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-356: the view's first row" },
     Pending { frame: "cost-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-363" },
     Pending { frame: "cost-open", rows: (21, 46), cols: (0, 159), swap: None, by: "T-363" },
     Pending { frame: "log-folded", rows: (13, 46), cols: (0, 159), swap: None, by: "T-364" },
@@ -191,9 +197,11 @@ const PENDING: &[Pending] = &[
     Pending { frame: "tasks-open", rows: (38, 38), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
     Pending { frame: "tasks-open", rows: (41, 41), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
     Pending { frame: "tasks-open", rows: (43, 43), cols: (144, 158), swap: None, by: "prototype data: merge clocks" },
-    // T-267 is queued although T-263 and T-266 are not merged.
-    Pending { frame: "tasks-folded", rows: (19, 19), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
-    Pending { frame: "tasks-open", rows: (27, 27), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
+    // T-267 is queued although T-263 and T-266 are not merged. Its row is the
+    // first of the waiting ones, the newest first (T-362's regeneration of the
+    // Tasks frames).
+    Pending { frame: "tasks-folded", rows: (15, 15), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
+    Pending { frame: "tasks-open", rows: (23, 23), cols: (92, 122), swap: None, by: "prototype data: T-267 stage" },
     // The prototype colours lane `mast` blue by name, the board colours lanes
     // by their order: its blue is the board's magenta, bold for bold.
     Pending { frame: "now-folded", rows: (0, 47), cols: (0, 159), swap: Some(('u', 'm')), by: "prototype data: lane colour" },
@@ -512,4 +520,79 @@ fn a_lane_colour_swap_keeps_the_case() {
     assert!(matches(&cell('U'), &cell('M'), swap), "a bold lane");
     assert!(!matches(&cell('U'), &cell('m'), swap), "a bold prototype letter needs the bold board letter");
     assert!(!matches(&cell('u'), &cell('M'), swap), "and a plain one the plain");
+}
+
+// ---------------------------------------------------------------------------
+// T-362: the Tasks view paints the prototype's git graph, from the row the
+// prototype's view starts on.
+// ---------------------------------------------------------------------------
+
+/// The board of the fixture, as `render` builds it.
+fn fixture_board() -> (Store, gear_board::Board) {
+    let (mut store, now) = crate::golden_fixture::load();
+    let mut board = gear_board::build(
+        &mut store,
+        &gear_board::Options { project: Some("gear".into()), ..Default::default() },
+        now,
+    )
+    .unwrap();
+    board.engine = gear_board::EngineState::Running;
+    (store, board)
+}
+
+/// The cell differences of `frame`'s rows `rows` between the prototype and the
+/// Tasks view painted on top of `top` (the row the prototype's view starts on).
+///
+/// The lane colour swap of the golden gate is allowed: the prototype colours a
+/// lane by its name, the board by its place.
+fn view_differences(frame: Frame, top: usize, rows: Range) -> Vec<String> {
+    let (_, board) = fixture_board();
+    let mut canvas = gear_board::frame::Canvas::new(160, 48);
+    let screen =
+        gear_board::frame::Screen { tab: Tab::Tasks, selected: 0, detail: false, size: (160, 48) };
+    let picks = gear_board::frame::view(&board, &screen, &mut canvas, top);
+    // The frame lights the selected row (README change 13).
+    if let Some(row) = picks.first() {
+        canvas.light_row(*row);
+    }
+    let (want, got) = (cells(&golden(frame)), cells(&gold::planes(&canvas)));
+    // The prototype's own data that no store can give (its merge clocks and
+    // T-267's stage) is skipped, as the golden gate skips it.
+    let data: Vec<Pending> = PENDING
+        .iter()
+        .copied()
+        .filter(|entry| entry.frame == frame && entry.by.starts_with("prototype data"))
+        .collect();
+    let mut problems = Vec::new();
+    for row in rows.0..=rows.1 {
+        for col in 0..want[row].len() {
+            if pending_at(&data, frame, row, col).0 {
+                continue;
+            }
+            let (want_cell, got_cell) = (want[row][col], got[row][col]);
+            if !matches(&want_cell, &got_cell, Some(('u', 'm'))) {
+                problems.push(format!(
+                    "row {row} col {col}: want {:?} {} {} got {:?} {} {}",
+                    want_cell.text,
+                    want_cell.colour,
+                    want_cell.reverse,
+                    got_cell.text,
+                    got_cell.colour,
+                    got_cell.reverse,
+                ));
+            }
+        }
+    }
+    problems
+}
+
+#[test]
+fn the_tasks_view_paints_the_prototype_rows() {
+    // The prototype's folded header ends on row 13 and its view starts on row
+    // 14; the open header ends on row 21 and its view on row 22 (its
+    // `TOP[0]`). The view is the same in both frames.
+    let folded = view_differences("tasks-folded", 14, (14, 44));
+    assert!(folded.is_empty(), "\n{}", folded.join("\n"));
+    let open = view_differences("tasks-open", 22, (22, 44));
+    assert!(open.is_empty(), "\n{}", open.join("\n"));
 }
