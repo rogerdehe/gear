@@ -202,7 +202,7 @@ fn the_board_built_for_a_landed_voyage_keeps_its_data() {
     let mut store = world();
     let plan = board(&mut store, Some("M1"));
 
-    // Its tasks only: the one it merged, not the one it cut.
+    // Its tasks only, and the one it cut is not counted (T-415).
     assert_eq!(plan.totals.tasks, 1, "the tasks of M1: {:?}", plan.totals);
     assert_eq!(plan.totals.done, 1);
 
@@ -212,7 +212,11 @@ fn the_board_built_for_a_landed_voyage_keeps_its_data() {
     let lane = &plan.lanes[0];
     assert_eq!(lane.idle_text.as_deref(), Some("retired at the landing"));
     let ids: Vec<&str> = lane.tasks.iter().map(|task| task.id.as_str()).collect();
-    assert_eq!(ids, vec!["T-1"], "the lane works M1 only, and no cancelled task");
+    assert_eq!(
+        ids,
+        vec!["T-1", "T-4"],
+        "the lane works M1 only, and the task it cut stays in its queue (T-415)"
+    );
 
     // The graph and the time view follow the shown tasks.
     let graphed: Vec<&str> = plan.graph.iter().map(|task| task.id.as_str()).collect();

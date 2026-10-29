@@ -584,14 +584,14 @@ pub fn project_for(
         None => workload_voyage(tx, project, now)?,
     };
     // The tasks the board shows. A named voyage shows its own tasks and no
-    // task of another voyage (T-350): a cancelled task was cut, so it is not
-    // work. Without a name, the home page keeps today's rule: the measured
-    // voyage's tasks and every open task of the project (T-246).
+    // task of another voyage (T-350). A cancelled task stays in its lane's
+    // queue — it was cut, not deleted — and the totals leave it out (T-415).
+    // Without a name, the home page keeps today's rule: the measured voyage's
+    // tasks and every open task of the project (T-246).
     let tasks: Vec<_> = match milestone {
         Some(shown) => all_tasks
             .iter()
             .filter(|task| task.milestone.as_deref() == Some(shown))
-            .filter(|task| task.state != TaskState::Cancelled)
             .cloned()
             .collect(),
         None => match &workload {
