@@ -248,3 +248,46 @@ fn raw_mode(fd: RawFd) -> Option<libc::termios> {
     }
     Some(saved)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-403: a frame is written over the last one, in place, and the screen
+    /// is never cleared whole — that clear is what made the page blink.
+    #[test]
+    fn draw_overwrites_the_screen_in_place() {
+        let mut out: Vec<u8> = Vec::new();
+        draw(&mut out, "GEAR · p\nLANES\n  T-1 done").unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[?2026h\x1b[H"), "{text:?}");
+        assert!(!text.contains("\x1b[2J"), "the whole screen is never cleared: {text:?}");
+        assert!(
+            text.ends_with("\x1b[J\x1b[?2026l"),
+            "the erase below and the end of the synchronized update close the frame: {text:?}"
+        );
+        // Every line erases its rest, the last one included; only the lines
+        // between newlines take a newline (F2: the frame has no trailing one).
+        let body = text
+            .strip_prefix("\x1b[?2026h\x1b[H")
+            .and_then(|rest| rest.strip_suffix("\x1b[J\x1b[?2026l"))
+            .expect("the frame between the update's two ends");
+        let lines: Vec<&str> = body.split('\n').collect();
+        assert_eq!(lines.len(), 3, "{body:?}");
+        for line in &lines {
+            assert!(line.ends_with("\x1b[K"), "every line erases its rest: {line:?}");
+        }
+        assert_eq!(lines[2], "  T-1 done\x1b[K", "{body:?}");
+    }
+
+    /// An empty frame is an update of its own: `\x1b[J` erases what is left.
+    #[test]
+    fn an_empty_frame_is_a_whole_update() {
+        let mut out: Vec<u8> = Vec::new();
+        draw(&mut out, "").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?2026h\x1b[H\x1b[K\x1b[J\x1b[?2026l"
+        );
+    }
+}
