@@ -1438,6 +1438,10 @@ fn merge_op_of(store: &mut Store, project: &str, task: &str, attempt: i64) -> Ge
 }
 
 /// The merge ops that may run now: Intended, or Unknown after a restart.
+///
+/// T-395: both states run in one queue, oldest first. Every Intended op before
+/// any Unknown one starved a merge that lost its push race (it stayed Unknown)
+/// while newer merges kept arriving.
 fn ready_merges(store: &mut Store, project: &str) -> GearResult<Vec<OpRow>> {
     store.read(|tx| {
         let mut ready = Vec::new();
@@ -1448,6 +1452,14 @@ fn ready_merges(store: &mut Store, project: &str) -> GearResult<Vec<OpRow>> {
                 }
             }
         }
+        // The order of ops: the time they were created, then their number —
+        // not their id as a string, where O-999 sorts after O-1000 (T-268).
+        let op_number = |id: &str| -> i64 {
+            id.split_once('-')
+                .and_then(|(_, number)| number.parse().ok())
+                .unwrap_or(0)
+        };
+        ready.sort_by_key(|op| (op.created, op_number(&op.id)));
         Ok(ready)
     })
 }
@@ -6186,8 +6198,6 @@ fn a_refused_land_is_retried_by_a_remerge() {
     // The merge runs and the pull request's head is pushed.
     pr_tick(&mut store, &mut herdr, &cfg, 20);
     pr_tick(&mut store, &mut herdr, &cfg, 21);
-    let first = merge_op_in(&mut store, &candidate, OpState::Unknown);
-    let _ = first;
 
     // The forge refuses the landing.
     let refusing = FakeForge::refusing("not mergeable: required checks are missing");
@@ -6302,5 +6312,78 @@ fn a_pushed_head_is_reused_after_a_restart() {
         serde_json::from_str(&result_of(&mut store, &id)).unwrap();
     assert_eq!(result["head"], older.as_str(), "the head on the branch is reused: {result}");
     assert_eq!(scratch.head_of("heat/t5"), older, "nothing was pushed");
+}
+
+/// T-395: a merge that lost its push race (Unknown) is not starved by newer
+/// merges. It runs in the same pass as the Intended ops, in the order the ops
+/// were created, rather than after every Intended op there will ever be.
+#[test]
+fn an_unknown_merge_is_not_starved_by_newer_intended_ones() {
+    let mut store = gear_store::Store::open_in_memory().unwrap();
+    store
+        .write(|tx| {
+            tx.insert_project(&gear_store::ProjectRow {
+                id: "p".into(),
+                herdr_session: "sess".into(),
+                config_toml: config_text("true"),
+                config_version: 1,
+                quota_lanes: 1,
+                quota_temps: 0,
+                quota_includes_captain: false,
+                plan_version: 0,
+                created: 0,
+            })
+        })
+        .unwrap();
+
+    // An op of the given kind, state and creation time; its id is the store's.
+    fn queue(
+        store: &mut gear_store::Store,
+        kind: OpKind,
+        state: OpState,
+        created: Ts,
+    ) -> String {
+        let op = store
+            .write(|tx| {
+                tx.insert_op(&gear_store::NewOp {
+                    project: "p".into(),
+                    seat: "p:heat".into(),
+                    generation: 1,
+                    kind,
+                    task: Some("T-5".into()),
+                    attempt: Some(1),
+                    ref_msg: None,
+                    plan_version: None,
+                    payload: serde_json::json!({
+                        "branch": "heat/t5",
+                        "candidate": "abc1234",
+                        "review": "review/t5",
+                    }),
+                    created,
+                })
+            })
+            .unwrap();
+        if state != OpState::Intended {
+            store
+                .write(|tx| tx.set_op_state("p", &op.id, state, None, created))
+                .unwrap();
+        }
+        op.id
+    }
+
+    // Two newer merges are queued; the older merge that lost its race is
+    // Unknown. Another op is queued too: it is no merge and stays out.
+    let newer_a = queue(&mut store, OpKind::Merge, OpState::Intended, 200);
+    let newer_b = queue(&mut store, OpKind::Merge, OpState::Intended, 300);
+    let raced = queue(&mut store, OpKind::Merge, OpState::Unknown, 100);
+    let _other = queue(&mut store, OpKind::Doorbell, OpState::Intended, 50);
+
+    let ready: Vec<String> = ready_merges(&mut store, "p")
+        .unwrap()
+        .into_iter()
+        .map(|op| op.id)
+        .collect();
+
+    assert_eq!(ready, vec![raced, newer_a, newer_b], "oldest first, the raced one not starved");
 }
 }
