@@ -72,6 +72,12 @@ pub struct ApplyResult {
 ///    - an existing id must exist; a `NEW` block needs `lane`, `goal`, `accept`
 ///      and `estimate` (the planned time in minutes, T-38);
 ///    - every dep names an existing task or a task of this draft; no cycle;
+///    - no task that is still to be worked on (not `Done`, `Failed` or
+///      `Cancelled`) keeps a deps entry naming a task that is or becomes
+///      `Cancelled` in this apply (T-428): a cancelled dep never becomes Done
+///      and merged, so such a task would never be delivered — one line per
+///      pair, `<id> depends on cancelled <dep>: drop or replace that
+///      dependency`, and nothing is applied;
 ///    - `state=` only on existing tasks: `cancelled` from any non-terminal state,
 ///      and from Done when the task's accepted candidate is **not** on its
 ///      integration branch (T-112: its merge was given up; a done task whose
@@ -436,6 +442,48 @@ fn apply_queue(
             ErrorCode::BadFormat,
             format!("the dependencies form a cycle through {cycle}"),
         ));
+    }
+    // A plan never leaves a task waiting for a cancelled one (T-428): a
+    // cancelled dep never becomes Done and merged, so the engine never
+    // delivers the task and nothing says why (T-358 and T-368 kept a
+    // cancelled T-332 in their deps; the other project's T-140 and T-178 wait
+    // on its cancelled T-186). Every task of the project counts, with the
+    // cancellations and dep changes of this draft applied; one line per pair.
+    let mut states: BTreeMap<String, TaskState> = existing
+        .iter()
+        .map(|(id, task)| (id.clone(), task.state))
+        .collect();
+    for (index, item) in draft.queue.iter().enumerate() {
+        let id = match &item.id {
+            Some(id) => Some(id.clone()),
+            None => new_ids.get(&index).cloned(),
+        };
+        let Some(id) = id else { continue };
+        let state = match item.state.as_deref() {
+            Some("cancelled") => TaskState::Cancelled,
+            Some("ready") => TaskState::Ready,
+            _ => states.get(&id).copied().unwrap_or(TaskState::Ready),
+        };
+        states.insert(id, state);
+    }
+    let waiting: Vec<String> = graph
+        .iter()
+        .filter(|(id, _)| {
+            !matches!(
+                states.get(id.as_str()),
+                Some(TaskState::Cancelled | TaskState::Done | TaskState::Failed)
+            )
+        })
+        .flat_map(|(id, deps)| {
+            deps.iter()
+                .filter(|dep| states.get(dep.as_str()).is_some_and(|state| *state == TaskState::Cancelled))
+                .map(move |dep| {
+                    format!("{id} depends on cancelled {dep}: drop or replace that dependency")
+                })
+        })
+        .collect();
+    if !waiting.is_empty() {
+        return Err(GearError::new(ErrorCode::BadFormat, waiting.join("\n")));
     }
 
     // The `# Milestone` blocks the draft owes the file (T-333): a task sails on

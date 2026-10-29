@@ -1329,11 +1329,21 @@ fn start_reviewer(
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
-        let selected = review_model_entry(kind, entry);
-        let (recorded, current_model) = store.read(|tx| Ok((tx.get_meta(&review_model_key(&seat.id))?, tx.get_meta(&crate::model::model_meta_key(&seat.id))?)))?;
-        let model_matches = entry.is_none_or(|entry| current_model.as_deref() == Some(entry.model()));
-        if recorded.as_deref() != Some(selected.as_str()) || !model_matches {
-            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "model")
+        // T-429: the review chain changed since this seat's last review — the
+        // model the chain names, or the CLI that runs it. A warm seat is reused
+        // only on the seat the chain asks for now: a reviewer kept warm through
+        // review after review would otherwise run the old model for ever. The
+        // seat is released (the agent's pane with it) and the next tick starts
+        // the review on a free seat, as it does for any other job. A seat whose
+        // model is unset, or the chain's model, is adopted as before.
+        let current_model = store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id)))?;
+        let model_moved = current_model.is_some_and(|current| entry.is_some_and(|entry| current != entry.model()));
+        let started_kind = recorded_start_kind(store, &seat.id, seat.generation)?;
+        let cli_moved = entry
+            .and_then(ModelEntry::cli)
+            .is_some_and(|cli| started_kind.as_deref().is_some_and(|started| started != cli));
+        if model_moved || cli_moved {
+            crate::release::release_one(store, herdr, &seat.project, seat, None, now, "the review chain changed")
                 .map_err(|reason| GearError::new(ErrorCode::BadFormat, reason))?;
             return Ok(Started::NotYet);
         }
@@ -1825,6 +1835,18 @@ fn recorded_start(
     };
     Ok(record.get("pane").and_then(|value| value.as_str()) == Some(pane)
         && record.get("kind").and_then(|value| value.as_str()) == Some(kind))
+}
+
+/// The CLI the seat's agent was recorded as started with in `generation`
+/// (T-429): the recorded start's kind, when there is one.
+fn recorded_start_kind(store: &mut Store, seat: &str, generation: i64) -> GearResult<Option<String>> {
+    let Some(raw) = store.read(|tx| tx.get_meta(&start_key(seat, generation)))? else {
+        return Ok(None);
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(None);
+    };
+    Ok(record.get("kind").and_then(|value| value.as_str()).map(str::to_string))
 }
 
 /// Record that this engine is about to start `label` in `pane`. The record is
@@ -5812,6 +5834,65 @@ profile = "opencode"
         assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key(&seat.id))).unwrap().as_deref(), Some("gpt-6-astra"));
         crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 16).unwrap();
         assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Starting, "the earlier delivery must not cancel the new attempt");
+    }
+
+    /// T-429: the review chain's model changed while the reviewer sat warm
+    /// (standby, its agent idle): the seat is released, not reused on the model
+    /// it ran the last review on, and the next tick starts the review on the
+    /// new model.
+    #[test]
+    fn warm_reviewer_of_a_changed_chain_is_released_and_restarted_on_the_new_model() {
+        let changed = CONFIG.replace(REVIEW_CHAIN, r#"review = [{ model = "gpt-6.1-luna", cli = "codex" }]"#);
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap().started, vec!["p:review-1"]);
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1"))).unwrap().as_deref(), Some("gpt-6.1-sol"));
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Done;
+            tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")?;
+            let mut project = tx.get_project("p")?.unwrap();
+            project.config_toml = changed.clone();
+            tx.update_project(&project)
+        }).unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let _ = crate::release::take_release_log();
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
+        assert!(report.started.is_empty(), "the warm seat is not reused on the old model: {report:?}");
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Releasing);
+        let log = crate::release::take_release_log();
+        assert!(log.iter().any(|line| line.contains("p:review-1") && line.contains("caller=the review chain changed")), "{log:?}");
+        crate::release::release_finished_reviews(&mut store, &mut herdr, "p", T0 + 13).unwrap();
+        assert_eq!(store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap().state, SeatState::Released);
+        let report = start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 14).unwrap();
+        assert_eq!(report.started, vec!["p:review-1"], "{report:?}");
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1"))).unwrap().as_deref(), Some("gpt-6.1-luna"));
+    }
+
+    /// T-429: a warm reviewer whose chain model is the one it already runs is
+    /// adopted as before: no release, no restart.
+    #[test]
+    fn warm_reviewer_of_an_unchanged_chain_is_adopted() {
+        let mut store = world(CONFIG);
+        let mut herdr = FakeHerdr::new();
+        assert_eq!(start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 10).unwrap().started, vec!["p:review-1"]);
+        store.write(|tx| {
+            let mut task = tx.get_task("p", "T-1")?.unwrap();
+            task.state = TaskState::Done;
+            tx.update_task(&task)?;
+            tx.set_seat_state("p:review-1", SeatState::Standby, None, T0 + 11)?;
+            tx.clear_seat_task("p:review-1")
+        }).unwrap();
+        queue_review_job(&mut store, 2, "heat");
+        let _ = crate::release::take_release_log();
+        start_reviews(&mut store, &mut herdr, &cfg(), &cfg().profiles, "p", T0 + 12).unwrap();
+        assert!(crate::release::take_release_log().is_empty(), "the warm seat is not released");
+        assert_eq!(store.read(|tx| tx.get_meta(&pending_review_key("p:review-1"))).unwrap().as_deref(), Some("T-2"), "the warm seat takes the job");
+        let seat = store.read(|tx| tx.get_seat("p:review-1")).unwrap().unwrap();
+        assert!(!matches!(seat.state, SeatState::Releasing | SeatState::Released), "{:?}", seat.state);
+        assert_eq!(store.read(|tx| tx.get_meta(&crate::model::model_meta_key("p:review-1"))).unwrap().as_deref(), Some("gpt-6.1-sol"));
     }
 
     /// T-425: a reviewer worktree that cannot check out is the **seat's**

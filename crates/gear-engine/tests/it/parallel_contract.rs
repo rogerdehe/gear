@@ -572,6 +572,56 @@ fn a_landed_task_is_not_an_open_change_and_open_tasks_still_pair() {
     assert!(pair[0].body.contains(SHARED), "{}", pair[0].body);
 }
 
+/// T-431: a candidate git cannot resolve (a commit this clone lacks, or a
+/// branch name stored before T-421) is no candidate: the task is judged by its
+/// branch as before, and one such task never stops the scan for the whole
+/// project. A task whose branch does not resolve either is skipped.
+#[test]
+fn an_unresolvable_candidate_does_not_stop_the_scan() {
+    let repo = Repo::new();
+    repo.branch("heat/t1", SHARED);
+    repo.branch("steady/t2", SHARED);
+    let mut store = repo.store();
+    // A done task handed in a ref this clone does not have (T-431), and its
+    // branch does not resolve either: the scan skips it, it never fails.
+    store
+        .write(|tx| {
+            tx.insert_task(&TaskRow {
+                repo: None,
+                base: None,
+                gate: None,
+                rework_estimate_min: None,
+                project: "p".into(),
+                id: "T-3".into(),
+                rank: 3,
+                state: TaskState::Done,
+                priority: "must".into(),
+                lane: Some("steady".into()),
+                milestone: None,
+                required: false,
+                contract_version: 1,
+                deps: vec![],
+                followup_of: None,
+                wait_on: None,
+                wait_cond: None,
+                rework_note: None,
+                estimate_min: Some(30),
+                issue: None,
+                updated: T0,
+            })
+        })
+        .unwrap();
+    hand_in(&mut store, "p", "T-3", "p:steady", 1, "scan/t12");
+
+    let checked = scan(&mut store, 0);
+    assert!(checked.problems.is_empty(), "one bad candidate fails nothing: {:?}", checked.problems);
+    assert_eq!(checked.opened.len(), 1, "the open pair is still reported: {checked:?}");
+    let pair = pair_items(&mut store);
+    assert_eq!(pair.len(), 1, "{pair:?}");
+    assert!(pair[0].body.contains("T-1 (heat) and T-2 (steady)"), "{}", pair[0].body);
+    assert!(pair[0].body.contains(SHARED), "{}", pair[0].body);
+}
+
 /// T-188: an overlap with the integration branch is an information line (the
 /// board and `gear queue` show it), never a captain item: the lane merges
 /// dev in and the merge gate catches a conflict.
